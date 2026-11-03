@@ -65,6 +65,7 @@ class FaceWorkerSignals(QObject):
 
     batch_progressed = Signal(int, int)  # (current_processed, total_to_process)
     suggestions_updated = Signal()       # Emitted when new face suggestions/centroids are committed
+    media_faces_ready = Signal(int)      # Emitted when a specific media_id has its face scan completed & committed
     worker_finished = Signal(int)        # (total_faces_detected)
     status_message = Signal(str)         # Human-readable progress description
 
@@ -94,20 +95,29 @@ class FaceDetectionWorker(QRunnable):
         force_rescan: bool = False,
         min_match_score: float = 0.42,
         high_match_score: float = 0.55,
+        target_media_ids: Sequence[int] | None = None,
     ) -> None:
         super().__init__()
         self.engine = engine
-        self.face_engine = face_engine or FaceEngine()
+        self._face_engine = face_engine
         self.cancel_flag = cancel_flag
         self.batch_size = max(1, int(batch_size))
         self.throttle_ms = max(0, int(throttle_ms))
         self.force_rescan = force_rescan
         self.min_match_score = float(min_match_score)
         self.high_match_score = float(high_match_score)
+        self.target_media_ids = [int(m) for m in target_media_ids] if target_media_ids else None
 
         self.signals = FaceWorkerSignals()
         self.repo = CatalogRepository(engine)
         self.thumb_repo = ThumbnailRepository(engine)
+
+    @property
+    def face_engine(self) -> FaceEngine:
+        """Lazily creates FaceEngine inside worker thread instead of on GUI thread."""
+        if self._face_engine is None:
+            self._face_engine = FaceEngine()
+        return self._face_engine
 
     def _is_cancelled(self) -> bool:
         """Checks whether cancellation has been requested via the cancel flag."""
@@ -126,6 +136,16 @@ class FaceDetectionWorker(QRunnable):
         total_faces_detected = 0
         try:
             if self._is_cancelled():
+                return
+
+            if not self.face_engine.is_available:
+                logger.warning("FaceDetectionWorker: FaceEngine is unavailable; skipping face scan.")
+                self.signals.status_message.emit("Face recognition engine unavailable.")
+                return
+
+            # High-speed targeted scan for user-selected photos
+            if self.target_media_ids:
+                total_faces_detected = self._run_targeted_scan(self.target_media_ids)
                 return
 
             if self.force_rescan:
@@ -158,6 +178,155 @@ class FaceDetectionWorker(QRunnable):
             self.engine.close_thread_connections()
 
     # -------------------------------------------------------------------------
+    # Targeted High-Speed Face Scan for Selected Photos
+    # -------------------------------------------------------------------------
+    def _run_targeted_scan(self, media_ids: Sequence[int]) -> int:
+        """
+        High-speed targeted face detection & matching for user-selected photos.
+        Bypasses whole-catalog scans, immediately detecting faces on the requested media,
+        healing confirmed tags, matching against existing person centroids, and emitting
+        per-photo media_faces_ready signals for instant UI updates.
+        """
+        conn = self.engine.catalog_conn()
+
+        # Ensure people with confirmed faces have up-to-date centroids
+        p_missing = conn.execute(
+            """
+            SELECT DISTINCT person_id FROM media_people
+            WHERE state = 1 AND person_id IS NOT NULL AND embedding IS NOT NULL
+              AND person_id NOT IN (SELECT id FROM people WHERE centroid_embedding IS NOT NULL);
+            """
+        ).fetchall()
+        for p_row in p_missing:
+            try:
+                self.repo.recalculate_person_centroid(int(p_row["person_id"]))
+            except Exception:
+                pass
+
+        centroids_raw = self.repo.get_people_centroids()
+        centroids_dict: dict[int, np.ndarray] = {}
+        for pid, c_blob in centroids_raw.items():
+            try:
+                c_mat = deserialize_embedding(c_blob, allow_multi=True)
+                if c_mat is not None and c_mat.size > 0:
+                    centroids_dict[pid] = c_mat
+            except Exception:
+                pass
+
+        rejected_pairs = self.repo.get_rejected_face_pairs()
+        total_faces_detected = 0
+
+        placeholders = ",".join("?" for _ in media_ids)
+        rows = conn.execute(
+            f"""
+            SELECT m.id, m.filename, m.orientation, f.path AS folder_path
+            FROM media m
+            JOIN folders f ON f.id = m.folder_id
+            WHERE m.id IN ({placeholders}) AND m.is_missing = 0 AND m.is_video = 0;
+            """,
+            list(media_ids),
+        ).fetchall()
+
+        for r in rows:
+            if self._is_cancelled():
+                break
+
+            mid = int(r["id"])
+            fpath = Path(r["folder_path"]) / str(r["filename"])
+            if not fpath.exists():
+                self.repo.mark_face_scan_failed([mid])
+                continue
+
+            try:
+                detected_faces = self.face_engine.detect_and_embed(
+                    str(fpath),
+                    orientation=int(r["orientation"] or 1),
+                )
+            except Exception as exc:
+                logger.warning("TargetedFaceScan: Failed to detect faces in image %s: %s", fpath, exc)
+                self.repo.mark_face_scan_failed([mid])
+                continue
+
+            # Verify & heal any confirmed faces on this media
+            unclaimed_faces = self._verify_and_heal_image_faces(
+                mid,
+                fpath,
+                int(r["orientation"] or 1),
+                detected_faces,
+            )
+
+            if unclaimed_faces:
+                payload = [
+                    {
+                        "rect_x": df.rect_x,
+                        "rect_y": df.rect_y,
+                        "rect_w": df.rect_w,
+                        "rect_h": df.rect_h,
+                        "embedding": serialize_embedding(df.embedding),
+                        "similarity_score": None,
+                    }
+                    for df in unclaimed_faces
+                ]
+                created_ids = self.repo.insert_detected_faces(mid, payload)
+                total_faces_detected += len(detected_faces)
+
+                thumb_entries = [
+                    (fid, df.crop_webp)
+                    for fid, df in zip(created_ids, unclaimed_faces)
+                    if df.crop_webp
+                ]
+                if thumb_entries:
+                    self.thumb_repo.put_face_thumbnails_batch(thumb_entries)
+
+                # Vectorized matching against person centroids
+                if centroids_dict:
+                    img_suggestions: list[tuple[int, int, float]] = []
+                    for fid, df in zip(created_ids, unclaimed_faces):
+                        best_person_id = None
+                        best_sim = -1.0
+                        for pid, c_mat in centroids_dict.items():
+                            if (fid, pid) in rejected_pairs:
+                                continue
+                            try:
+                                if c_mat.ndim == 1:
+                                    sim = float(np.dot(c_mat, df.embedding))
+                                else:
+                                    sim = float(np.max(np.dot(c_mat, df.embedding)))
+                                if sim > best_sim:
+                                    best_sim = sim
+                                    best_person_id = pid
+                            except Exception:
+                                pass
+                        if best_person_id is not None and best_sim >= self.min_match_score:
+                            img_suggestions.append((fid, best_person_id, best_sim))
+                    if img_suggestions:
+                        self.repo.update_suggested_matches(img_suggestions)
+            elif detected_faces:
+                total_faces_detected += len(detected_faces)
+
+            # Mark media face scan complete
+            self.repo.update_face_scan_version([mid], version=TARGET_FACE_SCAN_VERSION)
+
+            # Emit immediate per-photo signal for instant UI display
+            try:
+                self.signals.media_faces_ready.emit(mid)
+            except Exception:
+                pass
+
+        # Global matching pass across all unassigned faces
+        try:
+            self._run_stage3_match()
+        except Exception as exc:
+            logger.warning("TargetedFaceScan: Stage 3 match error: %s", exc)
+
+        try:
+            self.signals.suggestions_updated.emit()
+        except Exception:
+            pass
+
+        return total_faces_detected
+
+    # -------------------------------------------------------------------------
     # Stage 1: Prioritized Backfill of Confirmed Faces
     # -------------------------------------------------------------------------
     def _run_stage1_backfill(self) -> None:
@@ -171,7 +340,7 @@ class FaceDetectionWorker(QRunnable):
         conn = self.engine.catalog_conn()
         thumb_conn = self.engine.thumbnails_conn()
 
-        # Query all confirmed faces that are missing embeddings or on media scanned prior to version 2
+        # Query all confirmed faces on media scanned prior to version 2
         missing_emb_rows = conn.execute(
             """
             SELECT mp.id, mp.media_id, mp.person_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
@@ -181,7 +350,7 @@ class FaceDetectionWorker(QRunnable):
             JOIN folders f ON f.id = m.folder_id
             WHERE mp.state = 1
               AND m.is_missing = 0
-              AND (mp.embedding IS NULL OR (m.face_scan_version >= 0 AND m.face_scan_version < 2))
+              AND m.face_scan_version < 2
             ORDER BY mp.id ASC;
             """
         ).fetchall()
@@ -190,7 +359,7 @@ class FaceDetectionWorker(QRunnable):
         thumb_rows = thumb_conn.execute("SELECT face_id FROM face_thumbnails;").fetchall()
         existing_thumb_ids = {int(r["face_id"]) for r in thumb_rows}
 
-        # Also find confirmed faces missing thumbnail crops
+        # Also find confirmed boxed faces missing thumbnail crops (exclude boxless tags)
         all_confirmed = conn.execute(
             """
             SELECT mp.id, mp.media_id, mp.person_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
@@ -200,6 +369,9 @@ class FaceDetectionWorker(QRunnable):
             JOIN folders f ON f.id = m.folder_id
             WHERE mp.state = 1
               AND m.is_missing = 0
+              AND m.face_scan_version < 2
+              AND mp.rect_w > 0.005
+              AND mp.rect_h > 0.005
             ORDER BY mp.id ASC;
             """
         ).fetchall()
@@ -217,13 +389,16 @@ class FaceDetectionWorker(QRunnable):
                     media_groups.setdefault(mid, []).append(dict(r))
 
         if media_groups:
+            total_stage1 = len(media_groups)
             self.signals.status_message.emit(
-                f"Stage 1: Verifying and healing confirmed faces in {len(media_groups)} photos..."
+                f"Stage 1: Verifying and healing confirmed faces in {total_stage1} photos..."
             )
 
-            for mid, m_items in media_groups.items():
+            for idx, (mid, m_items) in enumerate(media_groups.items()):
                 if self._is_cancelled():
                     return
+                if (idx % 10 == 0) or (idx + 1 == total_stage1):
+                    self.signals.batch_progressed.emit(idx + 1, total_stage1)
 
                 first = m_items[0]
                 fpath = Path(first["folder_path"]) / str(first["filename"])
@@ -307,6 +482,7 @@ class FaceDetectionWorker(QRunnable):
 
         claimed_d_indices: set[int] = set()
         unmatched_rows: list[dict[str, Any]] = []
+        boxless_rows: list[dict[str, Any]] = []
 
         # Pass 1: Case A (Box already aligns with a detected face: IoU >= 0.25)
         for row in confirmed_rows:
@@ -315,6 +491,9 @@ class FaceDetectionWorker(QRunnable):
             ry = float(row["rect_y"])
             rw = float(row["rect_w"])
             rh = float(row["rect_h"])
+            if rw <= 0.005 or rh <= 0.005:
+                boxless_rows.append(dict(row))
+                continue
             r_box = (rx, ry, rw, rh)
 
             best_iou = -1.0
@@ -357,23 +536,137 @@ class FaceDetectionWorker(QRunnable):
             else:
                 unmatched_rows.append(dict(row))
 
+        # Pass 2: Heal boxless person tags (rect_w <= 0.005) against unclaimed detected faces
+        if boxless_rows and detected_faces:
+            remaining_boxless: list[dict[str, Any]] = []
+            for b_row in boxless_rows:
+                mp_id = int(b_row["id"])
+                c_blob = b_row.get("centroid_embedding")
+                if not c_blob and b_row.get("person_id"):
+                    pid_val = int(b_row["person_id"])
+                    c_row = conn.execute("SELECT centroid_embedding FROM people WHERE id = ?;", (pid_val,)).fetchone()
+                    if c_row and c_row["centroid_embedding"]:
+                        c_blob = c_row["centroid_embedding"]
+                best_sim = -1.0
+                best_d_idx = -1
+                if c_blob:
+                    try:
+                        c_vec = deserialize_embedding(c_blob)
+                        for d_idx, d in enumerate(detected_faces):
+                            if d_idx in claimed_d_indices:
+                                continue
+                            sim = float(np.dot(c_vec, d.embedding))
+                            if sim > best_sim:
+                                best_sim = sim
+                                best_d_idx = d_idx
+                    except Exception:
+                        pass
+                if best_sim >= 0.38 and best_d_idx >= 0:
+                    claimed_d_indices.add(best_d_idx)
+                    matched_d = detected_faces[best_d_idx]
+                    self._delete_overlapping_unassigned(
+                        conn, media_id, (matched_d.rect_x, matched_d.rect_y, matched_d.rect_w, matched_d.rect_h)
+                    )
+                    with self.engine.write_lock:
+                        conn.execute(
+                            """
+                            UPDATE media_people
+                            SET rect_x = ?, rect_y = ?, rect_w = ?, rect_h = ?, embedding = ?
+                            WHERE id = ?;
+                            """,
+                            (
+                                matched_d.rect_x,
+                                matched_d.rect_y,
+                                matched_d.rect_w,
+                                matched_d.rect_h,
+                                serialize_embedding(matched_d.embedding),
+                                mp_id,
+                            ),
+                        )
+                        conn.commit()
+                    if matched_d.crop_webp:
+                        self.thumb_repo.put_face_thumbnail(mp_id, matched_d.crop_webp)
+                        pid = b_row["person_id"]
+                        if pid:
+                            with self.engine.write_lock:
+                                conn.execute(
+                                    "UPDATE people SET thumbnail_blob = ? WHERE id = ? AND thumbnail_blob IS NULL;",
+                                    (matched_d.crop_webp, int(pid)),
+                                )
+                                conn.commit()
+                            self.repo.recalculate_person_centroid(int(pid))
+                else:
+                    remaining_boxless.append(b_row)
+
+            # If exactly 1 boxless person tag remains and 1 unclaimed detected face remains on this photo, snap it!
+            unclaimed_d_indices = [
+                idx for idx in range(len(detected_faces)) if idx not in claimed_d_indices
+            ]
+            if len(remaining_boxless) == 1 and len(unclaimed_d_indices) == 1:
+                b_row = remaining_boxless.pop(0)
+                mp_id = int(b_row["id"])
+                d_idx = unclaimed_d_indices[0]
+                claimed_d_indices.add(d_idx)
+                matched_d = detected_faces[d_idx]
+                self._delete_overlapping_unassigned(
+                    conn, media_id, (matched_d.rect_x, matched_d.rect_y, matched_d.rect_w, matched_d.rect_h)
+                )
+                with self.engine.write_lock:
+                    conn.execute(
+                        """
+                        UPDATE media_people
+                        SET rect_x = ?, rect_y = ?, rect_w = ?, rect_h = ?, embedding = ?
+                        WHERE id = ?;
+                        """,
+                        (
+                            matched_d.rect_x,
+                            matched_d.rect_y,
+                            matched_d.rect_w,
+                            matched_d.rect_h,
+                            serialize_embedding(matched_d.embedding),
+                            mp_id,
+                        ),
+                    )
+                    conn.commit()
+                if matched_d.crop_webp:
+                    self.thumb_repo.put_face_thumbnail(mp_id, matched_d.crop_webp)
+                    pid = b_row["person_id"]
+                    if pid:
+                        with self.engine.write_lock:
+                            conn.execute(
+                                "UPDATE people SET thumbnail_blob = ? WHERE id = ? AND thumbnail_blob IS NULL;",
+                                (matched_d.crop_webp, int(pid)),
+                            )
+                            conn.commit()
+                        self.repo.recalculate_person_centroid(int(pid))
+
+            unmatched_rows.extend(remaining_boxless)
+        else:
+            unmatched_rows.extend(boxless_rows)
+
         # Centroid Quality Gate for unmatched confirmed faces:
         # If FaceEngine did not confirm a valid face (IoU < 0.25), ensure embedding = NULL
         # so it does not poison person centroids. Never move rect coordinates or swap names!
         for item in unmatched_rows:
             mp_id = int(item["id"])
+            rw_u = float(item["rect_w"] or 0.0)
+            rh_u = float(item["rect_h"] or 0.0)
             with self.engine.write_lock:
                 conn.execute(
                     "UPDATE media_people SET embedding = NULL WHERE id = ?;",
                     (mp_id,),
                 )
                 conn.commit()
+            if rw_u <= 0.005 or rh_u <= 0.005:
+                # Boxless whole-photo person tag: ensure no bogus 16x16 corner crop exists in face_thumbnails
+                self.thumb_repo.invalidate_face_thumbnails([mp_id])
+                continue
             # If thumbnail is missing, generate crop from the box so the UI has an avatar
             if not self.thumb_repo.get_face_thumbnail(mp_id):
                 try:
                     _, crop_bytes = self.face_engine.extract_crop_and_embed_rect(
                         str(fpath),
-                        (float(item["rect_x"]), float(item["rect_y"]), float(item["rect_w"]), float(item["rect_h"])),
+                        (float(item["rect_x"]), float(item["rect_y"]), rw_u, rh_u),
                         orientation=orientation,
                     )
                     if crop_bytes:

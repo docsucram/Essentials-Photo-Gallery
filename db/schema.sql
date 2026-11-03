@@ -110,6 +110,10 @@ CREATE INDEX IF NOT EXISTS idx_media_face_scan
 CREATE INDEX IF NOT EXISTS idx_media_is_missing
     ON media(is_missing) WHERE is_missing = 1;
 
+CREATE INDEX IF NOT EXISTS idx_media_day_bucket
+    ON media(CAST(FLOOR((CASE WHEN date_taken > 100000000000 THEN date_taken / 1000.0 ELSE date_taken * 1.0 END) / 86400.0) AS INTEGER))
+    WHERE date_taken IS NOT NULL AND date_taken != 0;
+
 -- ----------------------------------------------------------------------------
 -- 3. Descriptive Tags & Closure Table (Boolean AND / OR / NOT Hierarchy)
 -- ----------------------------------------------------------------------------

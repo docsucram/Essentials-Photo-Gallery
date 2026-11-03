@@ -713,8 +713,14 @@ def _parse_iso_or_exif_datetime(dt_str: str) -> int | None:
             dt = datetime.datetime.strptime(s[:19], fmt).replace(
                 tzinfo=datetime.timezone.utc
             )
+            if dt.year < 1826 or dt.year > 2100:
+                return None
             epoch_zero = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
-            return int((dt - epoch_zero).total_seconds())
+            ts = int((dt - epoch_zero).total_seconds())
+            # Reject unset QuickTime/MP4 epoch zero (1904-01-01, -2082844800) and Unix epoch zero (1970-01-01 / 1969-12-31)
+            if abs(ts - (-2082844800)) <= 172800 or abs(ts) <= 86400:
+                return None
+            return ts
         except ValueError:
             continue
     return None

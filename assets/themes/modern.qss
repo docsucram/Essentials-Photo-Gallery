@@ -1,5 +1,5 @@
 /* Modern Neutral Theme */
-QMainWindow, QWidget {
+QMainWindow {
     background-color: #FAFAFA;
     color: #222222;
     font-family: "Segoe UI", sans-serif;

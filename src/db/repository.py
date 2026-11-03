@@ -438,9 +438,12 @@ class CatalogRepository:
     def get_rating_counts(self) -> dict[int, int]:
         """Returns item count per rating star (0..5) for the Left Navigation Dock."""
         conn = self.engine.catalog_conn()
+        cur = conn.cursor()
+        cur.row_factory = None
         counts = {r: 0 for r in range(6)}
-        for row in conn.execute("SELECT rating, COUNT(*) AS cnt FROM media GROUP BY rating;").fetchall():
-            counts[int(row["rating"])] = int(row["cnt"])
+        for r_val, cnt in cur.execute("SELECT rating, COUNT(*) FROM media GROUP BY rating;").fetchall():
+            if r_val is not None:
+                counts[int(r_val)] = int(cnt)
         return counts
 
     def get_date_tree_counts(self) -> list[dict[str, Any]]:
@@ -542,7 +545,11 @@ class CatalogRepository:
                     ON CONFLICT(folder_id, filename) DO UPDATE SET
                         size = excluded.size,
                         mtime = excluded.mtime,
-                        date_taken = COALESCE(excluded.date_taken, media.date_taken),
+                        date_taken = CASE
+                            WHEN excluded.date_taken IS NOT NULL THEN excluded.date_taken
+                            WHEN media.date_taken < 315532800 AND (media.is_video = 1 OR media.date_taken < -2000000000) THEN NULL
+                            ELSE media.date_taken
+                        END,
                         rating = CASE WHEN excluded.rating > 0 THEN excluded.rating ELSE media.rating END,
                         flag = CASE WHEN excluded.flag > 0 THEN excluded.flag ELSE media.flag END,
                         face_scan_version = CASE
@@ -881,13 +888,130 @@ class CatalogRepository:
             sort_dir = "ASC" if is_sort_rev else "DESC"
             sort_expr = "COALESCE(m.date_taken, m.mtime, 0)"
 
-        if grp_expr is not None:
+        # Fast-path ORDER BY: when grouping by year/month/date and sorting by date in the same direction,
+        # chronological order is already strictly grouped by year/month/day, allowing SQLite to use
+        # idx_media_effective_date directly without 500k strftime() calls or temporary B-tree sorting.
+        is_chrono_group = group_mode in (
+            "auto",
+            "month",
+            "month taken",
+            "date",
+            "date taken",
+            "day",
+            "year",
+            "year taken",
+        )
+        if is_chrono_group and sort_mode == "date" and grp_dir == sort_dir:
+            order_sql = f"ORDER BY COALESCE(m.date_taken, m.mtime, 0) {sort_dir}, m.id ASC"
+        elif grp_expr is not None:
             if " COLLATE " in grp_expr or grp_expr.endswith(" ASC") or grp_expr.endswith(" DESC"):
                 order_sql = f"ORDER BY {grp_expr}, {sort_expr} {sort_dir}, m.id ASC"
             else:
                 order_sql = f"ORDER BY {grp_expr} {grp_dir}, {sort_expr} {sort_dir}, m.id ASC"
         else:
             order_sql = f"ORDER BY {sort_expr} {sort_dir}, m.id ASC"
+
+        # Fast-path 13-column SELECT when extra joins/columns are not needed
+        if group_mode in ("month", "month taken", "auto", "none", "flat", "year", "year taken", "date", "date taken", "day"):
+            sql_fast = f"""
+                SELECT
+                    m.id,
+                    m.folder_id,
+                    m.filename,
+                    m.size,
+                    m.mtime,
+                    m.date_taken,
+                    m.rating,
+                    m.flag,
+                    COALESCE(m.width, 0),
+                    COALESCE(m.height, 0),
+                    m.orientation,
+                    m.is_video,
+                    m.caption
+                FROM media m
+                {where_sql}
+                {order_sql};
+            """
+            raw_rows = cur.execute(sql_fast, params).fetchall()
+            _Record = MediaItemRecord
+            _epoch_to_dt = _epoch_to_datetime_utc
+            _date_bounds = _compute_date_bounds_utc
+            records: list[MediaItemRecord] = []
+
+            if group_mode in ("month", "month taken", "auto"):
+                cur_m_start = 1
+                cur_m_end = 0
+                cur_m_label = "Unknown Date"
+                for mid, fid, fname, size, mtime, dt_taken, rating, flag, w, h, orient, is_vid, caption in raw_rows:
+                    eff_dt = dt_taken if dt_taken is not None else (mtime if mtime else None)
+                    if eff_dt is None:
+                        gkey = "Unknown Date"
+                        dt_val = 0
+                    else:
+                        dt_val = eff_dt
+                        if cur_m_start <= dt_val <= cur_m_end:
+                            gkey = cur_m_label
+                        else:
+                            dt = _epoch_to_dt(dt_val)
+                            cur_m_start, cur_m_end = _date_bounds(dt.year, dt.month)
+                            cur_m_label = dt.strftime("%B %Y")
+                            gkey = cur_m_label
+                    records.append(
+                        _Record(mid, fid, fname, size, mtime, dt_val, rating, flag, w, h, orient, is_vid, caption, gkey)
+                    )
+                return records
+
+            if group_mode in ("none", "flat"):
+                return [
+                    _Record(mid, fid, fname, size, mtime, dt_taken if dt_taken is not None else (mtime or 0), rating, flag, w, h, orient, is_vid, caption, "")
+                    for mid, fid, fname, size, mtime, dt_taken, rating, flag, w, h, orient, is_vid, caption in raw_rows
+                ]
+
+            if group_mode in ("year", "year taken"):
+                cur_y_start = 1
+                cur_y_end = 0
+                cur_y_label = "Unknown Date"
+                for mid, fid, fname, size, mtime, dt_taken, rating, flag, w, h, orient, is_vid, caption in raw_rows:
+                    eff_dt = dt_taken if dt_taken is not None else (mtime if mtime else None)
+                    if eff_dt is None:
+                        gkey = "Unknown Date"
+                        dt_val = 0
+                    else:
+                        dt_val = eff_dt
+                        if cur_y_start <= dt_val <= cur_y_end:
+                            gkey = cur_y_label
+                        else:
+                            dt = _epoch_to_dt(dt_val)
+                            cur_y_start, cur_y_end = _date_bounds(dt.year)
+                            cur_y_label = str(dt.year)
+                            gkey = cur_y_label
+                    records.append(
+                        _Record(mid, fid, fname, size, mtime, dt_val, rating, flag, w, h, orient, is_vid, caption, gkey)
+                    )
+                return records
+
+            if group_mode in ("date", "date taken", "day"):
+                cur_d_start = 1
+                cur_d_end = 0
+                cur_d_label = "Unknown Date"
+                for mid, fid, fname, size, mtime, dt_taken, rating, flag, w, h, orient, is_vid, caption in raw_rows:
+                    eff_dt = dt_taken if dt_taken is not None else (mtime if mtime else None)
+                    if eff_dt is None:
+                        gkey = "Unknown Date"
+                        dt_val = 0
+                    else:
+                        dt_val = eff_dt
+                        if cur_d_start <= dt_val <= cur_d_end:
+                            gkey = cur_d_label
+                        else:
+                            dt = _epoch_to_dt(dt_val)
+                            cur_d_start, cur_d_end = _date_bounds(dt.year, dt.month, dt.day)
+                            cur_d_label = dt.strftime("%A, %d %B %Y")
+                            gkey = cur_d_label
+                    records.append(
+                        _Record(mid, fid, fname, size, mtime, dt_val, rating, flag, w, h, orient, is_vid, caption, gkey)
+                    )
+                return records
 
         sql = f"""
             SELECT
@@ -924,7 +1048,7 @@ class CatalogRepository:
         cur_m_start = 1
         cur_m_end = 0
         cur_m_label = "Unknown Date"
-        records: list[MediaItemRecord] = []
+        records = []
 
         for row in raw_rows:
             (
@@ -951,6 +1075,7 @@ class CatalogRepository:
             ) = row[:20]
             g_extra = row[20] if len(row) > 20 else ""
 
+            eff_dt = dt_taken if dt_taken is not None else (mtime if mtime else None)
             if group_mode in ("none", "flat"):
                 gkey = ""
             elif group_mode in ("person", "people"):
@@ -960,26 +1085,26 @@ class CatalogRepository:
             elif group_mode == "name":
                 gkey = "All photos and videos"
             elif group_mode in ("date", "date taken", "day"):
-                if dt_taken is None:
+                if eff_dt is None:
                     gkey = "Unknown Date"
                 else:
-                    dt = _epoch_to_datetime_utc(dt_taken)
+                    dt = _epoch_to_datetime_utc(eff_dt)
                     gkey = dt.strftime("%A, %d %B %Y")
             elif group_mode in ("month", "month taken", "auto"):
-                if dt_taken is None:
+                if eff_dt is None:
                     gkey = "Unknown Date"
-                elif cur_m_start <= dt_taken <= cur_m_end:
+                elif cur_m_start <= eff_dt <= cur_m_end:
                     gkey = cur_m_label
                 else:
-                    dt = _epoch_to_datetime_utc(dt_taken)
+                    dt = _epoch_to_datetime_utc(eff_dt)
                     cur_m_start, cur_m_end = _compute_date_bounds_utc(dt.year, dt.month)
                     cur_m_label = dt.strftime("%B %Y")
                     gkey = cur_m_label
             elif group_mode in ("year", "year taken"):
-                if dt_taken is None:
+                if eff_dt is None:
                     gkey = "Unknown Date"
                 else:
-                    dt = _epoch_to_datetime_utc(dt_taken)
+                    dt = _epoch_to_datetime_utc(eff_dt)
                     gkey = dt.strftime("%Y")
             elif group_mode in ("time", "time taken"):
                 if dt_taken is None:
@@ -1070,12 +1195,12 @@ class CatalogRepository:
             elif group_mode in ("camera",):
                 gkey = camera_name or "Unknown Camera"
             else:
-                if dt_taken is None:
+                if eff_dt is None:
                     gkey = "Unknown Date"
-                elif cur_m_start <= dt_taken <= cur_m_end:
+                elif cur_m_start <= eff_dt <= cur_m_end:
                     gkey = cur_m_label
                 else:
-                    dt = _epoch_to_datetime_utc(dt_taken)
+                    dt = _epoch_to_datetime_utc(eff_dt)
                     cur_m_start, cur_m_end = _compute_date_bounds_utc(dt.year, dt.month)
                     cur_m_label = dt.strftime("%B %Y")
                     gkey = cur_m_label
@@ -1087,7 +1212,7 @@ class CatalogRepository:
                     filename=fname,
                     size=size,
                     mtime=mtime,
-                    date_taken=0 if dt_taken is None else dt_taken,
+                    date_taken=0 if eff_dt is None else eff_dt,
                     rating=rating,
                     flag=flag,
                     width=w,
@@ -1656,6 +1781,13 @@ class CatalogRepository:
                 ).fetchone()
                 if parent_row is None:
                     raise KeyError(f"Parent tag {new_parent_id} not found")
+                # Cycle check: new_parent cannot be a descendant of tag_id
+                is_cycle = conn.execute(
+                    "SELECT 1 FROM tag_closure WHERE ancestor_id = ? AND descendant_id = ?;",
+                    (tag_id, new_parent_id),
+                ).fetchone()
+                if is_cycle is not None:
+                    raise ValueError(f"Cannot move tag {tag_id} into its own descendant {new_parent_id}")
                 new_full_path = f"{parent_row['full_path']}/{tag_row['name']}"
             else:
                 new_full_path = str(tag_row["name"])
@@ -1682,6 +1814,80 @@ class CatalogRepository:
                     (f"{new_full_path}{rel_suffix}", int(d["id"])),
                 )
             conn.commit()
+
+    def merge_tags(self, source_tag_id: int, target_tag_id: int) -> None:
+        """
+        Merges source_tag_id into target_tag_id:
+        1. Copies all media associations from source_tag_id to target_tag_id.
+        2. Recursively re-parents any child tags of source_tag_id under target_tag_id (merging duplicates).
+        3. Deletes source_tag_id.
+        """
+        if source_tag_id == target_tag_id:
+            return
+
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            # 1. Transfer media associations
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO media_tags (media_id, tag_id)
+                SELECT media_id, ? FROM media_tags WHERE tag_id = ?;
+                """,
+                (target_tag_id, source_tag_id),
+            )
+            conn.execute("DELETE FROM media_tags WHERE tag_id = ?;", (source_tag_id,))
+
+            # 2. Transfer child tags
+            children = conn.execute(
+                "SELECT id, name FROM tags WHERE parent_id = ?;", (source_tag_id,)
+            ).fetchall()
+            for child in children:
+                cid = int(child["id"])
+                cname = str(child["name"])
+                existing_c = conn.execute(
+                    "SELECT id FROM tags WHERE parent_id = ? AND name = ? COLLATE NOCASE;",
+                    (target_tag_id, cname),
+                ).fetchone()
+                if existing_c is not None:
+                    self.merge_tags(cid, int(existing_c["id"]))
+                else:
+                    self.move_tag(cid, target_tag_id)
+
+            # 3. Delete source tag
+            conn.execute("DELETE FROM tags WHERE id = ?;", (source_tag_id,))
+            conn.commit()
+
+    def find_child_tag_by_name(self, parent_id: int | None, name: str) -> dict[str, Any] | None:
+        """Finds a direct child tag with the specified name under parent_id (or root if None)."""
+        conn = self.engine.catalog_conn()
+        if parent_id is not None:
+            row = conn.execute(
+                "SELECT id, parent_id, name, full_path FROM tags WHERE parent_id = ? AND name = ? COLLATE NOCASE;",
+                (parent_id, name),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT id, parent_id, name, full_path FROM tags WHERE parent_id IS NULL AND name = ? COLLATE NOCASE;",
+                (name,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def find_tag_by_leaf_name(self, leaf_name: str) -> dict[str, Any] | None:
+        """Finds an existing tag with the specified leaf name, preferring hierarchical tags and most-used tags."""
+        conn = self.engine.catalog_conn()
+        row = conn.execute(
+            """
+            SELECT t.id, t.parent_id, t.name, t.full_path, COUNT(mt.media_id) AS cnt
+            FROM tags t
+            LEFT JOIN media_tags mt ON mt.tag_id = t.id
+            WHERE LOWER(t.name) = LOWER(?)
+            GROUP BY t.id
+            ORDER BY (t.parent_id IS NOT NULL) DESC, cnt DESC, LENGTH(t.full_path) DESC
+            LIMIT 1;
+            """,
+            (leaf_name.strip(),),
+        ).fetchone()
+        return dict(row) if row else None
 
     def assign_tag(self, media_ids: Sequence[int], tag_id: int) -> None:
         if not media_ids:
@@ -2122,7 +2328,7 @@ class CatalogRepository:
                 FROM media_people mp
                 JOIN media m ON m.id = mp.media_id
                 JOIN folders f ON f.id = m.folder_id
-                WHERE mp.person_id = ? AND m.is_video = 0
+                WHERE mp.person_id = ? AND m.is_video = 0 AND mp.rect_w > 0.005 AND mp.rect_h > 0.005
                 ORDER BY (mp.rect_w * mp.rect_h) DESC, m.date_taken DESC
                 LIMIT 1;
                 """,
@@ -2826,9 +3032,92 @@ class CatalogRepository:
 
     confirm_face_suggestion = confirm_faces
 
+    def assign_person_to_face(self, face_id: int, person_id: int) -> None:
+        """Assigns person_id to a specific face_id, updating confirmed counts and marking media dirty."""
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            old_row = conn.execute("SELECT media_id, person_id FROM media_people WHERE id = ?;", (face_id,)).fetchone()
+            old_pid = int(old_row["person_id"]) if old_row and old_row["person_id"] else None
+
+            conn.execute(
+                "UPDATE media_people SET person_id = ?, state = 1, suggested_person_id = NULL WHERE id = ?;",
+                (person_id, face_id),
+            )
+            for pid in {old_pid, person_id}:
+                if pid:
+                    conn.execute(
+                        """
+                        UPDATE people
+                        SET confirmed_count = (
+                            SELECT COUNT(*) FROM media_people WHERE person_id = people.id AND state = 1
+                        )
+                        WHERE id = ?;
+                        """,
+                        (pid,),
+                    )
+            if old_row:
+                conn.execute("UPDATE media SET metadata_dirty = 1 WHERE id = ?;", (old_row["media_id"],))
+            conn.commit()
+
+    def unassign_face_person(self, face_id: int, person_id: int | None = None) -> None:
+        """
+        Removes the person tag from a face bounding box without deleting the detected box itself,
+        setting it to state 0 (unassigned) so it displays as 'Who is this?'.
+        Also records the rejection so this face won't be re-suggested as this person.
+        """
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            if person_id is None:
+                row = conn.execute("SELECT person_id FROM media_people WHERE id = ?;", (face_id,)).fetchone()
+                if row and row["person_id"]:
+                    person_id = int(row["person_id"])
+
+            if person_id:
+                conn.execute(
+                    "INSERT OR IGNORE INTO face_rejections (face_id, person_id) VALUES (?, ?);",
+                    (face_id, person_id),
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO face_rejected_suggestions (face_id, person_id) VALUES (?, ?);",
+                    (face_id, person_id),
+                )
+
+            # Check if this face has a valid bounding box (rect_w > 0 and rect_h > 0)
+            row = conn.execute("SELECT media_id, rect_w, rect_h FROM media_people WHERE id = ?;", (face_id,)).fetchone()
+            if row and row["rect_w"] > 0 and row["rect_h"] > 0:
+                conn.execute(
+                    "UPDATE media_people SET person_id = NULL, suggested_person_id = NULL, state = 0 WHERE id = ?;",
+                    (face_id,),
+                )
+            else:
+                conn.execute("DELETE FROM media_people WHERE id = ?;", (face_id,))
+
+            if person_id:
+                conn.execute(
+                    """
+                    UPDATE people
+                    SET confirmed_count = (
+                        SELECT COUNT(*) FROM media_people WHERE person_id = people.id AND state = 1
+                    )
+                    WHERE id = ?;
+                    """,
+                    (person_id,),
+                )
+            if row:
+                conn.execute("UPDATE media SET metadata_dirty = 1 WHERE id = ?;", (row["media_id"],))
+            conn.commit()
+
     def recalculate_person_centroid(self, person_id: int) -> None:
         """Recalculates ArcFace centroid/sub-centroids for person_id from confirmed faces."""
         try:
+            from src.core.face_matcher import (
+                FaceVectorMatcher,
+                deserialize_embedding,
+                normalize_vector,
+                serialize_embedding,
+            )
+            import numpy as np
+
             conn = self.engine.catalog_conn()
             rows = conn.execute(
                 "SELECT embedding FROM media_people WHERE person_id = ? AND state = 1 AND embedding IS NOT NULL;",
@@ -2848,7 +3137,8 @@ class CatalogRepository:
         """
         Names/assigns an unknown or suggested face region (media_people.id) to a person.
         Promotes state = 1, updates person's centroid embedding, increments confirmed count,
-        and marks media dirty for metadata sync.
+        and marks media dirty for metadata sync. Consolidates any existing boxless row for
+        this person on the same media.
         """
         clean_name = str(person_name).strip()
         if not clean_name:
@@ -2862,6 +3152,15 @@ class CatalogRepository:
             ).fetchone()
             if row:
                 mid = int(row["media_id"])
+                # Consolidate duplicate boxless placeholder row for this person on this photo
+                conn.execute(
+                    """
+                    DELETE FROM media_people
+                    WHERE media_id = ? AND person_id = ? AND id != ?
+                      AND (rect_w <= 0.005 OR rect_h <= 0.005);
+                    """,
+                    (mid, person_id, int(face_id)),
+                )
                 conn.execute("UPDATE media SET metadata_dirty = 1 WHERE id = ?;", (mid,))
                 conn.commit()
                 if row["embedding"]:
@@ -3306,6 +3605,13 @@ class CatalogRepository:
             )
             conn.commit()
 
+    def update_face_suggestion(
+        self, face_id: int, person_id: int | None, confidence: float | None
+    ) -> None:
+        """Updates a single face's suggested match and similarity score."""
+        if person_id is not None and confidence is not None:
+            self.update_suggested_matches([(face_id, person_id, confidence)])
+
     def get_pending_face_suggestions(
         self,
         limit: int = 500,
@@ -3655,13 +3961,14 @@ class CatalogRepository:
             pid = int(r["person_id"]) if r["person_id"] is not None else None
             pname = str(r["person_name"]) if r["person_name"] else None
             st = int(r["state"])
-            blob = face_thumbs.get(fid) or r["person_thumbnail_blob"]
             rect = (
                 float(r["rect_x"] or 0.0),
                 float(r["rect_y"] or 0.0),
                 float(r["rect_w"] or 0.0),
                 float(r["rect_h"] or 0.0),
             )
+            has_valid_rect = rect[2] > 0.005 and rect[3] > 0.005
+            blob = (face_thumbs.get(fid) if has_valid_rect else None) or r["person_thumbnail_blob"]
             reg_dict = {
                 "id": pid if pid is not None else fid,
                 "region_id": fid,
@@ -3837,6 +4144,12 @@ class CatalogRepository:
         row = conn.execute("SELECT COUNT(*) AS cnt FROM media WHERE metadata_dirty = 1;").fetchone()
         return int(row["cnt"]) if row else 0
 
+    def get_total_media_count(self) -> int:
+        """Returns the total number of non-missing media records in the catalog."""
+        conn = self.engine.catalog_conn()
+        row = conn.execute("SELECT COUNT(*) AS cnt FROM media WHERE is_missing = 0;").fetchone()
+        return int(row["cnt"]) if row else 0
+
     def mark_media_clean(
         self, media_ids: Sequence[int], updated_mtimes: dict[int, int] | None = None
     ) -> None:
@@ -3863,32 +4176,51 @@ class ThumbnailRepository:
     def __init__(self, engine: DualDatabaseEngine) -> None:
         self.engine = engine
 
+    @property
+    def _write_lock(self) -> Any:
+        return getattr(self.engine, "thumb_write_lock", self.engine.write_lock)
+
     def get_webp_blob(
         self, media_id: int, expected_mtime: int | None = None
     ) -> bytes | None:
         conn = self.engine.thumbnails_conn()
-        row = conn.execute(
+        cur = conn.cursor()
+        cur.row_factory = None
+        row = cur.execute(
             "SELECT webp_blob, mtime FROM thumbnails WHERE media_id = ?;", (media_id,)
         ).fetchone()
         if row is None:
             return None
-        if expected_mtime is not None and int(row["mtime"]) < int(expected_mtime):
+        if expected_mtime is not None and int(row[1]) < int(expected_mtime):
             return None
-        return bytes(row["webp_blob"])
+        return bytes(row[0])
 
-    def get_webp_blobs_batch(self, media_ids: Sequence[int]) -> dict[int, bytes]:
+    def get_webp_blobs_batch(
+        self,
+        media_ids: Sequence[int],
+        expected_mtimes: dict[int, int] | None = None,
+    ) -> dict[int, bytes]:
         if not media_ids:
             return {}
         conn = self.engine.thumbnails_conn()
+        cur = conn.cursor()
+        cur.row_factory = None
         result: dict[int, bytes] = {}
         for chunk in _iter_id_chunks(media_ids, 900):
             placeholders = ",".join("?" for _ in chunk)
-            rows = conn.execute(
-                f"SELECT media_id, webp_blob FROM thumbnails WHERE media_id IN ({placeholders});",
+            rows = cur.execute(
+                f"SELECT media_id, webp_blob, mtime FROM thumbnails WHERE media_id IN ({placeholders});",
                 list(chunk),
             ).fetchall()
-            for r in rows:
-                result[int(r["media_id"])] = bytes(r["webp_blob"])
+            if expected_mtimes is not None:
+                for mid_val, blob_val, mtime_val in rows:
+                    mid_i = int(mid_val)
+                    exp = expected_mtimes.get(mid_i)
+                    if exp is None or int(mtime_val) >= int(exp):
+                        result[mid_i] = bytes(blob_val)
+            else:
+                for mid_val, blob_val, _ in rows:
+                    result[int(mid_val)] = bytes(blob_val)
         return result
 
     def put_webp_blob(
@@ -3899,7 +4231,7 @@ class ThumbnailRepository:
         width: int = 256,
         height: int = 256,
     ) -> None:
-        with self.engine.write_lock:
+        with self._write_lock:
             conn = self.engine.thumbnails_conn()
             conn.execute(
                 """
@@ -3915,10 +4247,32 @@ class ThumbnailRepository:
             )
             conn.commit()
 
+    def put_webp_blobs_batch(
+        self,
+        entries: Sequence[tuple[int, bytes, int, int, int]],
+    ) -> None:
+        if not entries:
+            return
+        with self._write_lock:
+            conn = self.engine.thumbnails_conn()
+            conn.executemany(
+                """
+                INSERT INTO thumbnails (media_id, webp_blob, mtime, width, height)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(media_id) DO UPDATE SET
+                    webp_blob = excluded.webp_blob,
+                    mtime = excluded.mtime,
+                    width = excluded.width,
+                    height = excluded.height;
+                """,
+                entries,
+            )
+            conn.commit()
+
     def invalidate(self, media_ids: Sequence[int]) -> None:
         if not media_ids:
             return
-        with self.engine.write_lock:
+        with self._write_lock:
             conn = self.engine.thumbnails_conn()
             for chunk in _iter_id_chunks(media_ids, 900):
                 placeholders = ",".join("?" for _ in chunk)
@@ -3955,7 +4309,7 @@ class ThumbnailRepository:
         return result
 
     def put_face_thumbnail(self, media_people_id: int, webp_blob: bytes) -> None:
-        with self.engine.write_lock:
+        with self._write_lock:
             conn = self.engine.thumbnails_conn()
             conn.execute(
                 """
@@ -3972,7 +4326,7 @@ class ThumbnailRepository:
     ) -> None:
         if not entries:
             return
-        with self.engine.write_lock:
+        with self._write_lock:
             conn = self.engine.thumbnails_conn()
             conn.executemany(
                 """
@@ -3987,7 +4341,7 @@ class ThumbnailRepository:
     def invalidate_face_thumbnails(self, media_people_ids: Sequence[int]) -> None:
         if not media_people_ids:
             return
-        with self.engine.write_lock:
+        with self._write_lock:
             conn = self.engine.thumbnails_conn()
             for chunk in _iter_id_chunks(media_people_ids, 900):
                 placeholders = ",".join("?" for _ in chunk)
@@ -4001,9 +4355,41 @@ class ThumbnailRepository:
         """Returns the WebP face thumbnail bytes for person_id on media_id."""
         cat_conn = self.engine.catalog_conn()
         row = cat_conn.execute(
-            "SELECT id FROM media_people WHERE media_id = ? AND person_id = ? AND state = 1 LIMIT 1;",
+            "SELECT id, rect_w, rect_h FROM media_people WHERE media_id = ? AND person_id = ? AND state = 1 LIMIT 1;",
             (int(media_id), int(person_id)),
         ).fetchone()
         if not row:
             return None
+        if float(row["rect_w"] or 0.0) <= 0.005 or float(row["rect_h"] or 0.0) <= 0.005:
+            return None
         return self.get_face_thumbnail(int(row["id"]))
+
+    def purge_mismatched_orientation_thumbnails(self) -> int:
+        """Purges any cached thumbnails whose aspect ratio conflicts with catalog orientation."""
+        try:
+            with self._write_lock:
+                tconn = self.engine.thumbnails_conn()
+                cat_path = getattr(self.engine, "catalog_path", None)
+                if cat_path and Path(cat_path).exists():
+                    clean_cat = str(cat_path).replace("\\", "/")
+                    tconn.execute(f"ATTACH DATABASE '{clean_cat}' AS cat_db;")
+                    cur = tconn.cursor()
+                    cur.execute(
+                        """
+                        DELETE FROM thumbnails
+                        WHERE media_id IN (
+                            SELECT t.media_id
+                            FROM thumbnails t
+                            JOIN cat_db.media m ON t.media_id = m.id
+                            WHERE (m.orientation IN (6, 8) AND t.width > t.height)
+                               OR (m.orientation IN (1, 3) AND m.width > m.height AND t.height > t.width)
+                        );
+                        """
+                    )
+                    count = cur.rowcount
+                    tconn.commit()
+                    tconn.execute("DETACH DATABASE cat_db;")
+                    return max(0, count)
+        except Exception:
+            pass
+        return 0

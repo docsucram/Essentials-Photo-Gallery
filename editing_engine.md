@@ -1,8 +1,8 @@
-# PhotoGallery64 Image Editing Engine: Technical Architecture & Specification
+# Essentials Photo Gallery Image Editing Engine: Technical Architecture & Specification
 
 ## 1. Architectural Overview & Design Philosophy
 
-`PhotoGallery64` implements a hybrid non-destructive parametric editing architecture with deterministic, lossless pixel pipeline execution built on NumPy and OpenCV (`src/imaging/opencv_engine.py`, `src/ui/media_viewer.py`, `src/ui/right_tag_dock.py`).
+**Essentials Photo Gallery** implements a hybrid non-destructive parametric editing architecture with deterministic, lossless pixel pipeline execution built on NumPy and OpenCV (`src/imaging/opencv_engine.py`, `src/ui/media_viewer.py`, `src/ui/right_tag_dock.py`).
 
 The design satisfies four core operational principles:
 1. **Interactive Fluidity (Zero-Latency Preview):** During interactive slider dragging or mouse movement, operations execute against an adaptive, downscaled display proxy (`display_proxy_rgb`) at $>60\text{ FPS}$.
@@ -19,7 +19,7 @@ The design satisfies four core operational principles:
                       |                                       |
                       v                                       v
          +-------------------------+             +-------------------------+
-         | Master Array (RGB uint8)|             |  Display Proxy (1280px) |
+         | Master Array (RGB uint8)|             |  Display Proxy (1920px) |
          +------------+------------+             +------------+------------+
                       |                                       |
                       |  Full-Res Commit                      |  Live Slider Scrubbing
@@ -122,6 +122,15 @@ Flash photography in low ambient light causes retro-reflection from the vascular
    $$\text{target\_dark} = \text{clip}(\min(G, B) \times 0.55, 12.0, 42.0)$$
    $$\text{patch}_{final} = \text{patch}_{orig} \times (1.0 - \alpha) + \text{target\_dark} \times \alpha$$
    This prevents the "black hole" artifact common in naive red eye tools and retains authentic corneal highlights.
+
+
+### 3.1.1. Unified Spot Fix Architecture (Retouch & Red Eye)
+Retouch (exemplar-synthesized blemish healing) and Red Eye removal are unified under a single **Spot Fix** floating toolbar in \src/ui/media_viewer.py\:
+- **Exclusive Sub-Mode Toggling:** Clean buttons for **Blemish** and **Red eye** replace verbose on-canvas instruction labels.
+- **Shared Brush Radius:** A single slider (	ext{px}$ to 	ext{px}$) controls the circular spot size for both tools.
+- **Keyboard Shortcuts:** Bracket keys (\[\ decrease, \]\ increase) adjust the brush size dynamically in real time.
+- **1:1 View-Scale Transform:** Radius in scene coordinates is computed dynamically as {	ext{scene}} = r_{	ext{screen}} / 	ext{scale}$ ({	ext{master}} = 	ext{round}(r_{	ext{scene}})$), ensuring the on-screen cursor circle matches the painted canvas area down to the subpixel regardless of zoom factor.
+- **Dual-Interaction Red Eye Mode:** Clicking with the circular brush instantly applies connected-component pupil desaturation within the brush radius, while dragging a marquee box targets larger or off-axis eyes with full backward compatibility.
 
 ---
 

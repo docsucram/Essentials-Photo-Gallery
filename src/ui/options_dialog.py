@@ -82,15 +82,15 @@ class FaceRecognitionOptionsTab(QWidget):
                     f"   Execution Provider: {p_name}\n"
                     f"   Status: Operational (ArcFace 512-D + SCRFD Landmark Geometry)"
                 )
-                self.lbl_engine_status.setStyleSheet("color: #1B5E20; font-weight: bold;")
+                self.lbl_engine_status.setStyleSheet("color: #22C55E; font-weight: bold;")
             else:
                 self.lbl_engine_status.setText(
                     "⚠ Face Engine: Unavailable (InsightFace models missing). Fallback disabled."
                 )
-                self.lbl_engine_status.setStyleSheet("color: #B71C1C; font-weight: bold;")
+                self.lbl_engine_status.setStyleSheet("color: #EF4444; font-weight: bold;")
         except Exception as ex:
             self.lbl_engine_status.setText(f"Status check error: {ex}")
-            self.lbl_engine_status.setStyleSheet("color: #B71C1C;")
+            self.lbl_engine_status.setStyleSheet("color: #EF4444;")
 
         status_layout.addWidget(self.lbl_engine_status)
         main_layout.addWidget(status_group)
@@ -146,6 +146,14 @@ class FaceRecognitionOptionsTab(QWidget):
         h_box_size.addWidget(self.lbl_size_val)
         tuning_layout.addRow("Minimum Face Size:", h_box_size)
 
+        h_reset_tuning = QHBoxLayout()
+        h_reset_tuning.addStretch(1)
+        self.btn_restore_face_defaults = QPushButton("Restore Default Sensitivity", self)
+        self.btn_restore_face_defaults.setToolTip("Reset Detection Confidence (65%), Match Threshold (52%), and Minimum Face Size (40 px) to defaults.")
+        self.btn_restore_face_defaults.clicked.connect(self._restore_default_sensitivity)
+        h_reset_tuning.addWidget(self.btn_restore_face_defaults)
+        tuning_layout.addRow("", h_reset_tuning)
+
         main_layout.addWidget(tuning_group)
 
         # 3. Maintenance Group
@@ -158,7 +166,7 @@ class FaceRecognitionOptionsTab(QWidget):
             self,
         )
         lbl_maint_info.setWordWrap(True)
-        lbl_maint_info.setStyleSheet("color: #555555; font-size: 11px;")
+        lbl_maint_info.setStyleSheet("font-size: 11px;")
         maint_layout.addWidget(lbl_maint_info)
 
         v_btn_layout = QVBoxLayout()
@@ -205,6 +213,12 @@ class FaceRecognitionOptionsTab(QWidget):
         self._settings.setValue("face_min_size", size_int)
         self._settings.sync()
         self.settings_changed.emit()
+
+    def _restore_default_sensitivity(self) -> None:
+        self.slider_confidence.setValue(65)
+        self.slider_match.setValue(52)
+        self.slider_size.setValue(40)
+        self.save_settings()
 
     def _on_match_slider_changed(self, value: int) -> None:
         self.lbl_match_val.setText(f"{value}%")
@@ -272,7 +286,7 @@ class OptionsDialog(AppSettingsDialog):
     def __init__(
         self,
         engine: DualDatabaseEngine | None = None,
-        initial_tab: str = "face_recognition",
+        initial_tab: str = "general",
         parent: QWidget | None = None,
         **kwargs: Any,
     ) -> None:

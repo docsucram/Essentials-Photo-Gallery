@@ -32,6 +32,7 @@ from PySide6.QtCore import (
     QRectF,
     QSize,
     Qt,
+    QTimer,
     Signal,
 )
 from PySide6.QtGui import (
@@ -206,6 +207,12 @@ class _FaceCardDelegate(QStyledItemDelegate):
                 if not qimg.isNull():
                     pix = QPixmap.fromImage(qimg)
                     self.pixmap_cache.put(rec.face_id, pix)
+                else:
+                    pix = QPixmap()
+                    self.pixmap_cache.put(rec.face_id, pix)
+            else:
+                pix = QPixmap()
+                self.pixmap_cache.put(rec.face_id, pix)
 
         if pix and not pix.isNull():
             # Clip avatar to rounded rect
@@ -465,6 +472,17 @@ class _AutoHeightListView(QListView):
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self.update_height()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() == Qt.Key_Escape:
+            p = self.parent()
+            while p is not None:
+                if hasattr(p, "back_to_gallery_requested"):
+                    p.back_to_gallery_requested.emit()
+                    event.accept()
+                    return
+                p = p.parent()
+        super().keyPressEvent(event)
 
 
 class _PersonGroupSectionWidget(QWidget):
@@ -833,6 +851,12 @@ class BatchPeopleView(QWidget):
         self._scan_current: int = 0
         self._scan_total: int = 0
 
+        # Debounce timer to prevent multiple rapid re-clustering passes
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(250)
+        self._refresh_timer.timeout.connect(self._do_refresh_suggestions)
+
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1011,6 +1035,62 @@ class BatchPeopleView(QWidget):
         self.scroll_area.setWidget(self.scroll_content)
         main_layout.addWidget(self.scroll_area, 1)
 
+    def set_dark_mode(self, is_dark: bool) -> None:
+        """Applies Dark Studio or standard light styling to BatchPeopleView."""
+        self._is_dark = bool(is_dark)
+        if is_dark:
+            self.action_bar.setStyleSheet("background-color: #1B1E24; border-bottom: 1px solid #2D323B;")
+            self.avatar_strip.setStyleSheet("background-color: #171A20; border-bottom: 1px solid #2D323B;")
+            self.scroll_area.setStyleSheet(
+                """
+                QScrollArea {
+                    border: none;
+                    background-color: #121417;
+                }
+                QScrollBar:vertical {
+                    border: none;
+                    background: transparent;
+                    width: 8px;
+                    margin: 0px;
+                }
+                QScrollBar::handle:vertical {
+                    background: #3E4756;
+                    min-height: 28px;
+                    border-radius: 4px;
+                }
+                """
+            )
+            self.scroll_content.setStyleSheet("background-color: #121417;")
+            self.lbl_empty_state.setStyleSheet(
+                "color: #94A3B8; font-family: 'Segoe UI'; font-size: 11pt; padding: 48px 24px;"
+            )
+        else:
+            self.action_bar.setStyleSheet("background-color: #F0F4F8; border-bottom: 1px solid #D0DBE5;")
+            self.avatar_strip.setStyleSheet("background-color: #F8FAFC; border-bottom: 1px solid #D9E2EC;")
+            self.scroll_area.setStyleSheet(
+                """
+                QScrollArea {
+                    border: none;
+                    background-color: #FFFFFF;
+                }
+                QScrollBar:vertical {
+                    border: none;
+                    background: transparent;
+                    width: 8px;
+                    margin: 0px;
+                }
+                QScrollBar::handle:vertical {
+                    background: #CBD5E1;
+                    min-height: 28px;
+                    border-radius: 4px;
+                }
+                """
+            )
+            self.scroll_content.setStyleSheet("")
+            self.lbl_empty_state.setStyleSheet(
+                "color: #4A6585; font-family: 'Segoe UI'; font-size: 11pt; padding: 48px 24px;"
+            )
+
     def set_scan_progress(self, current: int, total: int) -> None:
         """Updates live face detection progress indicator in BatchPeopleView."""
         self._scan_current = current
@@ -1048,8 +1128,16 @@ class BatchPeopleView(QWidget):
     # -------------------------------------------------------------------------
     # Data Loading & Section Population
     # -------------------------------------------------------------------------
-    def refresh_suggestions(self) -> None:
-        """Reloads unassigned face suggestions (and optionally confirmed faces) from catalog.db and updates UI."""
+    def refresh_suggestions(self, debounce: bool = False) -> None:
+        """Reloads unassigned face suggestions from catalog.db and updates UI (optionally debounced)."""
+        if debounce:
+            self._refresh_timer.start()
+        else:
+            self._refresh_timer.stop()
+            self._do_refresh_suggestions()
+
+    def _do_refresh_suggestions(self) -> None:
+        """Internal execution of suggestion reload."""
         conf_thresh = getattr(self, "_min_confidence_threshold", 0.52)
         raw_rows = self.repo.get_pending_face_suggestions(limit=5000, min_confidence=conf_thresh, include_unnamed=True)
         if getattr(self, "_show_tagged_faces", False):
@@ -1177,14 +1265,20 @@ class BatchPeopleView(QWidget):
             unnamed_sections: list[tuple[str, list[FaceCardRecord]]] = []
             if len(valid_fids) >= 3 and len(emb_list) >= 3:
                 clusters = FaceVectorMatcher.cluster_unnamed_faces(
-                    valid_fids, np.stack(emb_list, axis=0), sim_threshold=0.58, min_cluster_size=3
+                    valid_fids, np.stack(emb_list, axis=0), sim_threshold=0.58, min_cluster_size=4
                 )
                 assigned_unnamed_fids = set()
-                for cluster_name, c_fids in clusters.items():
+                # Sort clusters by face count (largest first) and keep top 20 significant clusters
+                sorted_clusters = sorted(
+                    [(k, v) for k, v in clusters.items() if k != "Other Unnamed Faces"],
+                    key=lambda x: len(x[1]),
+                    reverse=True,
+                )
+                for idx, (_, c_fids) in enumerate(sorted_clusters[:20], 1):
                     c_recs = [fid_to_rec[fid] for fid in c_fids if fid in fid_to_rec]
                     assigned_unnamed_fids.update(c_fids)
                     if c_recs:
-                        unnamed_sections.append((cluster_name, c_recs))
+                        unnamed_sections.append((f"Unknown Person #{idx}", c_recs))
 
                 remaining_fids = [fid for fid in unnamed_fids if fid not in assigned_unnamed_fids]
                 if remaining_fids:

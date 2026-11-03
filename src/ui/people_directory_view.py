@@ -84,7 +84,7 @@ class MergePeopleDialog(QDialog):
         self.candidates = candidates
 
         self.setWindowTitle(f"Merge '{source_person_name}'")
-        self.setFixedSize(440, 420)
+        self.setFixedSize(460, 480)
         self.setStyleSheet(
             """
             QDialog {
@@ -95,7 +95,7 @@ class MergePeopleDialog(QDialog):
         )
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(10)
 
         # 1. Header with Source Info
@@ -123,16 +123,16 @@ class MergePeopleDialog(QDialog):
 
         layout.addLayout(h_src)
 
-        # 2. Searchable Name Input with Completer
-        lbl_prompt = QLabel("Type a name or choose from contacts below:", self)
+        # 2. Searchable Name Input (single unified list below)
+        lbl_prompt = QLabel("Type to filter contacts or enter a new name:", self)
         lbl_prompt.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         lbl_prompt.setStyleSheet("color: #334155; margin-top: 4px;")
         layout.addWidget(lbl_prompt)
 
-        self.txt_target = _AutoPopupLineEdit(self)
-        self.txt_target.setPlaceholderText("Start typing contact name...")
+        self.txt_target = QLineEdit(self)
+        self.txt_target.setPlaceholderText("Search contacts or type name...")
         self.txt_target.setFont(QFont("Segoe UI", 10))
-        self.txt_target.setFixedHeight(32)
+        self.txt_target.setFixedHeight(34)
         self.txt_target.setStyleSheet(
             """
             QLineEdit {
@@ -148,30 +148,24 @@ class MergePeopleDialog(QDialog):
             }
             """
         )
-
-        candidate_names = [str(c["name"]) for c in candidates if c.get("name")]
-        comp = QCompleter(candidate_names, self.txt_target)
-        comp.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        comp.setFilterMode(Qt.MatchFlag.MatchContains)
-        self.txt_target.setCompleter(comp)
-        comp.activated.connect(self._on_completer_activated)
         self.txt_target.textChanged.connect(self._on_text_changed)
         layout.addWidget(self.txt_target)
 
-        # 3. Candidate Quick-Pick List
+        # 3. Candidate Unified Contact List with Avatars & Photo Counts
         self.list_candidates = QListWidget(self)
-        self.list_candidates.setFixedHeight(140)
+        self.list_candidates.setIconSize(QSize(28, 28))
         self.list_candidates.setStyleSheet(
             """
             QListWidget {
-                border: 1px solid #E2E8F0;
+                border: 1px solid #CBD5E1;
                 border-radius: 6px;
                 background-color: #FFFFFF;
                 color: #0F172A;
             }
             QListWidget::item {
-                padding: 4px 6px;
+                padding: 5px 8px;
                 border-bottom: 1px solid #F1F5F9;
+                border-radius: 4px;
             }
             QListWidget::item:hover {
                 background-color: #F1F5F9;
@@ -179,13 +173,14 @@ class MergePeopleDialog(QDialog):
             QListWidget::item:selected {
                 background-color: #EFF6FF;
                 color: #1D4ED8;
+                border: 1px solid #BFDBFE;
                 font-weight: bold;
             }
             """
         )
         self._populate_candidate_list(self.candidates)
         self.list_candidates.itemClicked.connect(self._on_list_item_clicked)
-        layout.addWidget(self.list_candidates)
+        layout.addWidget(self.list_candidates, 1)
 
         # 4. Status / Live Preview Label
         self.lbl_preview = QLabel(self)
@@ -193,8 +188,6 @@ class MergePeopleDialog(QDialog):
         self.lbl_preview.setWordWrap(True)
         self.lbl_preview.setStyleSheet("color: #475569; padding: 2px;")
         layout.addWidget(self.lbl_preview)
-
-        layout.addStretch(1)
 
         # 5. Buttons
         h_btn = QHBoxLayout()
@@ -254,30 +247,36 @@ class MergePeopleDialog(QDialog):
         for c in items:
             cnt = c.get("photo_count", c.get("confirmed_count", 0))
             name = c.get("name", "")
-            icon = QIcon(make_circular_avatar(c.get("thumbnail_blob"), name, size=24))
-            item = QListWidgetItem(icon, f"{name}  ({cnt} photo{'s' if cnt != 1 else ''})")
+            icon = QIcon(make_circular_avatar(c.get("thumbnail_blob"), name, size=28))
+            item = QListWidgetItem(icon, f"  {name}   ({cnt} photo{'s' if cnt != 1 else ''})")
+            item.setSizeHint(QSize(400, 38))
             item.setData(Qt.ItemDataRole.UserRole, c)
             self.list_candidates.addItem(item)
-
-    def _on_completer_activated(self, text: str) -> None:
-        self.txt_target.setText(text)
-        self._on_text_changed(text)
 
     def _on_list_item_clicked(self, item: QListWidgetItem) -> None:
         c = item.data(Qt.ItemDataRole.UserRole)
         if c:
+            self.txt_target.blockSignals(True)
             self.txt_target.setText(c["name"])
+            self.txt_target.blockSignals(False)
+            self._update_preview()
 
     def _on_text_changed(self, text: str) -> None:
         query = text.strip().lower()
-        # Filter list items
+        matched_item = None
         for i in range(self.list_candidates.count()):
             itm = self.list_candidates.item(i)
             c = itm.data(Qt.ItemDataRole.UserRole)
             matches = not query or (c and query in c["name"].lower())
             itm.setHidden(not matches)
             if c and c["name"].lower() == query:
-                self.list_candidates.setCurrentItem(itm)
+                matched_item = itm
+
+        if matched_item:
+            self.list_candidates.setCurrentItem(matched_item)
+        else:
+            self.list_candidates.clearSelection()
+
         self._update_preview()
 
     def _update_preview(self) -> None:
@@ -817,7 +816,8 @@ class PeopleDirectoryView(QWidget):
         # ---------------------------------------------------------------------
         # 1. Header Toolbar
         # ---------------------------------------------------------------------
-        header_bar = QFrame(self)
+        self.header_bar = QFrame(self)
+        header_bar = self.header_bar
         header_bar.setFixedHeight(56)
         header_bar.setStyleSheet("background-color: #FFFFFF; border-bottom: 1px solid #E2E8F0;")
         h_layout = QHBoxLayout(header_bar)
@@ -1132,6 +1132,21 @@ class PeopleDirectoryView(QWidget):
                 thumb_blob=p["thumbnail_blob"],
                 parent=self.sec1_container,
             )
+            if getattr(self, "_is_dark", False):
+                card.setStyleSheet(
+                    """
+                    #NamedPersonCard {
+                        background-color: transparent;
+                        border: 1px solid transparent;
+                        border-radius: 12px;
+                    }
+                    #NamedPersonCard:hover {
+                        background-color: #242A36;
+                    }
+                    """
+                )
+                card.lbl_name.setStyleSheet("color: #E2E8F0;")
+                card.lbl_count.setStyleSheet("color: #94A3B8;")
             card.clicked.connect(self.person_selected.emit)
             card.rename_requested.connect(self._on_rename_person)
             card.merge_requested.connect(self._on_merge_person)
@@ -1169,6 +1184,38 @@ class PeopleDirectoryView(QWidget):
                     existing_names=card_names,
                     parent=self.sec2_container,
                 )
+                if getattr(self, "_is_dark", False):
+                    card_u.setStyleSheet(
+                        """
+                        #UnnamedPersonCard {
+                            background-color: transparent;
+                            border: 1px solid transparent;
+                            border-radius: 12px;
+                        }
+                        #UnnamedPersonCard:hover {
+                            background-color: #242A36;
+                        }
+                        """
+                    )
+                    card_u.txt_name.setStyleSheet(
+                        """
+                        QLineEdit {
+                            border: 1px solid #333A45;
+                            border-radius: 11px;
+                            padding: 2px 6px;
+                            background-color: #14171B;
+                            color: #E2E8F0;
+                        }
+                        QLineEdit:hover {
+                            border-color: #475569;
+                        }
+                        QLineEdit:focus {
+                            border-color: #3B82F6;
+                            background-color: #1B1E24;
+                            font-weight: bold;
+                        }
+                        """
+                    )
                 card_u.clicked.connect(lambda fids, tb: self.unnamed_selected.emit(fids, tb))
                 card_u.named.connect(self._on_name_cluster)
                 card_u.ignore_requested.connect(self._on_ignore_cluster_faces)
@@ -1194,6 +1241,74 @@ class PeopleDirectoryView(QWidget):
     def resizeEvent(self, event: Any) -> None:
         super().resizeEvent(event)
         self._render_grids()
+
+    def set_dark_mode(self, is_dark: bool) -> None:
+        """Applies Dark Studio or standard light styling to PeopleDirectoryView."""
+        self._is_dark = bool(is_dark)
+        if is_dark:
+            self.setStyleSheet("#PeopleDirectoryView { background-color: #121417; }")
+            if hasattr(self, "header_bar"):
+                self.header_bar.setStyleSheet("background-color: #1B1E24; border-bottom: 1px solid #2D323B;")
+            self.lbl_title.setStyleSheet("color: #E2E8F0;")
+            self.lbl_total_count.setStyleSheet("color: #94A3B8;")
+            self.txt_search.setStyleSheet(
+                "QLineEdit { border: 1px solid #333A45; border-radius: 16px; padding: 5px 12px; background: #14171B; color: #E2E8F0; }"
+                "QLineEdit:focus { border-color: #3B82F6; background: #1B1E24; }"
+            )
+            self.btn_refresh.setStyleSheet(
+                """
+                QPushButton#btnRefreshDirectory {
+                    background-color: #242A36;
+                    border: 1px solid #3E4756;
+                    border-radius: 4px;
+                    color: #E2E8F0;
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                    padding: 5px 12px;
+                }
+                QPushButton#btnRefreshDirectory:hover {
+                    background-color: #2D3542;
+                    border-color: #3B82F6;
+                    color: #FFFFFF;
+                }
+                """
+            )
+            self.lbl_sec1_title.setStyleSheet("color: #E2E8F0;")
+            self.lbl_sec2_title.setStyleSheet("color: #E2E8F0;")
+            self.lbl_empty.setStyleSheet("color: #94A3B8; font-size: 14px; margin-top: 60px;")
+        else:
+            self.setStyleSheet("#PeopleDirectoryView { background-color: #FFFFFF; }")
+            if hasattr(self, "header_bar"):
+                self.header_bar.setStyleSheet("background-color: #FFFFFF; border-bottom: 1px solid #E2E8F0;")
+            self.lbl_title.setStyleSheet("color: #0F172A;")
+            self.lbl_total_count.setStyleSheet("color: #64748B;")
+            self.txt_search.setStyleSheet(
+                "QLineEdit { border: 1px solid #CBD5E1; border-radius: 16px; padding: 5px 12px; background: #F8FAFC; color: #0F172A; }"
+                "QLineEdit:focus { border-color: #3B82F6; background: #FFFFFF; }"
+            )
+            self.btn_refresh.setStyleSheet(
+                """
+                QPushButton#btnRefreshDirectory {
+                    background-color: #FFFFFF;
+                    border: 1px solid #CBD5E1;
+                    border-radius: 4px;
+                    color: #334155;
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                    padding: 5px 12px;
+                }
+                QPushButton#btnRefreshDirectory:hover {
+                    background-color: #F8FAFC;
+                    border-color: #94A3B8;
+                    color: #1E293B;
+                }
+                """
+            )
+            self.lbl_sec1_title.setStyleSheet("color: #1E293B;")
+            self.lbl_sec2_title.setStyleSheet("color: #1E293B;")
+            self.lbl_empty.setStyleSheet("color: #64748B; font-size: 14px; margin-top: 60px;")
+        if self.isVisible():
+            self._render_grids()
 
     # -------------------------------------------------------------------------
     # Actions: Name Cluster, Rename, Merge, Review Suggestions

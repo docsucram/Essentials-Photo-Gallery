@@ -104,10 +104,12 @@ def extract_file_datetime(path: Path) -> datetime:
             with Image.open(path) as im:
                 ex = im.getexif()
                 if ex:
-                    dt_val = ex.get(306)
+                    dt_val = None
                     ex_ifd = ex.get_ifd(ExifTags.IFD.Exif)
                     if ex_ifd:
-                        dt_val = ex_ifd.get(36867) or ex_ifd.get(36868) or dt_val
+                        dt_val = ex_ifd.get(36867) or ex_ifd.get(36868)
+                    if not dt_val:
+                        dt_val = ex.get(36867) or ex.get(36868) or ex.get(306)
                     if dt_val:
                         s = str(dt_val).strip().replace("-", ":")
                         parts = s.split(" ")

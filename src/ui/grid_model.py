@@ -23,6 +23,7 @@ from PySide6.QtCore import (
     QPoint,
     QRect,
     Qt,
+    Signal,
 )
 
 from legacy_reference.imgBrowserv13 import LruCache
@@ -71,11 +72,60 @@ class _GroupSpan:
     y_end: int = 0
 
 
+class _LazyMosaicRectMap:
+    """
+    Lightweight dict-compatible view over raw (x, y, w, h) tuples that constructs
+    PySide6 QRect instances lazily on lookup, avoiding 500,000 C++ QRect allocations.
+    """
+
+    __slots__ = ("_raw",)
+
+    def __init__(self, raw: dict[int, tuple[int, int, int, int]]) -> None:
+        self._raw = raw
+
+    def clear(self) -> None:
+        self._raw.clear()
+
+    def get(self, key: int, default: Any = None) -> QRect | Any:
+        t = self._raw.get(key)
+        return QRect(t[0], t[1], t[2], t[3]) if t is not None else default
+
+    def __getitem__(self, key: int) -> QRect:
+        t = self._raw[key]
+        return QRect(t[0], t[1], t[2], t[3])
+
+    def __setitem__(self, key: int, val: QRect | tuple[int, int, int, int]) -> None:
+        if isinstance(val, QRect):
+            self._raw[key] = (val.x(), val.y(), val.width(), val.height())
+        else:
+            self._raw[key] = val
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._raw
+
+    def __len__(self) -> int:
+        return len(self._raw)
+
+    def __bool__(self) -> bool:
+        return bool(self._raw)
+
+    def keys(self):
+        return self._raw.keys()
+
+    def values(self):
+        return (QRect(t[0], t[1], t[2], t[3]) for t in self._raw.values())
+
+    def items(self):
+        return ((k, QRect(t[0], t[1], t[2], t[3])) for k, t in self._raw.items())
+
+
 class CatalogListModel(QAbstractListModel):
     """
     Virtualized QAbstractListModel holding compact MediaItemRecord tuples (~48 MB for 400k items).
     Computes exact O(G) pixel geometry for both 'wlpg_grid' and 'mosaic' modes with zero spacer rows.
     """
+
+    view_repaint_requested = Signal(int)  # media_id (>0 for single card, -1 for batch)
 
     HEADER_HEIGHT = 38
     GRID_MARGIN_X = 12
@@ -106,7 +156,8 @@ class CatalogListModel(QAbstractListModel):
         self._selected_ids: set[int] = set()
         self._group_record_starts: list[int] = []
         self._group_selected_counts: dict[int, int] = {}
-        self._mosaic_rects: dict[int, QRect] = {}
+        self._mosaic_raw: dict[int, tuple[int, int, int, int]] = {}
+        self._mosaic_rects: _LazyMosaicRectMap = _LazyMosaicRectMap(self._mosaic_raw)
         self._mosaic_total_height: int = 0
 
     @property
@@ -389,7 +440,8 @@ class CatalogListModel(QAbstractListModel):
             return QRect()
 
         if self._layout_mode == "mosaic":
-            return self._mosaic_rects.get(vrow, QRect())
+            t = self._mosaic_raw.get(vrow)
+            return QRect(t[0], t[1], t[2], t[3]) if t is not None else QRect()
 
         g_idx = bisect.bisect_right(self._group_starts, vrow) - 1
         if g_idx < 0 or g_idx >= len(self._groups):
@@ -427,16 +479,17 @@ class CatalogListModel(QAbstractListModel):
             else:
                 cand_groups = self._groups
 
+            raw = self._mosaic_raw
             for g in cand_groups:
                 if self._group_headers_enabled and g.vrow_header >= 0:
-                    hrect = self._mosaic_rects.get(g.vrow_header)
-                    if hrect is not None and hrect.contains(pos):
+                    ht = raw.get(g.vrow_header)
+                    if ht is not None and ht[0] <= px <= ht[0] + ht[2] and ht[1] <= py <= ht[1] + ht[3]:
                         return g.vrow_header
                 if g.collapsed:
                     continue
                 for vrow in range(g.vrow_items_start, g.vrow_end):
-                    mrect = self._mosaic_rects.get(vrow)
-                    if mrect is not None and mrect.contains(pos):
+                    mt = raw.get(vrow)
+                    if mt is not None and mt[0] <= px <= mt[0] + mt[2] and mt[1] <= py <= mt[1] + mt[3]:
                         return vrow
             return -1
 
@@ -484,19 +537,20 @@ class CatalogListModel(QAbstractListModel):
                 if self._group_y_ends
                 else 0
             )
+            raw = self._mosaic_raw
             for g_idx in range(start_g, len(self._groups)):
                 g = self._groups[g_idx]
                 if g.y_header > bottom_y and self._group_y_ends and g_idx > start_g:
                     break
                 if self._group_headers_enabled and g.vrow_header >= 0:
-                    hrect = self._mosaic_rects.get(g.vrow_header)
-                    if hrect and hrect.bottom() >= top_y and hrect.top() <= bottom_y:
+                    ht = raw.get(g.vrow_header)
+                    if ht is not None and (ht[1] + ht[3]) >= top_y and ht[1] <= bottom_y:
                         result.append(g.vrow_header)
                 if g.collapsed:
                     continue
                 for vrow in range(g.vrow_items_start, g.vrow_end):
-                    mrect = self._mosaic_rects.get(vrow)
-                    if mrect and mrect.bottom() >= top_y and mrect.top() <= bottom_y:
+                    mt = raw.get(vrow)
+                    if mt is not None and (mt[1] + mt[3]) >= top_y and mt[1] <= bottom_y:
                         result.append(vrow)
             return result
 
@@ -530,26 +584,29 @@ class CatalogListModel(QAbstractListModel):
 
     def compute_mosaic_geometry(
         self, viewport_width: int, target_row_height: int = 180, spacing: int = 6
-    ) -> dict[int, QRect]:
+    ) -> _LazyMosaicRectMap:
         """
         Packs portrait and landscape images into gapless justified rows of equal height
-        across `viewport_width`, storing QRects for each virtual model row.
+        across `viewport_width`, storing raw (x, y, w, h) tuples and returning _LazyMosaicRectMap.
         """
         self._viewport_width = max(200, int(viewport_width))
         avail_w = max(200, self._viewport_width - (self.GRID_MARGIN_X * 2))
         target_h = max(60, int(target_row_height))
         header_h = self.HEADER_HEIGHT
+        margin_x = self.GRID_MARGIN_X
+        right_edge = margin_x + avail_w
+        section_gap = self.SECTION_BOTTOM_GAP
 
-        self._mosaic_rects.clear()
+        raw = self._mosaic_raw
+        raw.clear()
         y_cursor = self.GRID_MARGIN_TOP
         mosaic_group_y_ends: list[int] = []
+        records = self._records
+        headers_on = self._group_headers_enabled
 
         for g in self._groups:
-            g_y_start = y_cursor
-            if self._group_headers_enabled and g.vrow_header >= 0:
-                self._mosaic_rects[g.vrow_header] = QRect(
-                    self.GRID_MARGIN_X, y_cursor, avail_w, header_h
-                )
+            if headers_on and g.vrow_header >= 0:
+                raw[g.vrow_header] = (margin_x, y_cursor, avail_w, header_h)
                 y_cursor += header_h + spacing
 
             if g.collapsed or g.record_count == 0:
@@ -558,48 +615,56 @@ class CatalogListModel(QAbstractListModel):
 
             row_items: list[tuple[int, float]] = []
             row_aspect_sum = 0.0
+            vrow_base = g.vrow_items_start
+            rec_base = g.record_start
 
             for offset in range(g.record_count):
-                vrow = g.vrow_items_start + offset
-                rec = self._records[g.record_start + offset]
-                if rec.width > 0 and rec.height > 0:
-                    ar = max(0.33, min(3.0, float(rec.width) / float(rec.height)))
+                vrow = vrow_base + offset
+                rec = records[rec_base + offset]
+                w = rec.width
+                h = rec.height
+                if w > 0 and h > 0:
+                    ar = w / h
+                    if ar < 0.33:
+                        ar = 0.33
+                    elif ar > 3.0:
+                        ar = 3.0
                 else:
                     ar = 1.333
                 row_items.append((vrow, ar))
                 row_aspect_sum += ar
 
-                raw_row_w = (row_aspect_sum * target_h) + (
-                    max(0, len(row_items) - 1) * spacing
-                )
+                n_items = len(row_items)
+                raw_row_w = (row_aspect_sum * target_h) + ((n_items - 1) * spacing)
                 if raw_row_w >= avail_w:
-                    total_gaps = max(0, len(row_items) - 1) * spacing
-                    exact_h = max(
-                        40, int(round((avail_w - total_gaps) / row_aspect_sum))
-                    )
-                    x_cursor = self.GRID_MARGIN_X
+                    total_gaps = (n_items - 1) * spacing
+                    exact_h = int((avail_w - total_gaps) / row_aspect_sum + 0.5)
+                    if exact_h < 40:
+                        exact_h = 40
+                    x_cursor = margin_x
+                    last_i = n_items - 1
                     for idx_in_row, (item_vrow, item_ar) in enumerate(row_items):
-                        if idx_in_row == len(row_items) - 1:
-                            tile_w = max(20, (self.GRID_MARGIN_X + avail_w) - x_cursor)
+                        if idx_in_row == last_i:
+                            tile_w = right_edge - x_cursor
                         else:
-                            tile_w = max(20, int(round(item_ar * exact_h)))
-                        self._mosaic_rects[item_vrow] = QRect(
-                            x_cursor, y_cursor, tile_w, exact_h
-                        )
+                            tile_w = int(item_ar * exact_h + 0.5)
+                        if tile_w < 20:
+                            tile_w = 20
+                        raw[item_vrow] = (x_cursor, y_cursor, tile_w, exact_h)
                         x_cursor += tile_w + spacing
                     y_cursor += exact_h + spacing
                     row_items.clear()
                     row_aspect_sum = 0.0
 
             if row_items:
-                x_cursor = self.GRID_MARGIN_X
+                x_cursor = margin_x
                 for item_vrow, item_ar in row_items:
-                    tile_w = max(20, int(round(item_ar * target_h)))
-                    self._mosaic_rects[item_vrow] = QRect(
-                        x_cursor, y_cursor, tile_w, target_h
-                    )
+                    tile_w = int(item_ar * target_h + 0.5)
+                    if tile_w < 20:
+                        tile_w = 20
+                    raw[item_vrow] = (x_cursor, y_cursor, tile_w, target_h)
                     x_cursor += tile_w + spacing
-                y_cursor += target_h + self.SECTION_BOTTOM_GAP
+                y_cursor += target_h + section_gap
             mosaic_group_y_ends.append(y_cursor)
 
         if self._layout_mode == "mosaic":
@@ -760,19 +825,20 @@ class CatalogListModel(QAbstractListModel):
         return QModelIndex()
 
     def notify_pixmap_ready(self, media_id: int) -> None:
-        idx = self.index_for_media_id(media_id)
-        if idx.isValid():
-            self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
+        """
+        Notifies the view that a thumbnail pixmap is ready in LruCache without emitting
+        QAbstractItemModel.dataChanged (which causes C++ QListView to run an O(N) layout pass).
+        """
+        self.view_repaint_requested.emit(int(media_id))
 
     def update_items_metadata(
         self, media_ids: Sequence[int], **fields: Any
     ) -> None:
-        """Updates in-memory MediaItemRecord fields immediately and emits batched dataChanged."""
+        """Updates in-memory MediaItemRecord fields immediately and requests a coalesced viewport repaint."""
         if not media_ids:
             return
         self._ensure_id_index()
-        min_vrow: int | None = None
-        max_vrow: int | None = None
+        updated_any = False
         for mid in media_ids:
             rec_idx = self._id_to_rec_idx.get(mid)
             if rec_idx is None:
@@ -781,11 +847,7 @@ class CatalogListModel(QAbstractListModel):
             for k, v in fields.items():
                 if hasattr(rec, k):
                     setattr(rec, k, v)
-            idx = self.index_for_media_id(mid)
-            if idx.isValid():
-                vr = idx.row()
-                min_vrow = vr if min_vrow is None else min(min_vrow, vr)
-                max_vrow = vr if max_vrow is None else max(max_vrow, vr)
+            updated_any = True
 
-        if min_vrow is not None and max_vrow is not None:
-            self.dataChanged.emit(self.index(min_vrow, 0), self.index(max_vrow, 0))
+        if updated_any:
+            self.view_repaint_requested.emit(-1)

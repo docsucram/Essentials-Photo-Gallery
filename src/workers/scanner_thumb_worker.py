@@ -161,28 +161,45 @@ def _format_exposure_str(val: Any) -> str | None:
 
 
 _MAC_EPOCH_OFFSET = 2082844800  # seconds between 1904-01-01 (HFS+) and 1970-01-01 (Unix)
+_MIN_VALID_CAMERA_EPOCH = 315532800   # 1980-01-01 00:00:00 UTC
+_MAX_VALID_CAMERA_EPOCH = 2208988800  # 2040-01-01 00:00:00 UTC
 
+_FB_MULTI_ID_RE = re.compile(r"^\d{5,}_\d{10,}_\d{5,}")
 _FILENAME_TS_RE = re.compile(
-    r"(?:VID_|IMG_|PXL_|WP_|PANO_|PHOTO_)?(\d{4})[-_.]?(\d{2})[-_.]?(\d{2})[\s_T-]+(\d{2})[._:-]?(\d{2})[._:-]?(\d{2})"
+    r"(?:^|(?<!\d))(?:VID_|IMG_|PXL_|WP_|PANO_|PHOTO_)?(19[89]\d|20[0-3]\d)[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])[\s_T-]+([01]\d|2[0-3])[._:-]?([0-5]\d)[._:-]?([0-5]\d)(?:[._]?\d{1,3})?(?!\d)"
+)
+_FILENAME_DATE_ONLY_RE = re.compile(
+    r"(?:^|(?<=[_\-\s]))(?:WP_|VID[-_]|IMG[-_]|PANO_|PHOTO_|DSCF\d+_)(19[89]\d|20[0-3]\d)[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])(?!\d)"
 )
 
 
 def _timestamp_from_filename(stem: str) -> int | None:
-    """Parses camera-style filename timestamps (e.g. '2019-01-27 13.04.39') into a naive epoch."""
+    """Parses camera-style filename timestamps (e.g. '2019-01-27 13.04.39' or 'WP_20130725_007') into a naive epoch."""
+    if _FB_MULTI_ID_RE.match(stem):
+        return None
     m = _FILENAME_TS_RE.search(stem)
-    if not m:
-        return None
-    try:
-        y, mo, d, hh, mi, ss = (int(g) for g in m.groups())
-        return int(calendar.timegm(datetime.datetime(y, mo, d, hh, mi, ss).timetuple()))
-    except (ValueError, OverflowError):
-        return None
+    if m:
+        try:
+            y, mo, d, hh, mi, ss = (int(g) for g in m.groups())
+            return int(calendar.timegm(datetime.datetime(y, mo, d, hh, mi, ss).timetuple()))
+        except (ValueError, OverflowError):
+            pass
+    m_date = _FILENAME_DATE_ONLY_RE.search(stem)
+    if m_date:
+        try:
+            y, mo, d = (int(g) for g in m_date.groups())
+            return int(calendar.timegm(datetime.datetime(y, mo, d, 12, 0, 0).timetuple()))
+        except (ValueError, OverflowError):
+            pass
+    return None
 
 
 def _extract_mp4_creation_time(file_path: Path | str) -> int | None:
     """
     Walks ISO BMFF top-level atoms (never reading 'mdat' payloads) and returns the
     'mvhd' creation_time converted to a Unix epoch, or None.
+    Supports both standard QuickTime 1904 HFS+ epoch values (> _MAC_EPOCH_OFFSET) and
+    Android/camera encoders that wrote Unix 1970 epoch seconds directly into 'mvhd'.
     """
     try:
         with open(file_path, "rb") as f:
@@ -232,7 +249,11 @@ def _extract_mp4_creation_time(file_path: Path | str) -> int | None:
             else:
                 creation = struct.unpack(">I", data[4:8])[0]
             if creation > _MAC_EPOCH_OFFSET:
-                return int(creation - _MAC_EPOCH_OFFSET)
+                ts = int(creation - _MAC_EPOCH_OFFSET)
+                if _MIN_VALID_CAMERA_EPOCH <= ts <= _MAX_VALID_CAMERA_EPOCH:
+                    return ts
+            elif _MIN_VALID_CAMERA_EPOCH <= creation <= _MAC_EPOCH_OFFSET:
+                return int(creation)
     except Exception:
         return None
     return None
@@ -997,7 +1018,7 @@ def extract_media_metadata(file_path: Path, is_video: bool) -> dict[str, Any]:
             new_orient = int(xmp["orientation"])
             if 1 <= new_orient <= 8:
                 meta["orientation"] = new_orient
-        if xmp.get("date_taken") is not None:
+        if meta.get("date_taken") is None and xmp.get("date_taken") is not None:
             meta["date_taken"] = xmp["date_taken"]
         if xmp.get("caption"):
             meta["caption"] = xmp["caption"]
@@ -1071,14 +1092,30 @@ def extract_media_metadata(file_path: Path, is_video: bool) -> dict[str, Any]:
             for t in xmp["hierarchical_tags"]:
                 if t not in meta["hierarchical_tags"]:
                     meta["hierarchical_tags"].append(t)
-        if xmp.get("date_taken") is not None:
-            meta["date_taken"] = xmp["date_taken"]
+        xmp_dt = xmp.get("date_taken")
+        recovered_xmp_dt: int | None = None
+        if xmp_dt is not None and xmp_dt < _MIN_VALID_CAMERA_EPOCH:
+            # Exiv2 / digiKam sidecar bug: subtracted _MAC_EPOCH_OFFSET (66 years) from a Unix timestamp
+            # (turning 2012-2014 into 1946-1948) or wrote unset epoch zero (1904-01-01 / 1969-12-31).
+            shifted = int(xmp_dt) + _MAC_EPOCH_OFFSET
+            if _MIN_VALID_CAMERA_EPOCH <= shifted <= _MAX_VALID_CAMERA_EPOCH:
+                recovered_xmp_dt = shifted
+            xmp_dt = None
 
-        # 2. mvhd creation time, then 3. filename timestamp (before the mtime fallback)
-        if meta["date_taken"] is None:
-            meta["date_taken"] = _extract_mp4_creation_time(file_path)
-        if meta["date_taken"] is None:
-            meta["date_taken"] = _timestamp_from_filename(file_path.stem)
+        mvhd_dt = _extract_mp4_creation_time(file_path)
+        fn_dt = _timestamp_from_filename(file_path.stem)
+
+        if xmp_dt is not None:
+            meta["date_taken"] = xmp_dt
+        elif mvhd_dt is not None and fn_dt is not None:
+            # If mvhd_dt and fn_dt represent the same capture within ~25h (e.g. Android 1904 leap-day +1d shift)
+            # or mvhd_dt was truncated to midnight/hour (:00:00) while fn_dt has exact HH:MM:SS, prefer fn_dt.
+            if abs(mvhd_dt - fn_dt) <= 90000 or (mvhd_dt % 3600 == 0 and fn_dt % 60 != 0):
+                meta["date_taken"] = fn_dt
+            else:
+                meta["date_taken"] = mvhd_dt
+        else:
+            meta["date_taken"] = mvhd_dt or fn_dt or recovered_xmp_dt
 
     return meta
 
@@ -1167,6 +1204,12 @@ def _assign_tags_and_people_for_media(
     for norm_path in valid_tag_paths:
         if "/" not in norm_path and norm_path.lower() in hier_leaves:
             continue
+        # If flat tag, see if an existing tag in catalog already has this name in its hierarchy
+        if "/" not in norm_path and hasattr(repo, "find_tag_by_leaf_name"):
+            existing_match = repo.find_tag_by_leaf_name(norm_path)
+            if existing_match is not None and existing_match.get("parent_id") is not None:
+                repo.assign_tag([mid], int(existing_match["id"]))
+                continue
         tid = repo.create_tag(norm_path)
         repo.assign_tag([mid], tid)
 
@@ -1291,7 +1334,7 @@ class FolderSyncWorker(QRunnable):
                                             "ext": ext,
                                             "size": size_int,
                                             "mtime": mtime_int,
-                                            "date_taken": _timestamp_from_filename(Path(entry.name).stem),
+                                            "date_taken": _timestamp_from_filename(Path(entry.name).stem) if is_vid else None,
                                             "is_video": is_vid,
                                         }
                                     )
@@ -1481,6 +1524,7 @@ class ThumbnailDecodeWorker(QRunnable):
         is_video: bool = False,
         orientation: int = 1,
         cancel_flag: CancellationFlag | None = None,
+        metadata_dirty: int = 0,
     ) -> None:
         super().__init__()
         self.engine = engine
@@ -1490,6 +1534,7 @@ class ThumbnailDecodeWorker(QRunnable):
         self.is_video = bool(is_video)
         self.orientation = int(orientation or 1)
         self.cancel_flag = cancel_flag or CancellationFlag()
+        self.metadata_dirty = int(metadata_dirty or 0)
         self.signals = ThumbnailDecodeWorkerSignals()
 
     @Slot()
@@ -1535,7 +1580,11 @@ class ThumbnailDecodeWorker(QRunnable):
             if self.cancel_flag.is_set:
                 return
 
-            # 3. Compress to WebP BLOB (~8-12 KB) and store in thumbnails.db
+            # 3. Emit thumbnail_ready IMMEDIATELY so the UI displays the decoded image
+            # without waiting for WebP compression or SQLite write lock/commit!
+            self.signals.thumbnail_ready.emit(self.media_id, qimg)
+
+            # 4. Compress to WebP BLOB (~8-12 KB) and store in thumbnails.db in the background
             byte_array = QByteArray()
             buffer = QBuffer(byte_array)
             buffer.open(QIODevice.WriteOnly)
@@ -1552,9 +1601,6 @@ class ThumbnailDecodeWorker(QRunnable):
                     height=qimg.height(),
                 )
 
-            if not self.cancel_flag.is_set:
-                self.signals.thumbnail_ready.emit(self.media_id, qimg)
-
         except Exception as exc:
             from src.utils.scan_logger import log_scan_error
             log_scan_error("ThumbnailDecodeWorker", self.file_path, exc)
@@ -1567,9 +1613,6 @@ class ThumbnailDecodeWorker(QRunnable):
                 pass
             if not self.cancel_flag.is_set:
                 self.signals.error.emit(self.media_id, str(exc))
-        finally:
-            if threading.current_thread() is not threading.main_thread():
-                self.engine.close_thread_connections()
 
     def _decode_image_thumbnail(self) -> QImage | None:
         """Uses rawpy for RAW camera formats, and QImageReader/Pillow for standard formats."""
@@ -1622,6 +1665,7 @@ class ThumbnailDecodeWorker(QRunnable):
         del reader
         if not qimg.isNull():
             # Reconcile disk EXIF transformation with self.orientation from catalog.db
+            # Note: QImageReader with setAutoTransform(True) already applies disk EXIF orientation!
             disk_orient = 1
             if disk_trans == QImageIOHandler.Transformation.TransformationRotate90:
                 disk_orient = 6
@@ -1632,13 +1676,35 @@ class ThumbnailDecodeWorker(QRunnable):
 
             orient_to_angle = {1: 0, 6: 90, 3: 180, 8: 270}
             target_orient = int(self.orientation or 1)
-            delta_angle = (
-                orient_to_angle.get(target_orient, 0)
-                - orient_to_angle.get(disk_orient, 0)
-            ) % 360
-            if delta_angle != 0:
-                rot_transform = QTransform().rotate(delta_angle)
-                qimg = qimg.transformed(rot_transform, Qt.SmoothTransformation)
+
+            # Reconcile disk EXIF transformation with catalog orientation:
+            # 1. If catalog orientation is default 1 (un-enriched) and metadata_dirty is 0,
+            #    the auto-transformed image is already oriented properly by EXIF. Never rotate backwards!
+            # 2. Only apply delta_angle if:
+            #    - target_orient is an explicit non-default orientation (3, 6, 8) differing from disk, OR
+            #    - metadata_dirty is 1 (user explicitly modified orientation in app).
+            if target_orient != disk_orient:
+                if self.metadata_dirty == 1 or target_orient in (3, 6, 8):
+                    delta_angle = (
+                        orient_to_angle.get(target_orient, 0)
+                        - orient_to_angle.get(disk_orient, 0)
+                    ) % 360
+                    if delta_angle != 0:
+                        rot_transform = QTransform().rotate(delta_angle)
+                        qimg = qimg.transformed(rot_transform, Qt.SmoothTransformation)
+
+            # Proactively reconcile catalog orientation if it was un-enriched default 1
+            if disk_orient != 1 and target_orient == 1 and self.metadata_dirty == 0:
+                try:
+                    with self.engine.write_lock:
+                        conn = self.engine.catalog_conn()
+                        conn.execute(
+                            "UPDATE media SET orientation = ? WHERE id = ? AND metadata_dirty = 0;",
+                            (disk_orient, self.media_id),
+                        )
+                        conn.commit()
+                except Exception:
+                    pass
 
             if qimg.width() > THUMB_MAX_DIM or qimg.height() > THUMB_MAX_DIM:
                 qimg = qimg.scaled(

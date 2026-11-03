@@ -328,16 +328,17 @@ def stitch_panorama(
 # 2. Interactive Collage & 'Then & Now' Studio
 # =============================================================================
 
-def _crop_to_aspect(
+def _crop_to_aspect_with_rect(
     img_bgr: np.ndarray,
     target_w: int,
     target_h: int,
     focus_center: tuple[float, float] | None = None,
-) -> np.ndarray:
+) -> tuple[np.ndarray, tuple[int, int, int, int]]:
     """
     Aspect-fill crop with face/focus awareness:
     - If focus_center is provided as normalized (cx, cy) in [0..1], centers the crop box around it.
     - Defaults to (0.5, 0.40) to keep heads and eyes in frame rather than cutting off foreheads.
+    Returns (cropped_resized_bgr, (start_x, start_y, crop_w, crop_h)).
     """
     h, w = img_bgr.shape[:2]
     target_aspect = target_w / target_h
@@ -351,14 +352,32 @@ def _crop_to_aspect(
         desired_x = int(w * fc_x - new_w / 2)
         start_x = max(0, min(w - new_w, desired_x))
         cropped = img_bgr[:, start_x : start_x + new_w]
+        rect = (start_x, 0, new_w, h)
     else:
         # Crop height
         new_h = int(w / target_aspect)
         desired_y = int(h * fc_y - new_h / 2)
         start_y = max(0, min(h - new_h, desired_y))
         cropped = img_bgr[start_y : start_y + new_h, :]
+        rect = (0, start_y, w, new_h)
 
-    return cv2.resize(cropped, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    resized = cv2.resize(cropped, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    return resized, rect
+
+
+def _crop_to_aspect(
+    img_bgr: np.ndarray,
+    target_w: int,
+    target_h: int,
+    focus_center: tuple[float, float] | None = None,
+) -> np.ndarray:
+    """
+    Aspect-fill crop with face/focus awareness:
+    - If focus_center is provided as normalized (cx, cy) in [0..1], centers the crop box around it.
+    - Defaults to (0.5, 0.40) to keep heads and eyes in frame rather than cutting off foreheads.
+    """
+    resized, _ = _crop_to_aspect_with_rect(img_bgr, target_w, target_h, focus_center)
+    return resized
 
 
 def _apply_rounded_corners(img_bgr: np.ndarray, radius: int) -> np.ndarray:
@@ -475,6 +494,268 @@ def create_grid_collage(
     return canvas
 
 
+def _get_seamless_slots(n: int, is_portrait: bool) -> list[tuple[float, float, float, float]]:
+    """
+    Computes overlapping focal slot geometries (cx, cy, sw, sh) that guarantee 100% canvas coverage
+    with dedicated hero focal placements matching authentic Windows Live Photo Gallery Auto-Collage.
+    """
+    if n <= 1:
+        return [(0.5, 0.5, 1.0, 1.0)]
+    elif n == 2:
+        if is_portrait:
+            return [(0.50, 0.28, 1.0, 0.64), (0.50, 0.72, 1.0, 0.64)]
+        return [(0.28, 0.50, 0.64, 1.0), (0.72, 0.50, 0.64, 1.0)]
+    elif n == 3:
+        if is_portrait:
+            return [(0.50, 0.30, 1.0, 0.65), (0.28, 0.72, 0.64, 0.62), (0.72, 0.72, 0.64, 0.62)]
+        return [(0.30, 0.50, 0.65, 1.0), (0.72, 0.28, 0.62, 0.64), (0.72, 0.72, 0.62, 0.64)]
+    elif n == 4:
+        if is_portrait:
+            return [
+                (0.28, 0.26, 0.66, 0.58), (0.72, 0.26, 0.66, 0.58),
+                (0.28, 0.74, 0.66, 0.58), (0.72, 0.74, 0.66, 0.58),
+            ]
+        return [
+            (0.26, 0.28, 0.58, 0.66), (0.74, 0.28, 0.58, 0.66),
+            (0.26, 0.72, 0.58, 0.66), (0.74, 0.72, 0.58, 0.66),
+        ]
+    elif n == 5:
+        if is_portrait:
+            return [
+                (0.50, 0.50, 1.02, 0.54),  # hero center
+                (0.26, 0.18, 0.62, 0.44), (0.74, 0.18, 0.62, 0.44),
+                (0.26, 0.82, 0.62, 0.44), (0.74, 0.82, 0.62, 0.44),
+            ]
+        return [
+            (0.50, 0.50, 0.64, 1.02),  # hero center
+            (0.20, 0.26, 0.52, 0.62), (0.80, 0.26, 0.52, 0.62),
+            (0.20, 0.74, 0.52, 0.62), (0.80, 0.74, 0.52, 0.62),
+        ]
+    elif n == 6:
+        if is_portrait:
+            return [
+                (0.50, 0.38, 1.02, 0.46),  # hero
+                (0.26, 0.14, 0.62, 0.38), (0.74, 0.14, 0.62, 0.38),
+                (0.26, 0.64, 0.62, 0.38), (0.74, 0.64, 0.62, 0.38),
+                (0.50, 0.86, 1.02, 0.38),
+            ]
+        return [
+            (0.50, 0.50, 0.60, 1.02),  # hero center
+            (0.18, 0.24, 0.48, 0.60), (0.82, 0.24, 0.48, 0.60),
+            (0.18, 0.76, 0.48, 0.60), (0.82, 0.76, 0.48, 0.60),
+            (0.50, 0.14, 0.56, 0.42),
+        ]
+    elif n == 7:
+        if is_portrait:
+            return [
+                (0.50, 0.46, 1.02, 0.44),  # hero center
+                (0.26, 0.15, 0.62, 0.38), (0.74, 0.15, 0.62, 0.38),
+                (0.26, 0.65, 0.62, 0.38), (0.74, 0.65, 0.62, 0.38),
+                (0.26, 0.86, 0.62, 0.38), (0.74, 0.86, 0.62, 0.38),
+            ]
+        return [
+            (0.50, 0.50, 0.64, 0.68),  # hero center
+            (0.18, 0.22, 0.48, 0.58),  # top-left
+            (0.50, 0.14, 0.56, 0.42),  # top-center
+            (0.82, 0.22, 0.48, 0.58),  # top-right
+            (0.18, 0.78, 0.48, 0.58),  # bot-left
+            (0.50, 0.86, 0.56, 0.42),  # bot-center
+            (0.82, 0.78, 0.48, 0.58),  # bot-right
+        ]
+
+    # For N >= 8: row-balanced overlapping layout
+    if is_portrait:
+        num_rows = int(np.round(np.sqrt(n * 1.5)))
+    else:
+        num_rows = int(np.round(np.sqrt(n / 1.5)))
+    num_rows = max(2, min(num_rows, n))
+    base_per_row = n // num_rows
+    rem = n % num_rows
+    row_counts = [base_per_row + (1 if r < rem else 0) for r in range(num_rows)]
+
+    slots = []
+    rh = 1.35 / num_rows
+    for r, cols in enumerate(row_counts):
+        cy = (r + 0.5) / num_rows
+        cw = 1.35 / cols
+        for c in range(cols):
+            cx = (c + 0.5) / cols
+            slots.append((float(cx), float(cy), float(cw), float(rh)))
+    return slots
+
+
+def create_blended_seamless_collage(
+    images_bgr: list[np.ndarray],
+    target_size: tuple[int, int] = (2560, 1440),
+    blend_feather: float = 0.22,
+    faces_per_image: list[list[tuple[int, int, int, int]]] | None = None,
+    prioritize_faces: bool = True,
+) -> np.ndarray:
+    """
+    Renders an authentic Windows Live Photo Gallery seamless merged collage:
+    - Overlapping photos with soft-feathered edge transitions.
+    - Organic spatial distribution across the canvas with hero focal center.
+    - Face detection & prominence analysis: places images with large/main faces in hero slots.
+    - Face region protection: preserves crisp, opaque face details without ghosting or cutoffs.
+    - 100% canvas coverage with zero empty gaps.
+    """
+    if not images_bgr:
+        return np.full((target_size[1], target_size[0], 3), (30, 30, 35), dtype=np.uint8)
+
+    tw, th = target_size
+    n = len(images_bgr)
+    is_portrait = th > tw
+
+    slots = _get_seamless_slots(n, is_portrait)
+
+    # 1. Analyze each photo for faces and compute prominence & focal center
+    photo_info = []
+    for i, img in enumerate(images_bgr):
+        h, w = img.shape[:2]
+        faces: list[tuple[int, int, int, int]] = []
+        if faces_per_image and i < len(faces_per_image) and faces_per_image[i] is not None:
+            faces = faces_per_image[i]
+        else:
+            faces = detect_faces_in_image(img)
+
+        if faces:
+            # Face prominence score = maximum face area normalized by photo resolution
+            prominence = max((fw * fh) for fx, fy, fw, fh in faces) / float(w * h + 1)
+            # Find largest face to use as focal center
+            best_face = max(faces, key=lambda f: f[2] * f[3])
+            # Center slightly above midpoint of face for flattering composition
+            fc_x = (best_face[0] + best_face[2] * 0.5) / float(w)
+            fc_y = (best_face[1] + best_face[3] * 0.40) / float(h)
+        else:
+            prominence = 0.0
+            fc_x, fc_y = 0.50, 0.42
+
+        photo_info.append({
+            "index": i,
+            "img": img,
+            "faces": faces,
+            "prominence": prominence,
+            "focus_center": (fc_x, fc_y),
+        })
+
+    # 2. Assign photos to slots: if prioritize_faces, place highest face prominence at Hero slot 0
+    assigned_photos = list(photo_info)
+    if prioritize_faces and n > 1:
+        # Find photo with highest prominence
+        best_idx = max(range(n), key=lambda idx: assigned_photos[idx]["prominence"])
+        if best_idx != 0 and assigned_photos[best_idx]["prominence"] > 0.005:
+            # Swap hero photo to slot 0
+            assigned_photos[0], assigned_photos[best_idx] = assigned_photos[best_idx], assigned_photos[0]
+
+    canvas = np.zeros((th, tw, 3), dtype=np.float32)
+    weight = np.zeros((th, tw), dtype=np.float32)
+
+    for slot_idx, pinfo in enumerate(assigned_photos):
+        img = pinfo["img"]
+        fc_x, fc_y = pinfo["focus_center"]
+        faces = pinfo["faces"]
+
+        cx_norm, cy_norm, sw_norm, sh_norm = slots[slot_idx % len(slots)]
+        pw = max(64, int(tw * sw_norm))
+        ph = max(64, int(th * sh_norm))
+
+        # Face-aware aspect crop
+        cropped, crop_rect = _crop_to_aspect_with_rect(img, pw, ph, focus_center=(fc_x, fc_y))
+        patch = cv2.resize(cropped, (pw, ph), interpolation=cv2.INTER_AREA).astype(np.float32)
+
+        # Generate smooth cosine Hermite feathering mask
+        fx = max(12, int(pw * blend_feather))
+        fy = max(12, int(ph * blend_feather))
+
+        mask = np.ones((ph, pw), dtype=np.float32)
+        # Vertical gradient
+        for y in range(ph):
+            dist_y = min(y, ph - 1 - y)
+            if dist_y < fy:
+                t = dist_y / float(fy)
+                mask[y, :] *= t * t * (3.0 - 2.0 * t)
+
+        # Horizontal gradient
+        for x in range(pw):
+            dist_x = min(x, pw - 1 - x)
+            if dist_x < fx:
+                t = dist_x / float(fx)
+                mask[:, x] *= t * t * (3.0 - 2.0 * t)
+
+        ksize = (max(3, fx // 2 * 2 + 1), max(3, fy // 2 * 2 + 1))
+        mask = cv2.GaussianBlur(mask, ksize, 0)
+
+        # Protect detected face regions from fade / wash-out
+        face_boost = np.zeros((ph, pw), dtype=np.float32)
+        crop_x, crop_y, crop_w, crop_h = crop_rect
+        scale_x = pw / float(crop_w)
+        scale_y = ph / float(crop_h)
+
+        for fx_i, fy_i, fw_i, fh_i in faces:
+            # Map face box to patch coords
+            pfx1 = int((fx_i - crop_x) * scale_x)
+            pfy1 = int((fy_i - crop_y) * scale_y)
+            pfw = int(fw_i * scale_x)
+            pfh = int(fh_i * scale_y)
+
+            # Generous margin around face
+            mx = int(pfw * 0.25)
+            my = int(pfh * 0.25)
+            bx1 = max(0, pfx1 - mx)
+            by1 = max(0, pfy1 - my)
+            bx2 = min(pw, pfx1 + pfw + mx)
+            by2 = min(ph, pfy1 + pfh + my)
+
+            if bx2 > bx1 and by2 > by1:
+                # Ensure face has solid 1.0 mask and boost weight so face details dominate overlaps
+                mask[by1:by2, bx1:bx2] = np.maximum(mask[by1:by2, bx1:bx2], 1.0)
+                face_boost[by1:by2, bx1:bx2] = 5.0
+
+        if face_boost.max() > 0:
+            face_boost = cv2.GaussianBlur(face_boost, (35, 35), 0)
+
+        effective_weight = mask * (1.0 + face_boost)
+
+        # Destination placement
+        cx = int(tw * cx_norm)
+        cy = int(th * cy_norm)
+        x1 = cx - pw // 2
+        y1 = cy - ph // 2
+        x2 = x1 + pw
+        y2 = y1 + ph
+
+        src_x1 = max(0, -x1)
+        src_y1 = max(0, -y1)
+        src_x2 = pw - max(0, x2 - tw)
+        src_y2 = ph - max(0, y2 - th)
+
+        dst_x1 = max(0, x1)
+        dst_y1 = max(0, y1)
+        dst_x2 = min(tw, x2)
+        dst_y2 = min(th, y2)
+
+        if dst_x2 > dst_x1 and dst_y2 > dst_y1:
+            p_crop = patch[src_y1:src_y2, src_x1:src_x2]
+            w_crop = effective_weight[src_y1:src_y2, src_x1:src_x2]
+
+            canvas[dst_y1:dst_y2, dst_x1:dst_x2] += p_crop * w_crop[:, :, None]
+            weight[dst_y1:dst_y2, dst_x1:dst_x2] += w_crop
+
+    # Normalize blended pixels
+    nz = weight > 0.001
+    canvas[nz] /= weight[nz, None]
+
+    # Fill any subtle unassigned border fringes with blurred ambiance
+    if not np.all(nz):
+        hero_img = assigned_photos[0]["img"]
+        bg = cv2.resize(hero_img, (tw, th))
+        bg = cv2.GaussianBlur(bg, (51, 51), 0).astype(np.float32) * 0.75
+        empty = ~nz
+        canvas[empty] = bg[empty]
+
+    return np.clip(canvas, 0, 255).astype(np.uint8)
+
+
 def create_polaroid_scatter_collage(
     images_data: list[dict[str, Any]],
     target_size: tuple[int, int] = (2560, 1440),
@@ -570,7 +851,30 @@ def create_polaroid_scatter_collage(
 
         # 3. Print Date Taken / Caption on bottom margin
         if print_captions:
-            cap = item.get("caption") or item.get("date_str") or item.get("filename") or ""
+            raw_cap = item.get("caption") or item.get("date_str") or item.get("filename") or ""
+            cap = ""
+            if isinstance(raw_cap, (int, float)):
+                if raw_cap > 100000000:
+                    try:
+                        import datetime
+                        cap = datetime.datetime.fromtimestamp(raw_cap).strftime("%d %b %Y")
+                    except Exception:
+                        cap = str(int(raw_cap))
+                else:
+                    cap = str(raw_cap)
+            elif isinstance(raw_cap, str):
+                s_strip = raw_cap.strip()
+                if s_strip.isdigit() and len(s_strip) >= 9:
+                    try:
+                        import datetime
+                        cap = datetime.datetime.fromtimestamp(float(s_strip)).strftime("%d %b %Y")
+                    except Exception:
+                        cap = s_strip
+                else:
+                    cap = s_strip
+            else:
+                cap = str(raw_cap).strip()
+
             if cap:
                 if len(cap) > 34:
                     cap = cap[:31] + "..."
@@ -607,6 +911,82 @@ def create_polaroid_scatter_collage(
     return cv2.cvtColor(np.array(canvas_pil), cv2.COLOR_RGBA2BGR)
 
 
+def _parse_item_year(item: dict[str, Any]) -> str:
+    """Robustly extracts a 4-digit calendar year string from item metadata."""
+    import datetime
+    import re
+
+    val = item.get("date_taken") or item.get("date_str")
+    if isinstance(val, (int, float)):
+        if val > 100000000:
+            try:
+                return datetime.datetime.fromtimestamp(val).strftime("%Y")
+            except Exception:
+                pass
+        elif 1000 <= val <= 3000:
+            return str(int(val))
+
+    s = str(val or "").strip()
+    if s.isdigit() and len(s) >= 9:
+        try:
+            return datetime.datetime.fromtimestamp(float(s)).strftime("%Y")
+        except Exception:
+            pass
+
+    m = re.search(r"(?:^|[^\d])(19\d\d|20\d\d)(?:[^\d]|$)", s)
+    if m:
+        return m.group(1)
+
+    # Fallback to file modification time if available
+    mtime = item.get("mtime")
+    if isinstance(mtime, (int, float)) and mtime > 100000000:
+        try:
+            return datetime.datetime.fromtimestamp(mtime).strftime("%Y")
+        except Exception:
+            pass
+
+    return ""
+
+
+def _parse_item_timestamp(item: dict[str, Any]) -> float:
+    """Extracts a continuous float timestamp for chronological ordering."""
+    import datetime
+    import re
+
+    val = item.get("date_taken") or item.get("date_str")
+    if isinstance(val, (int, float)) and val > 100000000:
+        return float(val)
+
+    s = str(val or "").strip()
+    if s.isdigit() and len(s) >= 9:
+        try:
+            return float(s)
+        except Exception:
+            pass
+
+    m = re.search(r"(19\d\d|20\d\d)[-_:]?(\d{2})[-_:]?(\d{2})", s)
+    if m:
+        try:
+            dt = datetime.datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            return dt.timestamp()
+        except Exception:
+            pass
+
+    m_yr = re.search(r"(19\d\d|20\d\d)", s)
+    if m_yr:
+        try:
+            dt = datetime.datetime(int(m_yr.group(1)), 1, 1)
+            return dt.timestamp()
+        except Exception:
+            pass
+
+    mtime = item.get("mtime")
+    if isinstance(mtime, (int, float)):
+        return float(mtime)
+
+    return 0.0
+
+
 def create_then_and_now_card(
     images_data: list[dict[str, Any]],
     target_size: tuple[int, int] = (2560, 1440),
@@ -614,17 +994,14 @@ def create_then_and_now_card(
     """
     Renders a 'Then & Now' Comparison Card:
     - Automatically sorts photos chronologically from earliest to latest.
-    - Badges each photo with year/date badge (e.g. '2015' vs '2026').
+    - Badges each photo with accurate year/date badge (e.g. '2015' vs '2026').
     """
     tw, th = target_size
     canvas_pil = Image.new("RGBA", (tw, th), (24, 25, 28, 255))
     draw_canvas = ImageDraw.Draw(canvas_pil)
 
-    # Sort photos by date_taken / date_str if available
-    def _extract_sort_key(d: dict[str, Any]) -> str:
-        return str(d.get("date_taken") or d.get("date_str") or d.get("filename") or "")
-
-    sorted_photos = sorted(images_data, key=_extract_sort_key)
+    # Sort photos chronologically by actual timestamp/year
+    sorted_photos = sorted(images_data, key=_parse_item_timestamp)
     count = min(4, len(sorted_photos))
     if count == 0:
         return cv2.cvtColor(np.array(canvas_pil), cv2.COLOR_RGBA2BGR)
@@ -649,11 +1026,8 @@ def create_then_and_now_card(
         photo_pil = Image.fromarray(cv2.cvtColor(cropped_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
         canvas_pil.paste(photo_pil, (cx, cy))
 
-        # Format Badge Text (e.g. "THEN (2015)" vs "NOW (2026)")
-        date_val = str(item.get("date_taken") or item.get("date_str") or "")
-        year_str = ""
-        if len(date_val) >= 4 and date_val[:4].isdigit():
-            year_str = date_val[:4]
+        # Format Badge Text (e.g. "THEN • 2015" vs "NOW • 2026")
+        year_str = _parse_item_year(item)
 
         if i == 0:
             badge_text = f"THEN • {year_str}" if year_str else "THEN"
@@ -748,10 +1122,22 @@ def detect_faces_in_image(image_bgr: np.ndarray) -> list[tuple[int, int, int, in
     if image_bgr is None or image_bgr.size == 0:
         return []
 
+    h, w = image_bgr.shape[:2]
+    # Fast-path downscale for responsive interactive preview
+    scale = 1.0
+    if max(h, w) > 960:
+        scale = 960.0 / max(h, w)
+        det_img = cv2.resize(image_bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    else:
+        det_img = image_bgr
+
     try:
         from src.imaging.creative_effects import _detect_faces_for_mask
-        boxes = _detect_faces_for_mask(image_bgr)
+        boxes = _detect_faces_for_mask(det_img)
         if boxes:
+            if scale != 1.0:
+                inv = 1.0 / scale
+                boxes = [(int(bx * inv), int(by * inv), int(bw * inv), int(bh * inv)) for bx, by, bw, bh in boxes]
             return sorted(boxes, key=lambda rect: rect[0])
     except Exception:
         pass
@@ -761,12 +1147,70 @@ def detect_faces_in_image(image_bgr: np.ndarray) -> list[tuple[int, int, int, in
         return []
 
     classifier = cv2.CascadeClassifier(cascade_path)
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    faces = classifier.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(30, 30))
+    gray = cv2.cvtColor(det_img, cv2.COLOR_BGR2GRAY)
+    faces = classifier.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(25, 25))
 
-    # Sort faces from left to right for intuitive navigation
-    sorted_faces = sorted([tuple(map(int, f)) for f in faces], key=lambda rect: rect[0])
+    inv = 1.0 / scale if scale != 1.0 else 1.0
+    sorted_faces = sorted([tuple(map(int, (f[0] * inv, f[1] * inv, f[2] * inv, f[3] * inv))) for f in faces], key=lambda rect: rect[0])
     return sorted_faces
+
+
+def _blend_laplacian_pyramid(
+    src_bgr: np.ndarray,
+    base_bgr: np.ndarray,
+    mask_f: np.ndarray,
+    levels: int = 3,
+) -> np.ndarray:
+    """
+    Multi-band Laplacian pyramid blending for artifact-free facial composite blending:
+    Eliminates Poisson gradient halos, color bleeding, and background warping.
+    """
+    h, w = src_bgr.shape[:2]
+    div = 2 ** levels
+    pad_h = (div - (h % div)) % div
+    pad_w = (div - (w % div)) % div
+
+    if pad_h > 0 or pad_w > 0:
+        src_pad = cv2.copyMakeBorder(src_bgr, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT)
+        base_pad = cv2.copyMakeBorder(base_bgr, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT)
+        mask_pad = cv2.copyMakeBorder(mask_f, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT)
+    else:
+        src_pad = src_bgr
+        base_pad = base_bgr
+        mask_pad = mask_f
+
+    g_src = [src_pad.astype(np.float32)]
+    g_base = [base_pad.astype(np.float32)]
+    g_mask = [mask_pad.astype(np.float32)]
+    if g_mask[0].ndim == 2:
+        g_mask[0] = g_mask[0][:, :, None]
+
+    for i in range(levels):
+        g_src.append(cv2.pyrDown(g_src[i]))
+        g_base.append(cv2.pyrDown(g_base[i]))
+        m_down = cv2.pyrDown(g_mask[i])
+        if m_down.ndim == 2:
+            m_down = m_down[:, :, None]
+        g_mask.append(m_down)
+
+    l_src = [g_src[-1]]
+    l_base = [g_base[-1]]
+    for i in range(levels, 0, -1):
+        up_src = cv2.pyrUp(g_src[i], dstsize=(g_src[i - 1].shape[1], g_src[i - 1].shape[0]))
+        up_base = cv2.pyrUp(g_base[i], dstsize=(g_base[i - 1].shape[1], g_base[i - 1].shape[0]))
+        l_src.append(g_src[i - 1] - up_src)
+        l_base.append(g_base[i - 1] - up_base)
+
+    l_blend = []
+    for i, (ls, lb, gm) in enumerate(zip(l_src, l_base, reversed(g_mask))):
+        l_blend.append(ls * gm + lb * (1.0 - gm))
+
+    recon = l_blend[0]
+    for i in range(1, len(l_blend)):
+        recon = cv2.pyrUp(recon, dstsize=(l_blend[i].shape[1], l_blend[i].shape[0])) + l_blend[i]
+
+    res = np.clip(recon[:h, :w], 0, 255).astype(np.uint8)
+    return res
 
 
 def fuse_face(
@@ -778,7 +1222,8 @@ def fuse_face(
     """
     Seamlessly blends a face patch from aligned_source_bgr into base_bgr:
     - Pre-matches CIE LAB color mean and std so lighting and skin tones blend naturally.
-    - Uses Poisson clone with smooth feathered fallback near image boundaries.
+    - Uses multi-band Laplacian pyramid blending to preserve 100% of the base background
+      free of smudges, halos, Poisson bleed, or warping.
     """
     if base_bgr is None or aligned_source_bgr is None:
         return base_bgr
@@ -804,13 +1249,15 @@ def fuse_face(
     src_patch = aligned_source_bgr[y1:y2, x1:x2].copy()
     base_patch = base_bgr[y1:y2, x1:x2].copy()
 
-    # Pre-match CIE LAB color mean & std on inner core to avoid Poisson color shifting
+    # Pre-match CIE LAB color mean & std on inner facial core to avoid color shifting
     try:
         lab_src = cv2.cvtColor(src_patch, cv2.COLOR_BGR2LAB).astype(np.float32)
         lab_base = cv2.cvtColor(base_patch, cv2.COLOR_BGR2LAB).astype(np.float32)
         ih, iw = patch_h, patch_w
-        core_src = lab_src[int(ih * 0.2) : int(ih * 0.8), int(iw * 0.2) : int(iw * 0.8)]
-        core_base = lab_base[int(ih * 0.2) : int(ih * 0.8), int(iw * 0.2) : int(iw * 0.8)]
+        c_y1, c_y2 = int(ih * 0.25), int(ih * 0.75)
+        c_x1, c_x2 = int(iw * 0.25), int(iw * 0.75)
+        core_src = lab_src[c_y1:c_y2, c_x1:c_x2]
+        core_base = lab_base[c_y1:c_y2, c_x1:c_x2]
         if core_src.size > 0 and core_base.size > 0:
             for ch in range(3):
                 m_s, s_s = float(np.mean(core_src[:, :, ch])), float(np.std(core_src[:, :, ch])) + 1e-4
@@ -821,52 +1268,27 @@ def fuse_face(
     except Exception:
         pass
 
-    center_x = (x1 + x2) // 2
-    center_y = (y1 + y2) // 2
+    # Build face-centered elliptical feathered mask
+    fc_x = (fx + fw // 2) - x1
+    fc_y = (fy + fh // 2) - y1
+    axis_x = max(4, int(fw * 0.50))
+    axis_y = max(4, int(fh * 0.56))
 
-    # Check distance to border: cv2.seamlessClone requires center and mask bounding box
-    # to be strictly inside dst without touching image borders (margin >= 8px)
-    margin = 8
-    can_use_seamless = (
-        (center_x - patch_w // 2 >= margin)
-        and (center_x + patch_w // 2 < w - margin)
-        and (center_y - patch_h // 2 >= margin)
-        and (center_y + patch_h // 2 < h - margin)
-    )
-
-    if can_use_seamless:
-        # Build smooth elliptical mask for seamlessClone
-        mask = np.zeros((h, w), dtype=np.uint8)
-        axes = (patch_w // 2 - 2, patch_h // 2 - 2)
-        cv2.ellipse(mask, (center_x, center_y), axes, 0, 0, 360, 255, -1)
-
-        # Place color-matched patch into full source canvas
-        full_src = base_bgr.copy()
-        full_src[y1:y2, x1:x2] = src_patch
-
-        try:
-            fused = cv2.seamlessClone(
-                full_src,
-                base_bgr,
-                mask,
-                (center_x, center_y),
-                cv2.NORMAL_CLONE,
-            )
-            return fused
-        except Exception:
-            pass  # Fall through to feathered alpha blend
-
-    # Fallback: Feathered Alpha Blending
     mask_patch = np.zeros((patch_h, patch_w), dtype=np.uint8)
-    axes_patch = (patch_w // 2, patch_h // 2)
-    cv2.ellipse(mask_patch, (patch_w // 2, patch_h // 2), axes_patch, 0, 0, 360, 255, -1)
-    blurred_mask = cv2.GaussianBlur(mask_patch, (21, 21), 0).astype(np.float32) / 255.0
+    cv2.ellipse(mask_patch, (fc_x, fc_y), (axis_x, axis_y), 0, 0, 360, 255, -1)
+
+    ksize = max(5, int(min(fw, fh) * 0.25) | 1)
+    blurred_mask = cv2.GaussianBlur(mask_patch, (ksize, ksize), 0).astype(np.float32) / 255.0
+
+    try:
+        blended_patch = _blend_laplacian_pyramid(src_patch, base_patch, blurred_mask, levels=3)
+    except Exception:
+        # Graceful fallback: Feathered Alpha Blending
+        base_roi = base_patch.astype(np.float32)
+        src_roi = src_patch.astype(np.float32)
+        blended_roi = src_roi * blurred_mask[:, :, None] + base_roi * (1.0 - blurred_mask[:, :, None])
+        blended_patch = np.clip(blended_roi, 0, 255).astype(np.uint8)
 
     result = base_bgr.copy()
-    base_roi = result[y1:y2, x1:x2].astype(np.float32)
-    src_roi = src_patch.astype(np.float32)
-
-    blended_roi = src_roi * blurred_mask[:, :, None] + base_roi * (1.0 - blurred_mask[:, :, None])
-    result[y1:y2, x1:x2] = np.clip(blended_roi, 0, 255).astype(np.uint8)
-
+    result[y1:y2, x1:x2] = blended_patch
     return result

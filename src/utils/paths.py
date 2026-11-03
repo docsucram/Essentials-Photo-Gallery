@@ -14,12 +14,20 @@ def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"))
 
 
+_CACHED_BUNDLE_DIR: Path | None = None
+
+
 def get_bundle_dir() -> Path:
     """Returns the root directory where bundled assets live."""
+    global _CACHED_BUNDLE_DIR
+    if _CACHED_BUNDLE_DIR is not None:
+        return _CACHED_BUNDLE_DIR
     if is_frozen():
-        return Path(getattr(sys, "_MEIPASS"))
-    # In dev mode, project root is 2 levels up from src/utils/
-    return Path(__file__).resolve().parents[2]
+        _CACHED_BUNDLE_DIR = Path(getattr(sys, "_MEIPASS"))
+    else:
+        # In dev mode, project root is 2 levels up from src/utils/
+        _CACHED_BUNDLE_DIR = Path(__file__).resolve().parents[2]
+    return _CACHED_BUNDLE_DIR
 
 
 def get_resource_path(relative_path: str | Path) -> Path:

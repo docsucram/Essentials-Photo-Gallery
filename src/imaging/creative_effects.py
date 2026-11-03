@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from pathlib import Path
 from typing import Any
 import cv2
@@ -26,9 +27,14 @@ def _get_face_engine() -> Any:
     global _SHARED_FACE_ENGINE
     if _SHARED_FACE_ENGINE is None:
         try:
+            import os
+            os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+            models_dir = os.path.expanduser("~/.insightface/models")
+            has_local_insight = os.path.exists(models_dir) and any(os.path.isdir(os.path.join(models_dir, m)) for m in ("buffalo_l", "buffalo_s"))
+            backend = "insightface" if has_local_insight else "opencv_haar"
             from src.core.face_engine import FaceEngine
-            _SHARED_FACE_ENGINE = FaceEngine(backend="auto", allow_fallback=True)
-        except Exception as e:
+            _SHARED_FACE_ENGINE = FaceEngine(backend=backend, allow_fallback=True)
+        except BaseException as e:
             logger.debug("FaceEngine initialization in creative_effects failed: %s", e)
             _SHARED_FACE_ENGINE = False
     return _SHARED_FACE_ENGINE if _SHARED_FACE_ENGINE is not False else None
@@ -115,49 +121,28 @@ def guided_filter_matte(
 # =============================================================================
 
 def _detect_faces_for_mask(image_bgr: np.ndarray) -> list[tuple[int, int, int, int]]:
-    """Detects faces and returns pixel coordinates [(x, y, w, h)]."""
+    """Detects faces and returns pixel coordinates [(x, y, w, h)]. Uses fast multi-scale Haar cascade."""
     h, w = image_bgr.shape[:2]
-    engine = _get_face_engine()
     boxes: list[tuple[int, int, int, int]] = []
-    if engine is not None:
-        try:
-            # Detect on max 640px long edge for real-time speed
-            scale = max(1.0, max(h, w) / 640.0)
-            sw, sh = max(16, int(w / scale)), max(16, int(h / scale))
-            small = cv2.resize(image_bgr, (sw, sh), interpolation=cv2.INTER_AREA)
-            rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-            detected = engine.detect_faces(rgb)
-            for f in detected:
-                bx = int(round(f.rect_x * w))
-                by = int(round(f.rect_y * h))
-                bw = int(round(f.rect_w * w))
-                bh = int(round(f.rect_h * h))
-                if bw >= 16 and bh >= 16:
-                    boxes.append((bx, by, bw, bh))
-        except Exception as ex:
-            logger.debug("FaceEngine detection failed during subject mask estimate: %s", ex)
 
-    if not boxes:
-        # Fallback to OpenCV Haar cascade
-        try:
-            cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            face_cascade = cv2.CascadeClassifier(cascade_path)
-            gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-            scale = max(1.0, max(h, w) / 500.0)
-            if scale > 1.0:
-                sw, sh = max(10, int(w / scale)), max(10, int(h / scale))
-                small_gray = cv2.resize(gray, (sw, sh), interpolation=cv2.INTER_AREA)
-                raw_faces = face_cascade.detectMultiScale(small_gray, 1.2, 4, minSize=(20, 20))
-                for rx, ry, rw, rh in raw_faces:
-                    boxes.append((int(rx * scale), int(ry * scale), int(rw * scale), int(rh * scale)))
-            else:
-                raw_faces = face_cascade.detectMultiScale(gray, 1.2, 4, minSize=(24, 24))
-                for rx, ry, rw, rh in raw_faces:
-                    boxes.append((int(rx), int(ry), int(rw), int(rh)))
-        except Exception:
-            pass
+    try:
+        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        face_cascade = cv2.CascadeClassifier(cascade_path)
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        scale = max(1.0, max(h, w) / 800.0)
+        sw, sh = max(10, int(round(w / scale))), max(10, int(round(h / scale)))
+        small_gray = cv2.resize(gray, (sw, sh), interpolation=cv2.INTER_AREA) if scale > 1.05 else gray
+        raw_faces = face_cascade.detectMultiScale(small_gray, scaleFactor=1.1, minNeighbors=3, minSize=(20, 20))
+        for rx, ry, rw, rh in raw_faces:
+            bx = max(0, min(w - 1, int(round(rx * scale))))
+            by = max(0, min(h - 1, int(round(ry * scale))))
+            bw = max(16, min(w - bx, int(round(rw * scale))))
+            bh = max(16, min(h - by, int(round(rh * scale))))
+            boxes.append((bx, by, bw, bh))
+    except Exception:
+        pass
 
-    return boxes
+    return sorted(boxes, key=lambda rect: rect[0])
 
 
 def estimate_subject_mask(
@@ -611,6 +596,275 @@ def apply_portrait_bokeh_and_fill_light(
 
 
 # =============================================================================
+# ONNX Depth & Alpha Matting Engine + Cache
+# =============================================================================
+
+class DepthAndMatteEngine:
+    """
+    Unified high-performance Monocular Depth Map and Portrait Alpha Matte inference engine.
+    - Loads local ONNX models via onnxruntime (DirectML / CPU):
+        * Monocular 3D Depth Map: depth_anything_v2_vits.onnx or midas_v21_small_256.onnx
+          Outputs normalized continuous depth map D(x, y) in [0.0, 1.0] where 0.0 = closest foreground
+          and 1.0 = farthest background.
+        * Portrait Alpha Matte: modnet.onnx, u2netp.onnx, or rmbg-1.4.onnx
+          Outputs continuous human subject alpha matte M(x, y) in [0.0, 1.0].
+    - Zero-dependency instant fallback when ONNX weights are not present:
+        * Anatomical face-seeded Guided Filter + perspective ground gradient & sharpness estimator.
+    - High-speed per-image cache keyed by (cache_id, width, height) enabling 60 FPS real-time
+      slider manipulation in pure NumPy.
+    """
+
+    _instance: DepthAndMatteEngine | None = None
+
+    def __init__(self, models_dir: Path | str | None = None) -> None:
+        self.search_dirs: list[Path] = []
+        if models_dir is not None:
+            self.search_dirs.append(Path(models_dir))
+
+        # Local workspace models/
+        self.search_dirs.append(Path("models").resolve())
+        # AppData models/
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            self.search_dirs.append(Path(local_app_data) / "WindowsMediaGallery" / "models")
+        # Relative to project root
+        project_root = Path(__file__).resolve().parent.parent.parent
+        self.search_dirs.append(project_root / "models")
+
+        self._depth_session: Any = None
+        self._depth_model_name: str | None = None
+        self._matte_session: Any = None
+        self._matte_model_name: str | None = None
+        self._cache: dict[tuple[Any, int, int], tuple[np.ndarray, np.ndarray]] = {}
+        self._base_cache: dict[Any, tuple[np.ndarray, np.ndarray]] = {}
+
+        self._init_onnx_sessions()
+
+    def _find_model_file(self, filenames: list[str]) -> Path | None:
+        for d in self.search_dirs:
+            for fn in filenames:
+                cand = d / fn
+                if cand.is_file():
+                    return cand
+        return None
+
+    def _init_onnx_sessions(self) -> None:
+        try:
+            import onnxruntime as ort
+            providers = ort.get_available_providers()
+            prov_list = []
+            if "DmlExecutionProvider" in providers:
+                prov_list.append("DmlExecutionProvider")
+            prov_list.append("CPUExecutionProvider")
+
+            depth_path = self._find_model_file([
+                "depth_anything_v2_vits.onnx",
+                "midas_v21_small_256.onnx",
+                "depth_anything_v2.onnx",
+            ])
+            if depth_path:
+                sess_opts = ort.SessionOptions()
+                sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                self._depth_session = ort.InferenceSession(str(depth_path), sess_opts, providers=prov_list)
+                self._depth_model_name = depth_path.name
+                logger.info("Depth session loaded: %s with providers %s", depth_path.name, prov_list)
+
+            matte_path = self._find_model_file([
+                "modnet.onnx",
+                "u2netp.onnx",
+                "rmbg-1.4.onnx",
+            ])
+            if matte_path:
+                sess_opts = ort.SessionOptions()
+                sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                self._matte_session = ort.InferenceSession(str(matte_path), sess_opts, providers=prov_list)
+                self._matte_model_name = matte_path.name
+                logger.info("Matte session loaded: %s with providers %s", matte_path.name, prov_list)
+        except Exception as ex:
+            logger.debug("ONNX session initialization skipped / fallback active: %s", ex)
+
+    def ensure_depth_models(self, download_if_missing: bool = False) -> dict[str, Any]:
+        """Checks availability of ONNX models or returns current fallback state."""
+        return {
+            "has_depth_model": self._depth_session is not None,
+            "depth_model": self._depth_model_name,
+            "has_matte_model": self._matte_session is not None,
+            "matte_model": self._matte_model_name,
+            "using_fallback": self._depth_session is None or self._matte_session is None,
+        }
+
+    def clear_cache(self) -> None:
+        self._cache.clear()
+        self._base_cache.clear()
+
+    def get_depth_and_matte(
+        self,
+        image_rgb: np.ndarray,
+        media_id: Any = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Returns (depth_map, alpha_matte):
+        - depth_map: continuous float32 [0.0, 1.0] where 0.0 = closest foreground, 1.0 = farthest background.
+        - alpha_matte: continuous float32 [0.0, 1.0] where 1.0 = subject, 0.0 = background.
+        Cached by (cache_key, h, w) for instantaneous 60 FPS slider manipulation.
+        """
+        if image_rgb is None or image_rgb.size == 0:
+            dummy = np.zeros((10, 10), dtype=np.float32)
+            return dummy, dummy
+
+        h, w = image_rgb.shape[:2]
+        if media_id is not None:
+            cache_id = media_id
+        else:
+            cache_id = (
+                image_rgb.shape,
+                int(image_rgb[0, 0, 0]),
+                int(image_rgb[-1, -1, 0]),
+                int(image_rgb[h // 2, w // 2, 0]),
+            )
+        cache_key = (cache_id, w, h)
+
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        # Check if base maps are already computed for this media_id
+        if cache_id in self._base_cache:
+            base_depth, base_matte = self._base_cache[cache_id]
+            d_out = cv2.resize(base_depth, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+            m_out = cv2.resize(base_matte, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+            res = (d_out, m_out)
+            self._cache[cache_key] = res
+            return res
+
+        # Downsample image for high-speed base map computation (~50ms max)
+        base_scale = min(1.0, 640.0 / max(w, h))
+        if base_scale < 0.95:
+            bw = max(16, int(round(w * base_scale)))
+            bh = max(16, int(round(h * base_scale)))
+            comp_rgb = cv2.resize(image_rgb, (bw, bh), interpolation=cv2.INTER_AREA)
+        else:
+            bw, bh = w, h
+            comp_rgb = image_rgb
+
+        depth_map: np.ndarray | None = None
+        alpha_matte: np.ndarray | None = None
+
+        # 1. Monocular 3D Depth Map
+        if self._depth_session is not None:
+            try:
+                input_name = self._depth_session.get_inputs()[0].name
+                in_shape = self._depth_session.get_inputs()[0].shape
+                target_h = in_shape[2] if len(in_shape) == 4 and isinstance(in_shape[2], int) and in_shape[2] > 0 else 518
+                target_w = in_shape[3] if len(in_shape) == 4 and isinstance(in_shape[3], int) and in_shape[3] > 0 else 518
+
+                img_f = cv2.resize(comp_rgb, (target_w, target_h), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+                mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+                std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+                blob = ((img_f - mean) / std).transpose(2, 0, 1)[None, ...]
+
+                out = self._depth_session.run(None, {input_name: blob})[0]
+                out_2d = out[0, 0] if out.ndim == 4 else (out[0] if out.ndim == 3 else out)
+                d_min, d_max = float(np.min(out_2d)), float(np.max(out_2d))
+                if d_max > d_min:
+                    norm_disp = (out_2d - d_min) / (d_max - d_min)
+                else:
+                    norm_disp = np.zeros_like(out_2d)
+
+                norm_depth = 1.0 - norm_disp
+                depth_map = cv2.resize(norm_depth, (bw, bh), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+            except Exception as e:
+                logger.debug("ONNX depth inference error, using fallback: %s", e)
+                depth_map = None
+
+        # 2. Portrait Alpha Matte
+        if self._matte_session is not None:
+            try:
+                input_name = self._matte_session.get_inputs()[0].name
+                in_shape = self._matte_session.get_inputs()[0].shape
+                target_h = in_shape[2] if len(in_shape) == 4 and isinstance(in_shape[2], int) and in_shape[2] > 0 else 512
+                target_w = in_shape[3] if len(in_shape) == 4 and isinstance(in_shape[3], int) and in_shape[3] > 0 else 512
+
+                img_f = cv2.resize(comp_rgb, (target_w, target_h), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+                blob = ((img_f - 0.5) / 0.5).transpose(2, 0, 1)[None, ...]
+                out = self._matte_session.run(None, {input_name: blob})[0]
+                out_2d = out[0, 0] if out.ndim == 4 else (out[0] if out.ndim == 3 else out)
+                m_min, m_max = float(np.min(out_2d)), float(np.max(out_2d))
+                if m_max > m_min:
+                    norm_m = (out_2d - m_min) / (m_max - m_min)
+                else:
+                    norm_m = np.zeros_like(out_2d)
+                alpha_matte = cv2.resize(norm_m, (bw, bh), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+            except Exception as e:
+                logger.debug("ONNX matte inference error, using fallback: %s", e)
+                alpha_matte = None
+
+        # Zero-dependency fallback on base image
+        bgr = cv2.cvtColor(comp_rgb, cv2.COLOR_RGB2BGR)
+        if alpha_matte is None:
+            alpha_matte = estimate_subject_mask(bgr)
+
+        if depth_map is None:
+            inv_depth = estimate_depth_map(bgr, subject_mask=alpha_matte)
+            depth_map = np.clip(1.0 - inv_depth, 0.0, 1.0).astype(np.float32)
+
+        base_res = (
+            np.clip(depth_map, 0.0, 1.0).astype(np.float32),
+            np.clip(alpha_matte, 0.0, 1.0).astype(np.float32),
+        )
+        self._base_cache[cache_id] = base_res
+
+        # Scale to requested (w, h)
+        if (bw, bh) == (w, h):
+            res = base_res
+        else:
+            res = (
+                cv2.resize(base_res[0], (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32),
+                cv2.resize(base_res[1], (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32),
+            )
+        self._cache[cache_key] = res
+        return res
+
+    def get_depth_matte_and_weights(
+        self,
+        image_rgb: np.ndarray,
+        media_id: Any = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Returns (depth_map, alpha_matte, near_weight, far_weight) cached for 60 FPS slider manipulation.
+        """
+        depth_map, alpha_matte = self.get_depth_and_matte(image_rgb, media_id=media_id)
+        h, w = image_rgb.shape[:2]
+        if media_id is not None:
+            cache_id = media_id
+        else:
+            cache_id = (
+                image_rgb.shape,
+                int(image_rgb[0, 0, 0]),
+                int(image_rgb[-1, -1, 0]),
+                int(image_rgb[h // 2, w // 2, 0]),
+            )
+        w_key = (cache_id, w, h, "weights")
+        if w_key in self._cache:
+            near_w, far_w = self._cache[w_key]
+            return depth_map, alpha_matte, near_w, far_w
+
+        near_w = np.maximum(alpha_matte, 1.0 - depth_map).astype(np.float32)
+        far_w = (depth_map * (1.0 - alpha_matte)).astype(np.float32)
+        self._cache[w_key] = (near_w, far_w)
+        return depth_map, alpha_matte, near_w, far_w
+
+
+_SHARED_DEPTH_ENGINE: DepthAndMatteEngine | None = None
+
+
+def get_depth_and_matte_engine() -> DepthAndMatteEngine:
+    global _SHARED_DEPTH_ENGINE
+    if _SHARED_DEPTH_ENGINE is None:
+        _SHARED_DEPTH_ENGINE = DepthAndMatteEngine()
+    return _SHARED_DEPTH_ENGINE
+
+
+# =============================================================================
 # 3. 3D Cinematic Motion (Continuous Depth-Map Mesh Warping via cv2.remap)
 # =============================================================================
 
@@ -652,110 +906,232 @@ def inpaint_disocclusion_background(
     return cv2.inpaint(image_bgr, dilated_mask, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
 
 
+def prepare_3d_parallax_layers(
+    bgr_array: np.ndarray,
+    face_rects: list[tuple[int, int, int, int]] | None = None,
+) -> dict[str, np.ndarray]:
+    """
+    Precomputes hybrid 2.5D layered depth-mesh parallax layers:
+    1. Obtains (depth_map, alpha_matte) via DepthAndMatteEngine (Depth-Anything-V2 + MODNet with fallback).
+    2. Constructs a clean background plate (bg_plate) by dilating the foreground mask
+       (alpha_matte > 0.15) by int(18 * res_scale) pixels and inpainting disocclusions with cv2.inpaint.
+    3. Inpaints and smooths the background depth map (depth_bg) across the disocclusion zone so background
+       depth is continuous behind the subject.
+    Returns:
+       {
+           "fg_image": bgr_array,
+           "bg_plate": bg_plate,
+           "depth_map": depth_map,
+           "depth_bg": depth_bg,
+           "alpha_matte": alpha_matte,
+       }
+    """
+    if bgr_array is None or bgr_array.size == 0:
+        empty = np.zeros((10, 10, 3), dtype=np.uint8)
+        empty_f = np.zeros((10, 10), dtype=np.float32)
+        return {
+            "fg_image": empty,
+            "bg_plate": empty,
+            "depth_map": empty_f,
+            "depth_bg": empty_f,
+            "alpha_matte": empty_f,
+        }
+
+    h, w = bgr_array.shape[:2]
+    rgb = cv2.cvtColor(bgr_array, cv2.COLOR_BGR2RGB)
+    depth_engine = get_depth_and_matte_engine()
+    depth_map, alpha_matte = depth_engine.get_depth_and_matte(rgb)
+
+    # Clean foreground mask (threshold at 0.15)
+    res_scale = max(1.0, max(h, w) / 600.0)
+    dilate_px = max(5, int(18 * res_scale))
+    ksize = dilate_px * 2 + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+    bin_mask = (alpha_matte > 0.15).astype(np.uint8) * 255
+    dilated_mask = cv2.dilate(bin_mask, kernel)
+
+    # Inpaint background plate and background depth map
+    if res_scale > 1.2:
+        sw, sh = max(16, int(w / res_scale)), max(16, int(h / res_scale))
+        small_img = cv2.resize(bgr_array, (sw, sh), interpolation=cv2.INTER_AREA)
+        small_mask = cv2.resize(dilated_mask, (sw, sh), interpolation=cv2.INTER_NEAREST)
+        inpainted_small = cv2.inpaint(small_img, small_mask, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
+        bg_plate = cv2.resize(inpainted_small, (w, h), interpolation=cv2.INTER_LINEAR)
+
+        depth_u8 = (np.clip(depth_map, 0.0, 1.0) * 255.0).astype(np.uint8)
+        small_depth = cv2.resize(depth_u8, (sw, sh), interpolation=cv2.INTER_AREA)
+        inpainted_depth_small = cv2.inpaint(small_depth, small_mask, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
+        depth_bg_u8 = cv2.resize(inpainted_depth_small, (w, h), interpolation=cv2.INTER_LINEAR)
+        depth_bg = depth_bg_u8.astype(np.float32) / 255.0
+    else:
+        bg_plate = cv2.inpaint(bgr_array, dilated_mask, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
+        depth_u8 = (np.clip(depth_map, 0.0, 1.0) * 255.0).astype(np.uint8)
+        depth_bg_u8 = cv2.inpaint(depth_u8, dilated_mask, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
+        depth_bg = depth_bg_u8.astype(np.float32) / 255.0
+
+    # Ensure depth_bg is smoothly continuous behind the subject
+    blur_k = max(7, (int(9 * res_scale) // 2) * 2 + 1)
+    blurred_depth = cv2.GaussianBlur(depth_bg, (blur_k, blur_k), 0)
+    blend_mask = (dilated_mask.astype(np.float32) / 255.0)
+    depth_bg = depth_bg * (1.0 - blend_mask) + blurred_depth * blend_mask
+
+    return {
+        "fg_image": bgr_array,
+        "bg_plate": bg_plate,
+        "depth_map": depth_map,
+        "depth_bg": depth_bg,
+        "alpha_matte": alpha_matte,
+    }
+
+
 def render_3d_cinematic_motion_frame(
-    foreground_bgr: np.ndarray,
-    background_bgr: np.ndarray,
-    subject_mask: np.ndarray,
-    t: float,  # Normalized time in [0.0, 1.0]
+    foreground_bgr: np.ndarray | dict[str, np.ndarray],
+    background_bgr: np.ndarray | None = None,
+    subject_mask: np.ndarray | None = None,
+    t: float = 0.0,
     canvas_size: tuple[int, int] | None = None,
     depth_map: np.ndarray | None = None,
     motion_style: str = "orbital",
     intensity: float = 0.5,
     focal_plane: float = 0.5,
+    enable_bokeh: bool = True,
+    depth_bg: np.ndarray | None = None,
+    overscan_scale: float = 1.04,
 ) -> np.ndarray:
     """
     Renders a single frame of continuous 3D cinematic virtual camera parallax motion:
-    - Uses continuous depth field D(x, y) to construct smooth coordinate displacement fields (cv2.remap).
-    - Preserves photo aspect ratio (canvas_size defaults to source dimensions).
-    - motion_style: 'orbital', 'dolly_in', 'pan_lr', 'breathe'.
+    - 2.5D Layered separation: Background plate and foreground subject are warped independently,
+      completely eliminating single-mesh rubber edge stretching artifacts.
+    - Default 1.04x (4%) overscan prevents border reflection artifacts at the outer edges.
+    - motion_style: 'orbital' / '3d orbit', 'dolly_zoom' / 'dolly_in', 'parallax_drift' / 'pan_lr',
+      'cinematic_pan', 'breathe'.
     - intensity: parallax displacement amplitude in [0.1, 1.0].
+    - enable_bokeh: applies subtle optical disc blur to background plate proportional to depth_bg.
     """
-    h, w = foreground_bgr.shape[:2]
+    if isinstance(foreground_bgr, dict):
+        fg_src = foreground_bgr["fg_image"]
+        bg_src = foreground_bgr.get("bg_plate", fg_src)
+        depth_fg = foreground_bgr.get("depth_map")
+        depth_bg_arr = foreground_bgr.get("depth_bg", depth_fg)
+        alpha_matte = foreground_bgr.get("alpha_matte")
+    else:
+        fg_src = foreground_bgr
+        bg_src = background_bgr if background_bgr is not None else foreground_bgr
+        depth_fg = depth_map
+        depth_bg_arr = depth_bg if depth_bg is not None else depth_map
+        alpha_matte = subject_mask
+
+    h, w = fg_src.shape[:2]
     if canvas_size is None:
         tw, th = w, h
     else:
         tw, th = canvas_size
 
-    if depth_map is None:
-        depth_map = estimate_depth_map(foreground_bgr, subject_mask=subject_mask)
+    # Ensure masks & depth exist
+    if alpha_matte is None:
+        alpha_matte = np.ones((h, w), dtype=np.float32)
 
-    # Resize depth map to output canvas if dimensions differ
-    if depth_map.shape[:2] != (th, tw):
-        depth_canvas = cv2.resize(depth_map, (tw, th), interpolation=cv2.INTER_LINEAR)
+    if depth_fg is None:
+        depth_fg = estimate_depth_map(fg_src, subject_mask=alpha_matte)
+    if depth_bg_arr is None:
+        depth_bg_arr = depth_fg.copy()
+
+    # Resize all layers to target canvas if dimensions differ
+    if depth_fg.shape[:2] != (th, tw):
+        depth_fg = cv2.resize(depth_fg, (tw, th), interpolation=cv2.INTER_LINEAR)
+    if depth_bg_arr.shape[:2] != (th, tw):
+        depth_bg_arr = cv2.resize(depth_bg_arr, (tw, th), interpolation=cv2.INTER_LINEAR)
+    if fg_src.shape[:2] != (th, tw):
+        fg_canvas = cv2.resize(fg_src, (tw, th), interpolation=cv2.INTER_LINEAR)
     else:
-        depth_canvas = depth_map
-
-    # Ensure background and foreground match canvas size
-    if foreground_bgr.shape[:2] != (th, tw):
-        fg_canvas = cv2.resize(foreground_bgr, (tw, th), interpolation=cv2.INTER_LINEAR)
+        fg_canvas = fg_src
+    if bg_src.shape[:2] != (th, tw):
+        bg_canvas = cv2.resize(bg_src, (tw, th), interpolation=cv2.INTER_LINEAR)
     else:
-        fg_canvas = foreground_bgr
-
-    if background_bgr.shape[:2] != (th, tw):
-        bg_canvas = cv2.resize(background_bgr, (tw, th), interpolation=cv2.INTER_LINEAR)
+        bg_canvas = bg_src
+    if alpha_matte.shape[:2] != (th, tw):
+        alpha_canvas = cv2.resize(alpha_matte, (tw, th), interpolation=cv2.INTER_LINEAR)
     else:
-        bg_canvas = background_bgr
+        alpha_canvas = alpha_matte
 
-    if subject_mask.shape[:2] != (th, tw):
-        mask_canvas = cv2.resize(subject_mask, (tw, th), interpolation=cv2.INTER_LINEAR)
-    else:
-        mask_canvas = subject_mask
-
-    # Camera trajectory depending on motion style
     intensity = max(0.05, min(1.0, float(intensity)))
     max_disp = float(min(tw, th)) * 0.045 * intensity
+    cx, cy = tw * 0.5, th * 0.5
 
-    # Center depth offset around focal_plane
-    # Near objects (depth > focal_plane) move opposite to far objects (depth < focal_plane)
-    rel_depth = depth_canvas - float(focal_plane)
+    # 1.04x overscan grid to eliminate outer border reflection artifacts
+    xs, ys = np.meshgrid(np.arange(tw, dtype=np.float32), np.arange(th, dtype=np.float32))
+    overscan = max(1.0, float(overscan_scale))
+    base_x = cx + (xs - cx) / overscan
+    base_y = cy + (ys - cy) / overscan
 
-    if motion_style == "dolly_in":
-        # Hitchcock / Google Cinematic zoom push-in:
-        # Foreground expands faster than background
-        # Ease-in-out curve
-        ease_t = 0.5 - 0.5 * math.cos(t * math.pi)
-        cam_zoom = 1.0 + 0.05 * ease_t * intensity
-        # Differential zoom map
-        cx, cy = tw * 0.5, th * 0.5
-        xs, ys = np.meshgrid(np.arange(tw, dtype=np.float32), np.arange(th, dtype=np.float32))
-        depth_zoom = cam_zoom + rel_depth * (0.04 * ease_t * intensity)
-        map_x = cx + (xs - cx) / np.maximum(depth_zoom, 0.5)
-        map_y = cy + (ys - cy) / np.maximum(depth_zoom, 0.5)
+    # Relative depth displacement: near foreground (0.0) -> +0.5, far background (1.0) -> -0.5
+    rel_fg = 0.5 - depth_fg
+    rel_bg = 0.5 - depth_bg_arr
 
-    elif motion_style == "pan_lr":
-        # Smooth horizontal parallax glide
+    m_style = motion_style.lower()
+    if "dolly" in m_style or "vertigo" in m_style:
+        # Hitchcock Vertigo / Dolly Zoom: Foreground stays steady, background zooms in/out
+        cycle_t = 0.5 - 0.5 * math.cos(t * 2.0 * math.pi)
+        fg_zoom = 1.0 + 0.015 * cycle_t * intensity
+        bg_zoom = 1.0 + 0.08 * cycle_t * intensity
+        cam_x = math.sin(t * 2.0 * math.pi) * (max_disp * 0.3)
+        cam_y = math.sin(t * 2.0 * math.pi) * (max_disp * 0.15)
+        map_bg_x = cx + (base_x - cx) / bg_zoom + cam_x * rel_bg
+        map_bg_y = cy + (base_y - cy) / bg_zoom + cam_y * rel_bg
+        map_fg_x = cx + (base_x - cx) / fg_zoom + cam_x * rel_fg
+        map_fg_y = cy + (base_y - cy) / fg_zoom + cam_y * rel_fg
+
+    elif "drift" in m_style or "pan_lr" in m_style:
+        # Smooth horizontal / diagonal parallax drift
         cam_x = math.sin(t * 2.0 * math.pi) * max_disp
-        cx, cy = tw * 0.5, th * 0.5
-        xs, ys = np.meshgrid(np.arange(tw, dtype=np.float32), np.arange(th, dtype=np.float32))
-        map_x = xs + cam_x * rel_depth
-        map_y = ys
+        cam_y = math.sin(t * 2.0 * math.pi) * (max_disp * 0.25)
+        map_bg_x = base_x + cam_x * rel_bg
+        map_bg_y = base_y + cam_y * rel_bg
+        map_fg_x = base_x + cam_x * rel_fg
+        map_fg_y = base_y + cam_y * rel_fg
 
-    elif motion_style == "breathe":
+    elif "cinematic" in m_style or "pan" in m_style:
+        # Sweeping cinematic pan with subtle vertical arc
+        cam_x = math.sin(t * 2.0 * math.pi) * (max_disp * 1.3)
+        cam_y = (1.0 - math.cos(t * 2.0 * math.pi)) * (max_disp * 0.22)
+        zoom = 1.0 + 0.015 * (1.0 - math.cos(t * 2.0 * math.pi)) * intensity
+        map_bg_x = cx + (base_x - cx) / zoom + cam_x * rel_bg
+        map_bg_y = cy + (base_y - cy) / zoom + cam_y * rel_bg
+        map_fg_x = cx + (base_x - cx) / zoom + cam_x * rel_fg
+        map_fg_y = cy + (base_y - cy) / zoom + cam_y * rel_fg
+
+    elif "breathe" in m_style:
         # Gentle floating breathe
-        cam_y = math.sin(t * 2.0 * math.pi) * (max_disp * 0.6)
+        cam_y = math.sin(t * 2.0 * math.pi) * (max_disp * 0.5)
         zoom = 1.0 + 0.02 * math.sin(t * 2.0 * math.pi) * intensity
-        cx, cy = tw * 0.5, th * 0.5
-        xs, ys = np.meshgrid(np.arange(tw, dtype=np.float32), np.arange(th, dtype=np.float32))
-        map_x = cx + (xs - cx) / zoom
-        map_y = cy + (ys - cy) / zoom + cam_y * rel_depth
+        map_bg_x = cx + (base_x - cx) / zoom
+        map_bg_y = cy + (base_y - cy) / zoom + cam_y * rel_bg
+        map_fg_x = cx + (base_x - cx) / zoom
+        map_fg_y = cy + (base_y - cy) / zoom + cam_y * rel_fg
 
-    else:  # "orbital" (default)
-        # Sinusoidal 3D orbital loop with gentle push
+    else:  # "3d orbit" / "orbital" (default)
         cam_x = math.sin(t * 2.0 * math.pi) * max_disp
-        cam_y = math.cos(t * 2.0 * math.pi) * (max_disp * 0.35)
-        zoom = 1.0 + 0.025 * math.sin(t * math.pi) * intensity
+        cam_y = math.cos(t * 2.0 * math.pi) * (max_disp * 0.45)
+        zoom = 1.0 + 0.025 * (0.5 - 0.5 * math.cos(t * 2.0 * math.pi)) * intensity
+        map_bg_x = cx + (base_x - cx) / zoom + cam_x * rel_bg
+        map_bg_y = cy + (base_y - cy) / zoom + cam_y * rel_bg
+        map_fg_x = cx + (base_x - cx) / zoom + cam_x * rel_fg
+        map_fg_y = cy + (base_y - cy) / zoom + cam_y * rel_fg
 
-        cx, cy = tw * 0.5, th * 0.5
-        xs, ys = np.meshgrid(np.arange(tw, dtype=np.float32), np.arange(th, dtype=np.float32))
-        map_x = cx + (xs - cx) / zoom + cam_x * rel_depth
-        map_y = cy + (ys - cy) / zoom + cam_y * rel_depth
+    # Optional depth-weighted optical blur on background plate
+    if enable_bokeh:
+        bg_blur = cv2.GaussianBlur(bg_canvas, (13, 13), 0)
+        bokeh_weight = np.clip((depth_bg_arr - 0.25) / 0.75, 0.0, 1.0)[..., None]
+        bg_to_warp = (bg_canvas.astype(np.float32) * (1.0 - bokeh_weight * 0.65) + bg_blur.astype(np.float32) * (bokeh_weight * 0.65)).astype(np.uint8)
+    else:
+        bg_to_warp = bg_canvas
 
-    # Remap background and foreground using continuous displacement
-    warped_bg = cv2.remap(bg_canvas, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
-    warped_fg = cv2.remap(fg_canvas, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
-    warped_mask = cv2.remap(mask_canvas, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+    # Warp background plate and foreground subject & matte independently
+    warped_bg = cv2.remap(bg_to_warp, map_bg_x, map_bg_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+    warped_fg = cv2.remap(fg_canvas, map_fg_x, map_fg_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+    warped_alpha = cv2.remap(alpha_canvas, map_fg_x, map_fg_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
 
-    m3 = warped_mask[..., None]
+    m3 = np.clip(warped_alpha, 0.0, 1.0)[..., None]
     composite = warped_fg.astype(np.float32) * m3 + warped_bg.astype(np.float32) * (1.0 - m3)
     return np.clip(composite, 0.0, 255.0).astype(np.uint8)
 
@@ -771,6 +1147,7 @@ def render_3d_cinematic_motion_video(
     motion_style: str = "orbital",
     intensity: float = 0.5,
     focal_plane: float = 0.5,
+    enable_bokeh: bool = True,
     progress_callback: Any | None = None,
 ) -> bool:
     """
@@ -790,13 +1167,12 @@ def render_3d_cinematic_motion_video(
 
     tw, th = target_size
 
-    if subject_mask is None:
-        subject_mask = estimate_subject_mask(image_bgr)
-
-    if depth_map is None:
-        depth_map = estimate_depth_map(image_bgr, subject_mask=subject_mask)
-
-    bg_clean = inpaint_disocclusion_background(image_bgr, subject_mask)
+    # Precompute hybrid 2.5D parallax layers once
+    layers = prepare_3d_parallax_layers(image_bgr)
+    if subject_mask is not None:
+        layers["alpha_matte"] = subject_mask
+    if depth_map is not None:
+        layers["depth_map"] = depth_map
 
     total_frames = int(duration_sec * fps)
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -809,19 +1185,130 @@ def render_3d_cinematic_motion_video(
         for frame_idx in range(total_frames):
             t = frame_idx / float(max(1, total_frames - 1))
             frame = render_3d_cinematic_motion_frame(
-                foreground_bgr=image_bgr,
-                background_bgr=bg_clean,
-                subject_mask=subject_mask,
+                foreground_bgr=layers,
                 t=t,
                 canvas_size=(tw, th),
-                depth_map=depth_map,
                 motion_style=motion_style,
                 intensity=intensity,
                 focal_plane=focal_plane,
+                enable_bokeh=enable_bokeh,
             )
             writer.write(frame)
             if progress_callback:
                 progress_callback(int((frame_idx + 1) * 100 / total_frames))
+    finally:
+        writer.release()
+
+    return out_p.exists() and out_p.stat().st_size > 1000
+
+
+def render_3d_cinematic_motion_reel(
+    images_bgr: list[np.ndarray],
+    output_path: Path | str,
+    duration_per_clip: float = 4.0,
+    transition_sec: float = 0.8,
+    fps: int = 30,
+    resolution: tuple[int, int] | None = None,
+    motion_style: str = "orbital",
+    intensity: float = 0.5,
+    enable_bokeh: bool = True,
+    progress_callback: Any | None = None,
+) -> bool:
+    """
+    Renders a multi-photo 3D Memories Reel with smooth 0.8s cross-fades between photos.
+    """
+    valid_images = [img for img in images_bgr if img is not None and img.size > 0]
+    if not valid_images:
+        return False
+
+    if len(valid_images) == 1:
+        return render_3d_cinematic_motion_video(
+            valid_images[0],
+            output_path=output_path,
+            duration_sec=duration_per_clip,
+            fps=fps,
+            resolution=resolution,
+            motion_style=motion_style,
+            intensity=intensity,
+            enable_bokeh=enable_bokeh,
+            progress_callback=progress_callback,
+        )
+
+    out_p = Path(output_path)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+
+    # Base target canvas resolution on first image
+    h0, w0 = valid_images[0].shape[:2]
+    if resolution is None:
+        tw, th = compute_target_dimensions(w0, h0, max_long_edge=1920)
+    else:
+        tw, th = (resolution[0] & ~1, resolution[1] & ~1)
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(out_p), fourcc, float(fps), (tw, th))
+    if not writer.isOpened():
+        return False
+
+    clip_frames_count = max(30, int(duration_per_clip * fps))
+    trans_frames = max(6, int(transition_sec * fps))
+
+    # Pre-render or stream each photo clip
+    styles = [motion_style, "cinematic_pan", "dolly_zoom", "3d_orbit"]
+    num_clips = len(valid_images)
+    total_steps = num_clips * clip_frames_count
+    current_step = 0
+
+    try:
+        prev_tail_frames: list[np.ndarray] = []
+
+        for clip_idx, img in enumerate(valid_images):
+            style = styles[clip_idx % len(styles)] if motion_style == "orbital" else motion_style
+            layers = prepare_3d_parallax_layers(img)
+
+            clip_frames: list[np.ndarray] = []
+            for f_idx in range(clip_frames_count):
+                t = f_idx / float(max(1, clip_frames_count - 1))
+                frame = render_3d_cinematic_motion_frame(
+                    foreground_bgr=layers,
+                    t=t,
+                    canvas_size=(tw, th),
+                    motion_style=style,
+                    intensity=intensity,
+                    enable_bokeh=enable_bokeh,
+                )
+                clip_frames.append(frame)
+
+            # If not first clip, write cross-fade transition
+            if clip_idx > 0 and prev_tail_frames:
+                for step in range(trans_frames):
+                    alpha = (step + 1) / float(trans_frames + 1)
+                    blend = cv2.addWeighted(
+                        prev_tail_frames[step], 1.0 - alpha,
+                        clip_frames[step], alpha, 0.0
+                    )
+                    writer.write(blend)
+                    current_step += 1
+                    if progress_callback:
+                        progress_callback(min(99, int(current_step * 100 / total_steps)))
+
+                # Write remaining frames of this clip
+                for frame in clip_frames[trans_frames:-trans_frames if clip_idx < num_clips - 1 else None]:
+                    writer.write(frame)
+                    current_step += 1
+                    if progress_callback:
+                        progress_callback(min(99, int(current_step * 100 / total_steps)))
+            else:
+                # First clip: write up to tail
+                for frame in clip_frames[:-trans_frames]:
+                    writer.write(frame)
+                    current_step += 1
+                    if progress_callback:
+                        progress_callback(min(99, int(current_step * 100 / total_steps)))
+
+            prev_tail_frames = clip_frames[-trans_frames:]
+
+        if progress_callback:
+            progress_callback(100)
     finally:
         writer.release()
 

@@ -113,7 +113,21 @@ class _AeroFineTuneSlider(QSlider):
             """
         )
 
-    def mouseDoubleClickEvent(self, event) -> None:
+    def mousePressEvent(self, event: Any) -> None:
+        self.sliderPressed.emit()
+        if event.button() == Qt.LeftButton:
+            opt_min, opt_max = self.minimum(), self.maximum()
+            if self.orientation() == Qt.Horizontal and self.width() > 0:
+                pos = event.position().x() if hasattr(event, "position") else event.x()
+                val = opt_min + (opt_max - opt_min) * (pos / float(self.width()))
+                self.setValue(int(round(val)))
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: Any) -> None:
+        super().mouseReleaseEvent(event)
+        self.sliderReleased.emit()
+
+    def mouseDoubleClickEvent(self, event: Any) -> None:
         self.setValue(self.default_val)
         event.accept()
 
@@ -436,6 +450,7 @@ class _UnknownFaceCardWidget(QFrame):
         face_id: int,
         icon_pixmap: QPixmap | None = None,
         completer: QCompleter | None = None,
+        unlinked_candidates: list[str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -472,8 +487,21 @@ class _UnknownFaceCardWidget(QFrame):
 
         self.txt_who = QLineEdit(self)
         self.txt_who.setPlaceholderText("Who is this?")
-        if completer is not None:
-            self.txt_who.setCompleter(completer)
+        cands = [c.strip() for c in (unlinked_candidates or []) if c and c.strip()]
+        if completer is not None and hasattr(completer, "model") and completer.model() is not None:
+            existing_names: list[str] = []
+            m = completer.model()
+            if hasattr(m, "stringList"):
+                existing_names = list(m.stringList())
+            elif hasattr(m, "rowCount"):
+                existing_names = [m.data(m.index(i, 0)) for i in range(m.rowCount())]
+            merged_names = list(cands) + [n for n in existing_names if n not in cands]
+            card_model = QStringListModel(merged_names, self.txt_who)
+            card_comp = QCompleter(card_model, self.txt_who)
+            card_comp.setCaseSensitivity(Qt.CaseInsensitive)
+            card_comp.setFilterMode(Qt.MatchContains)
+            card_comp.activated[str].connect(self._on_completer_activated)
+            self.txt_who.setCompleter(card_comp)
         self.txt_who.setStyleSheet(
             """
             QLineEdit {
@@ -494,6 +522,37 @@ class _UnknownFaceCardWidget(QFrame):
         self.txt_who.setContextMenuPolicy(Qt.CustomContextMenu)
         self.txt_who.customContextMenuRequested.connect(self._show_txt_context_menu)
         hbox.addWidget(self.txt_who, 1)
+
+        # Quick-link buttons for boxless person tags on this photo
+        if cands:
+            for cand in cands[:2]:
+                btn_link = QPushButton(f"Link {cand}", self)
+                btn_link.setFixedHeight(22)
+                btn_link.setCursor(Qt.PointingHandCursor)
+                btn_link.setToolTip(f"Link detected face to tagged person '{cand}'")
+                btn_link.setStyleSheet(
+                    """
+                    QPushButton {
+                        background: #E8F4FD;
+                        border: 1px solid #70A6E8;
+                        border-radius: 3px;
+                        color: #104C8A;
+                        font-family: 'Segoe UI';
+                        font-size: 8pt;
+                        font-weight: 600;
+                        padding: 0 5px;
+                    }
+                    QPushButton:hover {
+                        background: #D0E8FC;
+                        border-color: #2979CC;
+                    }
+                    QPushButton:pressed {
+                        background: #B9DCFB;
+                    }
+                    """
+                )
+                btn_link.clicked.connect(lambda _, c=cand: self.assign_requested.emit(self.face_id, c))
+                hbox.addWidget(btn_link)
 
         self.btn_del = QPushButton(self)
         self.btn_del.setIcon(make_symbol_icon("cross", 14))
@@ -543,6 +602,12 @@ class _UnknownFaceCardWidget(QFrame):
         self.txt_who.setFocus()
         self.txt_who.selectAll()
 
+    def _on_completer_activated(self, text: str) -> None:
+        name = text.strip()
+        if name:
+            self.txt_who.setText(name)
+            self.assign_requested.emit(self.face_id, name)
+
     def _on_return(self) -> None:
         text = self.txt_who.text().strip()
         if text:
@@ -561,6 +626,68 @@ class _UnknownFaceCardWidget(QFrame):
         self.style().unpolish(self)
         self.style().polish(self)
         self.hovered_changed.emit(self.face_id, False)
+
+    def set_dark_mode(self, is_dark: bool) -> None:
+        if is_dark:
+            self.setStyleSheet(
+                """
+                QFrame#UnknownFaceCard {
+                    background: transparent;
+                    border: 1px dashed #3E4756;
+                    border-radius: 3px;
+                }
+                QFrame#UnknownFaceCard[hovered="true"] {
+                    background: #242A36;
+                    border: 1px solid #3B82F6;
+                }
+                """
+            )
+            self.txt_who.setStyleSheet(
+                """
+                QLineEdit {
+                    background: #14171B;
+                    border: 1px solid #333A45;
+                    border-radius: 2px;
+                    padding: 1px 4px;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                    color: #E2E8F0;
+                }
+                QLineEdit:hover, QLineEdit:focus {
+                    border-color: #3B82F6;
+                }
+                """
+            )
+        else:
+            self.setStyleSheet(
+                """
+                QFrame#UnknownFaceCard {
+                    background: transparent;
+                    border: 1px dashed #A4C2E8;
+                    border-radius: 3px;
+                }
+                QFrame#UnknownFaceCard[hovered="true"] {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F6FAFE, stop:1 #E5F1FB);
+                    border: 1px solid #2979CC;
+                }
+                """
+            )
+            self.txt_who.setStyleSheet(
+                """
+                QLineEdit {
+                    background: #FFFFFF;
+                    border: 1px solid #CBD5E1;
+                    border-radius: 2px;
+                    padding: 1px 4px;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                    color: #1E395B;
+                }
+                QLineEdit:hover, QLineEdit:focus {
+                    border-color: #2979CC;
+                }
+                """
+            )
 
 
 class _PersonTagCardWidget(QFrame):
@@ -592,6 +719,8 @@ class _PersonTagCardWidget(QFrame):
     merge_clicked = Signal(int, str)
     rename_clicked = Signal(int, str)
     hovered_changed = Signal(int, bool)
+    locate_face_clicked = Signal(int, str)  # (person_id, person_name)
+    link_face_clicked = Signal(int, int)  # (person_id, face_id)
 
     def __init__(
         self,
@@ -600,6 +729,7 @@ class _PersonTagCardWidget(QFrame):
         icon_pixmap: QPixmap | None = None,
         is_unconfirmed: bool = False,
         face_id: int | None = None,
+        is_boxless: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -608,6 +738,7 @@ class _PersonTagCardWidget(QFrame):
         self.person_name = str(person_name)
         self.is_unconfirmed = bool(is_unconfirmed)
         self.face_id = face_id
+        self.is_boxless = bool(is_boxless)
         self.setObjectName("PersonTagCard")
         self.setMouseTracking(True)
         self.setFixedHeight(36)
@@ -670,6 +801,33 @@ class _PersonTagCardWidget(QFrame):
         self.lbl_name.setToolTip(f"Search for photos of {self.person_name}")
         hbox.addWidget(self.lbl_name, 1)
 
+        if self.is_boxless:
+            self.btn_locate_box = QPushButton("(no box - add)", self)
+            self.btn_locate_box.setObjectName("LocateBoxBtn")
+            self.btn_locate_box.setCursor(Qt.PointingHandCursor)
+            self.btn_locate_box.setToolTip(f"Click to place or link a face box for {self.person_name} on this photo")
+            self.btn_locate_box.setStyleSheet(
+                """
+                QPushButton#LocateBoxBtn {
+                    color: #0066CC;
+                    font-family: 'Segoe UI';
+                    font-size: 8pt;
+                    font-style: italic;
+                    background: transparent;
+                    border: 1px dashed #A4C2E8;
+                    border-radius: 2px;
+                    padding: 1px 4px;
+                }
+                QPushButton#LocateBoxBtn:hover {
+                    color: #003366;
+                    background: #EBF3FB;
+                    border: 1px solid #0066CC;
+                }
+                """
+            )
+            self.btn_locate_box.clicked.connect(lambda: self.locate_face_clicked.emit(self.person_id, self.person_name))
+            hbox.addWidget(self.btn_locate_box)
+
         if self.is_unconfirmed:
             self.btn_confirm = QPushButton(self)
             self.btn_confirm.setIcon(make_symbol_icon("check", 14))
@@ -724,6 +882,34 @@ class _PersonTagCardWidget(QFrame):
     def _exec_menu(self, global_pos: QPoint) -> QMenu:
         menu = QMenu(self)
         menu.setFont(QFont("Segoe UI", 9))
+
+        if self.is_boxless:
+            act_locate = menu.addAction(f"Locate {self.person_name} on photo...")
+            act_locate.setIcon(make_symbol_icon("crosshair", 14) if callable(globals().get("make_symbol_icon")) else QIcon())
+            act_locate.triggered.connect(lambda: self.locate_face_clicked.emit(self.person_id, self.person_name))
+
+            detected_faces = getattr(self, "detected_unassigned_faces", [])
+            if len(detected_faces) == 1:
+                df = detected_faces[0]
+                df_id = int(df.get("face_id") or df.get("id") or 0)
+                act_link = menu.addAction("Link to detected face box")
+                act_link.triggered.connect(lambda checked=False, f_id=df_id: self.link_face_clicked.emit(self.person_id, f_id))
+            elif len(detected_faces) > 1:
+                link_menu = menu.addMenu("Link to detected face box")
+                for idx, df in enumerate(detected_faces):
+                    df_id = int(df.get("face_id") or df.get("id") or 0)
+                    blob = df.get("thumbnail_blob")
+                    pix = make_person_avatar_pixmap(f"Face {idx + 1}", blob, size=20, circular=False) if blob else None
+                    act_df = link_menu.addAction(f"Detected Face #{idx + 1}")
+                    if pix and not pix.isNull():
+                        act_df.setIcon(QIcon(pix))
+                    act_df.triggered.connect(lambda checked=False, f_id=df_id: self.link_face_clicked.emit(self.person_id, f_id))
+
+            menu.addSeparator()
+        elif not self.is_unconfirmed:
+            act_adjust = menu.addAction("Adjust face box on photo...")
+            act_adjust.triggered.connect(lambda: self.locate_face_clicked.emit(self.person_id, self.person_name))
+            menu.addSeparator()
 
         if self.is_unconfirmed:
             act_confirm = menu.addAction("Confirm")
@@ -794,6 +980,81 @@ class _PersonTagCardWidget(QFrame):
         self.style().unpolish(self)
         self.style().polish(self)
         self.hovered_changed.emit(self.person_id, False)
+
+    def set_dark_mode(self, is_dark: bool) -> None:
+        if is_dark:
+            self.setStyleSheet(
+                """
+                QFrame#PersonTagCard {
+                    background: transparent;
+                    border: 1px solid transparent;
+                    border-radius: 3px;
+                }
+                QFrame#PersonTagCard[hovered="true"] {
+                    background: #242A36;
+                    border: 1px solid #3B82F6;
+                }
+                QLabel#PersonNameLabel {
+                    color: #E2E8F0;
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                    background: transparent;
+                    border: none;
+                    padding-left: 4px;
+                }
+                QToolButton#PersonMenuBtn {
+                    border: none;
+                    border-left: 1px solid transparent;
+                    background: transparent;
+                    color: #94A3B8;
+                    font-size: 8pt;
+                    padding: 0px 4px;
+                }
+                QFrame#PersonTagCard[hovered="true"] QToolButton#PersonMenuBtn {
+                    border-left: 1px solid #3E4756;
+                }
+                QToolButton#PersonMenuBtn:hover {
+                    background: rgba(59, 130, 246, 55);
+                }
+                """
+            )
+        else:
+            self.setStyleSheet(
+                """
+                QFrame#PersonTagCard {
+                    background: transparent;
+                    border: 1px solid transparent;
+                    border-radius: 3px;
+                }
+                QFrame#PersonTagCard[hovered="true"] {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #F6FAFE, stop:1 #E5F1FB);
+                    border: 1px solid #84ACDD;
+                }
+                QLabel#PersonNameLabel {
+                    color: #1E395B;
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                    background: transparent;
+                    border: none;
+                    padding-left: 4px;
+                }
+                QToolButton#PersonMenuBtn {
+                    border: none;
+                    border-left: 1px solid transparent;
+                    background: transparent;
+                    color: #1E395B;
+                    font-size: 8pt;
+                    padding: 0px 4px;
+                }
+                QFrame#PersonTagCard[hovered="true"] QToolButton#PersonMenuBtn {
+                    border-left: 1px solid #A4C2E8;
+                }
+                QToolButton#PersonMenuBtn:hover {
+                    background: rgba(132, 172, 221, 55);
+                }
+                """
+            )
 
 
 class _DescriptiveTagRowWidget(QFrame):
@@ -947,6 +1208,100 @@ class _DescriptiveTagRowWidget(QFrame):
         self.style().polish(self)
         self.btn_del.hide()
 
+    def set_dark_mode(self, is_dark: bool) -> None:
+        if is_dark:
+            self.setStyleSheet(
+                """
+                QFrame#DescriptiveTagRow {
+                    background: transparent;
+                    border: 1px solid transparent;
+                    border-radius: 2px;
+                }
+                QFrame#DescriptiveTagRow[hovered="true"] {
+                    background: #242A36;
+                    border: 1px solid #3B82F6;
+                }
+                QLabel#TagLabel {
+                    color: #60A5FA;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                    padding-left: 2px;
+                    background: transparent;
+                    border: none;
+                }
+                QLabel#TagLabel:hover {
+                    text-decoration: underline;
+                    color: #93C5FD;
+                }
+                QLabel#TagCountLabel {
+                    color: #94A3B8;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                    background: transparent;
+                    border: none;
+                }
+                QToolButton#DeleteBtn {
+                    border: none;
+                    background: transparent;
+                    color: #94A3B8;
+                    font-family: 'Segoe UI';
+                    font-size: 8pt;
+                    padding: 0px 2px;
+                }
+                QToolButton#DeleteBtn:hover {
+                    color: #EF4444;
+                    background: rgba(255, 255, 255, 20);
+                    border-radius: 2px;
+                }
+                """
+            )
+        else:
+            self.setStyleSheet(
+                """
+                QFrame#DescriptiveTagRow {
+                    background: transparent;
+                    border: 1px solid transparent;
+                    border-radius: 2px;
+                }
+                QFrame#DescriptiveTagRow[hovered="true"] {
+                    background: #F0F6FC;
+                    border: 1px solid #7DA2CE;
+                }
+                QLabel#TagLabel {
+                    color: #0066CC;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                    padding-left: 2px;
+                    background: transparent;
+                    border: none;
+                }
+                QLabel#TagLabel:hover {
+                    text-decoration: underline;
+                    color: #004499;
+                }
+                QLabel#TagCountLabel {
+                    color: #555555;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                    background: transparent;
+                    border: none;
+                }
+                QToolButton#DeleteBtn {
+                    border: none;
+                    background: transparent;
+                    color: #4C4C4C;
+                    font-family: 'Segoe UI';
+                    font-size: 8pt;
+                    padding: 0px 2px;
+                }
+                QToolButton#DeleteBtn:hover {
+                    color: #C50F1F;
+                    background: rgba(0, 0, 0, 15);
+                    border-radius: 2px;
+                }
+                """
+            )
+
 
 class _ClickToEditLabel(QLabel):
     """Clean plain text label that emits clicked when pressed."""
@@ -956,6 +1311,7 @@ class _ClickToEditLabel(QLabel):
     def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
         super().__init__(text, parent)
         self.setCursor(Qt.PointingHandCursor)
+        self.setWordWrap(True)
         self.setStyleSheet(
             """
             QLabel {
@@ -1027,37 +1383,42 @@ class _ClickToEditWidget(QStackedWidget):
 
     def set_editable(self, editable: bool) -> None:
         self._editable = editable
+        is_dark = getattr(self, "_is_dark", False)
         if not editable:
             self.view_label.setCursor(Qt.ArrowCursor)
             self.view_label.setStyleSheet(
-                """
-                QLabel {
-                    color: #55687C;
+                f"""
+                QLabel {{
+                    color: {'#94A3B8' if is_dark else '#55687C'};
                     font-family: 'Segoe UI';
                     font-size: 8.5pt;
                     padding: 1px 4px;
                     border: 1px solid transparent;
-                }
+                }}
                 """
             )
         else:
             self.view_label.setCursor(Qt.PointingHandCursor)
             self.view_label.setStyleSheet(
-                """
-                QLabel {
-                    color: #1E395B;
+                f"""
+                QLabel {{
+                    color: {'#E2E8F0' if is_dark else '#1E395B'};
                     font-family: 'Segoe UI';
                     font-size: 8.5pt;
                     padding: 1px 4px;
                     border: 1px solid transparent;
                     border-radius: 2px;
-                }
-                QLabel:hover {
-                    background: #F4F8FC;
-                    border: 1px solid #C5D9EC;
-                }
+                }}
+                QLabel:hover {{
+                    background: {'#242A36' if is_dark else '#F4F8FC'};
+                    border: 1px solid {'#3B82F6' if is_dark else '#C5D9EC'};
+                }}
                 """
             )
+
+    def set_dark_mode(self, is_dark: bool) -> None:
+        self._is_dark = bool(is_dark)
+        self.set_editable(self._editable)
 
     def set_display_text(self, text: str) -> None:
         val = text.strip() if text else ""
@@ -1347,6 +1708,7 @@ class WLPGSplitterHandle(QSplitterHandle):
         self.setCursor(Qt.SplitVCursor)
         self._collapsed = False
         self._last_bottom_size = 220
+        self._is_dark = False
 
     def paintEvent(self, event: Any) -> None:
         p = QPainter(self)
@@ -1355,28 +1717,36 @@ class WLPGSplitterHandle(QSplitterHandle):
         h = float(self.height())
         mid_y = h / 2.0
 
+        is_dark = getattr(self, "_is_dark", False)
         # Background matches pane
-        p.fillRect(0, 0, int(w), int(h), QColor("#FFFFFF"))
+        p.fillRect(0, 0, int(w), int(h), QColor("#1B1E24" if is_dark else "#FFFFFF"))
 
         # Gradient separator line across width
         grad = QLinearGradient(0, mid_y, w, mid_y)
-        grad.setColorAt(0.0, QColor("#E2ECF7"))
-        grad.setColorAt(0.2, QColor("#B7D1EE"))
-        grad.setColorAt(0.5, QColor("#7CAEDB"))
-        grad.setColorAt(0.8, QColor("#B7D1EE"))
-        grad.setColorAt(1.0, QColor("#E2ECF7"))
+        if is_dark:
+            grad.setColorAt(0.0, QColor("#1B1E24"))
+            grad.setColorAt(0.2, QColor("#2D3542"))
+            grad.setColorAt(0.5, QColor("#475569"))
+            grad.setColorAt(0.8, QColor("#2D3542"))
+            grad.setColorAt(1.0, QColor("#1B1E24"))
+        else:
+            grad.setColorAt(0.0, QColor("#E2ECF7"))
+            grad.setColorAt(0.2, QColor("#B7D1EE"))
+            grad.setColorAt(0.5, QColor("#7CAEDB"))
+            grad.setColorAt(0.8, QColor("#B7D1EE"))
+            grad.setColorAt(1.0, QColor("#E2ECF7"))
         p.setPen(QPen(grad, 1))
         p.drawLine(QPointF(4, mid_y), QPointF(w - 4, mid_y))
 
         # Center collapse glyph button background (small oval/pill)
         center_x = w / 2.0
-        p.setPen(QPen(QColor("#B7D1EE"), 1))
-        p.setBrush(QColor("#FFFFFF"))
+        p.setPen(QPen(QColor("#3E4756" if is_dark else "#B7D1EE"), 1))
+        p.setBrush(QColor("#22262E" if is_dark else "#FFFFFF"))
         p.drawRoundedRect(QRectF(center_x - 12, mid_y - 5, 24, 10), 5, 5)
 
         # Center triangle arrow: ▽ when expanded, △ when collapsed
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#4E759B"))
+        p.setBrush(QColor("#94A3B8" if is_dark else "#4E759B"))
         if not self._collapsed:
             poly = QPolygonF([
                 QPointF(center_x - 4, mid_y - 2),
@@ -1469,6 +1839,8 @@ class TagAndCaptionDock(QDockWidget):
     assign_face_requested = Signal(int, str) # (face_id, person_name)
     dismiss_face_requested = Signal(int)     # (face_id)
     remove_face_requested = Signal(int)      # (face_id)
+    person_locate_face_requested = Signal(int, str)  # (person_id, person_name)
+    person_link_face_requested = Signal(int, int)    # (person_id, face_id)
 
     # Signals for Fine-Tune adjustments
     fine_tune_exposure_changed = Signal(int, int, int, int, int)   # brightness, contrast, shadows, highlights, clarity
@@ -1486,6 +1858,12 @@ class TagAndCaptionDock(QDockWidget):
     fine_tune_slider_pressed = Signal()
     fine_tune_slider_released = Signal(str)
 
+    # Signals for Depth & Light adjustments
+    depth_bokeh_changed = Signal(int, int, int)              # blur, focal_plane, glow
+    depth_relight_changed = Signal(int, int, int, int)       # near, far, warmth_near, warmth_far
+    depth_haze_changed = Signal(int, int)                    # haze, haze_warmth
+    depth_reset_requested = Signal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Tag and caption", parent)
         self.setObjectName("TagAndCaptionDock")
@@ -1493,10 +1871,10 @@ class TagAndCaptionDock(QDockWidget):
             QDockWidget.DockWidgetClosable
         )
         self.setTitleBarWidget(QWidget(self))  # Hide default ugly dock titlebar
-        self.setMinimumWidth(160)
+        self.setMinimumWidth(220)
         self.setMaximumWidth(600)
 
-        self._current_mode: Literal["info", "fine_tune"] = "info"
+        self._current_mode: Literal["info", "fine_tune", "depth_light"] = "info"
         self._selected_ids: list[int] = []
         self._current_rating: int = 0
         self._current_flag: int = 0
@@ -1504,6 +1882,25 @@ class TagAndCaptionDock(QDockWidget):
         self._updating_ui: bool = False
         self._original_filename: str = ""
         self._current_date_taken_ts: int = 0
+
+        # Real-time event throttler/coalescer to maintain responsive 60 FPS interactions
+        self._dl_timer = QTimer(self)
+        self._dl_timer.setSingleShot(True)
+        self._dl_timer.setInterval(16)
+        self._dl_timer.timeout.connect(self._flush_depth_light_emits)
+        self._pending_dl_bokeh = False
+        self._pending_dl_relight = False
+        self._pending_dl_haze = False
+
+        self._ft_timer = QTimer(self)
+        self._ft_timer.setSingleShot(True)
+        self._ft_timer.setInterval(16)
+        self._ft_timer.timeout.connect(self._flush_fine_tune_emits)
+        self._pending_ft_exposure = False
+        self._pending_ft_color = False
+        self._pending_ft_optics = False
+        self._pending_ft_straighten = False
+        self._pending_ft_detail = False
 
         # Outer Container & Header Row with close '✕' button
         self.container = QFrame(self)
@@ -1552,21 +1949,23 @@ class TagAndCaptionDock(QDockWidget):
         h_layout.addWidget(self.btn_close_dock)
         outer_vbox.addWidget(header_row)
 
-        # Mode Stack: Page 0 = Information & Tags, Page 1 = Fine-Tune
+        # Mode Stack: Page 0 = Information & Tags, Page 1 = Fine-Tune, Page 2 = Depth & Light
         self.mode_stack = QStackedWidget(self.container)
 
         self.page_info = self._build_info_page()
         self.page_fine_tune = self._build_fine_tune_page()
+        self.page_depth_light = self._build_depth_light_page()
 
         self.mode_stack.addWidget(self.page_info)
         self.mode_stack.addWidget(self.page_fine_tune)
+        self.mode_stack.addWidget(self.page_depth_light)
         outer_vbox.addWidget(self.mode_stack, 1)
 
         self.setWidget(self.container)
         self._apply_stylesheet()
 
     def sizeHint(self) -> QSize:
-        return QSize(280, 600)
+        return QSize(295, 600) if getattr(self, "_current_mode", "info") in ("fine_tune", "depth_light") else QSize(280, 600)
 
     def minimumSizeHint(self) -> QSize:
         return QSize(220, 300)
@@ -1581,10 +1980,15 @@ class TagAndCaptionDock(QDockWidget):
             return
         super().keyPressEvent(event)
 
-    def set_mode(self, mode: Literal["info", "fine_tune"]) -> None:
-        """Switches between Tag & Caption / Information (Ctrl+I) and Fine-Tune (Ctrl+F)."""
+    def set_mode(self, mode: Literal["info", "fine_tune", "depth_light"]) -> None:
+        """Switches between Tag & Caption (Ctrl+I), Fine-Tune (Ctrl+F), and Depth & Light."""
         self._current_mode = mode
-        self.mode_stack.setCurrentIndex(1 if mode == "fine_tune" else 0)
+        if mode == "depth_light":
+            self.mode_stack.setCurrentIndex(2)
+        elif mode == "fine_tune":
+            self.mode_stack.setCurrentIndex(1)
+        else:
+            self.mode_stack.setCurrentIndex(0)
         self.show()
 
     def focus_filename_rename(self) -> None:
@@ -1730,6 +2134,7 @@ class TagAndCaptionDock(QDockWidget):
 
         # Form frame containing metadata when items ARE selected
         self.info_form_frame = QFrame(bottom_content)
+        self.info_form_frame.setObjectName("InfoFormFrame")
         form_vbox = QVBoxLayout(self.info_form_frame)
         form_vbox.setContentsMargins(0, 0, 0, 0)
         form_vbox.setSpacing(4)
@@ -1748,6 +2153,7 @@ class TagAndCaptionDock(QDockWidget):
         def make_val_lbl() -> QLabel:
             lbl = QLabel("-", self.info_form_frame)
             lbl.setStyleSheet("color: #1E395B; font-family: 'Segoe UI'; font-size: 8.5pt;")
+            lbl.setWordWrap(True)
             return lbl
 
         def make_field_lbl(text: str) -> QLabel:
@@ -2004,7 +2410,7 @@ class TagAndCaptionDock(QDockWidget):
             s.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
             s.valueChanged.connect(self._emit_fine_tune_exposure)
             s.sliderReleased.connect(
-                lambda: self.fine_tune_slider_released.emit("Adjust Exposure")
+                lambda: self._on_fine_tune_slider_released("Adjust Exposure")
             )
 
         vbox.addWidget(grp_exp)
@@ -2031,7 +2437,7 @@ class TagAndCaptionDock(QDockWidget):
             s.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
             s.valueChanged.connect(self._emit_fine_tune_color)
             s.sliderReleased.connect(
-                lambda: self.fine_tune_slider_released.emit("Adjust Color")
+                lambda: self._on_fine_tune_slider_released("Adjust Color")
             )
 
         vbox.addWidget(grp_color)
@@ -2066,7 +2472,7 @@ class TagAndCaptionDock(QDockWidget):
         self.ft_slider_straighten.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
         self.ft_slider_straighten.valueChanged.connect(self._emit_fine_tune_straighten)
         self.ft_slider_straighten.sliderReleased.connect(
-            lambda: self.fine_tune_slider_released.emit("Straighten Photo")
+            lambda: self._on_fine_tune_slider_released("Straighten Photo")
         )
         grp_str.vbox.addWidget(self._make_slider_header("Angle", self.ft_slider_straighten, unit="°"))
         grp_str.vbox.addWidget(self.ft_slider_straighten)
@@ -2085,13 +2491,13 @@ class TagAndCaptionDock(QDockWidget):
         self.ft_slider_sharpen.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
         self.ft_slider_sharpen.valueChanged.connect(self._emit_fine_tune_detail)
         self.ft_slider_sharpen.sliderReleased.connect(
-            lambda: self.fine_tune_slider_released.emit("Adjust Detail")
+            lambda: self._on_fine_tune_slider_released("Adjust Detail")
         )
 
         self.ft_slider_denoise.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
         self.ft_slider_denoise.valueChanged.connect(self._emit_fine_tune_detail)
         self.ft_slider_denoise.sliderReleased.connect(
-            lambda: self.fine_tune_slider_released.emit("Adjust Detail")
+            lambda: self._on_fine_tune_slider_released("Adjust Detail")
         )
 
         vbox.addWidget(grp_det)
@@ -2105,7 +2511,7 @@ class TagAndCaptionDock(QDockWidget):
         self.ft_slider_vignette.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
         self.ft_slider_vignette.valueChanged.connect(self._emit_fine_tune_optics)
         self.ft_slider_vignette.sliderReleased.connect(
-            lambda: self.fine_tune_slider_released.emit("Adjust Vignette")
+            lambda: self._on_fine_tune_slider_released("Adjust Vignette")
         )
 
         vbox.addWidget(grp_optics)
@@ -2194,8 +2600,10 @@ class TagAndCaptionDock(QDockWidget):
 
         val_lbl = QLabel("0" if not unit else f"0{unit}", container)
         val_lbl.setObjectName("val_lbl")
+        val_lbl.setMinimumWidth(32)
+        val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         val_lbl.setStyleSheet(
-            "color: #5A7A9E; font-family: 'Segoe UI'; font-size: 8pt; font-weight: 600; border: none; background: transparent;"
+            "color: #5A7A9E; font-family: 'Segoe UI'; font-size: 8pt; font-weight: 600; border: none; background: transparent; padding-right: 2px;"
         )
         h_layout.addWidget(val_lbl)
 
@@ -2254,6 +2662,148 @@ class TagAndCaptionDock(QDockWidget):
             self._updating_ui = False
         self.fine_tune_reset_requested.emit()
 
+    def _build_depth_light_page(self) -> QWidget:
+        scroll = _NoHorizontalScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        content = QWidget(scroll)
+        vbox = QVBoxLayout(content)
+        vbox.setContentsMargins(6, 2, 6, 8)
+        vbox.setSpacing(6)
+
+        # Group 1: Portrait Bokeh & Focus
+        grp_bokeh = _FineTuneGroup("Portrait Bokeh & Focus", content)
+        self.dl_slider_blur = self._make_aero_slider(0, 100, 0)
+        grp_bokeh.vbox.addWidget(self._make_slider_header("Bokeh blur strength", self.dl_slider_blur))
+        grp_bokeh.vbox.addWidget(self.dl_slider_blur)
+
+        self.dl_slider_focal = self._make_aero_slider(0, 100, 0)
+        grp_bokeh.vbox.addWidget(self._make_slider_header("Change focal depth", self.dl_slider_focal))
+        grp_bokeh.vbox.addWidget(self.dl_slider_focal)
+
+        self.dl_slider_glow = self._make_aero_slider(0, 100, 0)
+        grp_bokeh.vbox.addWidget(self._make_slider_header("Specular highlight bloom", self.dl_slider_glow))
+        grp_bokeh.vbox.addWidget(self.dl_slider_glow)
+
+        for s in (self.dl_slider_blur, self.dl_slider_focal, self.dl_slider_glow):
+            s.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+            s.valueChanged.connect(self._emit_depth_bokeh)
+            s.sliderReleased.connect(lambda: self._on_depth_slider_released("Adjust Bokeh & Focus"))
+
+        vbox.addWidget(grp_bokeh)
+
+        # Group 2: 3D Depth Relighting
+        grp_relight = _FineTuneGroup("3D Depth Relighting", content)
+        self.dl_slider_near = self._make_aero_slider(-100, 100, 0)
+        grp_relight.vbox.addWidget(self._make_slider_header("Near subject light", self.dl_slider_near))
+        grp_relight.vbox.addWidget(self.dl_slider_near)
+
+        self.dl_slider_far = self._make_aero_slider(-100, 100, 0)
+        grp_relight.vbox.addWidget(self._make_slider_header("Background light", self.dl_slider_far))
+        grp_relight.vbox.addWidget(self.dl_slider_far)
+
+        self.dl_slider_warmth_near = self._make_aero_slider(-100, 100, 0)
+        grp_relight.vbox.addWidget(self._make_slider_header("Near subject warmth", self.dl_slider_warmth_near))
+        grp_relight.vbox.addWidget(self.dl_slider_warmth_near)
+
+        self.dl_slider_warmth_far = self._make_aero_slider(-100, 100, 0)
+        grp_relight.vbox.addWidget(self._make_slider_header("Background warmth", self.dl_slider_warmth_far))
+        grp_relight.vbox.addWidget(self.dl_slider_warmth_far)
+
+        for s in (self.dl_slider_near, self.dl_slider_far, self.dl_slider_warmth_near, self.dl_slider_warmth_far):
+            s.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+            s.valueChanged.connect(self._emit_depth_relight)
+            s.sliderReleased.connect(lambda: self._on_depth_slider_released("3D Depth Relighting"))
+
+        vbox.addWidget(grp_relight)
+
+        # Group 3: Atmospheric Depth Haze
+        grp_haze = _FineTuneGroup("Atmospheric Depth Haze", content)
+        self.dl_slider_haze = self._make_aero_slider(0, 100, 0)
+        grp_haze.vbox.addWidget(self._make_slider_header("Atmospheric haze / mist", self.dl_slider_haze))
+        grp_haze.vbox.addWidget(self.dl_slider_haze)
+
+        self.dl_slider_haze_warmth = self._make_aero_slider(-100, 100, 0)
+        grp_haze.vbox.addWidget(self._make_slider_header("Haze warmth (Blue <-> Amber)", self.dl_slider_haze_warmth))
+        grp_haze.vbox.addWidget(self.dl_slider_haze_warmth)
+
+        for s in (self.dl_slider_haze, self.dl_slider_haze_warmth):
+            s.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+            s.valueChanged.connect(self._emit_depth_haze)
+            s.sliderReleased.connect(lambda: self._on_depth_slider_released("Atmospheric Depth Haze"))
+
+        vbox.addWidget(grp_haze)
+
+        # Bottom Actions: Hold to Compare & Reset stacked cleanly to prevent horizontal overflow
+        action_bar = QVBoxLayout()
+        action_bar.setSpacing(5)
+        action_bar.setContentsMargins(0, 4, 0, 4)
+
+        self.btn_dl_hold_compare = QPushButton("Hold to Compare (Original)", content)
+        self.btn_dl_hold_compare.setFixedHeight(26)
+        self.btn_dl_hold_compare.setCursor(Qt.PointingHandCursor)
+        self.btn_dl_hold_compare.setToolTip("Click and hold to preview original unedited photo (\\)")
+        self.btn_dl_hold_compare.setStyleSheet(
+            """
+            QPushButton {
+                background: #F7FAFD;
+                border: 1px solid #B5D2ED;
+                border-radius: 3px;
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 8pt;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #E4F0FC;
+            }
+            QPushButton:pressed {
+                background: #CCE4F7;
+                border-color: #3399FF;
+            }
+            """
+        )
+        self.btn_dl_hold_compare.pressed.connect(self.compare_started.emit)
+        self.btn_dl_hold_compare.released.connect(self.compare_ended.emit)
+        action_bar.addWidget(self.btn_dl_hold_compare)
+
+        self.btn_dl_reset = QPushButton("Reset to Default", content)
+        self.btn_dl_reset.setFixedHeight(26)
+        self.btn_dl_reset.setCursor(Qt.PointingHandCursor)
+        self.btn_dl_reset.setToolTip("Reset all depth, blur, relight, and haze adjustments to default")
+        self.btn_dl_reset.setStyleSheet(
+            """
+            QPushButton {
+                background: #F7FAFD;
+                border: 1px solid #B5D2ED;
+                border-radius: 3px;
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 8pt;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #FFF1F0;
+                border-color: #FFA39E;
+                color: #CF1322;
+            }
+            QPushButton:pressed {
+                background: #FFCCC7;
+                border-color: #F5222D;
+            }
+            """
+        )
+        self.btn_dl_reset.clicked.connect(self.depth_reset_requested.emit)
+        action_bar.addWidget(self.btn_dl_reset)
+
+        vbox.addLayout(action_bar)
+        vbox.addStretch(1)
+
+        scroll.setWidget(content)
+        return scroll
+
     @staticmethod
     def _make_aero_slider(min_val: int, max_val: int, default_val: int) -> _AeroFineTuneSlider:
         return _AeroFineTuneSlider(min_val, max_val, default_val)
@@ -2261,52 +2811,166 @@ class TagAndCaptionDock(QDockWidget):
     def _emit_fine_tune_exposure(self) -> None:
         if self._updating_ui:
             return
-        self.fine_tune_exposure_changed.emit(
-            self.ft_slider_brightness.value(),
-            self.ft_slider_contrast.value(),
-            self.ft_slider_shadows.value(),
-            self.ft_slider_highlights.value(),
-            self.ft_slider_clarity.value(),
-        )
+        if not getattr(self, "_is_sliding_ft", False):
+            self._is_sliding_ft = True
+            self.fine_tune_slider_pressed.emit()
+        self._pending_ft_exposure = True
+        if not self._ft_timer.isActive():
+            self._ft_timer.start()
 
     def _emit_fine_tune_color(self) -> None:
         if self._updating_ui:
             return
-        self.fine_tune_color_changed.emit(
-            self.ft_slider_temp.value(),
-            self.ft_slider_tint.value(),
-            self.ft_slider_sat.value(),
-            self.ft_slider_dehaze.value(),
-        )
+        if not getattr(self, "_is_sliding_ft", False):
+            self._is_sliding_ft = True
+            self.fine_tune_slider_pressed.emit()
+        self._pending_ft_color = True
+        if not self._ft_timer.isActive():
+            self._ft_timer.start()
 
     def _emit_fine_tune_optics(self) -> None:
         if self._updating_ui:
             return
-        self.fine_tune_optics_changed.emit(self.ft_slider_vignette.value())
+        if not getattr(self, "_is_sliding_ft", False):
+            self._is_sliding_ft = True
+            self.fine_tune_slider_pressed.emit()
+        self._pending_ft_optics = True
+        if not self._ft_timer.isActive():
+            self._ft_timer.start()
 
     def _emit_fine_tune_straighten(self) -> None:
         if self._updating_ui:
             return
-        self.fine_tune_straighten_changed.emit(float(self.ft_slider_straighten.value()))
+        if not getattr(self, "_is_sliding_ft", False):
+            self._is_sliding_ft = True
+            self.fine_tune_slider_pressed.emit()
+        self._pending_ft_straighten = True
+        if not self._ft_timer.isActive():
+            self._ft_timer.start()
 
     def _emit_fine_tune_detail(self) -> None:
         if self._updating_ui:
             return
-        self.fine_tune_detail_changed.emit(
-            self.ft_slider_sharpen.value(),
-            self.ft_slider_denoise.value(),
-        )
+        if not getattr(self, "_is_sliding_ft", False):
+            self._is_sliding_ft = True
+            self.fine_tune_slider_pressed.emit()
+        self._pending_ft_detail = True
+        if not self._ft_timer.isActive():
+            self._ft_timer.start()
+
+    def _flush_fine_tune_emits(self) -> None:
+        if self._updating_ui:
+            return
+        if self._pending_ft_exposure:
+            self._pending_ft_exposure = False
+            self.fine_tune_exposure_changed.emit(
+                self.ft_slider_brightness.value(),
+                self.ft_slider_contrast.value(),
+                self.ft_slider_shadows.value(),
+                self.ft_slider_highlights.value(),
+                self.ft_slider_clarity.value(),
+            )
+        if self._pending_ft_color:
+            self._pending_ft_color = False
+            self.fine_tune_color_changed.emit(
+                self.ft_slider_temp.value(),
+                self.ft_slider_tint.value(),
+                self.ft_slider_sat.value(),
+                self.ft_slider_dehaze.value(),
+            )
+        if self._pending_ft_optics:
+            self._pending_ft_optics = False
+            self.fine_tune_optics_changed.emit(self.ft_slider_vignette.value())
+        if self._pending_ft_straighten:
+            self._pending_ft_straighten = False
+            self.fine_tune_straighten_changed.emit(float(self.ft_slider_straighten.value()))
+        if self._pending_ft_detail:
+            self._pending_ft_detail = False
+            self.fine_tune_detail_changed.emit(
+                self.ft_slider_sharpen.value(),
+                self.ft_slider_denoise.value(),
+            )
+
+    def _on_fine_tune_slider_released(self, action_name: str) -> None:
+        self._is_sliding_ft = False
+        if self._ft_timer.isActive():
+            self._ft_timer.stop()
+        self._flush_fine_tune_emits()
+        self.fine_tune_slider_released.emit(action_name)
+
+    def _emit_depth_bokeh(self) -> None:
+        if self._updating_ui:
+            return
+        if not getattr(self, "_is_sliding_depth", False):
+            self._is_sliding_depth = True
+            self.fine_tune_slider_pressed.emit()
+        self._pending_dl_bokeh = True
+        if not self._dl_timer.isActive():
+            self._dl_timer.start()
+
+    def _emit_depth_relight(self) -> None:
+        if self._updating_ui:
+            return
+        if not getattr(self, "_is_sliding_depth", False):
+            self._is_sliding_depth = True
+            self.fine_tune_slider_pressed.emit()
+        self._pending_dl_relight = True
+        if not self._dl_timer.isActive():
+            self._dl_timer.start()
+
+    def _emit_depth_haze(self) -> None:
+        if self._updating_ui:
+            return
+        if not getattr(self, "_is_sliding_depth", False):
+            self._is_sliding_depth = True
+            self.fine_tune_slider_pressed.emit()
+        self._pending_dl_haze = True
+        if not self._dl_timer.isActive():
+            self._dl_timer.start()
+
+    def _flush_depth_light_emits(self) -> None:
+        if self._updating_ui:
+            return
+        if self._pending_dl_bokeh:
+            self._pending_dl_bokeh = False
+            self.depth_bokeh_changed.emit(
+                self.dl_slider_blur.value(),
+                self.dl_slider_focal.value(),
+                self.dl_slider_glow.value(),
+            )
+        if self._pending_dl_relight:
+            self._pending_dl_relight = False
+            self.depth_relight_changed.emit(
+                self.dl_slider_near.value(),
+                self.dl_slider_far.value(),
+                self.dl_slider_warmth_near.value(),
+                self.dl_slider_warmth_far.value(),
+            )
+        if self._pending_dl_haze:
+            self._pending_dl_haze = False
+            self.depth_haze_changed.emit(
+                self.dl_slider_haze.value(),
+                self.dl_slider_haze_warmth.value(),
+            )
+
+    def _on_depth_slider_released(self, action_name: str) -> None:
+        self._is_sliding_depth = False
+        if self._dl_timer.isActive():
+            self._dl_timer.stop()
+        self._flush_depth_light_emits()
+        self.fine_tune_slider_released.emit(action_name)
 
     def set_denoise_analyzed_value(self, val: float) -> None:
         """Sets the noise reduction slider to the calculated noise analysis value."""
         self.ft_slider_denoise.setValue(int(round(val)))
 
     def sync_recipe(self, recipe: Any) -> None:
-        """Synchronizes fine-tune sliders with the current PhotoAdjustmentRecipe without emitting signals."""
+        """Synchronizes fine-tune and depth & light sliders with current PhotoAdjustmentRecipe without emitting signals."""
         self._updating_ui = True
         try:
             if recipe is None:
                 b = c = s = h = cl = t = ti = sat = dh = str_deg = sh = dn = vig = 0
+                d_blur = d_focal = d_glow = d_near = d_far = d_wn = d_wf = d_haze = d_hw = 0
             else:
                 b = int(round(getattr(recipe, "brightness", 0.0)))
                 c = int(round(getattr(recipe, "contrast", 0.0)))
@@ -2322,19 +2986,41 @@ class TagAndCaptionDock(QDockWidget):
                 dn = int(round(getattr(recipe, "denoise", 0.0)))
                 vig = int(round(getattr(recipe, "vignette", 0.0)))
 
-            self.ft_slider_brightness.setValue(b)
-            self.ft_slider_contrast.setValue(c)
-            self.ft_slider_shadows.setValue(s)
-            self.ft_slider_highlights.setValue(h)
-            self.ft_slider_clarity.setValue(cl)
-            self.ft_slider_temp.setValue(t)
-            self.ft_slider_tint.setValue(ti)
-            self.ft_slider_sat.setValue(sat)
-            self.ft_slider_dehaze.setValue(dh)
-            self.ft_slider_straighten.setValue(str_deg)
-            self.ft_slider_sharpen.setValue(sh)
-            self.ft_slider_denoise.setValue(dn)
-            self.ft_slider_vignette.setValue(vig)
+                d_blur = int(round(getattr(recipe, "depth_blur", 0.0)))
+                d_focal = int(round(getattr(recipe, "focal_plane", 0.0)))
+                d_glow = int(round(getattr(recipe, "bokeh_glow", 0.0)))
+                d_near = int(round(getattr(recipe, "relight_near", 0.0)))
+                d_far = int(round(getattr(recipe, "relight_far", 0.0)))
+                d_wn = int(round(getattr(recipe, "warmth_near", 0.0)))
+                d_wf = int(round(getattr(recipe, "warmth_far", 0.0)))
+                d_haze = int(round(getattr(recipe, "depth_haze", 0.0)))
+                d_hw = int(round(getattr(recipe, "depth_haze_warmth", 0.0)))
+
+            if hasattr(self, "ft_slider_brightness"):
+                self.ft_slider_brightness.setValue(b)
+                self.ft_slider_contrast.setValue(c)
+                self.ft_slider_shadows.setValue(s)
+                self.ft_slider_highlights.setValue(h)
+                self.ft_slider_clarity.setValue(cl)
+                self.ft_slider_temp.setValue(t)
+                self.ft_slider_tint.setValue(ti)
+                self.ft_slider_sat.setValue(sat)
+                self.ft_slider_dehaze.setValue(dh)
+                self.ft_slider_straighten.setValue(str_deg)
+                self.ft_slider_sharpen.setValue(sh)
+                self.ft_slider_denoise.setValue(dn)
+                self.ft_slider_vignette.setValue(vig)
+
+            if hasattr(self, "dl_slider_blur"):
+                self.dl_slider_blur.setValue(d_blur)
+                self.dl_slider_focal.setValue(d_focal)
+                self.dl_slider_glow.setValue(d_glow)
+                self.dl_slider_near.setValue(d_near)
+                self.dl_slider_far.setValue(d_far)
+                self.dl_slider_warmth_near.setValue(d_wn)
+                self.dl_slider_warmth_far.setValue(d_wf)
+                self.dl_slider_haze.setValue(d_haze)
+                self.dl_slider_haze_warmth.setValue(d_hw)
         finally:
             self._updating_ui = False
 
@@ -2424,6 +3110,13 @@ class TagAndCaptionDock(QDockWidget):
 
             # Face regions & people tags (confirmed, unconfirmed suggestions, unknown detected faces)
             face_regions = summary.get("face_regions") or summary.get("people", [])
+            boxless_names = [
+                str(p.get("person_name") or p.get("name") or "").strip()
+                for p in face_regions
+                if int(p.get("state", 1)) == 1
+                and (float(p.get("rect_w") or 0.0) <= 0.005 or float(p.get("rect_h") or 0.0) <= 0.005)
+                and (p.get("person_name") or p.get("name"))
+            ]
             for p in face_regions:
                 pname = str(p.get("person_name") or p.get("name") or "").strip()
                 fid = int(p.get("face_id") or p.get("region_id") or p.get("id") or 0)
@@ -2438,29 +3131,44 @@ class TagAndCaptionDock(QDockWidget):
                         face_id=fid,
                         icon_pixmap=pix,
                         completer=self._people_completer,
+                        unlinked_candidates=boxless_names,
                         parent=self.people_chips_container,
                     )
+                    if getattr(self, "_is_dark", False):
+                        unknown_chip.set_dark_mode(True)
                     unknown_chip.assign_requested.connect(self.assign_face_requested.emit)
                     unknown_chip.dismiss_requested.connect(self.dismiss_face_requested.emit)
                     unknown_chip.hovered_changed.connect(
                         lambda fid_val, hov: self.face_region_hovered.emit(fid_val if hov else None)
                     )
+                    unknown_chip.show()
                     self.people_chips_layout.addWidget(unknown_chip)
                 else:
                     # Confirmed person (state == 1) or unconfirmed suggestion (state == 0 with person_name)
+                    is_boxless_val = bool(st == 1 and (float(p.get("rect_w") or 0.0) <= 0.005 or float(p.get("rect_h") or 0.0) <= 0.005))
                     chip = _PersonTagCardWidget(
                         pid or fid,
                         pname,
                         icon_pixmap=pix,
                         is_unconfirmed=bool(st == 0 or p.get("is_unconfirmed")),
                         face_id=fid,
+                        is_boxless=is_boxless_val,
                         parent=self.people_chips_container,
                     )
+                    detected_unassigned = [
+                        reg for reg in face_regions
+                        if int(reg.get("state", 1)) == 0 and not (reg.get("person_name") or reg.get("name"))
+                    ]
+                    chip.detected_unassigned_faces = detected_unassigned
+                    if getattr(self, "_is_dark", False):
+                        chip.set_dark_mode(True)
+                    chip.locate_face_clicked.connect(self.person_locate_face_requested.emit)
+                    chip.link_face_clicked.connect(self.person_link_face_requested.emit)
                     chip.remove_clicked.connect(lambda pid_val, fid_val=fid: (
                         self.remove_face_requested.emit(fid_val) if fid_val else self.person_removed.emit(pid_val)
                     ))
                     chip.search_clicked.connect(self.person_search_requested.emit)
-                    chip.view_suggestions_clicked.connect(self.person_view_suggestions_requested.emit)
+                    chip.view_suggestions_clicked.connect(self.person_view_suggestions_clicked_slot if hasattr(self, "person_view_suggestions_clicked_slot") else self.person_view_suggestions_requested.emit)
                     chip.tag_as_other_clicked.connect(self.person_tag_as_other_requested.emit)
                     chip.set_display_pic_clicked.connect(self.person_set_display_pic_requested.emit)
                     chip.merge_clicked.connect(self.person_merge_requested.emit)
@@ -2473,6 +3181,7 @@ class TagAndCaptionDock(QDockWidget):
                     chip.hovered_changed.connect(
                         lambda pid_val, hov: self.person_hovered.emit(pid_val, hov)
                     )
+                    chip.show()
                     self.people_chips_layout.addWidget(chip)
 
             # Display-level tag deduplication: if both 'Subject/Occasions/Christmas' and 'Christmas' exist, keep only the hierarchical one
@@ -2506,9 +3215,12 @@ class TagAndCaptionDock(QDockWidget):
                     tooltip=str(t.get("full_path", t["name"])),
                     parent=self.tags_chips_container,
                 )
+                if getattr(self, "_is_dark", False):
+                    chip.set_dark_mode(True)
                 chip.remove_clicked.connect(self.tag_removed.emit)
                 chip.tag_clicked.connect(lambda tid, _name: self.tag_filter_requested.emit(tid))
                 chip.assign_to_all_clicked.connect(self.tag_assign_to_all_requested.emit)
+                chip.show()
                 self.tags_chips_layout.addWidget(chip)
 
             if count == 1:
@@ -2780,7 +3492,156 @@ class TagAndCaptionDock(QDockWidget):
         self.txt_add_person.setText(person_name)
         self._on_add_person_return()
 
+    def set_dark_mode(self, is_dark: bool) -> None:
+        """Applies Dark Studio or standard light styling to the Right Tag & Caption / Fine-Tune Dock."""
+        self._is_dark = bool(is_dark)
+        self._apply_stylesheet()
+
+        # Update splitter handle
+        if hasattr(self, "info_splitter"):
+            for i in range(self.info_splitter.count()):
+                h = self.info_splitter.handle(i)
+                if h is not None:
+                    h._is_dark = self._is_dark
+                    h.update()
+
+        # Update click-to-edit stacks and inputs
+        for st in (
+            getattr(self, "stack_filename", None),
+            getattr(self, "stack_date_time", None),
+            getattr(self, "stack_author", None),
+        ):
+            if st is not None:
+                st.set_dark_mode(self._is_dark)
+
+        if hasattr(self, "lbl_view_items_count"):
+            self.lbl_view_items_count.setStyleSheet(
+                f"color: {'#94A3B8' if is_dark else '#55687C'}; font-family: 'Segoe UI'; font-size: 8.5pt; padding-top: 2px;"
+            )
+        if hasattr(self, "lbl_selection_header"):
+            self.lbl_selection_header.setStyleSheet(
+                f"color: {'#94A3B8' if is_dark else '#7B8B9B'}; font-family: 'Segoe UI'; font-size: 8.5pt;"
+            )
+
+        # Update form labels inside info_form_frame only if visible
+        if hasattr(self, "info_form_frame") and self.info_form_frame.isVisible() and hasattr(self, "_info_form"):
+            form = self._info_form
+            for row in range(form.rowCount()):
+                lbl_item = form.itemAt(row, QFormLayout.LabelRole)
+                if lbl_item and isinstance(lbl_item.widget(), QLabel):
+                    lbl_item.widget().setStyleSheet(
+                        f"color: {'#94A3B8' if is_dark else '#55687C'}; font-family: 'Segoe UI'; font-size: 8.5pt;"
+                    )
+                fld_item = form.itemAt(row, QFormLayout.FieldRole)
+                if fld_item and isinstance(fld_item.widget(), QLabel):
+                    fld_item.widget().setStyleSheet(
+                        f"color: {'#E2E8F0' if is_dark else '#1E395B'}; font-family: 'Segoe UI'; font-size: 8.5pt;"
+                    )
+
+        # Update existing people/tag chips only if visible
+        if hasattr(self, "people_chips_layout") and self.isVisible():
+            for i in range(self.people_chips_layout.count()):
+                w = self.people_chips_layout.itemAt(i).widget()
+                if w and hasattr(w, "set_dark_mode"):
+                    w.set_dark_mode(self._is_dark)
+        if hasattr(self, "tags_chips_layout") and self.isVisible():
+            for i in range(self.tags_chips_layout.count()):
+                w = self.tags_chips_layout.itemAt(i).widget()
+                if w and hasattr(w, "set_dark_mode"):
+                    w.set_dark_mode(self._is_dark)
+
     def _apply_stylesheet(self) -> None:
+        is_dark = getattr(self, "_is_dark", False)
+        if is_dark:
+            self.container.setStyleSheet(
+                """
+                QFrame#RightSidebarContainer {
+                    background-color: #1B1E24;
+                    border-left: 1px solid #2D323B;
+                }
+                """
+            )
+            if hasattr(self, "page_info"):
+                self.page_info.setStyleSheet("background-color: #1B1E24;")
+            if hasattr(self, "info_splitter"):
+                self.info_splitter.setStyleSheet("background-color: #1B1E24;")
+                for i in range(self.info_splitter.count()):
+                    w = self.info_splitter.widget(i)
+                    if isinstance(w, QScrollArea):
+                        w.setStyleSheet("background-color: #1B1E24; border: none;")
+                        if w.widget():
+                            w.widget().setStyleSheet("background-color: #1B1E24;")
+            self.setStyleSheet(
+                """
+                QDockWidget#TagAndCaptionDock {
+                    background: #1B1E24;
+                    background-color: #1B1E24;
+                }
+                QFrame#RightSidebarContainer {
+                    background-color: #1B1E24;
+                    border-left: 1px solid #2D323B;
+                }
+                QWidget#InfoPage {
+                    background-color: #1B1E24;
+                }
+                QSplitter#InfoSplitter {
+                    background-color: #1B1E24;
+                }
+                QScrollArea {
+                    background-color: #1B1E24;
+                    border: none;
+                }
+                QScrollArea > QWidget > QWidget {
+                    background-color: #1B1E24;
+                }
+                QFrame#FineTuneGroup {
+                    background: #22262E;
+                    border: 1px solid #2D323B;
+                    border-radius: 4px;
+                }
+                QLabel#SectionTitle {
+                    color: #60A5FA;
+                    font-family: 'Segoe UI';
+                    font-size: 9.5pt;
+                    font-weight: 600;
+                    border: none;
+                    background: transparent;
+                    margin-top: 6px;
+                }
+                QLineEdit#InlineEdit {
+                    background: #14171B;
+                    border: 1px solid #333A45;
+                    border-radius: 2px;
+                    padding: 2px 6px;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                    color: #E2E8F0;
+                }
+                QLineEdit#InlineEdit:focus {
+                    border: 1px solid #3B82F6;
+                }
+                """
+            )
+            return
+
+        self.container.setStyleSheet(
+            """
+            QFrame#RightSidebarContainer {
+                background-color: #FFFFFF;
+                border-left: 1px solid #D2DFEE;
+            }
+            """
+        )
+        if hasattr(self, "page_info"):
+            self.page_info.setStyleSheet("background-color: #FFFFFF;")
+        if hasattr(self, "info_splitter"):
+            self.info_splitter.setStyleSheet("background-color: #FFFFFF;")
+            for i in range(self.info_splitter.count()):
+                w = self.info_splitter.widget(i)
+                if isinstance(w, QScrollArea):
+                    w.setStyleSheet("background-color: #FFFFFF; border: none;")
+                    if w.widget():
+                        w.widget().setStyleSheet("background-color: #FFFFFF;")
         self.setStyleSheet(
             """
             QDockWidget#TagAndCaptionDock {

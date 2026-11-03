@@ -15,25 +15,31 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
-from PySide6.QtCore import QByteArray, QMimeData, QPoint, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QByteArray, QMimeData, QPoint, QSettings, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
     QBrush,
     QColor,
     QCursor,
+    QDrag,
     QDragEnterEvent,
     QDragMoveEvent,
     QDropEvent,
     QFont,
+    QFontMetrics,
     QGuiApplication,
     QIcon,
+    QMouseEvent,
     QPainter,
     QPen,
+    QPixmap,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDockWidget,
     QFrame,
     QHBoxLayout,
@@ -50,6 +56,7 @@ from PySide6.QtWidgets import (
 
 from legacy_reference.imgBrowserv13 import FavouritesMenu
 from src.db.repository import ArrangeMode, CatalogRepository, FilterQuerySpec
+from src.ui.dialogs import TagMergeConfirmDialog
 from src.ui.ribbon_toolbar import make_person_avatar_pixmap, make_wlpg_icon
 
 _NODE_TYPE_ROLE = Qt.UserRole + 10
@@ -60,9 +67,11 @@ _OLD_PATH_ROLE = Qt.UserRole + 14
 
 
 class _LeftNavTree(QTreeWidget):
-    """Custom tree widget supporting Left and Right click drag-and-drop file moves/copies onto folder nodes."""
+    """Custom tree widget supporting Left and Right click drag-and-drop file moves/copies onto folder nodes,
+    and hierarchical drag-and-drop of descriptive tags onto other tags or root."""
 
     files_dropped = Signal(int, str, list, bool)  # target_folder_id, target_folder_path, [file_path_str], is_copy
+    tag_dropped = Signal(int, object)  # source_tag_id, target_tag_id (int | None)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -72,6 +81,8 @@ class _LeftNavTree(QTreeWidget):
         self._drop_hover_item: QTreeWidgetItem | None = None
         self._last_drag_buttons: Qt.MouseButtons = Qt.NoButton
         self._auto_right_drop_action: str | None = None  # For headless testing ("move" | "copy" | "cancel")
+        self._drag_start_pos: QPoint | None = None
+        self._drag_start_item: QTreeWidgetItem | None = None
 
         # Non-interfering child badge inside viewport (never steals WindowFromPoint during Windows OLE DoDragDrop)
         self._drag_badge = QLabel(self.viewport())
@@ -95,6 +106,97 @@ class _LeftNavTree(QTreeWidget):
         self._drag_expand_timer.setSingleShot(True)
         self._drag_expand_timer.setInterval(450)
         self._drag_expand_timer.timeout.connect(self._on_drag_expand_timeout)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton:
+            pos = event.position().toPoint()
+            item = self.itemAt(pos)
+            if item is None:
+                item = self.itemAt(QPoint(max(24, self.viewport().width() // 2), pos.y()))
+            if item is not None and item.data(0, _NODE_TYPE_ROLE) == "tag":
+                self._drag_start_pos = pos
+                self._drag_start_item = item
+            else:
+                self._drag_start_pos = None
+                self._drag_start_item = None
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._drag_start_item is not None and self._drag_start_pos is not None:
+            dist = (event.position().toPoint() - self._drag_start_pos).manhattanLength()
+            if dist >= QApplication.startDragDistance():
+                item = self._drag_start_item
+                self._drag_start_item = None
+                self._drag_start_pos = None
+                self._start_tag_drag(item)
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self._drag_start_item = None
+        self._drag_start_pos = None
+        super().mouseReleaseEvent(event)
+
+    def _start_tag_drag(self, item: QTreeWidgetItem) -> None:
+        tid = item.data(0, _NODE_PAYLOAD_ROLE)
+        if tid is None:
+            return
+        tname = item.data(0, _OLD_NAME_ROLE) or item.text(0).split(" (")[0]
+
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData("application/x-photogallery-tag-id", QByteArray(str(tid).encode()))
+        mime.setText(tname)
+        drag.setMimeData(mime)
+
+        pix = self._create_tag_drag_pixmap(tname)
+        drag.setPixmap(pix)
+        drag.setHotSpot(QPoint(12, 12))
+
+        drag.exec(Qt.MoveAction, Qt.MoveAction)
+
+    def _create_tag_drag_pixmap(self, tag_name: str) -> QPixmap:
+        font = QFont("Segoe UI", 9)
+        fm = QFontMetrics(font)
+        text_w = fm.horizontalAdvance(tag_name)
+        h = 24
+        w = 26 + text_w + 10
+        pix = QPixmap(w, h)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setBrush(QColor(255, 255, 255, 235))
+        p.setPen(QPen(QColor("#A0B8D0"), 1))
+        p.drawRoundedRect(0, 0, w - 1, h - 1, 3, 3)
+
+        tag_icon = make_wlpg_icon("tag", 14)
+        if not tag_icon.isNull():
+            p.drawPixmap(5, 5, tag_icon.pixmap(14, 14))
+        p.setFont(font)
+        p.setPen(QColor("#000000"))
+        p.drawText(24, 16, tag_name)
+        p.end()
+        return pix
+
+    def _is_valid_tag_drop_target(self, target_item: QTreeWidgetItem, source_tag_id: int) -> bool:
+        ntype = target_item.data(0, _NODE_TYPE_ROLE)
+        if ntype not in ("tag", "section_tags"):
+            return False
+
+        if ntype == "tag":
+            target_id = target_item.data(0, _NODE_PAYLOAD_ROLE)
+            # Cannot drop onto itself
+            if target_id == source_tag_id:
+                return False
+
+            # Cannot drop onto a descendant of source tag
+            cur = target_item.parent()
+            while cur is not None:
+                if cur.data(0, _NODE_TYPE_ROLE) == "tag" and cur.data(0, _NODE_PAYLOAD_ROLE) == source_tag_id:
+                    return False
+                cur = cur.parent()
+
+        return True
 
     def _on_drag_expand_timeout(self) -> None:
         if (
@@ -136,6 +238,10 @@ class _LeftNavTree(QTreeWidget):
                 self._drop_hover_item = None
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if event.mimeData().hasFormat("application/x-photogallery-tag-id"):
+            event.setDropAction(Qt.MoveAction)
+            event.acceptProposedAction()
+            return
         if event.mimeData().hasUrls():
             if event.buttons() != Qt.NoButton:
                 self._last_drag_buttons = event.buttons()
@@ -150,6 +256,56 @@ class _LeftNavTree(QTreeWidget):
         event.ignore()
 
     def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        if event.mimeData().hasFormat("application/x-photogallery-tag-id"):
+            pos = event.position().toPoint()
+            target_item = self.itemAt(pos)
+            if target_item is None:
+                target_item = self.itemAt(QPoint(max(24, self.viewport().width() // 2), pos.y()))
+
+            source_id_bytes = event.mimeData().data("application/x-photogallery-tag-id")
+            source_tag_id = int(source_id_bytes.data().decode()) if source_id_bytes else -1
+
+            if target_item is not None and self._is_valid_tag_drop_target(target_item, source_tag_id):
+                if self._drop_hover_item is not target_item:
+                    self._drop_hover_item = target_item
+                    prev_block = self.blockSignals(True)
+                    try:
+                        self.setCurrentItem(target_item)
+                    finally:
+                        self.blockSignals(prev_block)
+                    self.viewport().update()
+                    if target_item.childCount() > 0 and not target_item.isExpanded():
+                        self._drag_expand_timer.start()
+                    else:
+                        self._drag_expand_timer.stop()
+
+                ntype = target_item.data(0, _NODE_TYPE_ROLE)
+                if ntype == "section_tags":
+                    target_name = "Descriptive tags"
+                else:
+                    target_name = target_item.data(0, _OLD_NAME_ROLE) or target_item.text(0).split(" (")[0]
+
+                self._drag_badge.setText(f"➔ Move to {target_name}")
+                self._drag_badge.adjustSize()
+                bx = min(
+                    max(4, pos.x() + 14),
+                    max(4, self.viewport().width() - self._drag_badge.width() - 4),
+                )
+                by = max(2, pos.y() + 16)
+                if by + self._drag_badge.height() > self.viewport().height() - 2:
+                    by = max(2, pos.y() - self._drag_badge.height() - 6)
+                self._drag_badge.move(bx, by)
+                self._drag_badge.show()
+                self._drag_badge.raise_()
+
+                event.setDropAction(Qt.MoveAction)
+                event.acceptProposedAction()
+                return
+            else:
+                self._clear_drag_hover()
+                event.ignore()
+                return
+
         if event.mimeData().hasUrls():
             if event.buttons() != Qt.NoButton:
                 self._last_drag_buttons = event.buttons()
@@ -204,10 +360,28 @@ class _LeftNavTree(QTreeWidget):
 
     def dropEvent(self, event: QDropEvent) -> None:
         pos = event.position().toPoint()
-        item = self._folder_item_at(pos) or self._drop_hover_item
+        item = self.itemAt(pos)
+        if item is None:
+            item = self.itemAt(QPoint(max(24, self.viewport().width() // 2), pos.y()))
+        target_item = item or self._drop_hover_item
         self._clear_drag_hover()
 
-        if event.mimeData().hasUrls() and item is not None and item.data(0, _NODE_TYPE_ROLE) == "folder":
+        if event.mimeData().hasFormat("application/x-photogallery-tag-id") and target_item is not None:
+            source_id_bytes = event.mimeData().data("application/x-photogallery-tag-id")
+            source_tag_id = int(source_id_bytes.data().decode()) if source_id_bytes else -1
+            if self._is_valid_tag_drop_target(target_item, source_tag_id):
+                ntype = target_item.data(0, _NODE_TYPE_ROLE)
+                target_tag_id = (
+                    int(target_item.data(0, _NODE_PAYLOAD_ROLE))
+                    if ntype == "tag"
+                    else None
+                )
+                self.tag_dropped.emit(source_tag_id, target_tag_id)
+                event.setDropAction(Qt.MoveAction)
+                event.acceptProposedAction()
+                return
+
+        if event.mimeData().hasUrls() and target_item is not None and target_item.data(0, _NODE_TYPE_ROLE) == "folder":
             fid = item.data(0, _NODE_PAYLOAD_ROLE)
             fpath = item.data(0, _OLD_PATH_ROLE) or item.toolTip(0)
             file_paths = [
@@ -294,6 +468,7 @@ class LeftNavigationDock(QDockWidget):
     favourite_path_selected = Signal(str)
     files_dropped_on_folder = Signal(int, str, list, bool)
     people_directory_requested = Signal()
+    tag_hierarchy_changed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Navigation", parent)
@@ -362,6 +537,7 @@ class LeftNavigationDock(QDockWidget):
         self.tree.itemChanged.connect(self._on_item_changed)
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
         self.tree.files_dropped.connect(self.files_dropped_on_folder)
+        self.tree.tag_dropped.connect(self._on_tag_dropped)
         layout.addWidget(self.tree, 1)
 
         # Clean bottom footer with only the Subfolders toggle (matching WLPG style)
@@ -424,6 +600,60 @@ class LeftNavigationDock(QDockWidget):
             }
             """
         )
+
+    def set_dark_mode(self, is_dark: bool) -> None:
+        self._dark_mode = bool(is_dark)
+        self._is_dark = self._dark_mode
+        if not self._dark_mode:
+            self._apply_stylesheet()
+        else:
+            self.setStyleSheet(
+                """
+                QFrame#LeftNavContainer {
+                    background: #1B1E24;
+                    border-right: 1px solid #2E3440;
+                }
+                QTreeWidget#LeftNavTree {
+                    background: #1B1E24;
+                    border: none;
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                    color: #E2E8F0;
+                    outline: none;
+                }
+                QTreeWidget#LeftNavTree::item {
+                    padding: 2px 4px;
+                    border: 1px solid transparent;
+                    border-radius: 2px;
+                    color: #E2E8F0;
+                }
+                QTreeWidget#LeftNavTree::item:hover {
+                    background: #262C36;
+                    border: 1px solid #3E4756;
+                }
+                QTreeWidget#LeftNavTree::item:selected {
+                    background: #1E3A5F;
+                    border: 1px solid #3B82F6;
+                    color: #FFFFFF;
+                }
+                QFrame#LeftNavFooter {
+                    background: #16191E;
+                    border-top: 1px solid #2E3440;
+                }
+                QFrame#LeftNavFooter QCheckBox {
+                    color: #D8E0EA;
+                }
+                """
+            )
+        self._sync_tree_item_colors()
+
+    def _sync_tree_item_colors(self) -> None:
+        is_dark = getattr(self, "_dark_mode", False)
+        sec_brush = QBrush(QColor("#93C5FD" if is_dark else "#1E395B"))
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            if top is not None:
+                top.setForeground(0, sec_brush)
 
     def _init_root_sections(self) -> None:
         self.tree.blockSignals(True)
@@ -647,6 +877,8 @@ class LeftNavigationDock(QDockWidget):
                 t_item.setData(0, _NODE_TYPE_ROLE, "tag")
                 t_item.setData(0, _NODE_PAYLOAD_ROLE, tid)
                 t_item.setData(0, _TAG_FILTER_STATE_ROLE, "neutral")
+                t_item.setData(0, _OLD_NAME_ROLE, tname)
+                t_item.setData(0, _OLD_PATH_ROLE, str(t["full_path"]))
                 t_item.setIcon(0, tag_icon)
                 t_item.setToolTip(0, f"{t['full_path']} (Click to select, Ctrl+click to multi-select)")
                 self._tag_items[tid] = t_item
@@ -710,10 +942,48 @@ class LeftNavigationDock(QDockWidget):
             self.root_folders.setExpanded(True)
             self.root_tags.setExpanded(True)
             self.root_people.setExpanded(was_people_expanded)
+            if getattr(self, "_dark_mode", False):
+                self._sync_tree_item_colors()
         finally:
             self.tree.blockSignals(False)
             self._updating_tree = False
         self._update_summary_label()
+
+    def refresh_people_only(self, repo: CatalogRepository) -> list[dict[str, Any]]:
+        """Refreshes only the People section in <1ms without rebuilding Folders, Dates, Tags, or Ratings."""
+        self._repo = repo
+        people_rows = repo.get_people_list()
+        if not hasattr(self, "root_people") or self.root_people is None:
+            self.refresh_trees(repo)
+            return people_rows
+        self._updating_tree = True
+        self.tree.blockSignals(True)
+        try:
+            was_expanded = self.root_people.isExpanded()
+            self.root_people.takeChildren()
+            self._person_items.clear()
+            person_icon = make_wlpg_icon("person", 16)
+            for p in people_rows:
+                pid = int(p["id"])
+                pname = str(p["name"])
+                cnt = int(p["media_count"])
+                blob = p.get("thumbnail_blob")
+                p_item = QTreeWidgetItem([f"{pname} ({cnt})" if cnt > 0 else pname])
+                p_item.setData(0, _NODE_TYPE_ROLE, "person")
+                p_item.setData(0, _NODE_PAYLOAD_ROLE, pid)
+                if blob:
+                    p_item.setIcon(0, QIcon(make_person_avatar_pixmap(pname, blob, 18)))
+                else:
+                    p_item.setIcon(0, person_icon)
+                if pid in self._person_ids:
+                    p_item.setSelected(True)
+                self.root_people.addChild(p_item)
+                self._person_items[pid] = p_item
+            self.root_people.setExpanded(was_expanded)
+        finally:
+            self.tree.blockSignals(False)
+            self._updating_tree = False
+        return people_rows
 
     def _apply_tag_item_visual_state(
         self, item: QTreeWidgetItem, state: Literal["neutral", "include", "exclude"]
@@ -793,10 +1063,22 @@ class LeftNavigationDock(QDockWidget):
             return
 
         changed = False
+        ctrl_held = bool(QGuiApplication.keyboardModifiers() & Qt.ControlModifier)
         if folder_tuple is not None:
             if self._folder_id != folder_tuple[0]:
                 self._folder_id, self._folder_name = folder_tuple
                 changed = True
+            if not ctrl_held and (self._date_year is not None or self._date_month is not None or self._date_day is not None):
+                self._date_year = None
+                self._date_month = None
+                self._date_day = None
+                changed = True
+        elif not ctrl_held and date_tuple is not None:
+            if self._folder_id is not None:
+                self._folder_id = None
+                self._folder_name = "All folders"
+                changed = True
+
         if date_tuple is not None:
             y, m, d = date_tuple
             if (self._date_year, self._date_month, self._date_day) != (y, m, d):
@@ -1133,8 +1415,8 @@ class LeftNavigationDock(QDockWidget):
                 )
             )
             menu.addAction(act_rem)
-        elif ntype == "section_folders":
-            act_add = QAction("Add folder to gallery...", menu)
+        elif ntype in ("section_folders", "all_media"):
+            act_add = QAction(make_wlpg_icon("folder_add", 16), "Add folder to gallery...", menu)
             act_add.triggered.connect(self.folder_add_requested.emit)
             menu.addAction(act_add)
 
@@ -1177,6 +1459,68 @@ class LeftNavigationDock(QDockWidget):
             self._repo.delete_tag(tag_id)
             self.refresh_trees(self._repo)
             self.filter_changed.emit()
+
+    def _on_tag_dropped(self, source_tag_id: int, target_tag_id: int | None) -> None:
+        """Handles moving or merging a dragged descriptive tag onto another tag or Descriptive tags root."""
+        if not hasattr(self, "_repo") or self._repo is None:
+            return
+        if source_tag_id == target_tag_id:
+            return
+
+        conn = self._repo.engine.catalog_conn()
+        source_row = conn.execute(
+            "SELECT id, parent_id, name, full_path FROM tags WHERE id = ?;", (source_tag_id,)
+        ).fetchone()
+        if source_row is None:
+            return
+
+        current_parent_id = source_row["parent_id"]
+        # If dropping onto the current parent, nothing needs to be done
+        if (target_tag_id is None and current_parent_id is None) or (target_tag_id == current_parent_id):
+            return
+
+        source_name = str(source_row["name"])
+
+        # Check if a sibling tag with the same name already exists under the target parent
+        existing = self._repo.find_child_tag_by_name(target_tag_id, source_name)
+        if existing is not None and int(existing["id"]) != source_tag_id:
+            existing_tag_id = int(existing["id"])
+            settings = QSettings("PhotoGallery64", "PhotoGallery64")
+            suppress = settings.value("suppress_tag_merge_warning", False, type=bool)
+
+            if not suppress:
+                dlg = TagMergeConfirmDialog(self)
+                if getattr(self, "_auto_tag_merge_decision", None) is not None:
+                    res = QDialog.Accepted if self._auto_tag_merge_decision else QDialog.Rejected
+                else:
+                    res = dlg.exec()
+
+                if res != QDialog.Accepted:
+                    return
+
+                if dlg.dont_show_again:
+                    settings.setValue("suppress_tag_merge_warning", True)
+
+            # Perform tag merge
+            self._repo.merge_tags(source_tag_id, existing_tag_id)
+        else:
+            # Perform tag move
+            self._repo.move_tag(source_tag_id, target_tag_id)
+
+        # Refresh navigation tree and notify application
+        self.refresh_trees(self._repo)
+        self.tag_hierarchy_changed.emit()
+
+        # Keep target tag (and ancestors) expanded so the moved/merged tag is visible
+        if target_tag_id is not None and target_tag_id in self._tag_items:
+            t_item = self._tag_items[target_tag_id]
+            t_item.setExpanded(True)
+            p = t_item.parent()
+            while p is not None:
+                p.setExpanded(True)
+                p = p.parent()
+        elif target_tag_id is None and hasattr(self, "root_tags"):
+            self.root_tags.setExpanded(True)
 
     def _open_folder_location(self, folder_path: str) -> None:
         """Reveals the folder in Windows File Explorer."""

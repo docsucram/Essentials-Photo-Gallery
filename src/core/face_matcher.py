@@ -187,48 +187,42 @@ class FaceVectorMatcher:
 
         # Compute NxN cosine similarity matrix
         sim_matrix = E @ E.T
-
-        # Fast greedy leader clustering
-        assigned = np.zeros(n_faces, dtype=bool)
-        clusters: list[list[int]] = []
-
-        adj = sim_matrix >= sim_threshold
+        adj = (sim_matrix >= sim_threshold)
         np.fill_diagonal(adj, True)
 
+        # Vectorized greedy leader clustering (O(N) updates, avoiding N 2D matrix copies)
+        active = np.ones(n_faces, dtype=bool)
+        deg = adj.sum(axis=1)
+        clusters: list[list[int]] = []
+
         while True:
-            unassigned_indices = np.where(~assigned)[0]
-            if len(unassigned_indices) < min_cluster_size:
-                break
-
-            sub_adj = adj[np.ix_(unassigned_indices, unassigned_indices)]
-            degrees = np.sum(sub_adj, axis=1)
-
-            max_deg_local = int(np.argmax(degrees))
-            max_deg = degrees[max_deg_local]
-
+            deg_masked = np.where(active, deg, 0)
+            best_idx = int(np.argmax(deg_masked))
+            max_deg = deg_masked[best_idx]
             if max_deg < min_cluster_size:
                 break
 
-            leader_idx = unassigned_indices[max_deg_local]
-            connected_local = np.where(sub_adj[max_deg_local])[0]
-            cluster_indices = unassigned_indices[connected_local]
+            cluster_mask = adj[best_idx] & active
+            cluster_indices = np.where(cluster_mask)[0]
+            if len(cluster_indices) < min_cluster_size:
+                active[best_idx] = False
+                continue
 
-            if len(cluster_indices) >= min_cluster_size:
-                cluster_emb = E[cluster_indices]
-                cluster_mean = normalize_vector(np.mean(cluster_emb, axis=0, keepdims=True))
-                sims_to_mean = (cluster_emb @ cluster_mean.T).flatten()
-                sorted_members = cluster_indices[np.argsort(-sims_to_mean)]
+            # Sort cluster members by similarity to cluster mean
+            cluster_emb = E[cluster_indices]
+            cluster_mean = normalize_vector(np.mean(cluster_emb, axis=0, keepdims=True))
+            sims_to_mean = (cluster_emb @ cluster_mean.T).flatten()
+            sorted_members = cluster_indices[np.argsort(-sims_to_mean)]
 
-                clusters.append([face_ids_list[idx] for idx in sorted_members])
-                assigned[cluster_indices] = True
-            else:
-                break
+            clusters.append([face_ids_list[idx] for idx in sorted_members])
+            active[cluster_indices] = False
+            deg -= adj[:, cluster_indices].sum(axis=1)
 
         result: dict[str, list[int]] = {}
         for idx, cluster_fids in enumerate(clusters, 1):
             result[f"Unknown Person #{idx}"] = cluster_fids
 
-        other_indices = np.where(~assigned)[0]
+        other_indices = np.where(active)[0]
         if len(other_indices) > 0:
             result["Other Unnamed Faces"] = [face_ids_list[idx] for idx in other_indices]
 

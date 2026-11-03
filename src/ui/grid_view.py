@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Literal
 from PySide6.QtCore import (
     QAbstractItemModel,
     QEvent,
+    QFileInfo,
     QItemSelection,
     QItemSelectionModel,
     QMimeData,
@@ -44,6 +45,7 @@ from PySide6.QtGui import (
     QDragMoveEvent,
     QDropEvent,
     QFont,
+    QIcon,
     QImage,
     QKeyEvent,
     QLinearGradient,
@@ -59,6 +61,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QFileIconProvider,
     QLabel,
     QLineEdit,
     QListView,
@@ -137,6 +140,175 @@ def get_windows_open_with_apps(extension: str) -> list[tuple[str, str]]:
         return []
 
 
+def resolve_windows_app_path(app_cmd: str) -> str | None:
+    """Resolves an executable or app name into an absolute path on Windows."""
+    import shutil
+    if sys.platform != "win32":
+        return shutil.which(app_cmd)
+    if os.path.isabs(app_cmd) and os.path.exists(app_cmd):
+        return app_cmd
+
+    import glob
+    import re
+    import winreg
+
+    # 0. UWP Application (AppUserModelID e.g. Microsoft.Windows.Photos_8wekyb3d8bbwe!App)
+    if "!" in app_cmd or app_cmd.startswith("Microsoft."):
+        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_CLASSES_ROOT):
+            try:
+                with winreg.OpenKey(root, "Software\\Classes") as classes_key:
+                    num = winreg.QueryInfoKey(classes_key)[0]
+                    for i in range(num):
+                        name = winreg.EnumKey(classes_key, i)
+                        if name.startswith("AppX"):
+                            try:
+                                with winreg.OpenKey(classes_key, f"{name}\\Shell\\open") as open_key:
+                                    aumid, _ = winreg.QueryValueEx(open_key, "AppUserModelID")
+                                    if aumid == app_cmd:
+                                        pkg_id, _ = winreg.QueryValueEx(open_key, "PackageId")
+                                        exe_rel, _ = winreg.QueryValueEx(open_key, "PackageRelativeExecutable")
+                                        full_exe = os.path.join(r"C:\Program Files\WindowsApps", pkg_id, exe_rel)
+                                        if os.path.exists(full_exe):
+                                            return full_exe
+                            except OSError:
+                                pass
+            except OSError:
+                pass
+
+    # 1. App Paths registry key
+    for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(root, f"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{app_cmd}") as k:
+                val, _ = winreg.QueryValueEx(k, "")
+                clean_val = str(val).strip('"')
+                if clean_val and os.path.exists(clean_val):
+                    return clean_val
+        except OSError:
+            pass
+
+    # 2. Applications\{app_cmd}\shell\open\command
+    for root in (winreg.HKEY_CLASSES_ROOT, winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(root, f"Applications\\{app_cmd}\\shell\\open\\command") as k:
+                val, _ = winreg.QueryValueEx(k, "")
+                if val:
+                    m = re.search(r'"([^"]+\.exe)"', str(val), re.IGNORECASE)
+                    if m and os.path.exists(m.group(1)):
+                        return m.group(1)
+                    first = str(val).split()[0].strip('"')
+                    if os.path.exists(first):
+                        return first
+        except OSError:
+            pass
+
+    # 3. PATH
+    p = shutil.which(app_cmd)
+    if p and os.path.exists(p):
+        return p
+
+    # 4. Standard Program Files and LocalAppData folders
+    stem = os.path.splitext(app_cmd)[0]
+    search_dirs = [
+        os.environ.get("ProgramFiles", "C:\\Program Files"),
+        os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs"),
+    ]
+    for d in search_dirs:
+        if not d or not os.path.exists(d):
+            continue
+        direct = os.path.join(d, app_cmd)
+        if os.path.exists(direct):
+            return direct
+        sub = os.path.join(d, stem, app_cmd)
+        if os.path.exists(sub):
+            return sub
+        try:
+            matches = glob.glob(os.path.join(d, "*", app_cmd))
+            if matches:
+                return matches[0]
+        except Exception:
+            pass
+
+    return None
+
+
+_ICON_PROVIDER: QFileIconProvider | None = None
+_APP_ICON_CACHE: dict[str, QIcon] = {}
+
+
+def get_windows_app_icon(app_name: str, app_cmd: str) -> QIcon:
+    """Extracts authentic system application icon for a Windows registered application."""
+    global _ICON_PROVIDER
+    cache_key = f"{app_name}:{app_cmd}"
+    if cache_key in _APP_ICON_CACHE:
+        return _APP_ICON_CACHE[cache_key]
+
+    if _ICON_PROVIDER is None:
+        _ICON_PROVIDER = QFileIconProvider()
+
+    from src.ui.ribbon_toolbar import make_wlpg_icon
+    name_l = app_name.lower()
+    cmd_l = app_cmd.lower()
+    if "photos" in name_l or "photos" in cmd_l:
+        ico = make_wlpg_icon("view_file", 16)
+        _APP_ICON_CACHE[cache_key] = ico
+        return ico
+    if "paint" in name_l or "paint" in cmd_l:
+        ico = make_wlpg_icon("retouch", 16)
+        _APP_ICON_CACHE[cache_key] = ico
+        return ico
+
+    if sys.platform == "win32":
+        import shutil
+        import winreg
+
+        paths_to_try: list[str] = []
+        if os.path.isabs(app_cmd) and os.path.exists(app_cmd):
+            paths_to_try.append(app_cmd)
+
+        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(root, f"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{app_cmd}") as k:
+                    val, _ = winreg.QueryValueEx(k, "")
+                    if val and os.path.exists(str(val)):
+                        paths_to_try.append(str(val))
+            except OSError:
+                pass
+
+        try:
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, f"Applications\\{app_cmd}\\shell\\open\\command") as k:
+                val, _ = winreg.QueryValueEx(k, "")
+                if val:
+                    exe = str(val).split(".exe")[0] + ".exe"
+                    exe = exe.strip('"')
+                    if os.path.exists(exe):
+                        paths_to_try.append(exe)
+        except OSError:
+            pass
+
+        res = resolve_windows_app_path(app_cmd)
+        if res and res not in paths_to_try:
+            paths_to_try.append(res)
+
+        p = shutil.which(app_cmd)
+        if p and os.path.exists(p):
+            paths_to_try.append(p)
+
+        for pth in paths_to_try:
+            try:
+                fi = QFileInfo(pth)
+                ico = _ICON_PROVIDER.icon(fi)
+                if not ico.isNull():
+                    _APP_ICON_CACHE[cache_key] = ico
+                    return ico
+            except Exception:
+                pass
+
+    fallback = make_wlpg_icon("view_file", 16)
+    _APP_ICON_CACHE[cache_key] = fallback
+    return fallback
+
+
 def _build_star_polygon(
     center_x: float, center_y: float, outer_r: float, inner_r: float
 ) -> QPolygonF:
@@ -179,8 +351,10 @@ class MediaCardDelegate(QStyledItemDelegate):
         self._hover_caption: bool = False
         self.face_crop_person_id: int | None = None
         self.thumb_repo: Any | None = None
+        self.dark_mode: bool = False
         self._face_crop_cache: dict[tuple[int, int], QPixmap] = {}
         self._person_face_rects: dict[tuple[int, int], tuple[float, float, float, float]] = {}
+        self._scaled_pixmap_cache: dict[tuple[int, int, int], QPixmap] = {}
 
     def set_face_crop_person_id(self, person_id: int | None) -> None:
         self.face_crop_person_id = person_id
@@ -212,26 +386,76 @@ class MediaCardDelegate(QStyledItemDelegate):
     def set_layout_mode(self, mode: Literal["wlpg_grid", "mosaic"]) -> None:
         self._layout_mode = mode
 
+    @property
+    def is_horizontal_card(self) -> bool:
+        """WLPG Card Presentation: When choosing more than 2 details under photo, switch to horizontal card view."""
+        if self._layout_mode == "mosaic":
+            return False
+        under_photo_keys = {"rating", "caption", "filename", "size", "dimensions", "date_taken", "date_modified"}
+        if "all" in self._visible_details:
+            return True
+        count = len(self._visible_details & under_photo_keys)
+        return count > 2
+
     # -------------------------------------------------------------------------
     # Deterministic Hit-Test Geometry Helpers
     # -------------------------------------------------------------------------
-    @staticmethod
-    def checkbox_rect(card_rect: QRect) -> QRect:
+    def checkbox_rect(self, card_rect: QRect) -> QRect:
+        if getattr(self, "is_horizontal_card", False):
+            thumb_side = max(70, min(int(card_rect.height() - 12), 120))
+            img_x = card_rect.left() + 8
+            img_y = card_rect.top() + (card_rect.height() - thumb_side) // 2
+            return QRect(img_x + 4, img_y + 4, 16, 16)
         return QRect(card_rect.left() + 6, card_rect.top() + 6, 16, 16)
 
-    @staticmethod
-    def flag_rect(card_rect: QRect) -> QRect:
+    def flag_rect(self, card_rect: QRect) -> QRect:
+        if getattr(self, "is_horizontal_card", False):
+            thumb_side = max(70, min(int(card_rect.height() - 12), 120))
+            img_x = card_rect.left() + 8
+            img_y = card_rect.top() + (card_rect.height() - thumb_side) // 2
+            return QRect(img_x + thumb_side - 20, img_y + 4, 16, 16)
         return QRect(card_rect.right() - 22, card_rect.top() + 6, 16, 16)
 
-    @classmethod
-    def stars_bar_rect(cls, card_rect: QRect) -> QRect:
-        x = card_rect.center().x() - (cls.STAR_BAR_WIDTH // 2)
-        y = card_rect.bottom() - cls.STAR_BAR_HEIGHT - 3
-        return QRect(x, y, cls.STAR_BAR_WIDTH, cls.STAR_BAR_HEIGHT)
+    def stars_bar_rect(self, card_rect: QRect) -> QRect:
+        if getattr(self, "is_horizontal_card", False):
+            thumb_side = max(70, min(int(card_rect.height() - 12), 120))
+            text_left = card_rect.left() + 8 + thumb_side + 10
+            y = card_rect.top() + 8
+            if "filename" in self._visible_details or "all" in self._visible_details:
+                y += 18
+            if "date_taken" in self._visible_details or "all" in self._visible_details:
+                y += 16
+            if "dimensions" in self._visible_details or "all" in self._visible_details:
+                y += 16
+            if "size" in self._visible_details or "all" in self._visible_details:
+                y += 16
+            if "date_modified" in self._visible_details or "all" in self._visible_details:
+                y += 16
+            return QRect(text_left, y, self.STAR_BAR_WIDTH, self.STAR_BAR_HEIGHT)
+        x = card_rect.center().x() - (self.STAR_BAR_WIDTH // 2)
+        y = card_rect.bottom() - self.STAR_BAR_HEIGHT - 3
+        return QRect(x, y, self.STAR_BAR_WIDTH, self.STAR_BAR_HEIGHT)
 
-    @classmethod
-    def caption_rect(cls, card_rect: QRect, has_stars: bool = True) -> QRect:
-        y_bot = card_rect.bottom() - (cls.STAR_BAR_HEIGHT + 6 if has_stars else 4)
+    def caption_rect(self, card_rect: QRect, has_stars: bool = True) -> QRect:
+        if getattr(self, "is_horizontal_card", False):
+            thumb_side = max(70, min(int(card_rect.height() - 12), 120))
+            text_left = card_rect.left() + 8 + thumb_side + 10
+            text_w = max(40, card_rect.right() - text_left - 8)
+            y = card_rect.top() + 8
+            if "filename" in self._visible_details or "all" in self._visible_details:
+                y += 18
+            if "date_taken" in self._visible_details or "all" in self._visible_details:
+                y += 16
+            if "dimensions" in self._visible_details or "all" in self._visible_details:
+                y += 16
+            if "size" in self._visible_details or "all" in self._visible_details:
+                y += 16
+            if "date_modified" in self._visible_details or "all" in self._visible_details:
+                y += 16
+            if has_stars:
+                y += 18
+            return QRect(text_left, y, text_w, 16)
+        y_bot = card_rect.bottom() - (self.STAR_BAR_HEIGHT + 6 if has_stars else 4)
         return QRect(card_rect.left() + 6, y_bot - 16, card_rect.width() - 12, 16)
 
     @classmethod
@@ -292,7 +516,7 @@ class MediaCardDelegate(QStyledItemDelegate):
         chevron = "›" if collapsed else "⌄"
         chevron_font = QFont("Segoe UI", 12, QFont.Bold)
         painter.setFont(chevron_font)
-        painter.setPen(QColor("#1E395B"))
+        painter.setPen(QColor("#93C5FD") if self.dark_mode else QColor("#1E395B"))
         painter.drawText(
             QRect(row_rect.left() + 2, row_rect.top() + 2, 16, 28),
             Qt.AlignLeft | Qt.AlignVCenter,
@@ -302,7 +526,7 @@ class MediaCardDelegate(QStyledItemDelegate):
         # WLPG Section Title (Segoe UI Light-style 14pt blue)
         title_font = QFont("Segoe UI", 14, QFont.Normal)
         painter.setFont(title_font)
-        painter.setPen(QColor("#29588C"))
+        painter.setPen(QColor("#60A5FA") if self.dark_mode else QColor("#29588C"))
         fm_title = painter.fontMetrics()
         title_w = fm_title.horizontalAdvance(group_key) + 8
         title_rect = QRect(row_rect.left() + 18, row_rect.top() + 2, title_w, 28)
@@ -317,7 +541,7 @@ class MediaCardDelegate(QStyledItemDelegate):
 
         sub_font = QFont("Segoe UI", 9)
         painter.setFont(sub_font)
-        painter.setPen(QColor("#6D6D6D"))
+        painter.setPen(QColor("#9CA3AF") if self.dark_mode else QColor("#6D6D6D"))
         fm_sub = painter.fontMetrics()
         sub_w = fm_sub.horizontalAdvance(sub_text) + 12
         sub_rect = QRect(title_rect.right() + 4, row_rect.top() + 6, sub_w, 24)
@@ -327,10 +551,275 @@ class MediaCardDelegate(QStyledItemDelegate):
         line_x = sub_rect.right() + 8
         if line_x < row_rect.right() - 12:
             line_y = row_rect.top() + 20
-            painter.setPen(QPen(QColor("#E5EEF7"), 1))
+            painter.setPen(QPen(QColor("#2E3440") if self.dark_mode else QColor("#E5EEF7"), 1))
             painter.drawLine(line_x, line_y, row_rect.right() - 8, line_y)
 
         painter.restore()
+
+    def _resolve_pixmap(self, media_id: int | None) -> QPixmap | None:
+        if media_id is None:
+            return None
+        pixmap: QPixmap | None = None
+        if self.face_crop_person_id is not None:
+            key = (int(media_id), int(self.face_crop_person_id))
+            if key in self._face_crop_cache:
+                pixmap = self._face_crop_cache[key]
+            elif self.thumb_repo is not None:
+                blob = self.thumb_repo.get_face_thumbnail_for_media_person(media_id, self.face_crop_person_id)
+                if blob:
+                    pm = QPixmap()
+                    if pm.loadFromData(blob) and not pm.isNull():
+                        self._face_crop_cache[key] = pm
+                        pixmap = pm
+                    else:
+                        self._face_crop_cache[key] = None
+                else:
+                    self._face_crop_cache[key] = None
+
+            if pixmap is None and key in self._person_face_rects:
+                full_pm = self.pixmap_cache.get(media_id)
+                if full_pm is not None and not full_pm.isNull() and full_pm.width() > 10 and full_pm.height() > 10:
+                    rx, ry, rw, rh = self._person_face_rects[key]
+                    cx = rx + rw * 0.5
+                    cy = ry + rh * 0.5
+                    side = max(rw, rh) * 1.38
+                    pw, ph = full_pm.width(), full_pm.height()
+                    crop_x = int(max(0, (cx - side * 0.5) * pw))
+                    crop_y = int(max(0, (cy - side * 0.5) * ph))
+                    crop_w = int(min(pw - crop_x, side * pw))
+                    crop_h = int(min(ph - crop_y, side * ph))
+                    crop_side = min(crop_w, crop_h)
+                    if crop_side > 10:
+                        crop_pm = full_pm.copy(crop_x, crop_y, crop_side, crop_side)
+                        self._face_crop_cache[key] = crop_pm
+                        pixmap = crop_pm
+
+        if pixmap is None:
+            if self.face_crop_person_id is None or (int(media_id), int(self.face_crop_person_id)) not in self._person_face_rects:
+                pixmap = self.pixmap_cache.get(media_id)
+        return pixmap
+
+    def _paint_horizontal_media_card(
+        self,
+        painter: QPainter,
+        option: QStyleOptionViewItem,
+        index: QModelIndex,
+        card_rect: QRect,
+    ) -> None:
+        media_id = index.data(CatalogRoles.MediaIdRole)
+        rating = int(index.data(CatalogRoles.RatingRole) or 0)
+        flag = int(index.data(CatalogRoles.FlagRole) or 0)
+        is_video = bool(index.data(CatalogRoles.IsVideoRole))
+        is_selected = bool(option.state & QStyle.State_Selected)
+        is_hovered = bool(option.state & QStyle.State_MouseOver)
+
+        # 1. Background frame
+        if is_selected:
+            grad = QLinearGradient(card_rect.topLeft(), card_rect.bottomLeft())
+            if self.dark_mode:
+                grad.setColorAt(0.0, QColor("#1E3A5F"))
+                grad.setColorAt(1.0, QColor("#172554"))
+                painter.setBrush(grad)
+                painter.setPen(QPen(QColor("#3B82F6"), 1.2))
+            else:
+                grad.setColorAt(0.0, QColor("#E4F3FF"))
+                grad.setColorAt(1.0, QColor("#C6E4FF"))
+                painter.setBrush(grad)
+                painter.setPen(QPen(QColor("#6CB8FF"), 1.2))
+            painter.drawRoundedRect(card_rect, 3, 3)
+        elif is_hovered:
+            grad = QLinearGradient(card_rect.topLeft(), card_rect.bottomLeft())
+            if self.dark_mode:
+                grad.setColorAt(0.0, QColor("#262B33"))
+                grad.setColorAt(1.0, QColor("#1F242B"))
+                painter.setBrush(grad)
+                painter.setPen(QPen(QColor("#475569"), 1.0))
+            else:
+                grad.setColorAt(0.0, QColor("#F6FBFF"))
+                grad.setColorAt(1.0, QColor("#E8F4FF"))
+                painter.setBrush(grad)
+                painter.setPen(QPen(QColor("#B8DCFF"), 1.0))
+            painter.drawRoundedRect(card_rect, 3, 3)
+
+        # 2. Thumbnail on Left
+        thumb_side = max(70, min(int(card_rect.height() - 14), 120))
+        img_box = QRect(
+            card_rect.left() + 8,
+            card_rect.top() + (card_rect.height() - thumb_side) // 2,
+            thumb_side,
+            thumb_side,
+        )
+
+        pixmap = self._resolve_pixmap(media_id)
+        if pixmap is not None and not pixmap.isNull() and img_box.width() > 8 and img_box.height() > 8:
+            scaled_sz = pixmap.size().scaled(img_box.size(), Qt.KeepAspectRatio)
+            target_rect = QRect(
+                img_box.center().x() - scaled_sz.width() // 2,
+                img_box.center().y() - scaled_sz.height() // 2,
+                scaled_sz.width(),
+                scaled_sz.height(),
+            )
+            # Soft drop shadow
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 75 if self.dark_mode else 26))
+            painter.drawRect(target_rect.adjusted(2, 2, 4, 4))
+            painter.setBrush(QColor(0, 0, 0, 120 if self.dark_mode else 48))
+            painter.drawRect(target_rect.adjusted(1, 1, 2, 2))
+
+            s_key = (int(pixmap.cacheKey()), scaled_sz.width(), scaled_sz.height())
+            scaled_pix = self._scaled_pixmap_cache.get(s_key)
+            if scaled_pix is None:
+                scaled_pix = pixmap.scaled(scaled_sz, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+                if len(self._scaled_pixmap_cache) >= 512:
+                    self._scaled_pixmap_cache.clear()
+                self._scaled_pixmap_cache[s_key] = scaled_pix
+
+            painter.drawPixmap(target_rect.topLeft(), scaled_pix)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#3E4656") if self.dark_mode else QColor("#B8B8B8"), 1))
+            painter.drawRect(target_rect)
+        else:
+            painter.setBrush(QColor("#22262E") if self.dark_mode else QColor("#F4F6F9"))
+            painter.setPen(QPen(QColor("#333944") if self.dark_mode else QColor("#DCE2EA"), 1))
+            painter.drawRect(img_box)
+            if is_video:
+                painter.setPen(QColor("#9CA3AF") if self.dark_mode else QColor("#666666"))
+                painter.drawText(img_box, Qt.AlignCenter, "🎬 VIDEO")
+
+        # Checkbox & Flag pin on thumbnail
+        if is_selected or is_hovered:
+            cb_rect = self.checkbox_rect(card_rect)
+            if is_selected:
+                painter.setBrush(QColor("#106EBE"))
+                painter.setPen(QPen(QColor("#005A9E"), 1.2))
+                painter.drawRoundedRect(cb_rect, 2, 2)
+                painter.setPen(QPen(QColor("#FFFFFF"), 1.8))
+                painter.drawLine(cb_rect.left() + 3, cb_rect.top() + 8, cb_rect.left() + 7, cb_rect.bottom() - 3)
+                painter.drawLine(cb_rect.left() + 7, cb_rect.bottom() - 3, cb_rect.right() - 3, cb_rect.top() + 4)
+            else:
+                painter.setBrush(QColor(35, 42, 52, 220) if self.dark_mode else QColor(255, 255, 255, 220))
+                painter.setPen(QPen(QColor("#60A5FA") if self.dark_mode else QColor("#7A9CC6"), 1.1))
+                painter.drawRoundedRect(cb_rect, 2, 2)
+
+        if "flag" in self._visible_details or "all" in self._visible_details:
+            if flag == 1 or is_hovered:
+                fl_rect = self.flag_rect(card_rect)
+                pole_x = fl_rect.left() + 4
+                painter.setPen(QPen(QColor("#D83B01") if flag == 1 else QColor("#8A9AB0"), 1.3))
+                painter.drawLine(pole_x, fl_rect.top() + 2, pole_x, fl_rect.bottom() - 2)
+                banner = QPolygonF([
+                    QPointF(pole_x, fl_rect.top() + 2),
+                    QPointF(fl_rect.right() - 2, fl_rect.top() + 5),
+                    QPointF(pole_x, fl_rect.top() + 9),
+                ])
+                painter.setBrush(QColor("#E81123") if flag == 1 else (QColor(45, 55, 72, 190) if self.dark_mode else QColor(255, 255, 255, 190)))
+                painter.drawPolygon(banner)
+
+        # 3. Text details on the right
+        text_left = img_box.right() + 10
+        text_w = max(40, card_rect.right() - text_left - 8)
+        cur_y = card_rect.top() + 8
+        has_stars = ("rating" in self._visible_details or "all" in self._visible_details)
+        has_caption = ("caption" in self._visible_details or "all" in self._visible_details)
+
+        # A. Filename (highest / top)
+        if "filename" in self._visible_details or "all" in self._visible_details:
+            fname = str(index.data(CatalogRoles.FilenameRole) or "")
+            painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
+            painter.setPen(QColor("#60A5FA") if self.dark_mode else QColor("#1E395B"))
+            elided = painter.fontMetrics().elidedText(fname, Qt.ElideMiddle, text_w)
+            painter.drawText(QRect(text_left, cur_y, text_w, 18), Qt.AlignLeft | Qt.AlignVCenter, elided)
+            cur_y += 18
+
+        # B. Metadata details (Date taken, Dimensions, File size, Date modified)
+        if "date_taken" in self._visible_details or "all" in self._visible_details:
+            dt_epoch = index.data(CatalogRoles.DateTakenRole)
+            if dt_epoch:
+                dt_str = _epoch_to_datetime_utc(int(dt_epoch)).strftime("%d/%m/%Y %H:%M")
+                painter.setFont(QFont("Segoe UI", 8.5))
+                painter.setPen(QColor("#9CA3AF") if self.dark_mode else QColor("#555555"))
+                painter.drawText(QRect(text_left, cur_y, text_w, 16), Qt.AlignLeft | Qt.AlignVCenter, dt_str)
+                cur_y += 16
+
+        if "dimensions" in self._visible_details or "all" in self._visible_details:
+            dims = str(index.data(CatalogRoles.DimensionsRole) or "")
+            if dims:
+                painter.setFont(QFont("Segoe UI", 8.5))
+                painter.setPen(QColor("#9CA3AF") if self.dark_mode else QColor("#555555"))
+                painter.drawText(QRect(text_left, cur_y, text_w, 16), Qt.AlignLeft | Qt.AlignVCenter, dims)
+                cur_y += 16
+
+        if "size" in self._visible_details or "all" in self._visible_details:
+            sz_str = format_file_size(int(index.data(CatalogRoles.FileSizeRole) or 0))
+            painter.setFont(QFont("Segoe UI", 8.5))
+            painter.setPen(QColor("#9CA3AF") if self.dark_mode else QColor("#555555"))
+            painter.drawText(QRect(text_left, cur_y, text_w, 16), Qt.AlignLeft | Qt.AlignVCenter, sz_str)
+            cur_y += 16
+
+        if "date_modified" in self._visible_details or "all" in self._visible_details:
+            mtime = index.data(CatalogRoles.DateModifiedRole)
+            if mtime:
+                m_str = _epoch_to_datetime_utc(int(mtime)).strftime("%d/%m/%Y %H:%M")
+                painter.setFont(QFont("Segoe UI", 8.5))
+                painter.setPen(QColor("#9CA3AF") if self.dark_mode else QColor("#555555"))
+                painter.drawText(QRect(text_left, cur_y, text_w, 16), Qt.AlignLeft | Qt.AlignVCenter, m_str)
+                cur_y += 16
+
+        # C. Rating (stars) (2nd lowest)
+        if has_stars:
+            stars_rect = self.stars_bar_rect(card_rect)
+            star_slot_w = stars_rect.width() / 5.0
+            cy = stars_rect.center().y()
+            is_card_star_hovered = (self._hover_row == index.row())
+            hovered_star_num = self._hover_star if is_card_star_hovered else 0
+
+            for s_idx in range(1, 6):
+                cx = stars_rect.left() + (s_idx - 0.5) * star_slot_w
+                poly = _build_star_polygon(cx, cy, outer_r=5.2, inner_r=2.3)
+                if hovered_star_num > 0:
+                    if s_idx <= hovered_star_num and s_idx <= rating:
+                        painter.setBrush(QColor("#F5B800"))
+                        painter.setPen(QPen(QColor("#C68B00"), 0.8))
+                    elif hovered_star_num < s_idx <= rating:
+                        painter.setBrush(QColor(245, 184, 0, 70))
+                        painter.setPen(QPen(QColor(198, 139, 0, 90), 0.8))
+                    elif rating < s_idx <= hovered_star_num:
+                        painter.setBrush(Qt.NoBrush)
+                        painter.setPen(QPen(QColor("#4A90E2"), 1.2))
+                    else:
+                        painter.setBrush(Qt.NoBrush)
+                        outline_col = QColor("#B09B6B") if (is_hovered or is_selected or rating > 0) else QColor("#D5C9A8")
+                        painter.setPen(QPen(outline_col, 0.8))
+                else:
+                    if s_idx <= rating:
+                        painter.setBrush(QColor("#F5B800"))
+                        painter.setPen(QPen(QColor("#C68B00"), 0.8))
+                    else:
+                        painter.setBrush(Qt.NoBrush)
+                        outline_col = QColor("#B09B6B") if (is_hovered or is_selected or rating > 0) else QColor("#D5C9A8")
+                        painter.setPen(QPen(outline_col, 0.8))
+                painter.drawPolygon(poly)
+            cur_y += 18
+
+        # D. Caption (lowest / bottom)
+        if has_caption:
+            cap_rect = self.caption_rect(card_rect, has_stars=has_stars)
+            cap_text = str(index.data(CatalogRoles.CaptionRole) or "").strip()
+            painter.save()
+            is_cap_hovered = (self._hover_row == index.row() and getattr(self, "_hover_caption", False))
+            if cap_text:
+                painter.setFont(QFont("Segoe UI", 9))
+                painter.setPen(QColor("#60A5FA" if self.dark_mode else "#2B74B9") if is_cap_hovered else (QColor("#E2E8F0") if self.dark_mode else QColor("#333333")))
+                elided = painter.fontMetrics().elidedText(cap_text, Qt.ElideMiddle, text_w)
+                painter.drawText(cap_rect, Qt.AlignLeft | Qt.AlignVCenter, elided)
+            else:
+                cap_font = QFont("Segoe UI", 9)
+                cap_font.setItalic(True)
+                painter.setFont(cap_font)
+                painter.setPen(QColor("#60A5FA" if self.dark_mode else "#2B74B9") if is_cap_hovered else (QColor("#6B7280") if self.dark_mode else QColor("#888888")))
+                painter.drawText(cap_rect, Qt.AlignLeft | Qt.AlignVCenter, "Add caption")
+            painter.restore()
+            cur_y += 18
 
     def _paint_media_card(
         self,
@@ -343,6 +832,10 @@ class MediaCardDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
         card_rect = option.rect.adjusted(2, 2, -2, -2)
+        if self.is_horizontal_card:
+            self._paint_horizontal_media_card(painter, option, index, card_rect)
+            painter.restore()
+            return
         is_selected = bool(option.state & QStyle.State_Selected)
         is_hovered = bool(option.state & QStyle.State_MouseOver)
 
@@ -356,17 +849,29 @@ class MediaCardDelegate(QStyledItemDelegate):
         # hovered cards show a faint Aero outline, and selected cards show the Aero sky-blue box.
         if is_selected:
             grad = QLinearGradient(card_rect.topLeft(), card_rect.bottomLeft())
-            grad.setColorAt(0.0, QColor("#E4F3FF"))
-            grad.setColorAt(1.0, QColor("#C6E4FF"))
-            painter.setBrush(grad)
-            painter.setPen(QPen(QColor("#6CB8FF"), 1.2))
+            if self.dark_mode:
+                grad.setColorAt(0.0, QColor("#1E3A5F"))
+                grad.setColorAt(1.0, QColor("#172554"))
+                painter.setBrush(grad)
+                painter.setPen(QPen(QColor("#3B82F6"), 1.2))
+            else:
+                grad.setColorAt(0.0, QColor("#E4F3FF"))
+                grad.setColorAt(1.0, QColor("#C6E4FF"))
+                painter.setBrush(grad)
+                painter.setPen(QPen(QColor("#6CB8FF"), 1.2))
             painter.drawRoundedRect(card_rect, 3, 3)
         elif is_hovered:
             grad = QLinearGradient(card_rect.topLeft(), card_rect.bottomLeft())
-            grad.setColorAt(0.0, QColor("#F6FBFF"))
-            grad.setColorAt(1.0, QColor("#E8F4FF"))
-            painter.setBrush(grad)
-            painter.setPen(QPen(QColor("#B8DCFF"), 1.0))
+            if self.dark_mode:
+                grad.setColorAt(0.0, QColor("#262B33"))
+                grad.setColorAt(1.0, QColor("#1F242B"))
+                painter.setBrush(grad)
+                painter.setPen(QPen(QColor("#475569"), 1.0))
+            else:
+                grad.setColorAt(0.0, QColor("#F6FBFF"))
+                grad.setColorAt(1.0, QColor("#E8F4FF"))
+                painter.setBrush(grad)
+                painter.setPen(QPen(QColor("#B8DCFF"), 1.0))
             painter.drawRoundedRect(card_rect, 3, 3)
 
         # 2. Compute Image Area vs Bottom Details/Rating Area
@@ -412,9 +917,13 @@ class MediaCardDelegate(QStyledItemDelegate):
                 blob = self.thumb_repo.get_face_thumbnail_for_media_person(media_id, self.face_crop_person_id)
                 if blob:
                     pm = QPixmap()
-                    pm.loadFromData(blob)
-                    self._face_crop_cache[key] = pm
-                    pixmap = pm
+                    if pm.loadFromData(blob) and not pm.isNull():
+                        self._face_crop_cache[key] = pm
+                        pixmap = pm
+                    else:
+                        self._face_crop_cache[key] = None
+                else:
+                    self._face_crop_cache[key] = None
 
             # If dedicated crop is not in database yet, dynamically extract face crop from cached photo thumbnail!
             if pixmap is None and key in self._person_face_rects:
@@ -435,8 +944,9 @@ class MediaCardDelegate(QStyledItemDelegate):
                         self._face_crop_cache[key] = crop_pm
                         pixmap = crop_pm
 
-        if pixmap is None and media_id is not None and self.face_crop_person_id is None:
-            pixmap = self.pixmap_cache.get(media_id)
+        if pixmap is None and media_id is not None:
+            if self.face_crop_person_id is None or (int(media_id), int(self.face_crop_person_id)) not in self._person_face_rects:
+                pixmap = self.pixmap_cache.get(media_id)
 
         # In face crops mode, if the crop is still being decoded, show a clean face placeholder
         if pixmap is None and self.face_crop_person_id is not None and img_box.width() > 8 and img_box.height() > 8:
@@ -447,12 +957,12 @@ class MediaCardDelegate(QStyledItemDelegate):
                 box_side,
                 box_side,
             )
-            painter.setPen(QColor(200, 215, 230))
-            painter.setBrush(QColor(240, 244, 250))
+            painter.setPen(QColor(70, 80, 95) if self.dark_mode else QColor(200, 215, 230))
+            painter.setBrush(QColor(38, 43, 52) if self.dark_mode else QColor(240, 244, 250))
             painter.drawRoundedRect(ph_rect, 4, 4)
             # Subtle avatar silhouette
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(190, 205, 225))
+            painter.setBrush(QColor(80, 95, 115) if self.dark_mode else QColor(190, 205, 225))
             head_r = int(box_side * 0.18)
             head_cx = ph_rect.center().x()
             head_cy = ph_rect.top() + int(box_side * 0.38)
@@ -475,17 +985,29 @@ class MediaCardDelegate(QStyledItemDelegate):
 
             # Multi-layer soft WLPG drop shadow behind photo
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(0, 0, 0, 26))
+            painter.setBrush(QColor(0, 0, 0, 75 if self.dark_mode else 26))
             painter.drawRect(target_rect.adjusted(2, 2, 4, 4))
-            painter.setBrush(QColor(0, 0, 0, 48))
+            painter.setBrush(QColor(0, 0, 0, 120 if self.dark_mode else 48))
             painter.drawRect(target_rect.adjusted(1, 1, 2, 2))
+
+            s_key = (int(pixmap.cacheKey()), scaled_sz.width(), scaled_sz.height())
+            scaled_pix = self._scaled_pixmap_cache.get(s_key)
+            if scaled_pix is None:
+                if pixmap.size() == scaled_sz:
+                    scaled_pix = pixmap
+                else:
+                    scaled_pix = pixmap.scaled(
+                        scaled_sz, Qt.IgnoreAspectRatio, Qt.SmoothTransformation
+                    )
+                if len(self._scaled_pixmap_cache) >= 512:
+                    self._scaled_pixmap_cache.clear()
+                self._scaled_pixmap_cache[s_key] = scaled_pix
 
             if self._layout_mode == "mosaic":
                 painter.save()
                 painter.setClipRect(target_rect)
                 src_x = max(0, (scaled_sz.width() - target_rect.width()) // 2)
                 src_y = max(0, (scaled_sz.height() - target_rect.height()) // 2)
-                scaled_pix = pixmap.scaled(scaled_sz, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
                 painter.drawPixmap(
                     target_rect.topLeft(),
                     scaled_pix,
@@ -493,18 +1015,18 @@ class MediaCardDelegate(QStyledItemDelegate):
                 )
                 painter.restore()
             else:
-                painter.drawPixmap(target_rect, pixmap)
+                painter.drawPixmap(target_rect.topLeft(), scaled_pix)
 
             painter.setBrush(Qt.NoBrush)
-            painter.setPen(QPen(QColor("#B8B8B8"), 1))
+            painter.setPen(QPen(QColor("#3E4656") if self.dark_mode else QColor("#B8B8B8"), 1))
             painter.drawRect(target_rect)
         else:
             # Subtle placeholder while worker decodes WebP
-            painter.setBrush(QColor("#F4F6F9"))
-            painter.setPen(QPen(QColor("#DCE2EA"), 1))
+            painter.setBrush(QColor("#22262E") if self.dark_mode else QColor("#F4F6F9"))
+            painter.setPen(QPen(QColor("#333944") if self.dark_mode else QColor("#DCE2EA"), 1))
             painter.drawRect(img_box)
             if is_video:
-                painter.setPen(QColor("#666666"))
+                painter.setPen(QColor("#9CA3AF") if self.dark_mode else QColor("#666666"))
                 painter.drawText(img_box, Qt.AlignCenter, "🎬 VIDEO")
 
         # 4. Top-Left Hover / Selected Checkbox (Matches find_ui.png)
@@ -528,8 +1050,8 @@ class MediaCardDelegate(QStyledItemDelegate):
                     cb_rect.top() + 4,
                 )
             else:
-                painter.setBrush(QColor(255, 255, 255, 220))
-                painter.setPen(QPen(QColor("#7A9CC6"), 1.1))
+                painter.setBrush(QColor(35, 42, 52, 220) if self.dark_mode else QColor(255, 255, 255, 220))
+                painter.setPen(QPen(QColor("#60A5FA") if self.dark_mode else QColor("#7A9CC6"), 1.1))
                 painter.drawRoundedRect(cb_rect, 2, 2)
 
         # 5. Top-Right Flag Pin Icon (shown only if 'flag' in visible details)
@@ -549,7 +1071,7 @@ class MediaCardDelegate(QStyledItemDelegate):
                     ]
                 )
                 painter.setBrush(
-                    QColor("#E81123") if flag == 1 else QColor(255, 255, 255, 190)
+                    QColor("#E81123") if flag == 1 else (QColor(45, 55, 72, 190) if self.dark_mode else QColor(255, 255, 255, 190))
                 )
                 painter.drawPolygon(banner)
 
@@ -558,7 +1080,7 @@ class MediaCardDelegate(QStyledItemDelegate):
         if extra_lines:
             detail_font = QFont("Segoe UI", 8)
             painter.setFont(detail_font)
-            painter.setPen(QColor("#333333"))
+            painter.setPen(QColor("#D1D5DB") if self.dark_mode else QColor("#333333"))
             fm = painter.fontMetrics()
             for line in extra_lines:
                 elided = fm.elidedText(line, Qt.ElideMiddle, card_rect.width() - 12)
@@ -578,7 +1100,7 @@ class MediaCardDelegate(QStyledItemDelegate):
             if cap_text:
                 cap_font = QFont("Segoe UI", 9)
                 painter.setFont(cap_font)
-                painter.setPen(QColor("#2B74B9") if is_cap_hovered else QColor("#333333"))
+                painter.setPen(QColor("#60A5FA" if self.dark_mode else "#2B74B9") if is_cap_hovered else (QColor("#E2E8F0") if self.dark_mode else QColor("#333333")))
                 fm = painter.fontMetrics()
                 elided = fm.elidedText(cap_text, Qt.ElideMiddle, cap_rect.width())
                 painter.drawText(cap_rect, Qt.AlignCenter, elided)
@@ -586,7 +1108,7 @@ class MediaCardDelegate(QStyledItemDelegate):
                 cap_font = QFont("Segoe UI", 9)
                 cap_font.setItalic(True)
                 painter.setFont(cap_font)
-                painter.setPen(QColor("#2B74B9") if is_cap_hovered else QColor("#888888"))
+                painter.setPen(QColor("#60A5FA" if self.dark_mode else "#2B74B9") if is_cap_hovered else (QColor("#6B7280") if self.dark_mode else QColor("#888888")))
                 painter.drawText(cap_rect, Qt.AlignCenter, "Add caption")
             painter.restore()
 
@@ -792,6 +1314,13 @@ class ThumbnailGridView(QListView):
         self.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setFrameShape(QListView.NoFrame)
+        self.setUniformItemSizes(True)
+
+        self._last_repaint_mono: float = 0.0
+        self._repaint_coalesce_timer = QTimer(self)
+        self._repaint_coalesce_timer.setSingleShot(True)
+        self._repaint_coalesce_timer.setInterval(16)
+        self._repaint_coalesce_timer.timeout.connect(self._flush_coalesced_repaint)
 
         self._scroll_debounce = QTimer(self)
         self._scroll_debounce.setSingleShot(True)
@@ -831,16 +1360,62 @@ class ThumbnailGridView(QListView):
         )
         self.card_delegate.checkbox_toggled.connect(self.on_card_checkbox_toggled)
         self.catalog_model.modelReset.connect(self._on_model_reset)
-        self.catalog_model.dataChanged.connect(lambda *_: self.viewport().update())
+        self.catalog_model.view_repaint_requested.connect(self._on_view_repaint_requested)
+        self.catalog_model.dataChanged.connect(lambda *_: self.schedule_viewport_update())
 
         if self.selectionModel() is not None:
             self.selectionModel().selectionChanged.connect(self._on_selection_changed)
 
         self._sync_metrics_and_scrollbar()
 
+    def _on_view_repaint_requested(self, _media_id: int = -1) -> None:
+        self.schedule_viewport_update()
+
+    def schedule_viewport_update(self) -> None:
+        now = time.perf_counter()
+        if (now - self._last_repaint_mono) >= 0.015:
+            self._last_repaint_mono = now
+            self.viewport().update()
+        elif not self._repaint_coalesce_timer.isActive():
+            self._repaint_coalesce_timer.start()
+
+    def _flush_coalesced_repaint(self) -> None:
+        self._last_repaint_mono = time.perf_counter()
+        self.viewport().update()
+
+    def doItemsLayout(self) -> None:
+        # Prevent QListView's C++ O(N) layout engine from iterating 500k rows on modelReset
+        self._update_scrollbar_range()
+
+    def dataChanged(
+        self,
+        topLeft: QModelIndex,
+        bottomRight: QModelIndex,
+        roles: Sequence[int] = (),
+    ) -> None:
+        # Prevent QListView's C++ O(N) layout engine from iterating 500k rows on dataChanged
+        self.schedule_viewport_update()
+
     def _cell_dimensions(self) -> tuple[int, int]:
+        if self.card_delegate and self.card_delegate.is_horizontal_card:
+            thumb_side = max(70, min(self._thumb_size, 115))
+            cell_w = max(280, thumb_side + 220 + (self._cell_padding * 2))
+            under_keys = {"rating", "caption", "filename", "size", "dimensions", "date_taken", "date_modified"}
+            active_count = len(under_keys if "all" in self.card_delegate._visible_details else (self.card_delegate._visible_details & under_keys))
+            text_h = 16 + active_count * 18
+            cell_h = max(thumb_side + 18 + (self._cell_padding * 2), text_h + 16)
+            return cell_w, cell_h
+
+        bottom_reserve = 6
+        if self.card_delegate:
+            if "rating" in self.card_delegate._visible_details or "all" in self.card_delegate._visible_details:
+                bottom_reserve += 20
+            if "caption" in self.card_delegate._visible_details or "all" in self.card_delegate._visible_details:
+                bottom_reserve += 18
+            extra_count = len(self.card_delegate._visible_details - {"rating", "caption", "flag", "all"})
+            bottom_reserve += extra_count * 14
         cell_w = self._thumb_size + (self._cell_padding * 2)
-        cell_h = self._thumb_size + (self._cell_padding * 2) + 20
+        cell_h = self._thumb_size + (self._cell_padding * 2) + bottom_reserve
         return cell_w, cell_h
 
     def _sync_metrics_and_scrollbar(self) -> None:
@@ -977,6 +1552,12 @@ class ThumbnailGridView(QListView):
         self._sync_metrics_and_scrollbar()
         self._scroll_debounce.start()
 
+    def set_visible_details(self, details: set[str]) -> None:
+        if self.card_delegate:
+            self.card_delegate.set_visible_details(details)
+            self._sync_metrics_and_scrollbar()
+            self.viewport().update()
+
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._update_scope_bar_geometry()
@@ -1021,9 +1602,22 @@ class ThumbnailGridView(QListView):
             return QModelIndex()
         return self.catalog_model.index(vrow, 0)
 
+    def set_dark_mode(self, is_dark: bool) -> None:
+        self._dark_mode = bool(is_dark)
+        self._is_dark = self._dark_mode
+        if self.card_delegate is not None:
+            self.card_delegate.dark_mode = self._dark_mode
+            self.card_delegate._is_dark = self._dark_mode
+        if hasattr(self, "scope_bar") and self.scope_bar is not None and hasattr(self.scope_bar, "set_dark_mode"):
+            self.scope_bar.set_dark_mode(self._dark_mode)
+        if hasattr(self, "person_header_bar") and self.person_header_bar is not None and hasattr(self.person_header_bar, "set_dark_mode"):
+            self.person_header_bar.set_dark_mode(self._dark_mode)
+        self.viewport().update()
+
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self.viewport())
-        painter.fillRect(self.viewport().rect(), QColor("#FFFFFF"))
+        is_dark = getattr(self, "_dark_mode", False)
+        painter.fillRect(self.viewport().rect(), QColor("#181A1F") if is_dark else QColor("#FFFFFF"))
 
         if self.catalog_model is None or self.card_delegate is None:
             painter.end()
@@ -1036,6 +1630,7 @@ class ThumbnailGridView(QListView):
         )
 
         sel_model = self.selectionModel()
+        missing_mids: list[int] = []
         for vrow in visible_vrows:
             idx = self.catalog_model.index(vrow, 0)
             if not idx.isValid():
@@ -1054,6 +1649,13 @@ class ThumbnailGridView(QListView):
                 opt.state |= QStyle.State_MouseOver
 
             self.card_delegate.paint(painter, opt, idx)
+
+            mid = self.catalog_model.media_id_at(idx)
+            if mid is not None and mid not in self.catalog_model.pixmap_cache:
+                missing_mids.append(mid)
+
+        if missing_mids and not self._scroll_debounce.isActive():
+            self._scroll_debounce.start()
 
         # Rubber-band multi-selection rectangle
         if (
@@ -1651,6 +2253,20 @@ class ThumbnailGridView(QListView):
         if hasattr(main_win, "open_file_location_for_media"):
             act_loc.triggered.connect(lambda: main_win.open_file_location_for_media(media_id))
 
+        menu.addSeparator()
+
+        # 7. Copy
+        act_copy = menu.addAction("Copy")
+        act_copy.setShortcut("Ctrl+C")
+        if hasattr(main_win, "copy_selection_to_clipboard"):
+            act_copy.triggered.connect(main_win.copy_selection_to_clipboard)
+
+        # 8. Delete
+        act_del = menu.addAction("Delete")
+        act_del.setShortcut("Del")
+        if hasattr(main_win, "delete_selection_to_recycle_bin"):
+            act_del.triggered.connect(main_win.delete_selection_to_recycle_bin)
+
         if not getattr(self, "_suppress_menu_exec", False):
             menu.exec(global_pos)
         return menu
@@ -1659,6 +2275,8 @@ class ThumbnailGridView(QListView):
         self, global_pos: QPoint, media_id: int, is_video: bool = False
     ) -> QMenu:
         """Authentic WLPG Media Card context menu (Photo vs Video vs Face Crop)."""
+        from src.ui.ribbon_toolbar import make_wlpg_icon
+
         if getattr(self.card_delegate, "face_crop_person_id", None) is not None:
             return self._show_face_crop_context_menu(
                 global_pos, media_id, int(self.card_delegate.face_crop_person_id)
@@ -1690,7 +2308,8 @@ class ThumbnailGridView(QListView):
             open_with_menu = menu.addMenu("Open with")
             menu._open_with_menu = open_with_menu
             open_with_menu.setFont(QFont("Segoe UI", 9))
-            act_default = open_with_menu.addAction("System default player")
+
+            act_default = open_with_menu.addAction(make_wlpg_icon("play", 16), "System default player")
             if is_mw:
                 act_default.triggered.connect(lambda: main_win.open_with_app_for_media(media_id, "default"))
 
@@ -1698,11 +2317,12 @@ class ThumbnailGridView(QListView):
             if v_apps and is_mw:
                 open_with_menu.addSeparator()
                 for app_name, app_cmd in v_apps:
-                    act_app = open_with_menu.addAction(app_name)
+                    ico = get_windows_app_icon(app_name, app_cmd)
+                    act_app = open_with_menu.addAction(ico, app_name)
                     act_app.triggered.connect(lambda _c=False, cmd=app_cmd: main_win.open_with_app_for_media(media_id, cmd))
 
             open_with_menu.addSeparator()
-            act_choose = open_with_menu.addAction("Choose another app...")
+            act_choose = open_with_menu.addAction(make_wlpg_icon("options", 16), "Choose another app...")
             if is_mw:
                 act_choose.triggered.connect(lambda: main_win.open_with_app_for_media(media_id, "choose"))
 
@@ -1734,7 +2354,10 @@ class ThumbnailGridView(QListView):
 
             # 7. Properties
             act_prop = menu.addAction("Properties")
-            if is_mw:
+            act_prop.setShortcut("Alt+Enter")
+            if is_mw and hasattr(main_win, "open_file_properties"):
+                act_prop.triggered.connect(lambda checked=False, mid=selected_ids[0]: main_win.open_file_properties(mid))
+            elif is_mw and hasattr(main_win, "toggle_right_pane"):
                 act_prop.triggered.connect(lambda: main_win.toggle_right_pane("info"))
 
         else:
@@ -1763,7 +2386,7 @@ class ThumbnailGridView(QListView):
                             ext = fname.rsplit(".", 1)[-1].lower()
                         break
 
-            act_default = open_with_menu.addAction("System default viewer")
+            act_default = open_with_menu.addAction(make_wlpg_icon("view_file", 16), "System default viewer")
             if is_mw:
                 act_default.triggered.connect(lambda: main_win.open_with_app_for_media(media_id, "default"))
 
@@ -1774,18 +2397,19 @@ class ThumbnailGridView(QListView):
                 for app_name, app_cmd in photo_apps:
                     if "paint" in app_name.lower():
                         has_paint = True
-                    act_app = open_with_menu.addAction(app_name)
+                    ico = get_windows_app_icon(app_name, app_cmd)
+                    act_app = open_with_menu.addAction(ico, app_name)
                     act_app.triggered.connect(lambda _c=False, cmd=app_cmd: main_win.open_with_app_for_media(media_id, cmd))
                 if not has_paint:
-                    act_paint = open_with_menu.addAction("Paint")
+                    act_paint = open_with_menu.addAction(make_wlpg_icon("retouch", 16), "Paint")
                     act_paint.triggered.connect(lambda: main_win.open_with_app_for_media(media_id, "paint"))
             else:
-                act_paint = open_with_menu.addAction("Paint")
+                act_paint = open_with_menu.addAction(make_wlpg_icon("retouch", 16), "Paint")
                 if is_mw:
                     act_paint.triggered.connect(lambda: main_win.open_with_app_for_media(media_id, "paint"))
 
             open_with_menu.addSeparator()
-            act_choose = open_with_menu.addAction("Choose another app...")
+            act_choose = open_with_menu.addAction(make_wlpg_icon("options", 16), "Choose another app...")
             if is_mw:
                 act_choose.triggered.connect(lambda: main_win.open_with_app_for_media(media_id, "choose"))
 
@@ -1853,13 +2477,19 @@ class ThumbnailGridView(QListView):
             # 11. Rescan for faces
             act_rescan = menu.addAction("Rescan for faces")
             if is_mw:
-                act_rescan.triggered.connect(lambda: main_win.rescan_faces_for_selection([media_id]))
+                sel_mids = self.selected_media_ids()
+                target_mids = sel_mids if (sel_mids and media_id in sel_mids) else [media_id]
+                act_rescan.triggered.connect(lambda checked=False, t_ids=target_mids: main_win.rescan_faces_for_selection(t_ids))
 
             menu.addSeparator()
 
             # 12. Properties
             act_prop = menu.addAction("Properties")
-            if is_mw:
+            act_prop.setShortcut("Alt+Enter")
+            if is_mw and hasattr(main_win, "open_file_properties"):
+                target_mid = media_id if (media_id is not None) else (selected_ids[0] if selected_ids else None)
+                act_prop.triggered.connect(lambda checked=False, mid=target_mid: main_win.open_file_properties(mid))
+            elif is_mw and hasattr(main_win, "toggle_right_pane"):
                 act_prop.triggered.connect(lambda: main_win.toggle_right_pane("info"))
 
         if not getattr(self, "_suppress_menu_exec", False):
@@ -2092,13 +2722,13 @@ class ThumbnailGridView(QListView):
     # -------------------------------------------------------------------------
     # Visible Viewport Prefetch Range & Selection Helpers
     # -------------------------------------------------------------------------
-    def visible_media_ids(self, buffer_rows: int = 2) -> list[int]:
+    def visible_media_ids(self, buffer_rows: int = 4) -> list[int]:
         """Calculates the exact media_ids currently visible in the viewport plus buffer_rows."""
         if self.catalog_model is None or self.catalog_model.rowCount() == 0:
             return []
 
         _, cell_h = self._cell_dimensions()
-        buf_px = max(120, buffer_rows * cell_h)
+        buf_px = max(240, buffer_rows * cell_h)
         scroll_y = max(0, self.verticalScrollBar().value())
         vp_h = max(cell_h, self.viewport().height())
 
@@ -2114,7 +2744,7 @@ class ThumbnailGridView(QListView):
         return media_ids
 
     def _emit_visible_range(self) -> None:
-        self.viewport_range_changed.emit(self.visible_media_ids(buffer_rows=2))
+        self.viewport_range_changed.emit(self.visible_media_ids(buffer_rows=4))
 
     def _on_model_reset(self) -> None:
         self._sync_metrics_and_scrollbar()

@@ -40,6 +40,7 @@ class DualDatabaseEngine:
         self._lock = threading.Lock()
         self._all_connections: list[sqlite3.Connection] = []
         self.write_lock = threading.RLock()
+        self.thumb_write_lock = threading.RLock()
 
         if str(self.catalog_path) != ":memory:":
             self.catalog_path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,7 +110,7 @@ class DualDatabaseEngine:
     @contextlib.contextmanager
     def thumbnails_transaction(self) -> Generator[sqlite3.Connection, None, None]:
         """Context manager yielding the thread's thumbnails_conn with atomic transaction commit/rollback."""
-        with self.write_lock:
+        with self.thumb_write_lock:
             conn = self.thumbnails_conn()
             with conn:
                 yield conn
@@ -426,6 +427,183 @@ class DualDatabaseEngine:
                 )
         except Exception as exc:
             logger.warning("Error in dedup_media_tags_v2 migration: %s", exc)
+
+        # 10. One-time cleanup of boxless face crops (16x16 corner crops) and unscanned face versions:
+        try:
+            has_people = cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='people';"
+            ).fetchone()
+            cur.execute("CREATE TABLE IF NOT EXISTS schema_flags (name TEXT PRIMARY KEY);")
+            done = cur.execute(
+                "SELECT 1 FROM schema_flags WHERE name = 'heal_boxless_and_unscanned_faces_v1';"
+            ).fetchone()
+            if has_people and not done:
+                try:
+                    thumb_path = str(self.thumbnails_path.resolve())
+                    cur.execute("ATTACH DATABASE ? AS thumb_db;", (thumb_path,))
+                    cur.execute(
+                        """
+                        DELETE FROM thumb_db.face_thumbnails
+                        WHERE face_id IN (
+                            SELECT id FROM media_people WHERE rect_w <= 0.005 OR rect_h <= 0.005
+                        );
+                        """
+                    )
+                    cur.execute("DETACH DATABASE thumb_db;")
+                except Exception:
+                    pass
+
+                # Clear people avatars that came from boxless or unverified rows
+                cur.execute(
+                    """
+                    UPDATE people
+                    SET thumbnail_blob = NULL
+                    WHERE id IN (
+                        SELECT DISTINCT person_id FROM media_people
+                        WHERE person_id IS NOT NULL AND (rect_w <= 0.005 OR rect_h <= 0.005)
+                    )
+                    AND id NOT IN (
+                        SELECT DISTINCT person_id FROM media_people
+                        WHERE person_id IS NOT NULL AND rect_w > 0.005 AND rect_h > 0.005 AND embedding IS NOT NULL
+                    );
+                    """
+                )
+
+                # If photos were marked scanned while FaceEngine was unavailable (0 embeddings), reset scan version
+                emb_cnt_row = cur.execute(
+                    "SELECT COUNT(*) FROM media_people WHERE embedding IS NOT NULL;"
+                ).fetchone()
+                emb_cnt = int(emb_cnt_row[0]) if emb_cnt_row else 0
+                if emb_cnt == 0:
+                    cur.execute("UPDATE media SET face_scan_version = 0 WHERE face_scan_version > 0;")
+                else:
+                    cur.execute(
+                        """
+                        UPDATE media
+                        SET face_scan_version = 0
+                        WHERE id IN (
+                            SELECT DISTINCT media_id FROM media_people
+                            WHERE state = 1 AND (rect_w <= 0.005 OR rect_h <= 0.005)
+                        );
+                        """
+                    )
+
+                cur.execute(
+                    "INSERT OR IGNORE INTO schema_flags(name) VALUES ('heal_boxless_and_unscanned_faces_v1');"
+                )
+        except Exception as exc:
+            logger.warning("Error in heal_boxless_and_unscanned_faces_v1 migration: %s", exc)
+
+        # 11. One-time healing of EXIF SubIFD DateTimeOriginal (aligns with camera capture date):
+        try:
+            has_media = cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media';"
+            ).fetchone()
+            cur.execute("CREATE TABLE IF NOT EXISTS schema_flags (name TEXT PRIMARY KEY);")
+            done = cur.execute(
+                "SELECT 1 FROM schema_flags WHERE name = 'heal_exif_subifd_datetime_original_v1';"
+            ).fetchone()
+            if has_media and not done:
+                from PIL import Image, ExifTags
+                from src.workers.scanner_thumb_worker import _parse_iso_or_exif_datetime
+
+                media_rows = cur.execute("""
+                    SELECT m.id, f.path, m.filename, m.date_taken
+                    FROM media m
+                    JOIN folders f ON f.id = m.folder_id
+                    WHERE m.is_video = 0;
+                """).fetchall()
+
+                for mid, fpath, fname, db_dt in media_rows:
+                    full_p = Path(fpath) / fname
+                    if not full_p.exists():
+                        continue
+                    try:
+                        with Image.open(full_p) as img:
+                            ex = img.getexif()
+                            if not ex:
+                                continue
+                            ifd = ex.get_ifd(ExifTags.IFD.Exif)
+                            if not ifd:
+                                continue
+                            dto = ifd.get(36867) or ifd.get(36868)
+                            if dto:
+                                exif_ts = _parse_iso_or_exif_datetime(str(dto))
+                                if exif_ts and (db_dt is None or abs(exif_ts - db_dt) > 60):
+                                    cur.execute("UPDATE media SET date_taken = ? WHERE id = ?;", (exif_ts, mid))
+                    except Exception:
+                        pass
+
+                cur.execute(
+                    "INSERT OR IGNORE INTO schema_flags(name) VALUES ('heal_exif_subifd_datetime_original_v1');"
+                )
+                conn.commit()
+        except Exception as exc:
+            logger.warning("Error in heal_exif_subifd_datetime_original_v1 migration: %s", exc)
+
+        # 12. One-time healing of bogus filename/QuickTime/Exiv2 dates (e.g. 1055 Facebook IDs,
+        #     1904 QuickTime epoch zero, 1946-1948 Exiv2 66-year shift, 1969-12-31 Unix epoch zero):
+        try:
+            has_media = cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media';"
+            ).fetchone()
+            cur.execute("CREATE TABLE IF NOT EXISTS schema_flags (name TEXT PRIMARY KEY);")
+            done = cur.execute(
+                "SELECT 1 FROM schema_flags WHERE name = 'heal_bogus_video_and_filename_dates_v1';"
+            ).fetchone()
+            if has_media and not done:
+                from src.workers.scanner_thumb_worker import (
+                    _MAC_EPOCH_OFFSET,
+                    _MAX_VALID_CAMERA_EPOCH,
+                    _MIN_VALID_CAMERA_EPOCH,
+                    _extract_mp4_creation_time,
+                    _timestamp_from_filename,
+                    extract_media_metadata,
+                )
+
+                bad_rows = cur.execute(
+                    """
+                    SELECT m.id, f.path, m.filename, m.is_video, m.date_taken
+                    FROM media m
+                    JOIN folders f ON f.id = m.folder_id
+                    WHERE m.date_taken IS NOT NULL
+                      AND (m.date_taken < -2000000000 OR (m.is_video = 1 AND m.date_taken < 315532800));
+                    """
+                ).fetchall()
+
+                for mid, fpath, fname, is_vid, old_dt in bad_rows:
+                    full_p = Path(fpath) / fname
+                    new_dt: int | None = None
+                    if is_vid:
+                        mvhd_dt = _extract_mp4_creation_time(full_p) if full_p.exists() else None
+                        fn_dt = _timestamp_from_filename(Path(fname).stem)
+                        recovered: int | None = None
+                        if old_dt is not None and abs(int(old_dt) - (-2082844800)) > 172800 and abs(int(old_dt)) > 86400:
+                            shifted = int(old_dt) + _MAC_EPOCH_OFFSET
+                            if _MIN_VALID_CAMERA_EPOCH <= shifted <= _MAX_VALID_CAMERA_EPOCH:
+                                recovered = shifted
+                        if mvhd_dt is not None and fn_dt is not None:
+                            if abs(mvhd_dt - fn_dt) <= 90000 or (mvhd_dt % 3600 == 0 and fn_dt % 60 != 0):
+                                new_dt = fn_dt
+                            else:
+                                new_dt = mvhd_dt
+                        else:
+                            new_dt = mvhd_dt or fn_dt or recovered
+                    else:
+                        if full_p.exists():
+                            try:
+                                new_dt = extract_media_metadata(full_p, False).get("date_taken")
+                            except Exception:
+                                new_dt = None
+                    cur.execute("UPDATE media SET date_taken = ? WHERE id = ?;", (new_dt, int(mid)))
+
+                cur.execute(
+                    "INSERT OR IGNORE INTO schema_flags(name) VALUES ('heal_bogus_video_and_filename_dates_v1');"
+                )
+                conn.commit()
+        except Exception as exc:
+            logger.warning("Error in heal_bogus_video_and_filename_dates_v1 migration: %s", exc)
+
         conn.commit()
 
     def _migrate_thumbnails_schema(self, conn: sqlite3.Connection) -> None:

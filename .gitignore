@@ -39,5 +39,14 @@ htmlcov/
 Thumbs.db
 desktop.ini
 
-# Scratch / temporary experimental scripts & images
+# Scratch / temporary experimental scripts, local photos, logs & test suite
 scratch/
+photos/
+logs/
+tests/
+
+# Build & Distribution artifacts
+build/
+dist/
+dist_installer/
+*.spec.bak

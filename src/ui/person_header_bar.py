@@ -322,7 +322,7 @@ class PersonHeaderBar(QFrame):
 
         self.lbl_photo_count = QLabel(self)
         self.lbl_photo_count.setContentsMargins(0, 0, 0, 0)
-        self.lbl_photo_count.setStyleSheet("color: #64748B; font-size: 11px; padding: 0px; margin: 0px;")
+        self.lbl_photo_count.setStyleSheet("background: transparent; color: #64748B; font-size: 11px; padding: 0px; margin: 0px;")
         v_info.addWidget(self.lbl_photo_count, 0, Qt.AlignmentFlag.AlignLeft)
 
         h_row.addLayout(v_info, 1)
@@ -429,6 +429,74 @@ class PersonHeaderBar(QFrame):
 
         v_banner.addWidget(self.strip_scroll)
         main_layout.addWidget(self.banner_frame)
+
+    def set_dark_mode(self, is_dark: bool) -> None:
+        self._dark_mode = bool(is_dark)
+        self._is_dark = self._dark_mode
+        if not self._dark_mode:
+            self.setStyleSheet(
+                "#PersonHeaderBar { background-color: #F8FAFC; border-bottom: 1px solid #DDE4ED; }"
+                "QToolTip { background-color: #FFFFFF; color: #1E395B; border: 1px solid #7DA2CE; "
+                "border-radius: 2px; padding: 3px 6px; font-family: 'Segoe UI', sans-serif; font-size: 9pt; }"
+            )
+            self.btn_back_people.setStyleSheet(
+                "QPushButton { background-color: #FFFFFF; border: 1px solid #CBD5E1; color: #1E395B; "
+                "font-weight: bold; padding: 4px 10px; border-radius: 4px; font-size: 11px; }"
+                "QPushButton:hover { background-color: #EDF2F7; border-color: #94A3B8; }"
+            )
+            self.txt_name.setStyleSheet(
+                "QLineEdit { border: 1px solid transparent; background: transparent; color: #0F172A; padding: 0px; margin: 0px; border-radius: 3px; }"
+                "QLineEdit:hover { border-color: #CBD5E1; background: #FFFFFF; padding: 0px 4px; }"
+                "QLineEdit:focus { border-color: #3B82F6; background: #FFFFFF; padding: 0px 4px; }"
+            )
+            self.lbl_photo_count.setStyleSheet("background: transparent; color: #64748B; font-size: 11px; padding: 0px; margin: 0px;")
+            self.btn_full_photos.setStyleSheet(
+                "QPushButton { background-color: #FFFFFF; border: 1px solid #CBD5E1; border-top-left-radius: 4px; border-bottom-left-radius: 4px; "
+                "padding: 5px 12px; font-size: 11px; color: #334155; }"
+                "QPushButton:checked { background-color: #1E395B; color: #FFFFFF; border-color: #1E395B; font-weight: bold; }"
+            )
+            self.btn_face_crops.setStyleSheet(
+                "QPushButton { background-color: #FFFFFF; border: 1px solid #CBD5E1; border-left: none; border-top-right-radius: 4px; border-bottom-right-radius: 4px; "
+                "padding: 5px 12px; font-size: 11px; color: #334155; }"
+                "QPushButton:checked { background-color: #1E395B; color: #FFFFFF; border-color: #1E395B; font-weight: bold; }"
+            )
+            self.banner_frame.setStyleSheet(
+                "#SuggestionBanner { background-color: #F0F6FF; border: 1px solid #C7D9EE; border-radius: 6px; padding: 4px; }"
+            )
+            self.lbl_banner_title.setStyleSheet("background: transparent; font-weight: bold; color: #1E395B; font-size: 12px;")
+            self.lbl_banner_count.setStyleSheet("background: transparent; color: #64748B; font-size: 11px;")
+        else:
+            self.setStyleSheet(
+                "#PersonHeaderBar { background-color: #1E2228; border-bottom: 1px solid #2E3440; }"
+                "QToolTip { background-color: #FFFFFF; color: #1E395B; border: 1px solid #7DA2CE; "
+                "border-radius: 2px; padding: 3px 6px; font-family: 'Segoe UI', sans-serif; font-size: 9pt; }"
+            )
+            self.btn_back_people.setStyleSheet(
+                "QPushButton { background-color: #262C36; border: 1px solid #3E4756; color: #E2E8F0; "
+                "font-weight: bold; padding: 4px 10px; border-radius: 4px; font-size: 11px; }"
+                "QPushButton:hover { background-color: #323946; border-color: #60A5FA; }"
+            )
+            self.txt_name.setStyleSheet(
+                "QLineEdit { border: 1px solid transparent; background: transparent; color: #F1F5F9; padding: 0px; margin: 0px; border-radius: 3px; }"
+                "QLineEdit:hover { border-color: #475569; background: #14171B; padding: 0px 4px; }"
+                "QLineEdit:focus { border-color: #3B82F6; background: #14171B; padding: 0px 4px; }"
+            )
+            self.lbl_photo_count.setStyleSheet("background: transparent; color: #94A3B8; font-size: 11px; padding: 0px; margin: 0px;")
+            self.btn_full_photos.setStyleSheet(
+                "QPushButton { background-color: #262C36; border: 1px solid #3E4756; border-top-left-radius: 4px; border-bottom-left-radius: 4px; "
+                "padding: 5px 12px; font-size: 11px; color: #CBD5E1; }"
+                "QPushButton:checked { background-color: #2563EB; color: #FFFFFF; border-color: #2563EB; font-weight: bold; }"
+            )
+            self.btn_face_crops.setStyleSheet(
+                "QPushButton { background-color: #262C36; border: 1px solid #3E4756; border-left: none; border-top-right-radius: 4px; border-bottom-right-radius: 4px; "
+                "padding: 5px 12px; font-size: 11px; color: #CBD5E1; }"
+                "QPushButton:checked { background-color: #2563EB; color: #FFFFFF; border-color: #2563EB; font-weight: bold; }"
+            )
+            self.banner_frame.setStyleSheet(
+                "#SuggestionBanner { background-color: #1A2433; border: 1px solid #2E4057; border-radius: 6px; padding: 4px; }"
+            )
+            self.lbl_banner_title.setStyleSheet("background: transparent; font-weight: bold; color: #93C5FD; font-size: 12px;")
+            self.lbl_banner_count.setStyleSheet("background: transparent; color: #94A3B8; font-size: 11px;")
 
     def load_unnamed_person(
         self,

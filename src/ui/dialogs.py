@@ -13,8 +13,17 @@ from pathlib import Path
 from typing import Any, Literal
 
 from PIL import Image, ImageOps
-from PySide6.QtCore import QDate, QObject, QThread, QTime, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QFont, QIntValidator
+from PySide6.QtCore import QDate, QObject, QRect, QSettings, QThread, QTime, Qt, QUrl, Signal
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QFont,
+    QIntValidator,
+    QLinearGradient,
+    QPainter,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -31,6 +40,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QSlider,
     QSpinBox,
     QTabWidget,
@@ -206,6 +216,124 @@ class ChangeTimeTakenDialog(QDialog):
         return self.new_lead_timestamp() - self.lead_date_taken
 
 
+class TagMergeConfirmDialog(QDialog):
+    """
+    WLPG-style confirmation dialog when moving a tag into a parent where a tag
+    with the same name already exists (media_1793525510394_ecf2beb5.png).
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Photo Gallery")
+        self.setFixedSize(410, 160)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        self.setStyleSheet(
+            """
+            QDialog {
+                background-color: #FFFFFF;
+            }
+            QPushButton {
+                min-width: 75px;
+                height: 23px;
+                font-family: 'Segoe UI';
+                font-size: 9pt;
+                border: 1px solid #707070;
+                border-radius: 2px;
+                background-color: #E1E1E1;
+            }
+            QPushButton:hover {
+                background-color: #E5F1FB;
+                border: 1px solid #0078D7;
+            }
+            QPushButton:pressed {
+                background-color: #CCE4F7;
+                border: 1px solid #005499;
+            }
+            QPushButton:focus {
+                border: 1px solid #0078D7;
+            }
+            QCheckBox {
+                font-family: 'Segoe UI';
+                font-size: 9pt;
+                color: #000000;
+            }
+            """
+        )
+
+        main_vbox = QVBoxLayout(self)
+        main_vbox.setContentsMargins(18, 16, 18, 14)
+        main_vbox.setSpacing(14)
+
+        # Top area: Icon + text
+        top_hbox = QHBoxLayout()
+        top_hbox.setSpacing(14)
+        top_hbox.setAlignment(Qt.AlignTop)
+
+        lbl_icon = QLabel(self)
+        lbl_icon.setFixedSize(36, 36)
+        lbl_icon.setPixmap(self._make_question_pixmap(36))
+        top_hbox.addWidget(lbl_icon, 0, Qt.AlignTop)
+
+        text_vbox = QVBoxLayout()
+        text_vbox.setSpacing(6)
+
+        self.lbl_title = QLabel("A tag with the same name already exists here", self)
+        self.lbl_title.setStyleSheet("color: #003399; font-family: 'Segoe UI'; font-size: 11pt; font-weight: normal;")
+        self.lbl_title.setWordWrap(True)
+        text_vbox.addWidget(self.lbl_title)
+
+        self.lbl_msg = QLabel("These tags are about to be merged. Do you want to continue?", self)
+        self.lbl_msg.setStyleSheet("color: #000000; font-family: 'Segoe UI'; font-size: 9pt;")
+        self.lbl_msg.setWordWrap(True)
+        text_vbox.addWidget(self.lbl_msg)
+
+        top_hbox.addLayout(text_vbox, 1)
+        main_vbox.addLayout(top_hbox)
+
+        main_vbox.addStretch(1)
+
+        # Bottom row: Checkbox on left, Yes/No buttons on right
+        bottom_hbox = QHBoxLayout()
+        self.chk_dont_show = QCheckBox("Don't show this message again", self)
+        bottom_hbox.addWidget(self.chk_dont_show, 0, Qt.AlignVCenter)
+
+        bottom_hbox.addStretch(1)
+
+        self.btn_yes = QPushButton("Yes", self)
+        self.btn_yes.setDefault(True)
+        self.btn_yes.clicked.connect(self.accept)
+        bottom_hbox.addWidget(self.btn_yes)
+
+        self.btn_no = QPushButton("No", self)
+        self.btn_no.clicked.connect(self.reject)
+        bottom_hbox.addWidget(self.btn_no)
+
+        main_vbox.addLayout(bottom_hbox)
+
+    @staticmethod
+    def _make_question_pixmap(size: int = 36) -> QPixmap:
+        pix = QPixmap(size, size)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        grad = QLinearGradient(0, 0, 0, size)
+        grad.setColorAt(0, QColor("#3C88E8"))
+        grad.setColorAt(1, QColor("#1452B5"))
+        p.setBrush(grad)
+        p.setPen(QPen(QColor("#0F3D87"), 1.2))
+        p.drawEllipse(1, 1, size - 2, size - 2)
+        p.setPen(QColor("#FFFFFF"))
+        font = QFont("Segoe UI", int(size * 0.58), QFont.Bold)
+        p.setFont(font)
+        p.drawText(QRect(0, 0, size, size - 2), Qt.AlignCenter, "?")
+        p.end()
+        return pix
+
+    @property
+    def dont_show_again(self) -> bool:
+        return self.chk_dont_show.isChecked()
+
+
 class AppSettingsDialog(QDialog):
     """
     Windows Live Photo Gallery Options Dialog with multi-tab interface:
@@ -215,6 +343,8 @@ class AppSettingsDialog(QDialog):
     - Edit: Auto-adjust options (Straighten, Noise, Color, Exposure) and JPEG quality slider
     - Database: Database & Backup Maintenance (compaction, expired original cleanup)
     """
+
+    settings_applied = Signal()
 
     def __init__(
         self,
@@ -231,8 +361,12 @@ class AppSettingsDialog(QDialog):
         auto_noise: bool = False,
         auto_color: bool = True,
         auto_exposure: bool = True,
+        save_copy_location: str | None = None,
+        save_copy_custom_folder: str | None = None,
+        save_copy_naming: str | None = None,
+        save_copy_switch_view: bool | None = None,
         originals_dir: str | None = None,
-        pause_write_back: bool = False,
+        pause_write_back: bool = True,
         icon_theme: str = "wlpg_aero",
         engine: Any | None = None,
         initial_tab: str | None = None,
@@ -251,6 +385,14 @@ class AppSettingsDialog(QDialog):
         self.purge_rescan_requested: bool = False
         self.fast_rematch_requested: bool = False
         self.originals_dir: str = originals_dir or str(Path.home() / "Pictures" / ".OriginalFiles")
+
+        # Load Save as copy settings from QSettings if not explicitly passed
+        settings = QSettings("PhotoGallery64", "PhotoGallery64")
+        self._init_save_copy_location = save_copy_location if save_copy_location is not None else str(settings.value("save_copy_location", "original"))
+        self._init_save_copy_custom_folder = save_copy_custom_folder if save_copy_custom_folder is not None else str(settings.value("save_copy_custom_folder", "") or "")
+        self._init_save_copy_naming = save_copy_naming if save_copy_naming is not None else str(settings.value("save_copy_naming_pattern", "{stem}_edited"))
+        self._init_save_copy_switch_view = save_copy_switch_view if save_copy_switch_view is not None else settings.value("save_copy_switch_view", True, type=bool)
+        self._init_unsaved_edits_action = str(settings.value("unsaved_edits_action", "prompt"))
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(12, 12, 12, 12)
@@ -391,9 +533,19 @@ class AppSettingsDialog(QDialog):
         v_gen.addWidget(self.chk_write_to_files)
         self.chk_pause_write_back = self.chk_write_to_files
 
+        lbl_safe_hint = QLabel(
+            "When unchecked (default), tags, ratings, captions, and people are safely saved to the "
+            "gallery database without modifying your original image files on disk.",
+            tab_general,
+        )
+        lbl_safe_hint.setWordWrap(True)
+        lbl_safe_hint.setStyleSheet("font-size: 8.5pt; padding-left: 20px;")
+        v_gen.addWidget(lbl_safe_hint)
+
         v_gen.addStretch(1)
 
         self.tab_widget.addTab(tab_general, "General")
+        self.general_tab = tab_general
 
         # -------------------------------------------------------------
         # Tab 2: Face Recognition
@@ -465,7 +617,6 @@ class AppSettingsDialog(QDialog):
         h_ex = QHBoxLayout()
         lbl_ex_title = QLabel("Example:     ", imp_frame)
         self.lbl_import_example = QLabel("Himalayas\\DSC_1234.jpg", imp_frame)
-        self.lbl_import_example.setStyleSheet("color: #111111;")
         h_ex.addWidget(lbl_ex_title)
         h_ex.addWidget(self.lbl_import_example, 1)
         imp_frame_layout.addLayout(h_ex)
@@ -498,6 +649,7 @@ class AppSettingsDialog(QDialog):
         v_imp.addStretch(1)
 
         self.tab_widget.addTab(tab_import, "Import")
+        self.import_tab = tab_import
 
         # -------------------------------------------------------------
         # Tab 3: Originals (docs: screenshot 4)
@@ -520,7 +672,6 @@ class AppSettingsDialog(QDialog):
             orig_group,
         )
         lbl_orig_desc.setWordWrap(True)
-        lbl_orig_desc.setStyleSheet("color: #222222;")
         orig_layout.addWidget(lbl_orig_desc)
 
         lbl_go_orig = QLabel(
@@ -564,6 +715,7 @@ class AppSettingsDialog(QDialog):
         v_orig.addStretch(1)
 
         self.tab_widget.addTab(tab_originals, "Originals")
+        self.originals_tab = tab_originals
 
         # -------------------------------------------------------------
         # Tab 4: Edit (docs: screenshot 5)
@@ -617,7 +769,6 @@ class AppSettingsDialog(QDialog):
             self.grp_jpeg,
         )
         lbl_jpeg_desc.setWordWrap(True)
-        lbl_jpeg_desc.setStyleSheet("color: #222222;")
         v_jpeg.addWidget(lbl_jpeg_desc)
 
         self.slider_jpeg_quality = QSlider(Qt.Horizontal, self.grp_jpeg)
@@ -630,18 +781,103 @@ class AppSettingsDialog(QDialog):
 
         h_labels = QHBoxLayout()
         lbl_low = QLabel("Low", self.grp_jpeg)
-        lbl_low.setStyleSheet("color: #666666;")
         lbl_high = QLabel("High", self.grp_jpeg)
-        lbl_high.setStyleSheet("color: #666666;")
         h_labels.addWidget(lbl_low)
         h_labels.addStretch(1)
         h_labels.addWidget(lbl_high)
         v_jpeg.addLayout(h_labels)
 
         v_edit.addWidget(self.grp_jpeg)
+
+        # Save as copy settings group
+        self.grp_save_copy = QGroupBox("Save as copy settings", tab_edit)
+        v_copy = QVBoxLayout(self.grp_save_copy)
+        v_copy.setContentsMargins(12, 10, 12, 10)
+        v_copy.setSpacing(6)
+
+        lbl_naming = QLabel("File naming format:", self.grp_save_copy)
+        v_copy.addWidget(lbl_naming)
+
+        self.cmb_save_naming = QComboBox(self.grp_save_copy)
+        self.cmb_save_naming.addItem("Original name + _edited (e.g. photo_edited.jpg)", "{stem}_edited")
+        self.cmb_save_naming.addItem("Original name + (edited) (e.g. photo (edited).jpg)", "{stem} (edited)")
+        self.cmb_save_naming.addItem("Original name + _copy (e.g. photo_copy.jpg)", "{stem}_copy")
+        self.cmb_save_naming.addItem("Original name + -edit (e.g. photo-edit.jpg)", "{stem}-edit")
+        v_copy.addWidget(self.cmb_save_naming)
+
+        naming_idx = self.cmb_save_naming.findData(self._init_save_copy_naming)
+        if naming_idx >= 0:
+            self.cmb_save_naming.setCurrentIndex(naming_idx)
+
+        v_copy.addSpacing(2)
+        lbl_dest = QLabel("Destination folder:", self.grp_save_copy)
+        v_copy.addWidget(lbl_dest)
+
+        self.rad_save_orig = QRadioButton("Save to original photo's folder", self.grp_save_copy)
+        self.rad_save_custom = QRadioButton("Save to a specific folder:", self.grp_save_copy)
+        self.rad_save_ask = QRadioButton("Ask each time", self.grp_save_copy)
+        self.rad_save_ask.setToolTip("Prompt with a File Explorer save dialog each time Save as copy is clicked")
+
+        if self._init_save_copy_location == "custom":
+            self.rad_save_custom.setChecked(True)
+        elif self._init_save_copy_location in ("ask", "prompt"):
+            self.rad_save_ask.setChecked(True)
+        else:
+            self.rad_save_orig.setChecked(True)
+        v_copy.addWidget(self.rad_save_orig)
+        v_copy.addWidget(self.rad_save_custom)
+
+        h_cust = QHBoxLayout()
+        h_cust.setContentsMargins(20, 0, 0, 0)
+        self.txt_save_custom_folder = QLineEdit(self.grp_save_copy)
+        self.txt_save_custom_folder.setText(self._init_save_copy_custom_folder)
+        self.txt_save_custom_folder.setEnabled(self.rad_save_custom.isChecked())
+        self.btn_browse_custom_folder = QPushButton("Browse...", self.grp_save_copy)
+        self.btn_browse_custom_folder.setEnabled(self.rad_save_custom.isChecked())
+        self.btn_browse_custom_folder.clicked.connect(self._on_browse_save_copy_folder)
+        self.rad_save_custom.toggled.connect(self.txt_save_custom_folder.setEnabled)
+        self.rad_save_custom.toggled.connect(self.btn_browse_custom_folder.setEnabled)
+        h_cust.addWidget(self.txt_save_custom_folder)
+        h_cust.addWidget(self.btn_browse_custom_folder)
+        v_copy.addLayout(h_cust)
+
+        v_copy.addWidget(self.rad_save_ask)
+
+        v_copy.addSpacing(2)
+        self.chk_save_switch_view = QCheckBox("Switch to viewing the new copy after saving", self.grp_save_copy)
+        self.chk_save_switch_view.setChecked(self._init_save_copy_switch_view)
+        v_copy.addWidget(self.chk_save_switch_view)
+
+        v_edit.addWidget(self.grp_save_copy)
+
+        # Unsaved edits confirmation
+        self.grp_unsaved = QGroupBox("Unsaved edits confirmation", tab_edit)
+        v_unsaved = QVBoxLayout(self.grp_unsaved)
+        v_unsaved.setContentsMargins(10, 10, 10, 10)
+        v_unsaved.setSpacing(6)
+
+        lbl_unsaved_desc = QLabel("When closing or navigating away from a photo with unsaved adjustments:")
+        lbl_unsaved_desc.setStyleSheet("color: #1E395B; font-size: 9pt;")
+        v_unsaved.addWidget(lbl_unsaved_desc)
+
+        self.cmb_unsaved_action = QComboBox(self.grp_unsaved)
+        self.cmb_unsaved_action.addItem("Prompt what to do each time", "prompt")
+        self.cmb_unsaved_action.addItem("Automatically Save (Overwrite original)", "overwrite")
+        self.cmb_unsaved_action.addItem("Automatically Save as copy", "copy")
+        self.cmb_unsaved_action.addItem("Discard changes without asking", "discard")
+
+        cur_idx = self.cmb_unsaved_action.findData(self._init_unsaved_edits_action)
+        if cur_idx >= 0:
+            self.cmb_unsaved_action.setCurrentIndex(cur_idx)
+        else:
+            self.cmb_unsaved_action.setCurrentIndex(0)
+        v_unsaved.addWidget(self.cmb_unsaved_action)
+
+        v_edit.addWidget(self.grp_unsaved)
         v_edit.addStretch(1)
 
         self.tab_widget.addTab(tab_edit, "Edit")
+        self.edit_tab = tab_edit
 
         # -------------------------------------------------------------
         # Tab 5: Database
@@ -651,22 +887,38 @@ class AppSettingsDialog(QDialog):
         v_db.setContentsMargins(14, 14, 14, 14)
         v_db.setSpacing(12)
 
-        maint_frame = QFrame(tab_database)
-        maint_frame.setFrameShape(QFrame.StyledPanel)
-        maint_layout = QVBoxLayout(maint_frame)
-        maint_layout.setContentsMargins(12, 12, 12, 12)
-        maint_layout.setSpacing(10)
+        # Catalog & Cache Statistics Group
+        stats_group = QGroupBox("Catalog & Cache Statistics", tab_database)
+        stats_layout = QVBoxLayout(stats_group)
+        stats_layout.setContentsMargins(12, 10, 12, 10)
+        stats_layout.setSpacing(6)
 
-        lbl_maint = QLabel("Database & Backup Maintenance", maint_frame)
-        lbl_maint.setFont(QFont("Segoe UI", 9, QFont.Bold))
-        maint_layout.addWidget(lbl_maint)
+        self.lbl_db_stats = QLabel(stats_group)
+        self.lbl_db_stats.setWordWrap(True)
+        stats_layout.addWidget(self.lbl_db_stats)
+
+        self.lbl_open_db_dir = QLabel(
+            "<a href='open_db_dir' style='color: #3B82F6; text-decoration: underline;'>Open database folder in Explorer</a>",
+            stats_group,
+        )
+        self.lbl_open_db_dir.setOpenExternalLinks(False)
+        self.lbl_open_db_dir.linkActivated.connect(self._on_open_db_dir_link)
+        stats_layout.addWidget(self.lbl_open_db_dir)
+
+        v_db.addWidget(stats_group)
+        self._refresh_db_stats()
+
+        maint_frame = QGroupBox("Database & Backup Maintenance", tab_database)
+        maint_layout = QVBoxLayout(maint_frame)
+        maint_layout.setContentsMargins(12, 10, 12, 12)
+        maint_layout.setSpacing(8)
 
         lbl_maint_desc = QLabel(
             "Maintain optimal performance for large photo catalogs by compacting SQLite\n"
             "databases and removing expired backup copies of edited photos.",
             maint_frame,
         )
-        lbl_maint_desc.setStyleSheet("color: #444444;")
+        lbl_maint_desc.setWordWrap(True)
         maint_layout.addWidget(lbl_maint_desc)
 
         self.btn_compact_db = QPushButton(
@@ -694,13 +946,14 @@ class AppSettingsDialog(QDialog):
         maint_layout.addWidget(self.btn_heal_faces)
 
         self.lbl_maint_status = QLabel("", maint_frame)
-        self.lbl_maint_status.setStyleSheet("color: #0066CC;")
+        self.lbl_maint_status.setStyleSheet("color: #3B82F6; font-weight: 600;")
         maint_layout.addWidget(self.lbl_maint_status)
 
         v_db.addWidget(maint_frame)
         v_db.addStretch(1)
 
         self.tab_widget.addTab(tab_database, "Database")
+        self.database_tab = tab_database
 
         main_layout.addWidget(self.tab_widget)
 
@@ -716,8 +969,51 @@ class AppSettingsDialog(QDialog):
         main_layout.addWidget(self.button_box)
 
         # Initial tab routing
-        if initial_tab in ("face_recognition", "face", "faces"):
-            self.tab_widget.setCurrentWidget(self.face_tab)
+        if initial_tab:
+            itab = str(initial_tab).lower()
+            if itab in ("edit", "editing", "edits"):
+                self.tab_widget.setCurrentWidget(self.edit_tab)
+            elif itab in ("face_recognition", "face", "faces"):
+                self.tab_widget.setCurrentWidget(self.face_tab)
+            elif itab in ("general",):
+                self.tab_widget.setCurrentWidget(self.general_tab)
+            elif itab in ("import", "importing"):
+                self.tab_widget.setCurrentWidget(self.import_tab)
+            elif itab in ("originals", "original"):
+                self.tab_widget.setCurrentWidget(self.originals_tab)
+            elif itab in ("database", "db"):
+                self.tab_widget.setCurrentWidget(self.database_tab)
+
+    def _refresh_db_stats(self) -> None:
+        if not hasattr(self, "lbl_db_stats"):
+            return
+        if self.engine is None:
+            self.lbl_db_stats.setText("Database statistics unavailable.")
+            return
+        try:
+            cat_path = Path(self.engine.catalog_path)
+            thumb_path = Path(self.engine.thumbnails_path)
+            cat_mb = cat_path.stat().st_size / (1024 * 1024) if cat_path.exists() else 0.0
+            thumb_mb = thumb_path.stat().st_size / (1024 * 1024) if thumb_path.exists() else 0.0
+            conn = self.engine.catalog_conn()
+            media_cnt = int(conn.execute("SELECT COUNT(*) FROM media;").fetchone()[0])
+            folder_cnt = int(conn.execute("SELECT COUNT(*) FROM folders;").fetchone()[0])
+            people_cnt = int(conn.execute("SELECT COUNT(*) FROM people;").fetchone()[0])
+            dirty_cnt = int(conn.execute("SELECT COUNT(*) FROM media WHERE metadata_dirty = 1;").fetchone()[0])
+            self.lbl_db_stats.setText(
+                f"Indexed Media: {media_cnt:,} items across {folder_cnt:,} folders  |  "
+                f"People: {people_cnt:,}  |  Pending file writes: {dirty_cnt:,}\n"
+                f"Storage: catalog.db ({cat_mb:.1f} MB)  •  thumbnails.db ({thumb_mb:.1f} MB)\n"
+                f"Location: {cat_path.parent}"
+            )
+        except Exception:
+            self.lbl_db_stats.setText("Database statistics ready.")
+
+    def _on_open_db_dir_link(self, _link: str) -> None:
+        if self.engine is not None and hasattr(self.engine, "catalog_path"):
+            db_dir = Path(self.engine.catalog_path).parent
+            db_dir.mkdir(parents=True, exist_ok=True)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(db_dir)))
 
     def _on_face_purge_rescan(self) -> None:
         self.purge_rescan_requested = True
@@ -728,11 +1024,27 @@ class AppSettingsDialog(QDialog):
     def _on_apply(self) -> None:
         if hasattr(self, "face_tab") and self.face_tab:
             self.face_tab.save_settings()
+        self._save_copy_preferences()
+        self.settings_applied.emit()
 
     def accept(self) -> None:
         if hasattr(self, "face_tab") and self.face_tab:
             self.face_tab.save_settings()
+        self._save_copy_preferences()
         super().accept()
+
+    def _save_copy_preferences(self) -> None:
+        settings = QSettings("PhotoGallery64", "PhotoGallery64")
+        settings.setValue("save_copy_location", self.save_copy_location())
+        settings.setValue("save_copy_custom_folder", self.save_copy_custom_folder())
+        settings.setValue("save_copy_naming_pattern", self.save_copy_naming_pattern())
+        settings.setValue("save_copy_switch_view", self.save_copy_switch_view())
+        settings.setValue("unsaved_edits_action", self.unsaved_edits_action())
+
+    def _on_browse_save_copy_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Select Save as Copy Destination Folder")
+        if folder:
+            self.txt_save_custom_folder.setText(folder)
 
     def _on_browse_import_dest(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Select Import Folder")
@@ -859,6 +1171,25 @@ class AppSettingsDialog(QDialog):
 
     def auto_exposure(self) -> bool:
         return self.chk_auto_exposure.isChecked()
+
+    def save_copy_location(self) -> str:
+        if getattr(self, "rad_save_ask", None) and self.rad_save_ask.isChecked():
+            return "ask"
+        if getattr(self, "rad_save_custom", None) and self.rad_save_custom.isChecked():
+            return "custom"
+        return "original"
+
+    def save_copy_custom_folder(self) -> str:
+        return self.txt_save_custom_folder.text().strip() if hasattr(self, "txt_save_custom_folder") else ""
+
+    def save_copy_naming_pattern(self) -> str:
+        return str(self.cmb_save_naming.currentData()) if hasattr(self, "cmb_save_naming") else "{stem}_edited"
+
+    def save_copy_switch_view(self) -> bool:
+        return self.chk_save_switch_view.isChecked() if hasattr(self, "chk_save_switch_view") else True
+
+    def unsaved_edits_action(self) -> str:
+        return str(self.cmb_unsaved_action.currentData()) if hasattr(self, "cmb_unsaved_action") else "prompt"
 
 
 class _ResizeWorker(QThread):
@@ -1155,4 +1486,117 @@ class ResizePhotoDialog(QDialog):
 
         self.generated_files = generated
         return generated
+
+
+class AboutDialog(QDialog):
+    """About dialog for Essentials Photo Gallery."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("About Essentials Photo Gallery")
+        self.setFixedSize(480, 310)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(24, 20, 24, 18)
+        vbox.setSpacing(12)
+
+        # Header with Logo & Title
+        header_hbox = QHBoxLayout()
+        header_hbox.setSpacing(16)
+
+        lbl_icon = QLabel(self)
+        try:
+            from src.ui.icon_provider import make_wlpg_icon
+            lbl_icon.setPixmap(make_wlpg_icon("app_logo", 48).pixmap(48, 48))
+        except Exception:
+            try:
+                from src.ui.icon_provider import make_wlpg_icon
+                lbl_icon.setPixmap(make_wlpg_icon("flower", 48).pixmap(48, 48))
+            except Exception:
+                lbl_icon.setText("🌸")
+                lbl_icon.setStyleSheet("font-size: 32pt;")
+
+        header_hbox.addWidget(lbl_icon, 0, Qt.AlignTop)
+
+        info_vbox = QVBoxLayout()
+        info_vbox.setSpacing(4)
+
+        lbl_title = QLabel("Essentials Photo Gallery", self)
+        lbl_title.setStyleSheet("font-family: 'Segoe UI', sans-serif; font-size: 13pt; font-weight: bold; color: #1E395B;")
+        info_vbox.addWidget(lbl_title)
+
+        lbl_ver = QLabel("Build 2026 (v16.4.3528.0331)", self)
+        lbl_ver.setStyleSheet("font-family: 'Segoe UI', sans-serif; font-size: 8.5pt; color: #55687D;")
+        info_vbox.addWidget(lbl_ver)
+
+        lbl_desc = QLabel(
+            "Essentials Photo Gallery recreates the beloved fluid ribbon interface and Aero experience "
+            "with modern AI intelligence, hardware-accelerated monocular depth & portrait lighting, "
+            "and lossless non-destructive photo management.",
+            self,
+        )
+        lbl_desc.setWordWrap(True)
+        lbl_desc.setStyleSheet("font-family: 'Segoe UI', sans-serif; font-size: 9pt; color: #333333; margin-top: 4px;")
+        info_vbox.addWidget(lbl_desc)
+
+        header_hbox.addLayout(info_vbox, 1)
+        vbox.addLayout(header_hbox)
+
+        # Separator line
+        sep = QFrame(self)
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        sep.setStyleSheet("color: #DDE5EE;")
+        vbox.addWidget(sep)
+
+        # Technical details
+        lbl_tech = QLabel(
+            "Powered by PySide6 (Qt 6.8), OpenCV, ONNX Runtime (DirectML / CPU), "
+            "and SQLite WAL.\n© 2026 Essentials Photo Gallery Contributors.",
+            self,
+        )
+        lbl_tech.setStyleSheet("font-family: 'Segoe UI', sans-serif; font-size: 8pt; color: #667788;")
+        vbox.addWidget(lbl_tech)
+
+        vbox.addStretch(1)
+
+        # Bottom OK button
+        btn_box = QHBoxLayout()
+        btn_box.addStretch(1)
+        btn_ok = QPushButton("OK", self)
+        btn_ok.setFixedSize(85, 26)
+        btn_ok.setDefault(True)
+        btn_ok.setStyleSheet(
+            """
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FDFDFD, stop:1 #E5EBF2);
+                border: 1px solid #7DA2CE;
+                border-radius: 3px;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 9pt;
+                color: #1E395B;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F0F6FD, stop:1 #D9E8F8);
+                border: 1px solid #4888C8;
+            }
+            QPushButton:pressed {
+                background: #CCE0F4;
+                border: 1px solid #3377B8;
+            }
+            """
+        )
+        btn_ok.clicked.connect(self.accept)
+        btn_box.addWidget(btn_ok)
+        vbox.addLayout(btn_box)
+
+        self.setStyleSheet(
+            """
+            QDialog {
+                background-color: #FFFFFF;
+            }
+            """
+        )
+
 

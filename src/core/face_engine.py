@@ -250,6 +250,8 @@ class FaceEngine:
         img_h, img_w = rgb_img.shape[:2]
         if img_h <= 0 or img_w <= 0:
             return b""
+        if rect_w <= 0.005 or rect_h <= 0.005:
+            return b""
 
         # Convert normalized coords to pixel bounds
         px = rect_x * img_w
@@ -564,12 +566,15 @@ class FaceEngine:
         Returns:
             (embedding, crop_webp)
         """
+        rect_x, rect_y, rect_w, rect_h = rect
+        if float(rect_w) <= 0.005 or float(rect_h) <= 0.005:
+            return np.zeros((512,), dtype=np.float32), b""
+
         rgb_img = self.load_image_rgb(image, orientation=orientation)
         h, w = rgb_img.shape[:2]
         if h <= 0 or w <= 0:
             return np.zeros((512,), dtype=np.float32), b""
 
-        rect_x, rect_y, rect_w, rect_h = rect
         rect_x = float(np.clip(rect_x, 0.0, 1.0))
         rect_y = float(np.clip(rect_y, 0.0, 1.0))
         rect_w = float(np.clip(rect_w, 0.0, 1.0 - rect_x))

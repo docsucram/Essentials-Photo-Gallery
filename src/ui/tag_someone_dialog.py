@@ -49,10 +49,9 @@ class TagSomeoneDialog(QDialog):
         parent: QWidget | None = None,
         title: str = "Tag someone",
     ) -> None:
-        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
-        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        super().__init__(parent, Qt.Dialog | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
         self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setFixedSize(260, 320)
+        self.setFixedSize(270, 340)
 
         self._all_people = list(people)
         self._selected_name: str | None = None
@@ -220,7 +219,11 @@ class TagSomeoneDialog(QDialog):
         current_item = self.list_widget.currentItem()
         entered_text = self.txt_search.text().strip()
 
-        if current_item and (not entered_text or current_item.text().lower() == entered_text.lower()):
+        if current_item and (
+            not entered_text
+            or current_item.text().lower() == entered_text.lower()
+            or current_item.text().lower().startswith(entered_text.lower())
+        ):
             self._on_item_clicked(current_item)
             return
 
@@ -279,6 +282,9 @@ class TagSomeoneDialog(QDialog):
             x = min(max(0, pos.x()), scr.width() - dlg.width() - 10)
             y = min(max(0, pos.y()), scr.height() - dlg.height() - 10)
             dlg.move(x, y)
+        elif parent is not None:
+            p_geom = parent.frameGeometry()
+            dlg.move(p_geom.center() - dlg.rect().center())
         if dlg.exec() == QDialog.Accepted:
             return dlg._selected_name, dlg._selected_id
         return None, None

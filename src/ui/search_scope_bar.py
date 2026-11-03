@@ -413,6 +413,76 @@ class SearchScopeBar(QFrame):
             """
         )
 
+    def set_dark_mode(self, is_dark: bool) -> None:
+        self._dark_mode = bool(is_dark)
+        self._is_dark = self._dark_mode
+        if not self._dark_mode:
+            self._apply_style()
+            self.lbl_title.setStyleSheet(
+                "color: #1F497D; font-family: 'Segoe UI'; font-size: 9.5pt; font-weight: bold; border: none; background: transparent;"
+            )
+            self.lbl_scope_label.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent;")
+            self.lbl_scope_value.setStyleSheet("color: #1E395B; font-weight: bold; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent;")
+            self.lbl_search_kw.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent;")
+            self.txt_search.setStyleSheet(
+                """
+                QLineEdit#ScopeBarSearchInput {
+                    background: #FFFFFF;
+                    border: 1px solid #7F9DB9;
+                    border-radius: 2px;
+                    padding: 1px 4px;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                    color: #000000;
+                }
+                QLineEdit#ScopeBarSearchInput:focus {
+                    border: 1px solid #3380CC;
+                }
+                """ + _AERO_TOOLTIP_STYLE
+            )
+        else:
+            self.setStyleSheet(
+                """
+                QFrame#SearchScopeBar {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #20242B, stop:1 #1A1D23);
+                    border: 1px solid #2E3440;
+                    border-radius: 2px;
+                }
+                QToolTip {
+                    background-color: #FFFFFF;
+                    color: #1E395B;
+                    border: 1px solid #7DA2CE;
+                    border-radius: 2px;
+                    padding: 3px 6px;
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 9pt;
+                }
+                """
+            )
+            self.lbl_title.setStyleSheet(
+                "color: #60A5FA; font-family: 'Segoe UI'; font-size: 9.5pt; font-weight: bold; border: none; background: transparent;"
+            )
+            self.lbl_scope_label.setStyleSheet("color: #94A3B8; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent;")
+            self.lbl_scope_value.setStyleSheet("color: #E2E8F0; font-weight: bold; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent;")
+            self.lbl_search_kw.setStyleSheet("color: #94A3B8; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent;")
+            self.txt_search.setStyleSheet(
+                """
+                QLineEdit#ScopeBarSearchInput {
+                    background: #14171B;
+                    border: 1px solid #3E4756;
+                    border-radius: 2px;
+                    padding: 1px 4px;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                    color: #F1F5F9;
+                }
+                QLineEdit#ScopeBarSearchInput:focus {
+                    border: 1px solid #3B82F6;
+                }
+                """ + _AERO_TOOLTIP_STYLE
+            )
+
     # -------------------------------------------------------------------------
     # Public Control & Query API
     # -------------------------------------------------------------------------
@@ -557,18 +627,20 @@ class SearchScopeBar(QFrame):
             chip.remove_clicked.connect(self.location_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 
-        # 7. Active Media Type Chip: "Media type: Video" (or "Photos")
+        # 7. Active Media Type Chip: "Media type: Video" (or "Photos", "RAW") - ignore "all"
         media_type = filter_state.get("media_type")
-        if media_type:
+        m_val = str(media_type or "").lower().strip()
+        if m_val and m_val not in ("all", "none"):
             lbl_m = QLabel("Media type:", self.chips_widget)
             lbl_m.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
             self.chips_layout.addWidget(lbl_m)
 
-            m_val = str(media_type).lower().strip()
             if m_val in ("video", "videos"):
                 m_label = "Video"
-            elif m_val in ("image", "photo", "photos", "picture", "pictures"):
+            elif m_val in ("image", "images", "photo", "photos", "picture", "pictures"):
                 m_label = "Photos"
+            elif m_val in ("raw", "raws"):
+                m_label = "RAW"
             else:
                 m_label = str(media_type).capitalize()
 
