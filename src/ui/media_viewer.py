@@ -2167,6 +2167,11 @@ class SingleMediaViewer(QWidget):
         self.set_retouch_mode(False)
         self.set_red_eye_mode(False)
         self.set_markup_mode(False)
+        self._highlighted_person_id = None
+        self._highlighted_region_id = None
+        if hasattr(self, "_temp_faces_timer") and self._temp_faces_timer.isActive():
+            self._temp_faces_timer.stop()
+        self._current_people_regions = list(people_regions or []) if not self.current_is_video else []
         self._clear_face_overlays()
         self._purge_all_transient_scene_items()
 
@@ -2234,8 +2239,8 @@ class SingleMediaViewer(QWidget):
         self.recipe_changed.emit(self.current_recipe)
 
         # Draw face regions strictly for static images (is_video == 0)
-        if people_regions and not self.current_is_video:
-            self.render_face_regions(people_regions)
+        if not self.current_is_video:
+            self.render_face_regions(people_regions or [])
         self.update_revert_state()
         return True
 
@@ -2282,8 +2287,8 @@ class SingleMediaViewer(QWidget):
         self.scene.crop_rect_item.set_image_rect(QRectF(0, 0, pix.width(), pix.height()))
         self.image_changed.emit(self.current_pil_image)
 
-        # Update face overlays if people regions exist
-        if hasattr(self, "_current_people_regions") and self._current_people_regions and not self.current_is_video:
+        # Update face overlays for current static image (clears overlays when empty)
+        if hasattr(self, "_current_people_regions") and not self.current_is_video:
             self.render_face_regions(self._current_people_regions)
 
         # Cache unedited original pixmap for instantaneous, high-fidelity compare
@@ -2371,10 +2376,12 @@ class SingleMediaViewer(QWidget):
     def _on_custom_zoom_set(self) -> None:
         self.current_zoom_mode = "custom"
 
-    def set_zoom_mode(self, mode: Literal["fit", "fill", "100", "custom"]) -> None:
+    def set_zoom_mode(self, mode: Literal["fit", "fit_window", "fill", "100", "custom"]) -> None:
         self.current_zoom_mode = mode
         if mode == "fit":
-            self.graphics_view.fit_in_view_with_zoom()
+            self.graphics_view.fit_in_view_with_zoom(allow_upscale=False)
+        elif mode == "fit_window":
+            self.graphics_view.fit_in_view_with_zoom(allow_upscale=True)
         elif mode == "fill":
             self.graphics_view.fill_in_view_with_zoom()
         elif mode == "100":
@@ -4041,8 +4048,8 @@ class SingleMediaViewer(QWidget):
         self.scene.crop_rect_item.set_image_rect(QRectF(0, 0, pix.width(), pix.height()))
         self.image_changed.emit(self.current_pil_image)
 
-        # Update face overlays if people regions exist
-        if hasattr(self, "_current_people_regions") and self._current_people_regions and not self.current_is_video:
+        # Update face overlays for current static image (clears overlays when empty)
+        if hasattr(self, "_current_people_regions") and not self.current_is_video:
             self.render_face_regions(self._current_people_regions)
 
     def set_exposure_parameters(
@@ -5482,6 +5489,8 @@ class SingleMediaViewer(QWidget):
             mw.catalog_repo.dismiss_face_region(face_id)
             detail = mw.catalog_repo.get_media_detail(int(self.current_media_id))
             self.render_face_regions(detail.get("face_regions") or detail.get("people", []))
+        if hasattr(mw, "invalidate_face_crop_ui") and self.current_media_id is not None:
+            mw.invalidate_face_crop_ui(media_id=int(self.current_media_id))
 
     def start_face_adjust_mode(
         self,
@@ -5597,6 +5606,9 @@ class SingleMediaViewer(QWidget):
                 thumb_repo = getattr(mw, "thumb_repo", None)
                 mw.catalog_repo.update_face_rect(face_id, norm_rect, thumb_repo=thumb_repo)
                 mw.lbl_sync_status.setText("✓ Face bounding box updated")
+            if hasattr(mw, "invalidate_face_crop_ui"):
+                pids = [int(person_id)] if person_id else []
+                mw.invalidate_face_crop_ui(media_id=int(self.current_media_id), person_ids=pids)
             mw.refresh_navigation_and_autocomplete()
         self.stop_face_adjust_mode()
         if hasattr(mw, "catalog_repo"):
@@ -5664,6 +5676,9 @@ class SingleMediaViewer(QWidget):
             if person_id:
                 mw.catalog_repo.remove_person_tag(int(self.current_media_id), int(person_id))
             mw.catalog_repo.assign_person(int(self.current_media_id), new_name_clean, rect)
+        if hasattr(mw, "invalidate_face_crop_ui"):
+            affected_pids = [int(p) for p in (person_id, new_pid) if p is not None and int(p) > 0]
+            mw.invalidate_face_crop_ui(media_id=int(self.current_media_id), person_ids=affected_pids)
         mw.refresh_navigation_and_autocomplete()
         detail = mw.catalog_repo.get_media_detail(int(self.current_media_id))
         self.render_face_regions(detail.get("people", []))
@@ -5690,6 +5705,9 @@ class SingleMediaViewer(QWidget):
             mw.catalog_repo.unassign_face_person(fid, person_id)
         else:
             mw.catalog_repo.remove_person_tag(int(self.current_media_id), person_id)
+        if hasattr(mw, "invalidate_face_crop_ui"):
+            pids = [int(person_id)] if person_id else []
+            mw.invalidate_face_crop_ui(media_id=int(self.current_media_id), person_ids=pids)
         mw.refresh_navigation_and_autocomplete()
         detail = mw.catalog_repo.get_media_detail(int(self.current_media_id))
         self.render_face_regions(detail.get("people", []))
@@ -5721,6 +5739,9 @@ class SingleMediaViewer(QWidget):
                         (person_id,),
                     )
                     conn.commit()
+        if hasattr(mw, "invalidate_face_crop_ui"):
+            pids = [int(person_id)] if person_id else []
+            mw.invalidate_face_crop_ui(media_id=int(self.current_media_id), person_ids=pids)
         mw.refresh_navigation_and_autocomplete()
         detail = mw.catalog_repo.get_media_detail(int(self.current_media_id))
         self.render_face_regions(detail.get("people", []))
@@ -6234,7 +6255,7 @@ class SingleMediaViewer(QWidget):
                 event.accept()
                 return True
 
-            # Ctrl shortcuts: Rotate left (Ctrl+,), Rotate right (Ctrl+.), Actual size (Ctrl+0)
+            # Ctrl shortcuts: Rotate left (Ctrl+,), Rotate right (Ctrl+.), Thumbnail view (Ctrl+0), Actual size (Ctrl+1)
             if event.modifiers() == Qt.ControlModifier:
                 if event.key() == Qt.Key_Comma:
                     self.rotate_media(clockwise=False)
@@ -6245,6 +6266,14 @@ class SingleMediaViewer(QWidget):
                     event.accept()
                     return True
                 elif event.key() == Qt.Key_0:
+                    mw = getattr(self, "main_window", None) or self.window()
+                    if hasattr(mw, "trigger_thumbnail_view"):
+                        mw.trigger_thumbnail_view()
+                    else:
+                        self.closed.emit()
+                    event.accept()
+                    return True
+                elif event.key() == Qt.Key_1:
                     self.set_zoom_mode("100")
                     event.accept()
                     return True

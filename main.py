@@ -37,6 +37,7 @@ def create_app(argv: list[str] | None = None) -> QApplication:
     app = QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName("Essentials Photo Gallery")
     app.setOrganizationName("Essentials Photo Gallery")
+    app.setApplicationVersion("0.9.0")
     ico_path = get_resource_path("resources/icons/essentials_photo_gallery.ico")
     if not ico_path.exists():
         ico_path = get_resource_path("resources/icons/photogallery_live.ico")

@@ -2,116 +2,90 @@
 
 [![Release](https://img.shields.io/github/v/release/docsucram/Essentials-Photo-Gallery?label=Release&color=blue)](https://github.com/docsucram/Essentials-Photo-Gallery/releases/latest)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011%20(x64)-0078D6.svg)](https://github.com/docsucram/Essentials-Photo-Gallery/releases/latest)
-[![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
-[![Framework](https://img.shields.io/badge/GUI-PySide6%20%2F%20Qt6-green.svg)](https://wiki.qt.io/Qt_for_Python)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)](LICENSE)
 
-**Essentials Photo Gallery** is a high-performance, 64-bit Windows desktop photo management and editing workstation inspired by the classic **Windows Live Photo Gallery (WLPG)** and elevated with modern computer vision, biometric face clustering, interactive world map geotagging, a multi-photo creation studio, and 32-bit non-destructive image processing.
+**Essentials Photo Gallery** is a modern, 64-bit update to Microsoft's long-abandoned **Windows Live Photo Gallery (WLPG)**.
 
-Engineered to fluidly manage libraries exceeding **500,000+ photos and videos** with sub-10ms queries and 60 FPS virtualized scrolling, 100% locally and offline.
+Microsoft discontinued Windows Essentials back in 2017, and for anyone with a big local folder collection of family photos, nothing since has quite matched how fast, intuitive, and practical WLPG was for browsing, organising, tagging, and doing quick edits. This project is an attempt to bring that exact feel and workflow back on Windows 10 and 11—fixing WLPG's old limitations while adding a handful of genuinely useful modern tools.
 
----
-
-## 📥 Download Windows Installer (x64)
-
-Ready-to-run standalone installers (`EssentialsPhotoGallery_Setup_x64.exe`) are available on the **[GitHub Releases](https://github.com/docsucram/Essentials-Photo-Gallery/releases/latest)** page—no Python installation required.
-
-> **Note on Windows SmartScreen:** Because this open-source installer is not signed with a commercial EV certificate, Windows SmartScreen may display an *"Unknown publisher"* prompt on first launch. Click **More info** → **Run anyway** to proceed with setup.
+> [!IMPORTANT]
+> **Project Status — In Active Development**
+> This project is still actively being developed and tested. File write-back is **turned off by default**, and if you are trying it out on an existing photo collection, **it is strongly recommended to leave file write-back turned off** so tag and metadata changes stay in the local database rather than modifying your original image files. As always, please keep backups of important photos.
 
 ---
 
-## Key Features
+## Download
 
-### 🎨 Authentic WLPG Ribbon Experience & Full Dark Theme
-- **Classic Fluent & Aero Styling:** Faithful recreation of the Windows Live Photo Gallery ribbon tabs (*Home*, *Edit*, *Find*, *Create*, *View*) with responsive compaction and Quick Access Toolbar (QAT).
-- **Effects Gallery:** Live preview carousel and scrollable dropdown (*Black and white*, *Sepia*, *Warm*, *Cool*, *Chrome*, *Vivid*, *Matte*, and *B&W filter effects*) with 0–100% intensity blending.
-- **Full Dark Theme Support:** Dynamic dark slate styling across all ribbon tabs, carousels, status bars, and the single-image viewport canvas (`#14171C`).
-- **Browser-Style Navigation History:** Seamless back and forward navigation stack with mouse thumb button (`BackButton`, `ForwardButton`) and keyboard shortcut (`Alt+Left` / `Alt+Right`) support.
+Standalone 64-bit Windows installers (`EssentialsPhotoGallery_Setup_x64.exe`) are available on the **[Releases](https://github.com/docsucram/Essentials-Photo-Gallery/releases/latest)** page—no Python setup needed.
 
-### 👤 Biometric Face Recognition & People Workflows
-- **InsightFace & ArcFace AI Backend:** SCRFD anatomical face detector paired with 512-dimensional ArcFace vector embeddings running on ONNX Runtime (CPU or DirectML GPU acceleration).
-- **Batch People Tagging:** Virtualized face confirmation grid rendering 96×96 WebP crops with 1-click group confirmations and instant full-photo preview popovers on `Space`.
-- **Single-Image View Face Overlay:** Bounding boxes, hover regions, suggestion accept/reject chips, automatic face-box remapping on crop/rotate, and direct **click-to-rename/retag** affordance on confirmed face badges.
-- **People Directory & Unnamed Clusters:** Visual portrait directory grid with live search filtering, plus recurring unnamed face clusters (`>= 3` faces) with inline *"Add a name..."* pills and merge confirmation dialogs.
+*Note: Because this is a hobby open-source project without a paid code-signing certificate, Windows SmartScreen will likely show an "Unknown publisher" warning the first time you run the installer (**More info** -> **Run anyway**).*
 
-### 🛠 Modern 60 FPS Non-Destructive Editing Engine
-- **Non-Destructive Pipeline & True Uncrop:** Edits are stored as parametric recipes and applied non-destructively while preserving pristine originals in `.OriginalFiles/` (with configurable Save Overwrite vs. Save as Copy workflows). Re-opening Crop reveals the full uncropped canvas with the existing crop box pre-positioned.
-- **Fine-Tune & Depth & Light Adjustments:**
-  - Interactive RGB/Luminance histogram with draggable black and white point clipping markers.
-  - Clarity, vibrancy, color temperature, exposure, shadows/highlights, dehaze, unsharp mask, and bilateral denoising.
-  - Depth-aware subject relighting and Snapseed-style U-Point selective control points.
-- **Spot Fix, Red-Eye & Interactive Markup Suite:**
-  - Multi-radius Poisson Spot Fix healing brush and circular click/drag pupil-masked Red-Eye removal.
-  - **Vector Markup & Privacy Redaction:** Subpixel arrows, boxes, circles, stars, inline text callouts, two-click magnification loupes with tangent callout lines (crop-aware and scroll-wheel zoomable), Gaussian blur, and mosaic pixelation—all interactively movable before commit with strict LIFO undo.
+---
 
-### 🪄 Multi-Photo Creation Studio & Creative Effects
-- **Microsoft ICE-Style Panorama Stitcher:** Cylindrical/spherical stitching with automatic maximal interior rectangle crop and boundary inpainting.
-- **Collage Studio:** Modern Grid, Masonry, Polaroid table scatter with customizable captions, and *"Then & Now"* chronological comparison cards.
-- **Photo Fuse:** Combines the best smiles/expressions from a burst of group photos using color-matched Poisson seamless cloning.
-- **Colour Pop & Portrait Depth Bokeh:** Interactive multi-colour eyedropper (`Shift`/`Ctrl` `+`/`-` selection), edge-aware bilateral masking, and multi-scale pyramid bokeh blur.
-- **Hybrid 2.5D 3D Cinematic Motion:** Disocclusion-inpainted dual-layer depth-mesh parallax video synthesis (`Depth-Anything-V2` + `MODNet` ONNX with guided filter fallback) exporting smooth MP4 camera orbits, dollies, and pans without rubber-edge stretching.
+## Highlights & Features
 
-### 🏷 Hierarchical Tag Management & Left Navigation Dock
-- **Left Navigation Tree:** Folders (with subfolder recursion), Date Taken tree (`Year -> Month -> Day`), People, and Ratings (5★–1★).
-- **Descriptive Tag Tree:** Multi-level nesting, drag-and-drop reparenting, live item count badges, and 3-state Boolean checkboxes (`AND`, `OR`, `NOT`).
-- **Tag Hierarchy Dialog:** Interactive tag manager with drag-and-drop and *Clean Up Duplicate Root Tags*.
+- **Classic WLPG Ribbon Look & Feel (with Themes)**
+  Recreates the familiar *Home*, *Edit*, *Find*, *Create*, and *View* ribbon layout, left navigation tree, and right-hand tag/information pane—now with **Light and Dark theme** support.
 
-### 🔍 Perceptual Duplicate & Burst Finder (Find Ribbon Tab)
-- **Multi-Stage Detection Engine:** Instant byte-identical deduplication, multi-index 64-bit `pHash`/`dHash` for recompressed/edited images, and photo burst sequences with Laplacian focus sharpness scoring.
-- **Side-by-Side Comparison & Smart Auto-Select:** Clean comparison cards with 1-click recommendations (*Keep Highest Resolution*, *Keep Largest File Size*, *Keep Oldest Date*, *Keep Most Metadata*, *Keep Best Sharpness*) and safe removal via the Windows Recycle Bin (`Send2Trash`).
+- **WLPG Hierarchical Tagging**
+  Full support for nested descriptive tags (`Place/England/London`, `Subject/Occasions/...`), drag-and-drop tag tree management, star ratings, flags, captions, and fast multi-tag filtering—compatible with existing WLPG XMP/EXIF tags.
 
-### 🗺 Interactive World Map Geotagging
-- Embedded OpenStreetMap Leaflet integration with click-to-pin coordinate tagging, reverse-geocoded location search, and SQLite `media_rtree` bounding-box spatial clustering.
+- **Built for Large Libraries (64-Bit Architecture)**
+  WLPG was a 32-bit app that would frequently hit out-of-memory errors on large collections or high-megapixel cameras. Essentials Photo Gallery is native 64-bit with virtualised grid scrolling and separate SQLite catalog and thumbnail databases, designed to stay snappy even with **500,000+ photos and videos**.
 
-### ⚡ Dual-Database Architecture & 500k-Item Scale
-- **Catalog Database (`catalog.db`):** High-speed SQLite WAL storing media records, EXIF/XMP metadata, hierarchical tags, and ArcFace embeddings.
-- **Thumbnails Database (`thumbnails.db`):** Dedicated BLOB storage caching EXIF-oriented 256×256 WebP thumbnails and 96×96 face crops for instantaneous scrolling.
-- **Production Safeguards:** Safe Mode file write-back pause, worker task monitor with 1-click pause, online SQLite backup API, and RAW file container isolation via `.xmp` sidecars.
+- **Updated Facial Recognition & People View**
+  Replaces WLPG's ageing face detector with local **SCRFD + ArcFace (ONNX)** models for much faster, more accurate face detection and suggestions. Includes a dedicated People view, quick-find carousel, face crop view, and batch confirmation tools—all running 100% locally offline.
+
+- **Updated Creation Tools**
+  Brings back WLPG's multi-photo creation workflows without needing old external plugins:
+  - **Photo Collage** (grid, masonry, scattered Polaroid, and Then & Now layouts)
+  - **Photo Fuse** (combine the best smiles/expressions from a group burst into one photo)
+  - **Panoramic Stitching** (automatic panorama stitcher inspired by Microsoft ICE)
+
+- **New — Duplicate & Burst Photo Finder**
+  Finds exact file duplicates, resized/re-saved copies (via perceptual hashing), and rapid burst sequences, with side-by-side sharpness comparison to help clean up clutter safely via the Recycle Bin.
+
+- **New — Markup Tools**
+  Built-in annotation toolbar in single-image view for drawing arrows, boxes, circles, text callouts, zoom magnifier loupes, and blur/pixelate redaction before saving or copying.
+
+- **New — Portrait Blur & Relighting Tools**
+  Alongside classic WLPG quick edits (crop, straighten, red-eye, spot fix/retouch, exposure, colour, and effects), adds depth-based background portrait blur, subject relighting, and colour pop.
+
+- **New — Map View *(WIP)***
+  View and pin geotagged photos on an interactive world map. *(Currently a work in progress.)*
 
 ---
 
 ## Running from Source
 
-### Prerequisites
-- Python 3.11, 3.12, or 3.13 (64-bit) on Windows 10/11
-- Git
+Requires **Python 3.11–3.13 (64-bit)** on Windows 10 or 11.
 
-### Setup
-```bash
-# 1. Clone repository
+```powershell
+# Clone the repo
 git clone https://github.com/docsucram/Essentials-Photo-Gallery.git
 cd Essentials-Photo-Gallery
 
-# 2. Create virtual environment
+# Set up a virtual environment
 python -m venv venv
-venv\Scripts\activate   # Windows (pwsh / cmd)
+venv\Scripts\activate
 
-# 3. Install dependencies
+# Install dependencies and launch
 pip install -r requirements.txt
-
-# 4. Launch application
 python main.py
 ```
 
-### Building Standalone Executable & Installer
+### Building the `.exe` & Installer
+
+If you want to build a standalone executable or installer locally (installer requires [Inno Setup 6](https://jrsoftware.org/isinfo.php)):
+
 ```cmd
-1_build_exe.bat         # Compiles standalone 64-bit Windows executable via PyInstaller
-2_test_exe.bat          # Launches and tests the compiled binary
-3_build_installer.bat   # Builds Windows installer setup (EssentialsPhotoGallery_Setup_x64.exe) via Inno Setup 6
+1_build_exe.bat         :: Builds standalone 64-bit app via PyInstaller
+2_test_exe.bat          :: Runs the compiled build
+3_build_installer.bat   :: Packages EssentialsPhotoGallery_Setup_x64.exe
 ```
-
----
-
-## Architecture & Documentation
-
-- [`ARCHITECTURE.md`](ARCHITECTURE.md): Comprehensive as-built architecture, database schemas, threading models, and specifications.
-- [`SPEC.md`](SPEC.md): Executive functional and technical specifications summary.
-- [`editing_engine.md`](editing_engine.md): Mathematical and algorithmic specifications for non-destructive image processing.
-- [`edit_and_create_engine.md`](edit_and_create_engine.md) & [`create_engine.md`](create_engine.md): Technical review of the Edit, Depth & Light, and Multi-Photo Creation Studio engines.
-- [`futureideas.md`](futureideas.md): Forward-looking innovation roadmap (local semantic search, OCR, offline places tree).
 
 ---
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+Released under the [MIT License](LICENSE).

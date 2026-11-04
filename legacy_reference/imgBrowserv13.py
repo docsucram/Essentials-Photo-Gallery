@@ -179,13 +179,27 @@ class ImageGraphicsView(QGraphicsView):
         self.setMouseTracking(True)
         self.zoom_level = 1.0
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self.scene() or self.scene().sceneRect().isEmpty():
+            return
+        zoom_mode = getattr(self.main_window, "current_zoom_mode", "fit") if self.main_window else "fit"
+        if zoom_mode == "fit":
+            self.fit_in_view_with_zoom(allow_upscale=False)
+        elif zoom_mode == "fit_window":
+            self.fit_in_view_with_zoom(allow_upscale=True)
+        elif zoom_mode == "fill":
+            self.fill_in_view_with_zoom()
+
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         if not self.isVisible() or not self.scene() or self.scene().sceneRect().isEmpty():
             return
         zoom_mode = getattr(self.main_window, "current_zoom_mode", "fit") if self.main_window else "fit"
         if zoom_mode == "fit":
-            self.fit_in_view_with_zoom()
+            self.fit_in_view_with_zoom(allow_upscale=False)
+        elif zoom_mode == "fit_window":
+            self.fit_in_view_with_zoom(allow_upscale=True)
         elif zoom_mode == "fill":
             self.fill_in_view_with_zoom()
 
@@ -216,10 +230,24 @@ class ImageGraphicsView(QGraphicsView):
         self.setTransform(transform)
         self.zoomChanged.emit(int(self.zoom_level * 100))
 
-    def fit_in_view_with_zoom(self) -> None:
+    def fit_in_view_with_zoom(self, allow_upscale: bool = False) -> None:
         if not self.scene() or self.scene().sceneRect().isEmpty():
             return
-        self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
+        sr = self.scene().sceneRect()
+        vp = self.viewport().rect()
+        if (
+            not allow_upscale
+            and vp.width() > 0
+            and vp.height() > 0
+            and sr.width() <= vp.width()
+            and sr.height() <= vp.height()
+        ):
+            self.setTransform(QTransform())
+            self.centerOn(sr.center())
+            self.zoom_level = 1.0
+            self.zoomChanged.emit(100)
+            return
+        self.fitInView(sr, Qt.KeepAspectRatio)
         self.zoom_level = self.transform().m11()
         self.zoomChanged.emit(int(self.zoom_level * 100))
 

@@ -363,7 +363,12 @@ class MediaCardDelegate(QStyledItemDelegate):
             try:
                 conn = self.thumb_repo.engine.catalog_conn()
                 rows = conn.execute(
-                    "SELECT media_id, rect_x, rect_y, rect_w, rect_h FROM media_people WHERE person_id = ? AND state = 1;",
+                    """
+                    SELECT media_id, rect_x, rect_y, rect_w, rect_h
+                    FROM media_people
+                    WHERE person_id = ? AND state = 1
+                    ORDER BY is_manual ASC, id ASC;
+                    """,
                     (int(person_id),),
                 ).fetchall()
                 for r in rows:
@@ -376,6 +381,24 @@ class MediaCardDelegate(QStyledItemDelegate):
                         self._person_face_rects[(mid, int(person_id))] = (rx, ry, rw, rh)
             except Exception:
                 pass
+
+    def invalidate_face_crops(
+        self, media_id: int | None = None, person_id: int | None = None
+    ) -> None:
+        """Evicts stale cached face-crop pixmaps and refreshes active person face rects."""
+        if media_id is None and person_id is None:
+            self._face_crop_cache.clear()
+        else:
+            stale_keys = [
+                (mid, pid)
+                for (mid, pid) in self._face_crop_cache
+                if (media_id is None or mid == int(media_id))
+                and (person_id is None or pid == int(person_id))
+            ]
+            for k in stale_keys:
+                self._face_crop_cache.pop(k, None)
+        if self.face_crop_person_id is not None:
+            self.set_face_crop_person_id(self.face_crop_person_id)
 
     def set_cell_size(self, size: QSize) -> None:
         self._cell_size = size
@@ -571,10 +594,6 @@ class MediaCardDelegate(QStyledItemDelegate):
                     if pm.loadFromData(blob) and not pm.isNull():
                         self._face_crop_cache[key] = pm
                         pixmap = pm
-                    else:
-                        self._face_crop_cache[key] = None
-                else:
-                    self._face_crop_cache[key] = None
 
             if pixmap is None and key in self._person_face_rects:
                 full_pm = self.pixmap_cache.get(media_id)
@@ -920,10 +939,6 @@ class MediaCardDelegate(QStyledItemDelegate):
                     if pm.loadFromData(blob) and not pm.isNull():
                         self._face_crop_cache[key] = pm
                         pixmap = pm
-                    else:
-                        self._face_crop_cache[key] = None
-                else:
-                    self._face_crop_cache[key] = None
 
             # If dedicated crop is not in database yet, dynamically extract face crop from cached photo thumbnail!
             if pixmap is None and key in self._person_face_rects:

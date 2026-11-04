@@ -478,7 +478,8 @@ class _FaceCropPreloadWorker(QRunnable):
             cat_conn = self.engine.catalog_conn()
             rows = cat_conn.execute(
                 """
-                SELECT mp.id AS face_id, mp.media_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
+                SELECT mp.id AS face_id, mp.media_id, mp.is_manual,
+                       mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
                        m.filename, f.path AS folder_path
                 FROM media_people mp
                 JOIN media m ON m.id = mp.media_id
@@ -501,7 +502,10 @@ class _FaceCropPreloadWorker(QRunnable):
             except Exception:
                 pass
 
-            missing = [r for r in rows if int(r["face_id"]) not in existing_face_ids]
+            missing = [
+                r for r in rows
+                if int(r["face_id"]) not in existing_face_ids or bool(r["is_manual"])
+            ]
             total = len(missing)
             if total == 0:
                 self.signals.finished.emit()
@@ -583,6 +587,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._search_scope_bar_explicitly_opened: bool = False
         self._selected_ids: list[int] = []
         self._lead_selected_id: int | None = None
+        self._mru_descriptive_tags: list[str] = self._load_saved_mru_tags()
         self._is_shutting_down: bool = False
         self.write_back_paused: bool = True
         self._workers_paused: bool = False
@@ -952,18 +957,18 @@ class PhotoGalleryMainWindow(QMainWindow):
         r_hbox.addWidget(sep)
 
         self.btn_status_grid = QPushButton(right_ctrl)
-        self.btn_status_grid.setIcon(make_wlpg_icon("view_list", 18))
+        self.btn_status_grid.setIcon(make_wlpg_icon("view_details", 18))
         self.btn_status_grid.setIconSize(QSize(18, 18))
         self.btn_status_grid.setFixedSize(22, 22)
-        self.btn_status_grid.setToolTip("Thumbnail grid view")
-        self.btn_status_grid.clicked.connect(self.show_grid_view)
+        self.btn_status_grid.setToolTip("View Details")
+        self.btn_status_grid.clicked.connect(self._on_status_grid_or_details_clicked)
         r_hbox.addWidget(self.btn_status_grid)
 
         self.btn_status_fit = QPushButton(right_ctrl)
         self.btn_status_fit.setIcon(make_wlpg_icon("actual_size", 18))
         self.btn_status_fit.setIconSize(QSize(18, 18))
         self.btn_status_fit.setFixedSize(22, 22)
-        self.btn_status_fit.setToolTip("Actual size (Ctrl+0)")
+        self.btn_status_fit.setToolTip("Actual size (Ctrl+1)")
         self.btn_status_fit.clicked.connect(self._on_status_zoom_toggle_clicked)
         self.btn_status_fit.setVisible(False)
         r_hbox.addWidget(self.btn_status_fit)
@@ -1041,6 +1046,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.ribbon.action_triggered.connect(self.dispatch_ribbon_action)
         self.ribbon.layout_mode_changed.connect(self.grid_view.set_layout_mode)
         self.ribbon.zoom_size_changed.connect(self._on_ribbon_zoom_changed)
+        self.central_stack.currentChanged.connect(lambda _: self._update_status_grid_button())
 
         # Authentic WLPG Find & Home Tab Filter Signal Connections
         self.ribbon.date_filter_selected.connect(self._on_date_filter_selected)
@@ -1267,7 +1273,10 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.sc_slideshow = QShortcut(QKeySequence(Qt.Key_F12), self)
         self.sc_slideshow.activated.connect(lambda: self.dispatch_ribbon_action("slide_show"))
 
-        self.sc_actual_size = QShortcut(QKeySequence("Ctrl+0"), self)
+        self.sc_thumbnail_view = QShortcut(QKeySequence("Ctrl+0"), self)
+        self.sc_thumbnail_view.activated.connect(self.trigger_thumbnail_view)
+
+        self.sc_actual_size = QShortcut(QKeySequence("Ctrl+1"), self)
         self.sc_actual_size.activated.connect(lambda: self.media_viewer.set_zoom_mode("100"))
 
         # F4: Immersive Viewer Mode (hides side panes, status bar, QAT, and collapses ribbon)
@@ -1817,17 +1826,87 @@ class PhotoGalleryMainWindow(QMainWindow):
     # -------------------------------------------------------------------------
     # Sub-10ms Query Execution & Viewport Thumbnail Prefetching
     # -------------------------------------------------------------------------
+    def _load_saved_mru_tags(self) -> list[str]:
+        """Loads persisted most-recently-used descriptive tags from QSettings / settings.json."""
+        try:
+            settings = QSettings("PhotoGallery64", "PhotoGallery64")
+            raw = settings.value("recent_descriptive_tags")
+            if isinstance(raw, str) and raw.strip():
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    return [str(x).strip() for x in parsed if str(x).strip()][:15]
+            elif isinstance(raw, list):
+                return [str(x).strip() for x in raw if str(x).strip()][:15]
+        except Exception:
+            pass
+        try:
+            from src.utils.paths import get_app_data_dir
+            s_path = get_app_data_dir() / "settings.json"
+            if s_path.exists():
+                data = json.loads(s_path.read_text(encoding="utf-8"))
+                parsed = data.get("recent_descriptive_tags")
+                if isinstance(parsed, list):
+                    return [str(x).strip() for x in parsed if str(x).strip()][:15]
+        except Exception:
+            pass
+        return []
+
+    def _record_mru_descriptive_tag(self, tag_path: str) -> None:
+        """Promotes tag_path to the front of the MRU list and persists it."""
+        clean = str(tag_path).strip()
+        if not clean:
+            return
+        cur = getattr(self, "_mru_descriptive_tags", [])
+        self._mru_descriptive_tags = [
+            clean,
+            *[t for t in cur if t.lower() != clean.lower()],
+        ][:15]
+        try:
+            settings = QSettings("PhotoGallery64", "PhotoGallery64")
+            settings.setValue("recent_descriptive_tags", json.dumps(self._mru_descriptive_tags))
+        except Exception:
+            pass
+        try:
+            from src.utils.paths import get_app_data_dir
+            s_path = get_app_data_dir() / "settings.json"
+            pref_data: dict[str, Any] = {}
+            if s_path.exists():
+                try:
+                    pref_data = json.loads(s_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pref_data = {}
+            pref_data["recent_descriptive_tags"] = list(self._mru_descriptive_tags)
+            s_path.write_text(json.dumps(pref_data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
     def refresh_navigation_and_autocomplete(self) -> None:
         self.left_nav_dock.refresh_trees(self.catalog_repo)
         people = self.catalog_repo.get_people_list()
         tags = self.catalog_repo.get_tag_tree()
-        recent = self.catalog_repo.get_recent_tags(10)
+        all_tag_paths = [str(t["full_path"]) for t in tags]
+        canon_by_lower = {p.lower(): p for p in all_tag_paths}
+        mru_valid: list[str] = []
+        seen_low: set[str] = set()
+        for t in getattr(self, "_mru_descriptive_tags", []):
+            low = t.lower()
+            if low in canon_by_lower and low not in seen_low:
+                mru_valid.append(canon_by_lower[low])
+                seen_low.add(low)
+        db_recent = self.catalog_repo.get_recent_tags(12)
+        for t in db_recent:
+            low = t.lower()
+            if low not in seen_low:
+                mru_valid.append(t)
+                seen_low.add(low)
+            if len(mru_valid) >= 12:
+                break
         self.ribbon.populate_face_carousel(people)
         self.ribbon.populate_tags_menu(tags)
         self.right_tag_dock.set_autocomplete_lists(
-            [str(t["full_path"]) for t in tags],
+            all_tag_paths,
             [str(p["name"]) for p in people],
-            recent_tags=recent,
+            recent_tags=mru_valid[:12],
         )
 
     def _on_ribbon_tag_filter(self, tag_id: int | None, mode: str) -> None:
@@ -2233,6 +2312,46 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._update_worker_monitor()
         self.grid_view.viewport().update()
 
+    def invalidate_face_crop_ui(
+        self, media_id: int | None = None, person_ids: Sequence[int] = ()
+    ) -> None:
+        """
+        Invalidates in-memory face crop caches, refreshes active person header avatar/counts,
+        and marks grid view dirty when face regions are modified in Single Image View or Grid View.
+        """
+        if self.central_stack.currentWidget() == self.media_viewer:
+            self._viewer_faces_dirty = True
+
+        if hasattr(self, "card_delegate"):
+            if media_id is not None:
+                self.card_delegate.invalidate_face_crops(media_id=int(media_id))
+            for pid in person_ids:
+                if pid and int(pid) > 0:
+                    self.card_delegate.invalidate_face_crops(person_id=int(pid))
+            if media_id is None and not person_ids:
+                self.card_delegate.invalidate_face_crops()
+
+        if hasattr(self, "person_header_bar") and self.person_header_bar.isVisible():
+            cur_pid = getattr(self.person_header_bar, "current_person_id", None)
+            if cur_pid is not None and int(cur_pid) > 0:
+                if not person_ids or int(cur_pid) in {int(p) for p in person_ids if p}:
+                    self.person_header_bar.load_person(int(cur_pid))
+
+        active_crop_pid = getattr(self.card_delegate, "face_crop_person_id", None)
+        if active_crop_pid is not None and self.central_stack.currentWidget() == self.grid_view:
+            self._face_crop_cancel.set()
+            self._face_crop_cancel = CancellationFlag()
+            signals = _FaceCropPreloadSignals()
+            signals.crop_ready.connect(self._on_face_crop_ready)
+            signals.progress.connect(self._on_face_crop_progress)
+            signals.finished.connect(self._on_face_crop_finished)
+            worker = _FaceCropPreloadWorker(
+                self.engine, int(active_crop_pid), signals, self._face_crop_cancel
+            )
+            self.thumbnail_pool.start(worker)
+        if hasattr(self, "grid_view"):
+            self.grid_view.viewport().update()
+
     def _on_people_special_filter(self, filter_kind: str) -> None:
         """Filters catalog media by WLPG special people criteria: all_people, detected_untagged, untagged."""
         conn = self.engine.catalog_conn()
@@ -2342,6 +2461,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         if hasattr(self, "grid_view"):
             self.grid_view._sync_metrics_and_scrollbar()
             self.grid_view.viewport().update()
+        self._update_status_grid_button()
 
     def on_quick_find_person(self, person_id: int) -> None:
         toggle = self.ribbon.is_people_and_mode()
@@ -2557,7 +2677,11 @@ class PhotoGalleryMainWindow(QMainWindow):
             try:
                 self.left_nav_dock.reload_people_tree()
                 people = self.catalog_repo.get_people_list()
-                self.ribbon.home_face_carousel.load_people(people)
+                self.ribbon.populate_face_carousel(people)
+                if hasattr(self, "person_header_bar") and self.person_header_bar.isVisible():
+                    cur_pid = getattr(self.person_header_bar, "current_person_id", None)
+                    if cur_pid is not None and int(cur_pid) > 0:
+                        self.person_header_bar.load_person(int(cur_pid))
             except Exception:
                 pass
 
@@ -2665,13 +2789,23 @@ class PhotoGalleryMainWindow(QMainWindow):
 
     def on_selection_tag_added(self, tag_path: str) -> None:
         target_ids = self.get_active_target_ids()
-        if not target_ids or not tag_path.strip():
+        clean_path = tag_path.strip()
+        if not target_ids or not clean_path:
             return
-        tid = self.catalog_repo.create_tag(tag_path.strip())
+        tid: int | None = None
+        if "/" not in clean_path and "|" not in clean_path:
+            existing = self.catalog_repo.find_tag_by_leaf_name(clean_path)
+            if existing is not None:
+                tid = int(existing["id"])
+        if tid is None:
+            tid = self.catalog_repo.create_tag(clean_path)
         self.catalog_repo.assign_tag(target_ids, tid)
+        canon_path = self.catalog_repo.get_tag_full_path(tid) or clean_path
+        self._record_mru_descriptive_tag(canon_path)
         for mid in target_ids:
             self._media_meta_lookup.pop(mid, None)
-        self.metadata_sync_daemon.notify_dirty()
+        if getattr(self, "metadata_sync_daemon", None) is not None:
+            self.metadata_sync_daemon.notify_dirty()
         self.refresh_navigation_and_autocomplete()
         if self.central_stack.currentWidget() == self.grid_view:
             self.rebuild_and_run_query(preserve_selection=True)
@@ -2685,7 +2819,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.catalog_repo.remove_tag(target_ids, tag_id)
         for mid in target_ids:
             self._media_meta_lookup.pop(mid, None)
-        self.metadata_sync_daemon.notify_dirty()
+        if getattr(self, "metadata_sync_daemon", None) is not None:
+            self.metadata_sync_daemon.notify_dirty()
         self.refresh_navigation_and_autocomplete()
         if self.central_stack.currentWidget() == self.grid_view:
             self.rebuild_and_run_query(preserve_selection=True)
@@ -2697,9 +2832,13 @@ class PhotoGalleryMainWindow(QMainWindow):
         if not target_ids:
             return
         self.catalog_repo.assign_tag(target_ids, tag_id)
+        canon_path = self.catalog_repo.get_tag_full_path(tag_id)
+        if canon_path:
+            self._record_mru_descriptive_tag(canon_path)
         for mid in target_ids:
             self._media_meta_lookup.pop(mid, None)
-        self.metadata_sync_daemon.notify_dirty()
+        if getattr(self, "metadata_sync_daemon", None) is not None:
+            self.metadata_sync_daemon.notify_dirty()
         self.refresh_navigation_and_autocomplete()
         if self.central_stack.currentWidget() == self.grid_view:
             self.rebuild_and_run_query(preserve_selection=True)
@@ -2715,8 +2854,11 @@ class PhotoGalleryMainWindow(QMainWindow):
         )
         if not target_ids or not person_name.strip():
             return
+        pids_added: list[int] = []
         for mid in target_ids:
-            self.catalog_repo.assign_person(mid, person_name.strip())
+            pid = self.catalog_repo.assign_person(mid, person_name.strip())
+            pids_added.append(int(pid))
+            self.invalidate_face_crop_ui(media_id=int(mid), person_ids=[int(pid)])
         self.refresh_navigation_and_autocomplete()
         summary = self.catalog_repo.get_selection_summary(target_ids)
         self.right_tag_dock.bind_selection(target_ids, summary)
@@ -2740,6 +2882,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             return
         for mid in target_ids:
             self.catalog_repo.remove_person_tag(mid, person_id)
+            self.invalidate_face_crop_ui(media_id=int(mid), person_ids=[int(person_id)])
         self.refresh_navigation_and_autocomplete()
         summary = self.catalog_repo.get_selection_summary(target_ids)
         self.right_tag_dock.bind_selection(target_ids, summary)
@@ -2753,13 +2896,17 @@ class PhotoGalleryMainWindow(QMainWindow):
     def on_locate_person_face_requested(self, person_id: int, person_name: str) -> None:
         """Enters interactive face positioning on the open photo for the specified person."""
         if self.central_stack.currentWidget() != self.media_viewer:
-            self.show_single_viewer()
+            sel = self.get_active_target_ids()
+            if not sel:
+                return
+            self.open_single_viewer(sel[0])
         if hasattr(self, "media_viewer") and self.media_viewer is not None:
             self.media_viewer.start_face_tag_mode_for_person(int(person_id), str(person_name))
 
     def on_link_person_face_requested(self, person_id: int, face_id: int) -> None:
         """Links a boxless person tag directly to a detected face box."""
         self.catalog_repo.assign_face_to_person(int(face_id), int(person_id))
+        self.invalidate_face_crop_ui(person_ids=[int(person_id)])
         self.refresh_navigation_and_autocomplete()
         if (
             self.central_stack.currentWidget() == self.media_viewer
@@ -2822,7 +2969,11 @@ class PhotoGalleryMainWindow(QMainWindow):
                         )
                     break
             self.catalog_repo.remove_person_tag(mid, person_id)
-            self.catalog_repo.assign_person(mid, new_name_clean, existing_rect)
+            assigned_pid = self.catalog_repo.assign_person(mid, new_name_clean, existing_rect)
+            self.invalidate_face_crop_ui(
+                media_id=int(mid),
+                person_ids=[p for p in (int(person_id), int(assigned_pid)) if p > 0],
+            )
         self.refresh_navigation_and_autocomplete()
         summary = self.catalog_repo.get_selection_summary(target_ids)
         self.right_tag_dock.bind_selection(target_ids, summary)
@@ -3012,6 +3163,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             mid = int(r["media_id"])
             self.catalog_repo.add_face_rejection(mp_id, person_id)
             self.catalog_repo.remove_person_tag(mid, person_id)
+        for mid in media_ids:
+            self.invalidate_face_crop_ui(media_id=int(mid), person_ids=[int(person_id)])
         self.refresh_navigation_and_autocomplete()
         self.rebuild_and_run_query(preserve_selection=False)
         if hasattr(self, "person_header_bar") and self.person_header_bar.isVisible():
@@ -3063,6 +3216,11 @@ class PhotoGalleryMainWindow(QMainWindow):
                         (person_id,),
                     )
                     conn.commit()
+        for mid in media_ids:
+            self.invalidate_face_crop_ui(
+                media_id=int(mid),
+                person_ids=[int(person_id)] if person_id and person_id > 0 else [],
+            )
         self.refresh_navigation_and_autocomplete()
         self.rebuild_and_run_query(preserve_selection=False)
         if hasattr(self, "person_header_bar") and self.person_header_bar.isVisible():
@@ -3101,7 +3259,11 @@ class PhotoGalleryMainWindow(QMainWindow):
                         )
                     break
             self.catalog_repo.remove_person_tag(mid, person_id)
-            self.catalog_repo.assign_person(mid, new_name_clean, existing_rect)
+            assigned_pid = self.catalog_repo.assign_person(mid, new_name_clean, existing_rect)
+            self.invalidate_face_crop_ui(
+                media_id=int(mid),
+                person_ids=[p for p in (int(person_id), int(assigned_pid)) if p > 0],
+            )
         self.refresh_navigation_and_autocomplete()
         self.rebuild_and_run_query(preserve_selection=False)
         if hasattr(self, "person_header_bar") and self.person_header_bar.isVisible():
@@ -3320,7 +3482,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         rw: float,
         rh: float,
     ) -> None:
-        self.catalog_repo.assign_person(media_id, person_name, (rx, ry, rw, rh))
+        pid = self.catalog_repo.assign_person(media_id, person_name, (rx, ry, rw, rh))
+        self.invalidate_face_crop_ui(media_id=int(media_id), person_ids=[int(pid)])
         self.refresh_navigation_and_autocomplete()
         detail = self.catalog_repo.get_media_detail(media_id)
         self.media_viewer.render_face_regions(detail.get("people", []))
@@ -3396,10 +3559,15 @@ class PhotoGalleryMainWindow(QMainWindow):
             if self.central_stack.currentWidget() != self.media_viewer:
                 self._prev_central_widget = self.central_stack.currentWidget()
                 self._prev_ribbon_tab = self.ribbon.tab_widget.currentIndex()
+                self._viewer_faces_dirty = False
                 if self.isVisible():
                     self._nav_dock_was_visible = not self.left_nav_dock.isHidden()
                 self.left_nav_dock.hide()
             self.central_stack.setCurrentWidget(self.media_viewer)
+            if self.centralWidget() is not None and self.centralWidget().layout() is not None:
+                self.centralWidget().layout().activate()
+            if not bool(detail["is_video"]):
+                self.media_viewer.set_zoom_mode("fit")
             self.media_viewer.set_dark_mode(getattr(self, "current_theme", "") == "dark")
             self.ribbon.set_active_mode("viewer")
             self.ribbon.tab_widget.setCurrentWidget(self.ribbon.tab_edit)
@@ -3410,6 +3578,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.btn_status_next.setVisible(True)
             self.btn_status_fit.setVisible(True)
             self._update_status_zoom_toggle_button()
+            self._update_status_grid_button()
 
             fname = str(detail["filename"])
             self.setWindowTitle(f"{fname} - Essentials Photo Gallery")
@@ -3443,6 +3612,7 @@ class PhotoGalleryMainWindow(QMainWindow):
 
             self._refresh_effects_gallery_thumbnails()
             self._update_revert_button_state()
+            self.media_viewer.graphics_view.setFocus()
             if not self._is_navigating_history:
                 if 0 <= self._nav_index < len(self._nav_history) and self._nav_history[self._nav_index].get("view") == "viewer":
                     self._nav_history[self._nav_index]["media_id"] = media_id
@@ -3555,6 +3725,19 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.btn_status_next.setVisible(False)
         self.btn_status_fit.setVisible(False)
         self.btn_status_actual.setVisible(False)
+        self._update_status_grid_button()
+
+        if getattr(self, "_viewer_faces_dirty", False):
+            self._viewer_faces_dirty = False
+            self.rebuild_and_run_query()
+            if hasattr(self, "person_header_bar") and self.person_header_bar.isVisible():
+                cur_pid = getattr(self.person_header_bar, "current_person_id", None)
+                if cur_pid is not None and int(cur_pid) > 0:
+                    self.person_header_bar.load_person(int(cur_pid))
+            active_crop_pid = getattr(self.card_delegate, "face_crop_person_id", None)
+            if active_crop_pid is not None:
+                self.card_delegate.invalidate_face_crops(person_id=int(active_crop_pid))
+                self._on_person_view_mode_changed("crops")
 
         self.setWindowTitle("Essentials Photo Gallery")
         if hasattr(self.ribbon, "lbl_app_title"):
@@ -3666,10 +3849,22 @@ class PhotoGalleryMainWindow(QMainWindow):
                 return False
             self.rebuild_and_run_query()
         records = self.catalog_model._records
-        if not records:
-            return False
-        pos = self.catalog_model.record_index_for_id(curr_id)
+        pos = self.catalog_model.record_index_for_id(curr_id) if records else None
         if pos is None:
+            # Current media is not in the active filtered record list (e.g. startup Open With or stale sub-filter);
+            # switch scope to its parent folder (or All Media) so Next/Previous navigation works immediately.
+            try:
+                det = self.catalog_repo.get_media_detail(curr_id)
+                fid = det.get("folder_id")
+                if fid is not None and hasattr(self.left_nav_dock, "select_folder"):
+                    self.left_nav_dock.select_folder(int(fid))
+                else:
+                    self.left_nav_dock.clear_all_filters()
+                records = self.rebuild_and_run_query()
+                pos = self.catalog_model.record_index_for_id(curr_id)
+            except Exception:
+                pos = None
+        if not records or pos is None:
             return False
         next_pos = (pos + delta) % len(records)
         next_id = records[next_pos].id
@@ -5124,7 +5319,11 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.media_viewer.set_zoom_mode("100")
         elif action_id in ("viewer_zoom_fit", "zoom_fit"):
             if self.central_stack.currentWidget() == self.media_viewer:
-                self.media_viewer.set_zoom_mode("fit")
+                if self._is_viewer_image_bigger_than_window():
+                    self.media_viewer.set_zoom_mode("fit")
+                else:
+                    self.media_viewer.set_zoom_mode("fit_window")
+                self._update_status_zoom_toggle_button()
         elif action_id == "toggle_pause_write_back":
             self.toggle_pause_write_back()
         elif action_id == "print":
@@ -6092,6 +6291,54 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.media_viewer.set_zoom_mode("100")
         self._update_status_zoom_toggle_button()
 
+    def _on_status_grid_or_details_clicked(self) -> None:
+        """
+        In Grid View: toggles 'All details' (equivalent to View -> All details).
+        In Single Image View or other views: returns to Thumbnail Grid view.
+        """
+        if self.central_stack.currentWidget() == self.grid_view:
+            if hasattr(self, "ribbon") and hasattr(self.ribbon, "chk_all_details"):
+                self.ribbon.chk_all_details.setChecked(
+                    not self.ribbon.chk_all_details.isChecked()
+                )
+            self._update_status_grid_button()
+        else:
+            self.show_grid_view()
+
+    def trigger_thumbnail_view(self) -> None:
+        """Switches to Thumbnail View (Ctrl+0) from Single Image View, All Details mode, or auxiliary views."""
+        if self.central_stack.currentWidget() != self.grid_view:
+            self._prev_central_widget = None
+            self.show_grid_view()
+        if (
+            self.central_stack.currentWidget() == self.grid_view
+            and hasattr(self, "ribbon")
+            and hasattr(self.ribbon, "chk_all_details")
+            and self.ribbon.chk_all_details.isChecked()
+        ):
+            self.ribbon.chk_all_details.setChecked(False)
+        self._update_status_grid_button()
+
+    def _update_status_grid_button(self) -> None:
+        if not hasattr(self, "btn_status_grid"):
+            return
+        in_grid = (
+            hasattr(self, "central_stack")
+            and hasattr(self, "grid_view")
+            and self.central_stack.currentWidget() == self.grid_view
+        )
+        in_all_details = bool(
+            hasattr(self, "ribbon")
+            and hasattr(self.ribbon, "chk_all_details")
+            and self.ribbon.chk_all_details.isChecked()
+        )
+        if in_grid and not in_all_details:
+            self.btn_status_grid.setIcon(make_wlpg_icon("view_details", 18))
+            self.btn_status_grid.setToolTip("View Details")
+        else:
+            self.btn_status_grid.setIcon(make_wlpg_icon("thumbnail_view", 18))
+            self.btn_status_grid.setToolTip("Thumbnail view (Ctrl+0)")
+
     def _update_status_zoom_toggle_button(self) -> None:
         if not hasattr(self, "btn_status_fit"):
             return
@@ -6100,7 +6347,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.btn_status_fit.setToolTip("Fit to window")
         else:
             self.btn_status_fit.setIcon(make_wlpg_icon("actual_size", 18))
-            self.btn_status_fit.setToolTip("Actual size (Ctrl+0)")
+            self.btn_status_fit.setToolTip("Actual size (Ctrl+1)")
 
     def resizeEvent(self, event: Any) -> None:
         super().resizeEvent(event)
@@ -6721,6 +6968,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                     "auto_color": getattr(self, "auto_color", True),
                     "auto_exposure": getattr(self, "auto_exposure", True),
                     "zoom_val": self.slider_status_zoom.value(),
+                    "recent_descriptive_tags": list(getattr(self, "_mru_descriptive_tags", [])),
                 }
                 with open(settings_json_path, "w", encoding="utf-8") as f:
                     json.dump(pref_data, f, indent=2)
@@ -6916,6 +7164,26 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.engine.close_all()
 
     def eventFilter(self, watched: Any, event: Any) -> bool:
+        if event.type() == QEvent.Type.KeyPress:
+            from PySide6.QtWidgets import QAbstractSpinBox
+            if (
+                self.central_stack.currentWidget() == self.media_viewer
+                and not getattr(self.media_viewer, "is_crop_mode", False)
+                and QApplication.activeModalWidget() is None
+                and QApplication.activePopupWidget() is None
+            ):
+                focus_w = QApplication.focusWidget() or self.focusWidget()
+                target_watched = focus_w if focus_w is not None else self
+                if watched is target_watched and not isinstance(
+                    focus_w, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)
+                ):
+                    if event.key() in (Qt.Key_Left, Qt.Key_Right) and event.modifiers() in (
+                        Qt.NoModifier,
+                        Qt.KeypadModifier,
+                    ):
+                        self.navigate_single_viewer(-1 if event.key() == Qt.Key_Left else 1)
+                        event.accept()
+                        return True
         if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
             from PySide6.QtGui import QMouseEvent
             if isinstance(event, QMouseEvent):
@@ -6933,12 +7201,18 @@ class PhotoGalleryMainWindow(QMainWindow):
         super().showEvent(event)
         if not getattr(self, "_initial_show_done", False):
             self._initial_show_done = True
-            if self.central_stack.currentWidget() != self.media_viewer:
+            if self.central_stack.currentWidget() == self.media_viewer:
+                self.media_viewer.graphics_view.setFocus()
+                QTimer.singleShot(0, self.media_viewer.graphics_view.setFocus)
+            else:
                 self.left_nav_dock.setVisible(True)
                 self.left_nav_dock.show()
                 self.resizeDocks([self.left_nav_dock], [230], Qt.Horizontal)
                 if hasattr(self.ribbon, "btn_toggle_nav_pane"):
                     self.ribbon.btn_toggle_nav_pane.setChecked(True)
+                if self.central_stack.currentWidget() == self.grid_view:
+                    self.grid_view.setFocus()
+                    QTimer.singleShot(0, self.grid_view.setFocus)
             if (
                 getattr(self, "find_people_enabled", True)
                 and "PYTEST_CURRENT_TEST" not in os.environ

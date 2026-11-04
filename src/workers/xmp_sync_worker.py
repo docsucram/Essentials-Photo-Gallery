@@ -1112,6 +1112,12 @@ class MetadataSyncDaemon(QObject):
         """Pauses or resumes background file write-back."""
         self._paused = bool(paused)
 
+    def notify_dirty(self) -> None:
+        """Wakes the daemon to sync dirty metadata rows immediately if running and not paused."""
+        if not self._running or self._paused or self._is_flushing or self.stop_requested.is_set():
+            return
+        QTimer.singleShot(0, self._on_timer_tick)
+
     def start(self) -> None:
         self._running = True
         self.stop_requested.clear()

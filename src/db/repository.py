@@ -1751,10 +1751,12 @@ class CatalogRepository:
             for part in parts:
                 current_path = f"{current_path}/{part}" if current_path else part
                 existing = conn.execute(
-                    "SELECT id FROM tags WHERE full_path = ?;", (current_path,)
+                    "SELECT id, full_path FROM tags WHERE LOWER(full_path) = LOWER(?);",
+                    (current_path,),
                 ).fetchone()
                 if existing is not None:
                     parent_id = int(existing["id"])
+                    current_path = str(existing["full_path"])
                 else:
                     cur = conn.execute(
                         "INSERT INTO tags (parent_id, name, full_path) VALUES (?, ?, ?) RETURNING id;",
@@ -2019,23 +2021,30 @@ class CatalogRepository:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_tag_full_path(self, tag_id: int) -> str | None:
+        """Returns the canonical full_path for tag_id, or None if not found."""
+        conn = self.engine.catalog_conn()
+        row = conn.execute("SELECT full_path FROM tags WHERE id = ?;", (int(tag_id),)).fetchone()
+        return str(row["full_path"]) if row else None
+
     def get_recent_tags(self, limit: int = 10) -> list[str]:
-        """Returns the most frequently / recently used tag full_paths for quick suggestions."""
+        """Returns the most recently created / recently modified tag full_paths as initial suggestions."""
         conn = self.engine.catalog_conn()
         rows = conn.execute(
             """
-            SELECT t.full_path, COUNT(mt.media_id) AS cnt
+            SELECT t.full_path
             FROM tags t
             JOIN media_tags mt ON mt.tag_id = t.id
+            JOIN media m ON m.id = mt.media_id
             GROUP BY t.id
-            ORDER BY cnt DESC, t.full_path COLLATE NOCASE ASC
+            ORDER BY MAX(m.metadata_dirty) DESC, t.id DESC
             LIMIT ?;
             """,
             (limit,),
         ).fetchall()
         if not rows:
             rows = conn.execute(
-                "SELECT full_path FROM tags ORDER BY full_path COLLATE NOCASE ASC LIMIT ?;",
+                "SELECT full_path FROM tags ORDER BY id DESC LIMIT ?;",
                 (limit,),
             ).fetchall()
         return [str(r["full_path"]) for r in rows]
@@ -2095,6 +2104,133 @@ class CatalogRepository:
                 return buf.getvalue()
         except Exception:
             return None
+
+    def _put_face_thumbnail_direct(self, face_id: int, blob: bytes) -> None:
+        if not blob or face_id <= 0:
+            return
+        try:
+            with self.engine.write_lock:
+                tconn = self.engine.thumbnails_conn()
+                tconn.execute(
+                    """
+                    INSERT INTO face_thumbnails (face_id, crop_webp)
+                    VALUES (?, ?)
+                    ON CONFLICT(face_id) DO UPDATE SET crop_webp = excluded.crop_webp;
+                    """,
+                    (int(face_id), blob),
+                )
+                tconn.commit()
+        except Exception:
+            pass
+
+    def _invalidate_face_thumbnails_direct(self, face_ids: Sequence[int]) -> None:
+        clean_ids = [int(fid) for fid in face_ids if fid and int(fid) > 0]
+        if not clean_ids:
+            return
+        try:
+            with self.engine.write_lock:
+                tconn = self.engine.thumbnails_conn()
+                for chunk in _iter_id_chunks(clean_ids, 900):
+                    placeholders = ",".join("?" for _ in chunk)
+                    tconn.execute(
+                        f"DELETE FROM face_thumbnails WHERE face_id IN ({placeholders});",
+                        list(chunk),
+                    )
+                tconn.commit()
+        except Exception:
+            pass
+
+    def refresh_person_avatar(
+        self,
+        person_id: int,
+        invalidated_face_ids: Sequence[int] = (),
+        updated_face_id: int | None = None,
+    ) -> None:
+        """
+        Ensures `people.thumbnail_blob` and `people.avatar_media_people_id` stay fresh when a
+        face box is moved, retagged, unassigned, or deleted.
+        """
+        if not person_id or int(person_id) <= 0:
+            return
+        pid = int(person_id)
+        inv_set = {int(f) for f in invalidated_face_ids if f and int(f) > 0}
+        conn_read = self.engine.catalog_conn()
+        p_row = conn_read.execute(
+            "SELECT thumbnail_blob, avatar_media_people_id FROM people WHERE id = ?;",
+            (pid,),
+        ).fetchone()
+        if p_row is None:
+            return
+        cur_blob = p_row["thumbnail_blob"]
+        cur_avatar_fid = int(p_row["avatar_media_people_id"]) if p_row["avatar_media_people_id"] is not None else None
+
+        needs_refresh = False
+        target_face_id: int | None = None
+        if updated_face_id is not None and int(updated_face_id) > 0:
+            ufid = int(updated_face_id)
+            if cur_blob is None or cur_avatar_fid is None or cur_avatar_fid == ufid:
+                needs_refresh = True
+                target_face_id = ufid
+        elif inv_set:
+            if cur_blob is None or cur_avatar_fid is None or cur_avatar_fid in inv_set:
+                needs_refresh = True
+        elif cur_blob is None:
+            needs_refresh = True
+
+        if not needs_refresh:
+            return
+
+        cand_row = None
+        if target_face_id is not None:
+            cand_row = conn_read.execute(
+                """
+                SELECT mp.id AS face_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
+                       m.filename, f.path AS folder_path
+                FROM media_people mp
+                JOIN media m ON m.id = mp.media_id
+                JOIN folders f ON f.id = m.folder_id
+                WHERE mp.id = ? AND mp.person_id = ? AND mp.state = 1 AND m.is_video = 0
+                LIMIT 1;
+                """,
+                (target_face_id, pid),
+            ).fetchone()
+
+        if cand_row is None:
+            cand_row = conn_read.execute(
+                """
+                SELECT mp.id AS face_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
+                       m.filename, f.path AS folder_path
+                FROM media_people mp
+                JOIN media m ON m.id = mp.media_id
+                JOIN folders f ON f.id = m.folder_id
+                WHERE mp.person_id = ? AND mp.state = 1
+                  AND mp.rect_w > 0.005 AND mp.rect_h > 0.005 AND m.is_video = 0
+                ORDER BY mp.is_manual DESC, mp.id ASC
+                LIMIT 1;
+                """,
+                (pid,),
+            ).fetchone()
+
+        new_blob: bytes | None = None
+        new_avatar_fid: int | None = None
+        if cand_row is not None:
+            new_avatar_fid = int(cand_row["face_id"])
+            full_path = os.path.join(str(cand_row["folder_path"]), str(cand_row["filename"]))
+            rect = (
+                float(cand_row["rect_x"] or 0.0),
+                float(cand_row["rect_y"] or 0.0),
+                float(cand_row["rect_w"] or 0.0),
+                float(cand_row["rect_h"] or 0.0),
+            )
+            new_blob = self.extract_face_crop_blob(full_path, rect)
+
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            conn.execute(
+                "UPDATE people SET thumbnail_blob = ?, avatar_media_people_id = ? WHERE id = ?;",
+                (new_blob, new_avatar_fid, pid),
+            )
+            conn.commit()
 
     def upsert_person(self, name: str, thumbnail_blob: bytes | None = None) -> int:
         """Creates or retrieves a person by name."""
@@ -2163,21 +2299,34 @@ class CatalogRepository:
         is_video = bool(media_row["is_video"])
         rx, ry, rw, rh = (0.0, 0.0, 0.0, 0.0) if is_video else rect
 
-        # 2. Extract avatar thumbnail crop OUTSIDE write_lock if needed
+        # 2. Extract face thumbnail crop OUTSIDE write_lock if needed
+        face_crop_blob: bytes | None = None
+        if not is_video and (rw > 0.005 and rh > 0.005):
+            full_img_path = os.path.join(
+                str(media_row["folder_path"]), str(media_row["filename"])
+            )
+            face_crop_blob = self.extract_face_crop_blob(
+                full_img_path, (rx, ry, rw, rh)
+            )
         if thumbnail_blob is None and not is_video:
             existing_p = conn_read.execute(
                 "SELECT thumbnail_blob FROM people WHERE name = ?;",
                 (clean_name,),
             ).fetchone()
             if existing_p is None or existing_p["thumbnail_blob"] is None:
-                full_img_path = os.path.join(
-                    str(media_row["folder_path"]), str(media_row["filename"])
-                )
-                thumbnail_blob = self.extract_face_crop_blob(
-                    full_img_path, (rx, ry, rw, rh)
-                )
+                if face_crop_blob is not None:
+                    thumbnail_blob = face_crop_blob
+                else:
+                    full_img_path = os.path.join(
+                        str(media_row["folder_path"]), str(media_row["filename"])
+                    )
+                    thumbnail_blob = self.extract_face_crop_blob(
+                        full_img_path, (rx, ry, rw, rh)
+                    )
 
         # 3. Perform atomic DB mutations inside write lock
+        old_displaced_pid: int | None = None
+        mp_id: int = 0
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
             cur = conn.execute(
@@ -2230,28 +2379,41 @@ class CatalogRepository:
                         (person_id,),
                     )
                     if old_pid is not None and old_state == 1 and old_pid != person_id:
+                        old_displaced_pid = int(old_pid)
                         conn.execute(
                             "UPDATE people SET confirmed_count = MAX(0, confirmed_count - 1) WHERE id = ?;",
                             (old_pid,),
                         )
             else:
-                conn.execute(
+                cur_mp = conn.execute(
                     """
                     INSERT INTO media_people (media_id, person_id, state, is_manual, rect_x, rect_y, rect_w, rect_h)
-                    VALUES (?, ?, 1, 1, ?, ?, ?, ?);
+                    VALUES (?, ?, 1, 1, ?, ?, ?, ?)
+                    RETURNING id;
                     """,
                     (media_id, person_id, rx, ry, rw, rh),
                 )
+                mp_id = int(cur_mp.fetchone()[0])
                 conn.execute(
                     "UPDATE people SET confirmed_count = confirmed_count + 1 WHERE id = ?;",
                     (person_id,),
+                )
+            if mp_id > 0 and thumbnail_blob is not None:
+                conn.execute(
+                    "UPDATE people SET avatar_media_people_id = COALESCE(avatar_media_people_id, ?) WHERE id = ?;",
+                    (mp_id, person_id),
                 )
             conn.execute(
                 "UPDATE media SET metadata_dirty = 1 WHERE id = ?;",
                 (media_id,),
             )
             conn.commit()
-            return person_id
+
+        if mp_id > 0 and face_crop_blob is not None:
+            self._put_face_thumbnail_direct(mp_id, face_crop_blob)
+        if old_displaced_pid is not None and mp_id > 0:
+            self.refresh_person_avatar(old_displaced_pid, invalidated_face_ids=[mp_id])
+        return person_id
 
     def add_person_region(
         self,
@@ -2309,12 +2471,21 @@ class CatalogRepository:
 
     def backfill_missing_people_thumbnails(self) -> int:
         """
-        Populates `people.thumbnail_blob` for any person row whose avatar blob is NULL
-        by cropping their largest face region from `media_people`.
+        Populates or heals `people.thumbnail_blob` and `people.avatar_media_people_id`
+        for any person row whose avatar blob is NULL or whose avatar face link is missing/stale.
         """
         conn = self.engine.catalog_conn()
         missing = conn.execute(
-            "SELECT id, name FROM people WHERE thumbnail_blob IS NULL;"
+            """
+            SELECT p.id, p.name
+            FROM people p
+            LEFT JOIN media_people amp ON amp.id = p.avatar_media_people_id
+            WHERE p.thumbnail_blob IS NULL
+               OR p.avatar_media_people_id IS NULL
+               OR amp.id IS NULL
+               OR amp.person_id != p.id
+               OR amp.state != 1;
+            """
         ).fetchall()
         if not missing:
             return 0
@@ -2324,18 +2495,21 @@ class CatalogRepository:
             pid = int(p_row["id"])
             best_mp = conn.execute(
                 """
-                SELECT mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h, m.filename, f.path AS folder_path
+                SELECT mp.id AS face_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
+                       m.filename, f.path AS folder_path
                 FROM media_people mp
                 JOIN media m ON m.id = mp.media_id
                 JOIN folders f ON f.id = m.folder_id
-                WHERE mp.person_id = ? AND m.is_video = 0 AND mp.rect_w > 0.005 AND mp.rect_h > 0.005
-                ORDER BY (mp.rect_w * mp.rect_h) DESC, m.date_taken DESC
+                WHERE mp.person_id = ? AND mp.state = 1
+                  AND m.is_video = 0 AND mp.rect_w > 0.005 AND mp.rect_h > 0.005
+                ORDER BY mp.is_manual DESC, (mp.rect_w * mp.rect_h) DESC, m.date_taken DESC
                 LIMIT 1;
                 """,
                 (pid,),
             ).fetchone()
             if best_mp is None:
                 continue
+            best_fid = int(best_mp["face_id"])
             full_path = os.path.join(
                 str(best_mp["folder_path"]), str(best_mp["filename"])
             )
@@ -2350,8 +2524,8 @@ class CatalogRepository:
                 try:
                     with self.engine.write_lock:
                         conn.execute(
-                            "UPDATE people SET thumbnail_blob = ? WHERE id = ?;",
-                            (blob, pid),
+                            "UPDATE people SET thumbnail_blob = ?, avatar_media_people_id = ? WHERE id = ?;",
+                            (blob, best_fid, pid),
                         )
                         conn.commit()
                     updated += 1
@@ -2360,8 +2534,14 @@ class CatalogRepository:
         return updated
 
     def remove_person_tag(self, media_id: int, person_id: int) -> None:
+        removed_ids: list[int] = []
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
+            rows = conn.execute(
+                "SELECT id FROM media_people WHERE media_id = ? AND person_id = ?;",
+                (media_id, person_id),
+            ).fetchall()
+            removed_ids = [int(r["id"]) for r in rows]
             conn.execute(
                 "DELETE FROM media_people WHERE media_id = ? AND person_id = ?;",
                 (media_id, person_id),
@@ -2381,6 +2561,9 @@ class CatalogRepository:
                 (media_id,),
             )
             conn.commit()
+        if removed_ids:
+            self._invalidate_face_thumbnails_direct(removed_ids)
+            self.refresh_person_avatar(person_id, invalidated_face_ids=removed_ids)
 
     remove_person_from_media = remove_person_tag
 
@@ -2539,7 +2722,7 @@ class CatalogRepository:
         row = conn_read.execute(
             """
             SELECT m.filename, f.path AS folder_path,
-                   mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h
+                   mp.id AS face_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h
             FROM media m
             JOIN folders f ON f.id = m.folder_id
             LEFT JOIN media_people mp ON mp.media_id = m.id AND mp.person_id = ?
@@ -2561,11 +2744,12 @@ class CatalogRepository:
         blob = self.extract_face_crop_blob(full_path, rect)
         if not blob:
             return False
+        fid = int(row["face_id"]) if row["face_id"] is not None else None
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
             conn.execute(
-                "UPDATE people SET thumbnail_blob = ? WHERE id = ?;",
-                (blob, int(person_id)),
+                "UPDATE people SET thumbnail_blob = ?, avatar_media_people_id = ? WHERE id = ?;",
+                (blob, fid, int(person_id)),
             )
             conn.commit()
         return True
@@ -3034,6 +3218,7 @@ class CatalogRepository:
 
     def assign_person_to_face(self, face_id: int, person_id: int) -> None:
         """Assigns person_id to a specific face_id, updating confirmed counts and marking media dirty."""
+        old_pid: int | None = None
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
             old_row = conn.execute("SELECT media_id, person_id FROM media_people WHERE id = ?;", (face_id,)).fetchone()
@@ -3058,6 +3243,9 @@ class CatalogRepository:
             if old_row:
                 conn.execute("UPDATE media SET metadata_dirty = 1 WHERE id = ?;", (old_row["media_id"],))
             conn.commit()
+        if old_pid and old_pid != int(person_id):
+            self.refresh_person_avatar(old_pid, invalidated_face_ids=[int(face_id)])
+        self.refresh_person_avatar(int(person_id))
 
     def unassign_face_person(self, face_id: int, person_id: int | None = None) -> None:
         """
@@ -3065,6 +3253,7 @@ class CatalogRepository:
         setting it to state 0 (unassigned) so it displays as 'Who is this?'.
         Also records the rejection so this face won't be re-suggested as this person.
         """
+        deleted_row = False
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
             if person_id is None:
@@ -3090,6 +3279,7 @@ class CatalogRepository:
                     (face_id,),
                 )
             else:
+                deleted_row = True
                 conn.execute("DELETE FROM media_people WHERE id = ?;", (face_id,))
 
             if person_id:
@@ -3106,6 +3296,10 @@ class CatalogRepository:
             if row:
                 conn.execute("UPDATE media SET metadata_dirty = 1 WHERE id = ?;", (row["media_id"],))
             conn.commit()
+        if deleted_row:
+            self._invalidate_face_thumbnails_direct([int(face_id)])
+        if person_id:
+            self.refresh_person_avatar(int(person_id), invalidated_face_ids=[int(face_id)])
 
     def recalculate_person_centroid(self, person_id: int) -> None:
         """Recalculates ArcFace centroid/sub-centroids for person_id from confirmed faces."""
@@ -3133,18 +3327,26 @@ class CatalogRepository:
         except Exception:
             pass
 
-    def assign_face_to_person(self, face_id: int, person_name: str) -> int:
+    def assign_face_to_person(self, face_id: int, person_name: str | int) -> int:
         """
         Names/assigns an unknown or suggested face region (media_people.id) to a person.
         Promotes state = 1, updates person's centroid embedding, increments confirmed count,
         and marks media dirty for metadata sync. Consolidates any existing boxless row for
         this person on the same media.
         """
-        clean_name = str(person_name).strip()
-        if not clean_name:
-            raise ValueError("person_name cannot be empty")
-        person_id = self.upsert_person(clean_name)
+        if isinstance(person_name, int):
+            person_id = int(person_name)
+        else:
+            clean_name = str(person_name).strip()
+            if not clean_name:
+                raise ValueError("person_name cannot be empty")
+            person_id = self.upsert_person(clean_name)
+        old_row = self.engine.catalog_conn().execute(
+            "SELECT person_id FROM media_people WHERE id = ?;", (int(face_id),)
+        ).fetchone()
+        old_pid = int(old_row["person_id"]) if old_row and old_row["person_id"] else None
         self.confirm_faces(int(face_id), person_id)
+        removed_placeholder_ids: list[int] = []
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
             row = conn.execute(
@@ -3152,6 +3354,15 @@ class CatalogRepository:
             ).fetchone()
             if row:
                 mid = int(row["media_id"])
+                ph_rows = conn.execute(
+                    """
+                    SELECT id FROM media_people
+                    WHERE media_id = ? AND person_id = ? AND id != ?
+                      AND (rect_w <= 0.005 OR rect_h <= 0.005);
+                    """,
+                    (mid, person_id, int(face_id)),
+                ).fetchall()
+                removed_placeholder_ids = [int(r["id"]) for r in ph_rows]
                 # Consolidate duplicate boxless placeholder row for this person on this photo
                 conn.execute(
                     """
@@ -3161,24 +3372,69 @@ class CatalogRepository:
                     """,
                     (mid, person_id, int(face_id)),
                 )
+                conn.execute(
+                    """
+                    UPDATE people
+                    SET confirmed_count = (
+                        SELECT COUNT(*) FROM media_people WHERE person_id = people.id AND state = 1
+                    )
+                    WHERE id = ?;
+                    """,
+                    (person_id,),
+                )
+                if old_pid and old_pid != person_id:
+                    conn.execute(
+                        """
+                        UPDATE people
+                        SET confirmed_count = (
+                            SELECT COUNT(*) FROM media_people WHERE person_id = people.id AND state = 1
+                        )
+                        WHERE id = ?;
+                        """,
+                        (old_pid,),
+                    )
                 conn.execute("UPDATE media SET metadata_dirty = 1 WHERE id = ?;", (mid,))
                 conn.commit()
                 if row["embedding"]:
                     self.recalculate_person_centroid(person_id)
+        if removed_placeholder_ids:
+            self._invalidate_face_thumbnails_direct(removed_placeholder_ids)
+        if old_pid and old_pid != person_id:
+            self.refresh_person_avatar(old_pid, invalidated_face_ids=[int(face_id)])
+        self.refresh_person_avatar(person_id)
         return person_id
 
     def dismiss_face_region(self, face_id: int) -> None:
         """Dismisses a false-positive detected face box (sets state = -1) and marks media dirty."""
+        old_pid: int | None = None
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
-            row = conn.execute("SELECT media_id FROM media_people WHERE id = ?;", (int(face_id),)).fetchone()
-            conn.execute("UPDATE media_people SET state = -1 WHERE id = ?;", (int(face_id),))
+            row = conn.execute("SELECT media_id, person_id FROM media_people WHERE id = ?;", (int(face_id),)).fetchone()
+            if row and row["person_id"]:
+                old_pid = int(row["person_id"])
+            conn.execute("UPDATE media_people SET state = -1, person_id = NULL, suggested_person_id = NULL WHERE id = ?;", (int(face_id),))
+            if old_pid:
+                conn.execute(
+                    """
+                    UPDATE people
+                    SET confirmed_count = (
+                        SELECT COUNT(*) FROM media_people WHERE person_id = people.id AND state = 1
+                    )
+                    WHERE id = ?;
+                    """,
+                    (old_pid,),
+                )
             if row:
                 conn.execute("UPDATE media SET metadata_dirty = 1 WHERE id = ?;", (int(row["media_id"]),))
             conn.commit()
+        self._invalidate_face_thumbnails_direct([int(face_id)])
+        if old_pid:
+            self.refresh_person_avatar(old_pid, invalidated_face_ids=[int(face_id)])
 
     def remove_face_assignment(self, face_id: int) -> None:
         """Removes person assignment from a face region. If manual, deletes it; if detected, resets to state = 0."""
+        pid = None
+        is_manual = False
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
             row = conn.execute(
@@ -3187,8 +3443,9 @@ class CatalogRepository:
             if not row:
                 return
             pid = row["person_id"]
+            is_manual = bool(row["is_manual"])
             mid = int(row["media_id"])
-            if row["is_manual"]:
+            if is_manual:
                 conn.execute("DELETE FROM media_people WHERE id = ?;", (int(face_id),))
             else:
                 conn.execute(
@@ -3209,6 +3466,10 @@ class CatalogRepository:
                 self.recalculate_person_centroid(int(pid))
             conn.execute("UPDATE media SET metadata_dirty = 1 WHERE id = ?;", (mid,))
             conn.commit()
+        if is_manual:
+            self._invalidate_face_thumbnails_direct([int(face_id)])
+        if pid is not None:
+            self.refresh_person_avatar(int(pid), invalidated_face_ids=[int(face_id)])
 
     def update_face_rect(
         self,
@@ -3251,10 +3512,17 @@ class CatalogRepository:
         try:
             full_path = os.path.join(str(row["folder_path"]), str(row["filename"]))
             blob = self.extract_face_crop_blob(full_path, rect)
-            if blob and thumb_repo is not None:
-                thumb_repo.put_face_thumbnail(int(media_people_id), blob)
+            if blob:
+                if thumb_repo is not None:
+                    thumb_repo.put_face_thumbnail(int(media_people_id), blob)
+                else:
+                    self._put_face_thumbnail_direct(int(media_people_id), blob)
+            else:
+                self._invalidate_face_thumbnails_direct([int(media_people_id)])
         except Exception:
-            pass
+            self._invalidate_face_thumbnails_direct([int(media_people_id)])
+        if row["person_id"] is not None:
+            self.refresh_person_avatar(int(row["person_id"]), updated_face_id=int(media_people_id))
         return True
 
     def set_person_display_picture_from_face(self, person_id: int, face_id: int) -> bool:
@@ -3289,8 +3557,8 @@ class CatalogRepository:
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
             conn.execute(
-                "UPDATE people SET thumbnail_blob = ? WHERE id = ?;",
-                (blob, int(person_id)),
+                "UPDATE people SET thumbnail_blob = ?, avatar_media_people_id = ? WHERE id = ?;",
+                (blob, int(face_id), int(person_id)),
             )
             conn.commit()
         return True
@@ -3373,19 +3641,41 @@ class CatalogRepository:
             ids = media_people_ids
         if not ids:
             return
+        affected_pids: set[int] = set()
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
             for chunk in _iter_id_chunks(ids, 900):
                 placeholders = ",".join("?" for _ in chunk)
+                p_rows = conn.execute(
+                    f"SELECT DISTINCT person_id FROM media_people WHERE id IN ({placeholders}) AND person_id IS NOT NULL;",
+                    list(chunk),
+                ).fetchall()
+                for pr in p_rows:
+                    if pr["person_id"]:
+                        affected_pids.add(int(pr["person_id"]))
                 conn.execute(
                     f"""
                     UPDATE media_people
-                    SET state = -1, suggested_person_id = NULL, similarity_score = NULL
+                    SET state = -1, person_id = NULL, suggested_person_id = NULL, similarity_score = NULL
                     WHERE id IN ({placeholders});
                     """,
                     list(chunk),
                 )
+            for pid in affected_pids:
+                conn.execute(
+                    """
+                    UPDATE people
+                    SET confirmed_count = (
+                        SELECT COUNT(*) FROM media_people WHERE person_id = people.id AND state = 1
+                    )
+                    WHERE id = ?;
+                    """,
+                    (pid,),
+                )
             conn.commit()
+        self._invalidate_face_thumbnails_direct(ids)
+        for pid in affected_pids:
+            self.refresh_person_avatar(pid, invalidated_face_ids=ids)
 
     def purge_unconfirmed_suggestions(self) -> int:
         """
@@ -4355,12 +4645,17 @@ class ThumbnailRepository:
         """Returns the WebP face thumbnail bytes for person_id on media_id."""
         cat_conn = self.engine.catalog_conn()
         row = cat_conn.execute(
-            "SELECT id, rect_w, rect_h FROM media_people WHERE media_id = ? AND person_id = ? AND state = 1 LIMIT 1;",
+            """
+            SELECT id, rect_w, rect_h
+            FROM media_people
+            WHERE media_id = ? AND person_id = ? AND state = 1
+              AND rect_w > 0.005 AND rect_h > 0.005
+            ORDER BY is_manual DESC, id DESC
+            LIMIT 1;
+            """,
             (int(media_id), int(person_id)),
         ).fetchone()
         if not row:
-            return None
-        if float(row["rect_w"] or 0.0) <= 0.005 or float(row["rect_h"] or 0.0) <= 0.005:
             return None
         return self.get_face_thumbnail(int(row["id"]))
 

@@ -584,6 +584,28 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
             p.drawPoint(QPointF(s * 0.24, s * y_f))
             p.drawLine(QPointF(s * 0.40, s * y_f), QPointF(s * 0.82, s * y_f))
 
+    elif kind == "view_details":
+        # Mini photo card on the left + horizontal detail lines on the right
+        p.setPen(QPen(QColor("#2468A8"), 1.1))
+        p.setBrush(QColor("#DCEBFA"))
+        thumb_r = QRectF(s * 0.10, s * 0.22, s * 0.34, s * 0.56)
+        p.drawRoundedRect(thumb_r, 1.2, 1.2)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#5290CF"))
+        p.drawPolygon(
+            QPolygonF(
+                [
+                    QPointF(thumb_r.left() + 1.0, thumb_r.bottom() - 1.0),
+                    QPointF(thumb_r.left() + thumb_r.width() * 0.48, thumb_r.top() + thumb_r.height() * 0.52),
+                    QPointF(thumb_r.right() - 1.0, thumb_r.bottom() - 1.0),
+                ]
+            )
+        )
+        p.setPen(QPen(QColor("#2468A8"), max(1.4, s * 0.085), Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.54, s * 0.31), QPointF(s * 0.89, s * 0.31))
+        p.drawLine(QPointF(s * 0.54, s * 0.50), QPointF(s * 0.89, s * 0.50))
+        p.drawLine(QPointF(s * 0.54, s * 0.69), QPointF(s * 0.78, s * 0.69))
+
     elif kind in ("prev_media", "next_media"):
         p.setPen(QPen(QColor("#2468A8"), 1.8, Qt.SolidLine, Qt.RoundCap))
         p.setBrush(QColor("#2468A8"))
@@ -756,19 +778,34 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawLine(QPointF(s * 0.62, s * 0.64), QPointF(s * 0.62, s * 0.52))
         p.drawLine(QPointF(s * 0.62, s * 0.64), QPointF(s * 0.72, s * 0.64))
 
-    elif kind == "layout_grid":
-        p.setPen(QPen(QColor("#2B6299"), 1.1))
-        p.setBrush(QColor("#8ABEF2"))
+    elif kind in ("layout_grid", "thumbnail_view", "thumbnail_grid"):
+        # Crisp 2x2 grid of framed photo thumbnails
+        tile_w = s * 0.35
+        tile_h = s * 0.35
+        offsets = (0.11, 0.54)
         for r_i in range(2):
             for c_i in range(2):
-                p.drawRect(
-                    QRectF(
-                        s * (0.14 + c_i * 0.40),
-                        s * (0.14 + r_i * 0.40),
-                        s * 0.32,
-                        s * 0.32,
+                tx = s * offsets[c_i]
+                ty = s * offsets[r_i]
+                tr = QRectF(tx, ty, tile_w, tile_h)
+                p.setPen(QPen(QColor("#1F5D99"), max(1.0, s * 0.055)))
+                p.setBrush(QColor("#FFFFFF"))
+                p.drawRoundedRect(tr, 1.2, 1.2)
+                inner = tr.adjusted(1.1, 1.1, -1.1, -1.1)
+                if inner.width() > 2.0 and inner.height() > 2.0:
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(QColor("#CFE6FC"))
+                    p.drawRect(inner)
+                    p.setBrush(QColor("#4B8AC9"))
+                    p.drawPolygon(
+                        QPolygonF(
+                            [
+                                QPointF(inner.left(), inner.bottom()),
+                                QPointF(inner.left() + inner.width() * 0.45, inner.top() + inner.height() * 0.45),
+                                QPointF(inner.right(), inner.bottom()),
+                            ]
+                        )
                     )
-                )
 
     elif kind == "layout_mosaic":
         p.setPen(QPen(QColor("#2B6299"), 1.1))
@@ -6526,8 +6563,8 @@ class RibbonToolbar(QWidget):
         grp_zoom.content_layout.addWidget(self.btn_zoom_out)
 
         self.btn_zoom_actual = self._make_btn("Actual\nsize", "actual_size", grp_zoom, large=True)
-        self.btn_zoom_actual.setToolTip("Actual size (Ctrl+0)")
-        self.btn_zoom_actual._tooltip_override = "Actual size (Ctrl+0)"
+        self.btn_zoom_actual.setToolTip("Actual size (Ctrl+1)")
+        self.btn_zoom_actual._tooltip_override = "Actual size (Ctrl+1)"
         self.btn_zoom_actual.clicked.connect(lambda: self.action_triggered.emit("viewer_zoom_actual"))
         self.btn_zoom_actual.setVisible(False)
         grp_zoom.content_layout.addWidget(self.btn_zoom_actual)

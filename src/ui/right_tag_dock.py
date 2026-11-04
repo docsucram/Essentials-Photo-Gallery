@@ -1613,15 +1613,31 @@ class _DescriptiveTagInput(QLineEdit):
             self._completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
             self._completer.setCompletionPrefix("")
         else:
-            # Put matching recent tags first, followed by all other tags
-            seen = {t.lower() for t in self._recent_tags}
-            combined = list(self._recent_tags) + [
-                t for t in self._all_tags if t.lower() not in seen
-            ]
-            self._model.setStringList(combined)
-            self._completer.setCompletionMode(QCompleter.PopupCompletion)
-            self._completer.setFilterMode(Qt.MatchContains)
-            self._completer.setCompletionPrefix(val)
+            # Ordered filtered list: leaf-prefix matches first, then path-prefix, then substring matches (each alphabetical)
+            q = val.lower()
+            all_unique = list(
+                dict.fromkeys(
+                    list(self._all_tags)
+                    + [t for t in self._recent_tags if t.lower() not in {a.lower() for a in self._all_tags}]
+                )
+            )
+            matched = [t for t in all_unique if q in t.lower()]
+
+            def _sort_key(tag_str: str) -> tuple[int, str, str]:
+                low = tag_str.lower()
+                leaf = low.rsplit("/", 1)[-1]
+                if leaf.startswith(q):
+                    rank = 0
+                elif low.startswith(q):
+                    rank = 1
+                else:
+                    rank = 2
+                return (rank, leaf, low)
+
+            matched.sort(key=_sort_key)
+            self._model.setStringList(matched)
+            self._completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
+            self._completer.setCompletionPrefix("")
 
     def _on_text_edited(self, text: str) -> None:
         self._sync_model_for_text(text)
