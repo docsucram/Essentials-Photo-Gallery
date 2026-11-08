@@ -42,6 +42,7 @@ QLoggingCategory.setFilterRules(
 )
 from PySide6.QtGui import (
     QColor,
+    QCursor,
     QImage,
     QKeyEvent,
     QKeySequence,
@@ -49,6 +50,7 @@ from PySide6.QtGui import (
     QPalette,
     QPixmap,
     QShortcut,
+    QShowEvent,
     QTransform,
     QUndoCommand,
     QUndoStack,
@@ -536,6 +538,82 @@ class _FaceCropPreloadWorker(QRunnable):
                 self.engine.close_thread_connections()
 
 
+class _FramelessResizeFilter(QObject):
+    """
+    Handles native edge margin resizing on Windows / desktop OS for frameless window.
+    """
+
+    def __init__(self, window: QMainWindow, margin: int = 6) -> None:
+        super().__init__(window)
+        self.window = window
+        self.margin = margin
+        self._cursor_set: bool = False
+
+    def _get_edge(self, pos: QPoint) -> Qt.Edge | None:
+        if self.window.isMaximized():
+            return None
+        rect = self.window.rect()
+        x, y = pos.x(), pos.y()
+        w, h = rect.width(), rect.height()
+        m = self.margin
+
+        if x < 0 or y < 0 or x > w or y > h:
+            return None
+
+        on_left = x <= m
+        on_right = x >= w - m
+        on_top = y <= m
+        on_bottom = y >= h - m
+
+        edges = 0
+        if on_top:
+            edges |= Qt.TopEdge
+        elif on_bottom:
+            edges |= Qt.BottomEdge
+        if on_left:
+            edges |= Qt.LeftEdge
+        elif on_right:
+            edges |= Qt.RightEdge
+
+        return Qt.Edge(edges) if edges else None
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        t = event.type()
+        if t in (QEvent.MouseMove, QEvent.MouseButtonPress):
+            global_pos = getattr(event, "globalPosition", None)
+            if global_pos is not None:
+                g_pt = global_pos().toPoint()
+            else:
+                g_pt = QCursor.pos()
+
+            local_pos = self.window.mapFromGlobal(g_pt)
+            edge = self._get_edge(local_pos)
+
+            if t == QEvent.MouseMove:
+                if edge is not None:
+                    if edge in (Qt.TopEdge | Qt.LeftEdge, Qt.BottomEdge | Qt.RightEdge):
+                        self.window.setCursor(Qt.SizeFDiagCursor)
+                    elif edge in (Qt.TopEdge | Qt.RightEdge, Qt.BottomEdge | Qt.LeftEdge):
+                        self.window.setCursor(Qt.SizeBDiagCursor)
+                    elif edge in (Qt.LeftEdge, Qt.RightEdge):
+                        self.window.setCursor(Qt.SizeHorCursor)
+                    elif edge in (Qt.TopEdge, Qt.BottomEdge):
+                        self.window.setCursor(Qt.SizeVerCursor)
+                    self._cursor_set = True
+                elif self._cursor_set:
+                    self.window.unsetCursor()
+                    self._cursor_set = False
+
+            elif t == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                if edge is not None:
+                    handle = self.window.windowHandle()
+                    if handle is not None:
+                        handle.startSystemResize(edge)
+                        return True
+
+        return super().eventFilter(obj, event)
+
+
 class PhotoGalleryMainWindow(QMainWindow):
     """
     Windows Live Photo Gallery 64-Bit Clone Main Window (`docs/reference_ui/main_ui.png`).
@@ -549,6 +627,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         self.setWindowTitle("Essentials Photo Gallery")
         ico_path = Path(__file__).resolve().parent.parent.parent / "resources" / "icons" / "essentials_photo_gallery.ico"
         if not ico_path.exists():
@@ -558,6 +637,11 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(ico_path)))
         self.resize(1360, 840)
         self.setMinimumSize(500, 400)
+
+        self._resize_filter = _FramelessResizeFilter(self)
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self._resize_filter)
 
         self.engine = engine
         self.catalog_repo = CatalogRepository(engine)
@@ -696,8 +780,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.batch_people_view = BatchPeopleView(self.engine, self.central_stack)
         self.batch_people_view.faces_confirmed.connect(self._on_batch_faces_confirmed)
         self.batch_people_view.faces_rejected.connect(self._on_batch_faces_rejected)
+        self.batch_people_view.person_renamed.connect(
+            lambda pid, name: self.refresh_navigation_and_autocomplete()
+        )
         self.batch_people_view.back_to_gallery_requested.connect(self.close_batch_people_view)
         self.batch_people_view.open_media_requested.connect(self.open_single_viewer)
+        self.batch_people_view.card_selection_changed.connect(self._on_batch_card_selection_changed)
         QShortcut(QKeySequence(Qt.Key_Escape), self.batch_people_view, self.close_batch_people_view)
         self.central_stack.addWidget(self.batch_people_view)
 
@@ -1036,6 +1124,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         )
         self.left_nav_dock.files_dropped_on_folder.connect(self._on_files_dropped_on_folder)
         self.left_nav_dock.tag_hierarchy_changed.connect(self.refresh_navigation_and_autocomplete)
+        self.left_nav_dock.place_selected.connect(self._on_place_selected)
 
         # Top Ribbon Toolbar
         self.ribbon.arrange_changed.connect(self.on_arrange_changed)
@@ -1044,7 +1133,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.ribbon.search_text_changed.connect(self._on_search_text_changed)
         self.ribbon.search_all_requested.connect(self.left_nav_dock.clear_all_filters)
         self.ribbon.action_triggered.connect(self.dispatch_ribbon_action)
-        self.ribbon.layout_mode_changed.connect(self.grid_view.set_layout_mode)
+        self.ribbon.layout_mode_changed.connect(self._on_layout_mode_changed)
         self.ribbon.zoom_size_changed.connect(self._on_ribbon_zoom_changed)
         self.central_stack.currentChanged.connect(lambda _: self._update_status_grid_button())
 
@@ -1105,6 +1194,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.ribbon.forward_requested.connect(self.navigate_history_forward)
         self.ribbon.undo_requested.connect(self._on_undo)
         self.ribbon.redo_requested.connect(self._on_redo)
+        self.ribbon.qat_thumbnails_clicked.connect(self.trigger_thumbnail_view)
+        self.ribbon.qat_map_clicked.connect(self.show_map_view)
+        self.ribbon.qat_people_clicked.connect(self.open_people_directory_view)
         self.ribbon.filter_month_selected.connect(
             lambda m: self._on_date_filter_selected(None, m if m > 0 else None, None)
         )
@@ -2149,6 +2241,33 @@ class PhotoGalleryMainWindow(QMainWindow):
                         self.rebuild_and_run_query()
                     self.media_viewer.media_player.stop()
                 self.open_batch_people_view(person_id=state.get("person_id"))
+            elif view == "map":
+                if hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
+                    self.show_grid_view()
+                self.show_map_view()
+            elif view == "grid_map_selection":
+                if hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
+                    self.show_grid_view()
+                mids = state.get("media_ids", [])
+                loc_label = state.get("location_label", "")
+                self._active_map_media_ids = list(mids)
+                self._active_map_location_label = loc_label
+                if self.central_stack.currentWidget() != self.grid_view:
+                    self.central_stack.setCurrentWidget(self.grid_view)
+                    self.ribbon.set_active_mode("grid")
+                self.rebuild_and_run_query()
+            elif view == "grid_map_bbox":
+                if hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
+                    self.show_grid_view()
+                bbox = state.get("bbox")
+                loc_label = state.get("location_label", "")
+                self._active_bbox = bbox
+                self._active_map_media_ids = None
+                self._active_map_location_label = loc_label
+                if self.central_stack.currentWidget() != self.grid_view:
+                    self.central_stack.setCurrentWidget(self.grid_view)
+                    self.ribbon.set_active_mode("grid")
+                self.rebuild_and_run_query()
             else:
                 # Standard grid view (view == "grid" or legacy filter dict)
                 if hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
@@ -2191,9 +2310,13 @@ class PhotoGalleryMainWindow(QMainWindow):
             state["filter"] = filt
             self._push_nav_state(state)
 
-        # If navigating away while in people directory, return central stack to grid view
-        if hasattr(self, "people_directory_view") and self.central_stack.currentWidget() == self.people_directory_view:
+        # If navigating away while in map view, people directory, or batch view, return central stack to grid view
+        if hasattr(self, "_map_view") and self._map_view is not None and self.central_stack.currentWidget() == self._map_view:
+            self.show_grid_view()
+        elif hasattr(self, "people_directory_view") and self.central_stack.currentWidget() == self.people_directory_view:
             self.central_stack.setCurrentWidget(self.grid_view)
+        elif hasattr(self, "batch_people_view") and self.central_stack.currentWidget() == self.batch_people_view:
+            self.close_batch_people_view()
 
         # Check if single person filter is active -> show PersonHeaderBar
         selected_pids = self.left_nav_dock.current_filter_state().get("person_ids", ())
@@ -2464,6 +2587,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._update_status_grid_button()
 
     def on_quick_find_person(self, person_id: int) -> None:
+        if hasattr(self, "_map_view") and self._map_view is not None and self.central_stack.currentWidget() == self._map_view:
+            self.show_grid_view()
+        elif hasattr(self, "batch_people_view") and self.central_stack.currentWidget() == self.batch_people_view:
+            self.close_batch_people_view()
+        elif hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
+            self.show_grid_view()
         toggle = self.ribbon.is_people_and_mode()
         self.left_nav_dock.select_person(person_id, toggle=toggle)
 
@@ -2894,14 +3023,44 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.media_viewer.render_face_regions(detail.get("people", []))
 
     def on_locate_person_face_requested(self, person_id: int, person_name: str) -> None:
-        """Enters interactive face positioning on the open photo for the specified person."""
+        """Enters interactive face positioning on the open photo for the specified person with auto-snap."""
         if self.central_stack.currentWidget() != self.media_viewer:
             sel = self.get_active_target_ids()
             if not sel:
                 return
             self.open_single_viewer(sel[0])
         if hasattr(self, "media_viewer") and self.media_viewer is not None:
-            self.media_viewer.start_face_tag_mode_for_person(int(person_id), str(person_name))
+            mid = self.media_viewer.current_media_id
+            best_rect = None
+            if mid is not None:
+                untagged = self.catalog_repo.get_untagged_faces_for_media(int(mid))
+                if untagged:
+                    best_u = untagged[0]
+                    conn = self.engine.catalog_conn()
+                    p_row = conn.execute("SELECT centroid_embedding FROM people WHERE id = ?;", (int(person_id),)).fetchone()
+                    if p_row and p_row["centroid_embedding"]:
+                        import numpy as np
+                        from src.core.face_matcher import deserialize_embedding
+                        p_vec = deserialize_embedding(bytes(p_row["centroid_embedding"]))
+                        if p_vec.ndim > 1:
+                            p_vec = p_vec[0]
+                        best_sim = -1.0
+                        for u in untagged:
+                            if u.get("embedding"):
+                                u_vec = deserialize_embedding(bytes(u["embedding"]))
+                                if u_vec.ndim > 1:
+                                    u_vec = u_vec[0]
+                                sim = float(np.dot(p_vec, u_vec))
+                                if sim > best_sim:
+                                    best_sim = sim
+                                    best_u = u
+                    best_rect = (
+                        float(best_u.get("rect_x") or 0.38),
+                        float(best_u.get("rect_y") or 0.30),
+                        float(best_u.get("rect_w") or 0.22),
+                        float(best_u.get("rect_h") or 0.22),
+                    )
+            self.media_viewer.start_face_tag_mode_for_person(int(person_id), str(person_name), initial_rect=best_rect)
 
     def on_link_person_face_requested(self, person_id: int, face_id: int) -> None:
         """Links a boxless person tag directly to a detected face box."""
@@ -2924,6 +3083,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.right_tag_dock.bind_selection(curr_sel, summary)
         self.statusBar().showMessage("✓ Linked person to face box", 4000)
         self.lbl_sync_status.setText("✓ Linked person to face box")
+        if getattr(self, "find_people_enabled", True):
+            self.start_face_detection()
 
     def _on_dock_person_hovered(self, person_id: int, is_hovered: bool) -> None:
         if self.central_stack.currentWidget() == self.media_viewer:
@@ -3085,6 +3246,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.media_viewer.render_face_regions(detail.get("face_regions") or detail.get("people", []))
         self.grid_view.viewport().update()
         self.lbl_sync_status.setText(f"✓ Assigned face to '{person_name}'")
+        if getattr(self, "find_people_enabled", True):
+            self.start_face_detection()
 
     def _on_dismiss_face_requested(self, face_id: int) -> None:
         target_ids = (
@@ -3554,14 +3717,19 @@ class PhotoGalleryMainWindow(QMainWindow):
             is_video=bool(detail["is_video"]),
             people_regions=detail.get("people", []),
             orientation=int(detail.get("orientation") or 1),
+            metadata_dirty=int(detail.get("metadata_dirty") or 0),
         )
         if ok:
             if self.central_stack.currentWidget() != self.media_viewer:
                 self._prev_central_widget = self.central_stack.currentWidget()
-                self._prev_ribbon_tab = self.ribbon.tab_widget.currentIndex()
+                curr_tab = self.ribbon.tab_widget.currentIndex()
+                batch_tab_idx = getattr(self.ribbon, "tab_batch_people_index", 5)
+                self._prev_ribbon_tab = 0 if curr_tab == batch_tab_idx else curr_tab
                 self._viewer_faces_dirty = False
-                if self.isVisible():
+                if self.isVisible() and self.central_stack.currentWidget() == self.grid_view:
                     self._nav_dock_was_visible = not self.left_nav_dock.isHidden()
+                else:
+                    self._nav_dock_was_visible = True
                 self.left_nav_dock.hide()
             self.central_stack.setCurrentWidget(self.media_viewer)
             if self.centralWidget() is not None and self.centralWidget().layout() is not None:
@@ -3571,6 +3739,9 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.media_viewer.set_dark_mode(getattr(self, "current_theme", "") == "dark")
             self.ribbon.set_active_mode("viewer")
             self.ribbon.tab_widget.setCurrentWidget(self.ribbon.tab_edit)
+            self.right_tag_dock.show()
+            self.right_tag_dock.setVisible(True)
+            self.right_tag_dock.set_view_mode("viewer")
             self._update_undo_redo_enabled()
             if hasattr(self, "scope_bar"):
                 self.scope_bar.hide()
@@ -3680,6 +3851,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 return
             self.rebuild_and_run_query()
         self.media_viewer.media_player.stop()
+        self.media_viewer._stop_animated_image()
         self.media_viewer.set_markup_mode(False)
         self.media_viewer.set_retouch_mode(False)
         self.media_viewer.set_red_eye_mode(False)
@@ -3689,10 +3861,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._prev_central_widget = None
         if hasattr(self, "batch_people_view") and prev_widget == self.batch_people_view:
             self.central_stack.setCurrentWidget(self.batch_people_view)
-            self.ribbon.set_active_mode("grid")
+            self.ribbon.set_active_mode("batch_people")
             self._update_undo_redo_enabled()
-            if hasattr(self, "_prev_ribbon_tab"):
-                self.ribbon.tab_widget.setCurrentIndex(self._prev_ribbon_tab)
             self.left_nav_dock.hide()
             self.right_tag_dock.hide()
             self.btn_status_prev.setVisible(False)
@@ -3708,11 +3878,28 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self._push_nav_state({"view": "batch_people", "person_id": pid})
             return
 
+        if hasattr(self, "_map_view") and self._map_view is not None and prev_widget == self._map_view:
+            self.show_map_view()
+            return
+
+        if hasattr(self, "batch_people_view") and self.central_stack.currentWidget() == self.batch_people_view:
+            self.close_batch_people_view()
+            return
+
         self.central_stack.setCurrentWidget(self.grid_view)
+        if hasattr(self, "batch_people_view"):
+            self.batch_people_view.set_use_ribbon_mode(False)
         self.ribbon.set_active_mode("grid")
+        self.right_tag_dock.set_view_mode("grid")
         self._update_undo_redo_enabled()
         if hasattr(self, "_prev_ribbon_tab"):
-            self.ribbon.tab_widget.setCurrentIndex(self._prev_ribbon_tab)
+            if getattr(self, "_prev_ribbon_tab", 0) in (0, 1, 2, 3, 4):
+                self.ribbon.tab_widget.setCurrentIndex(self._prev_ribbon_tab)
+            else:
+                self.ribbon.tab_widget.setCurrentWidget(self.ribbon.tab_home)
+            delattr(self, "_prev_ribbon_tab")
+        else:
+            self.ribbon.tab_widget.setCurrentWidget(self.ribbon.tab_home)
         is_nav_vis = getattr(self, "_nav_dock_was_visible", True)
         self.left_nav_dock.setVisible(is_nav_vis)
         if is_nav_vis:
@@ -3721,6 +3908,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.resizeDocks([self.left_nav_dock], [230], Qt.Horizontal)
         if hasattr(self.ribbon, "btn_toggle_nav_pane"):
             self.ribbon.btn_toggle_nav_pane.setChecked(is_nav_vis)
+        self.right_tag_dock.show()
+        self.right_tag_dock.setVisible(True)
         self.btn_status_prev.setVisible(False)
         self.btn_status_next.setVisible(False)
         self.btn_status_fit.setVisible(False)
@@ -3757,6 +3946,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         sel = self.grid_view.selected_media_ids() or list(self._selected_ids)
         summary = self.catalog_repo.get_selection_summary(sel)
         self.right_tag_dock.bind_selection(sel, summary)
+        self.grid_view.setFocus()
 
         # Sync status zoom slider back to current grid thumbnail size
         thumb_sz = getattr(self.grid_view, "_thumb_size", 150)
@@ -3774,8 +3964,14 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._map_view.bind_repository(self.catalog_repo, self.thumb_repo)
             self._map_view.close_requested.connect(self.show_grid_view)
             self._map_view.filter_to_bbox_requested.connect(self.on_map_bbox_filter_requested)
+            self._map_view.cluster_selected.connect(self._on_map_cluster_selected)
+            self._map_view.cluster_open_requested.connect(self._on_map_cluster_clicked_data)
+            self._map_view.map_background_clicked.connect(self._on_map_bg_clicked)
+            self._map_view.bbox_changed.connect(self._on_map_bbox_changed)
             self._map_view.cluster_clicked.connect(self._on_map_cluster_clicked)
             self._map_view.cluster_clicked_data.connect(self._on_map_cluster_clicked_data)
+            self._map_view.open_media_requested.connect(self.open_single_viewer)
+            self.right_tag_dock.map_location_selected.connect(self._on_dock_map_location_selected)
             self.central_stack.addWidget(self._map_view)
         return self._map_view
 
@@ -3783,7 +3979,18 @@ class PhotoGalleryMainWindow(QMainWindow):
         mv = self._ensure_map_view()
         self.central_stack.setCurrentWidget(mv)
         self.ribbon.set_active_mode("map")
-        mv.set_viewport_bbox(-85.0, 85.0, -180.0, 180.0, self.catalog_repo)
+        self.left_nav_dock.hide()
+        self.right_tag_dock.hide()
+        if not getattr(self, "_map_view_initialized", False):
+            self._map_view_initialized = True
+            mv.fit_to_photos()
+        else:
+            mv.refresh_current_viewport()
+        total = sum(c.get("count", 0) for c in mv.current_clusters)
+        self.right_tag_dock.set_total_view_count(total)
+        self.right_tag_dock.set_map_clusters(mv.current_clusters)
+        if not self._is_navigating_history:
+            self._push_nav_state({"view": "map"})
 
     def open_batch_people_view(self, person_id: int | None = None) -> None:
         """Toggles between standard grid view and BatchPeopleView."""
@@ -3791,6 +3998,10 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.close_batch_people_view()
             return
         self.central_stack.setCurrentWidget(self.batch_people_view)
+        if hasattr(self, "ribbon"):
+            self.ribbon.set_active_mode("batch_people")
+        if hasattr(self, "batch_people_view"):
+            self.batch_people_view.set_use_ribbon_mode(True)
         # Ensure face detection worker runs if enabled or if no unassigned faces exist yet
         if getattr(self, "find_people_enabled", True) and "PYTEST_CURRENT_TEST" not in os.environ:
             has_pending = bool(self.engine.catalog_conn().execute(
@@ -3807,6 +4018,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.batch_people_view.filter_to_person(person_id)
         else:
             self.batch_people_view.refresh_suggestions()
+        if hasattr(self, "ribbon") and hasattr(self.ribbon, "update_batch_action_labels") and hasattr(self, "batch_people_view"):
+            self.ribbon.update_batch_action_labels(getattr(self.batch_people_view, "_current_view_mode", "suggestions"))
         self.left_nav_dock.hide()
         self.right_tag_dock.hide()
         self.lbl_sync_status.setText("Batch people tag view")
@@ -3816,7 +4029,17 @@ class PhotoGalleryMainWindow(QMainWindow):
     def close_batch_people_view(self) -> None:
         """Returns to standard grid view from BatchPeopleView."""
         self.central_stack.setCurrentWidget(self.grid_view)
+        if hasattr(self, "ribbon"):
+            self.ribbon.set_active_mode("grid")
+        if hasattr(self, "batch_people_view"):
+            self.batch_people_view.set_use_ribbon_mode(False)
+        if hasattr(self, "_prev_ribbon_tab"):
+            delattr(self, "_prev_ribbon_tab")
         self.left_nav_dock.show()
+        self.left_nav_dock.setVisible(True)
+        self.right_tag_dock.show()
+        self.right_tag_dock.setVisible(True)
+        self.right_tag_dock.set_view_mode("grid")
         self.refresh_navigation_and_autocomplete()
         self.rebuild_and_run_query()
         self.lbl_sync_status.setText("✓ Returned to gallery")
@@ -3839,6 +4062,11 @@ class PhotoGalleryMainWindow(QMainWindow):
     def _on_batch_faces_rejected(self, face_ids: list[int]) -> None:
         """Slot called when faces are rejected in BatchPeopleView."""
         self.lbl_sync_status.setText(f"Rejected {len(face_ids)} face suggestion(s)")
+
+    def _on_batch_card_selection_changed(self, mode: str, swap_name: str | None, person_name: str | None) -> None:
+        """Updates ribbon batch actions dynamically when card selection or mode changes."""
+        if hasattr(self, "ribbon") and hasattr(self.ribbon, "update_batch_action_labels"):
+            self.ribbon.update_batch_action_labels(mode, swap_name, person_name)
 
     def navigate_single_viewer(self, delta: int) -> bool:
         curr_id = self.media_viewer.current_media_id
@@ -3894,6 +4122,44 @@ class PhotoGalleryMainWindow(QMainWindow):
         )
         self.show_grid_view()
         self.rebuild_and_run_query()
+        if not self._is_navigating_history:
+            self._push_nav_state({
+                "view": "grid_map_bbox",
+                "bbox": self._active_bbox,
+                "location_label": self._active_map_location_label,
+            })
+
+    def _on_map_cluster_selected(self, media_ids: list[int], label: str = "") -> None:
+        if not media_ids:
+            return
+        self._selected_ids = [int(x) for x in media_ids]
+        self._lead_selected_id = self._selected_ids[0]
+        summary = self.catalog_repo.get_selection_summary(self._selected_ids)
+        self.right_tag_dock.bind_selection(self._selected_ids, summary)
+
+    def _on_map_bg_clicked(self) -> None:
+        self._selected_ids = []
+        self._lead_selected_id = None
+        self.right_tag_dock.bind_selection([], {"count": 0})
+        if self._map_view is not None:
+            total = sum(c.get("count", 0) for c in self._map_view.current_clusters)
+            self.right_tag_dock.set_total_view_count(total)
+
+    def _on_map_bbox_changed(
+        self, min_lat: float, max_lat: float, min_lon: float, max_lon: float
+    ) -> None:
+        if self._map_view is not None:
+            clusters = self._map_view.current_clusters
+            total = sum(c.get("count", 0) for c in clusters)
+            self.right_tag_dock.set_total_view_count(total)
+            self.right_tag_dock.set_map_clusters(clusters)
+
+    def _on_dock_map_location_selected(
+        self, media_ids: list[int], label: str, lat: float, lon: float
+    ) -> None:
+        self._on_map_cluster_selected(media_ids, label)
+        if self._map_view is not None:
+            self._map_view.fly_to(lat, lon, zoom=13)
 
     def _on_map_cluster_clicked(self, media_ids: list[int]) -> None:
         if not media_ids:
@@ -3911,6 +4177,31 @@ class PhotoGalleryMainWindow(QMainWindow):
         else:
             loc_label = label or f"{len(media_ids)} items"
             self.filter_gallery_to_map_selection(media_ids, loc_label)
+
+    def _on_place_selected(self, country: str, state: str, city: str) -> None:
+        """Flies to place on map or filters gallery to location."""
+        target_name = city or state or country
+        if not target_name:
+            return
+        if (
+            self._map_view is not None
+            and self.central_stack.currentWidget() == self._map_view
+        ):
+            from src.core.geotag_resolver import search_places_offline
+
+            places = search_places_offline(target_name, limit=3)
+            if places:
+                p = places[0]
+                self._map_view.fly_to(
+                    float(p["lat"]), float(p["lon"]), zoom=13 if city else 7
+                )
+            else:
+                self._map_view.search_box.setText(target_name)
+        else:
+            self._search_text = target_name
+            if hasattr(self, "search_box") and self.search_box is not None:
+                self.search_box.setText(target_name)
+            self.rebuild_and_run_query()
 
     def filter_gallery_to_map_selection(
         self, media_ids: list[int], location_label: str = ""
@@ -3940,6 +4231,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.ribbon.set_scope_label(display_label)
         self.show_grid_view()
         self.rebuild_and_run_query()
+        if not self._is_navigating_history:
+            self._push_nav_state({
+                "view": "grid_map_selection",
+                "media_ids": list(media_ids),
+                "location_label": display_label,
+            })
 
     def _on_analyze_noise_requested(self) -> None:
         """Runs the MAD noise profile analysis on the active photo and updates the denoise slider."""
@@ -4992,6 +5289,38 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.right_tag_dock.txt_caption.selectAll()
         elif action_id == "batch_people_tag":
             self.open_batch_people_view()
+        elif action_id == "batch_select_all":
+            if hasattr(self, "batch_people_view"):
+                self.batch_people_view.select_all()
+        elif action_id == "batch_confirm":
+            if hasattr(self, "batch_people_view"):
+                self.batch_people_view.confirm_selected()
+        elif action_id == "batch_switch":
+            if hasattr(self, "batch_people_view"):
+                self.batch_people_view.switch_selected()
+        elif action_id == "batch_reject":
+            if hasattr(self, "batch_people_view"):
+                self.batch_people_view.reject_selected()
+        elif action_id == "batch_tag_as":
+            if hasattr(self, "batch_people_view"):
+                self.batch_people_view._on_tag_as_clicked()
+        elif action_id == "batch_ignore":
+            if hasattr(self, "batch_people_view"):
+                self.batch_people_view.ignore_selected()
+        elif action_id == "batch_mode_suggestions":
+            if hasattr(self, "batch_people_view"):
+                self.batch_people_view.set_view_mode("suggestions")
+        elif action_id == "batch_mode_outliers":
+            if hasattr(self, "batch_people_view"):
+                self.batch_people_view.set_view_mode("outliers")
+        elif action_id == "batch_mode_boxless":
+            if hasattr(self, "batch_people_view"):
+                self.batch_people_view.set_view_mode("boxless")
+        elif action_id == "batch_face_options":
+            if hasattr(self, "batch_people_view"):
+                self.batch_people_view._open_face_options_dialog()
+        elif action_id == "batch_close":
+            self.close_batch_people_view()
         elif action_id == "people_tag":
             self._on_dock_person_tag_mode_requested()
         elif action_id == "toggle_flag":
@@ -5070,10 +5399,11 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.toggle_immersive_viewer_mode()
         elif action_id == "show_tag_hierarchy":
             self.open_tag_hierarchy_dialog()
+        elif action_id in ("show_thumbnails_view", "show_grid_view"):
+            self.trigger_thumbnail_view()
         elif action_id == "toggle_map_view":
             if hasattr(self, "duplicate_finder_view") and self.central_stack.currentWidget() == self.duplicate_finder_view:
                 self.show_grid_view()
-                event.accept()
                 return
             if self.central_stack.currentWidget() == self.map_view:
                 self.show_grid_view()
@@ -6228,6 +6558,11 @@ class PhotoGalleryMainWindow(QMainWindow):
         if target is not None:
             self.open_single_viewer(target)
 
+    def _on_layout_mode_changed(self, mode: str) -> None:
+        self.grid_view.set_layout_mode(mode)
+        if self.central_stack.currentWidget() != self.grid_view:
+            self.show_grid_view()
+
     def _on_ribbon_zoom_changed(self, size_px: int) -> None:
         self.slider_status_zoom.blockSignals(True)
         self.slider_status_zoom.setValue(size_px)
@@ -6303,12 +6638,16 @@ class PhotoGalleryMainWindow(QMainWindow):
                 )
             self._update_status_grid_button()
         else:
-            self.show_grid_view()
+            self.trigger_thumbnail_view()
 
     def trigger_thumbnail_view(self) -> None:
         """Switches to Thumbnail View (Ctrl+0) from Single Image View, All Details mode, or auxiliary views."""
-        if self.central_stack.currentWidget() != self.grid_view:
-            self._prev_central_widget = None
+        self._prev_central_widget = None
+        if hasattr(self, "_prev_ribbon_tab"):
+            delattr(self, "_prev_ribbon_tab")
+        if hasattr(self, "batch_people_view") and self.central_stack.currentWidget() == self.batch_people_view:
+            self.close_batch_people_view()
+        elif self.central_stack.currentWidget() != self.grid_view:
             self.show_grid_view()
         if (
             self.central_stack.currentWidget() == self.grid_view
@@ -6337,7 +6676,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.btn_status_grid.setToolTip("View Details")
         else:
             self.btn_status_grid.setIcon(make_wlpg_icon("thumbnail_view", 18))
-            self.btn_status_grid.setToolTip("Thumbnail view (Ctrl+0)")
+            self.btn_status_grid.setToolTip("Gallery view (Ctrl+0)")
 
     def _update_status_zoom_toggle_button(self) -> None:
         if not hasattr(self, "btn_status_fit"):
@@ -6526,6 +6865,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         try:
             self.current_theme = theme_name  # type: ignore[assignment]
             is_dark = (theme_name == "dark")
+            if theme_name == "modern":
+                icon_provider.set_icon_theme("fluent")
+                self.current_icon_theme = "fluent"
+            elif theme_name == "wlpg_aero":
+                icon_provider.set_icon_theme("wlpg_aero")
+                self.current_icon_theme = "wlpg_aero"
             theme_file = get_themes_dir() / f"{theme_name}.qss"
             if theme_file.exists():
                 qss = theme_file.read_text(encoding="utf-8")
@@ -6540,7 +6885,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                     app.setPalette(pal)
                     QToolTip.setPalette(pal)
 
-            # Propagate dark mode to panels with local stylesheets without affecting light themes
+            # Propagate theme mode to ribbon and panels
             for w in (
                 getattr(self, "ribbon", None),
                 getattr(self, "left_nav_dock", None),
@@ -6553,8 +6898,11 @@ class PhotoGalleryMainWindow(QMainWindow):
                 getattr(self, "batch_people_view", None),
                 getattr(self, "duplicate_finder_view", None),
             ):
-                if w is not None and hasattr(w, "set_dark_mode"):
-                    w.set_dark_mode(is_dark)
+                if w is not None:
+                    if hasattr(w, "apply_theme_mode"):
+                        w.apply_theme_mode(theme_name)
+                    elif hasattr(w, "set_dark_mode"):
+                        w.set_dark_mode(is_dark)
 
             # Update status bar styling for dark mode vs light themes
             sb = self.statusBar()
@@ -6642,6 +6990,89 @@ class PhotoGalleryMainWindow(QMainWindow):
                         self.lbl_sync_status.setStyleSheet("color: #60A5FA; padding-left: 4px; background: transparent;")
                     if hasattr(self, "sep_status_msg"):
                         self.sep_status_msg.setStyleSheet("color: #333A45; margin: 3px 6px;")
+                elif theme_name == "modern":
+                    sb.setStyleSheet(
+                        """
+                        QStatusBar {
+                            background: #F3F4F6;
+                            border-top: 1px solid #E5E7EB;
+                            color: #374151;
+                            font-family: 'Segoe UI';
+                            font-size: 8.5pt;
+                        }
+                        QStatusBar QLabel {
+                            color: #374151;
+                            background-color: transparent;
+                        }
+                        QStatusBar QPushButton {
+                            border: 1px solid transparent;
+                            background: transparent;
+                            color: #374151;
+                            border-radius: 2px;
+                            min-width: 22px;
+                            max-width: 26px;
+                            height: 20px;
+                        }
+                        QStatusBar QPushButton:hover {
+                            border: 1px solid #E5E7EB;
+                            background: #E5E7EB;
+                        }
+                        QStatusBar QSlider::groove:horizontal {
+                            height: 3px;
+                            background: #E5E7EB;
+                            border-radius: 1px;
+                        }
+                        QStatusBar QSlider::handle:horizontal {
+                            background: #0F6CBD;
+                            border: 1px solid #0F6CBD;
+                            width: 6px;
+                            height: 12px;
+                            margin: -5px 0;
+                            border-radius: 2px;
+                        }
+                        """
+                    )
+                    if hasattr(self, "lbl_status_counts"):
+                        self.lbl_status_counts.setStyleSheet("color: #111827; padding-left: 6px; font-weight: bold; background: transparent;")
+                    if hasattr(self, "btn_pause_workers"):
+                        self.btn_pause_workers.setStyleSheet(
+                            """
+                            QPushButton {
+                                font-family: 'Segoe UI Symbol', 'Segoe UI', sans-serif;
+                                font-size: 11pt;
+                                border: none;
+                                background: transparent;
+                                color: #374151;
+                                padding: 0;
+                                min-width: 18px;
+                                max-width: 20px;
+                                height: 18px;
+                            }
+                            QPushButton:hover {
+                                color: #0F6CBD;
+                            }
+                            """
+                        )
+                    if hasattr(self, "lbl_worker_monitor"):
+                        self.lbl_worker_monitor.setStyleSheet(
+                            """
+                            QLabel {
+                                color: #6B7280;
+                                font-size: 8.5pt;
+                                padding: 1px 4px;
+                                border-radius: 3px;
+                                background: transparent;
+                            }
+                            QLabel:hover {
+                                color: #0F6CBD;
+                                background: #E5E7EB;
+                            }
+                            """
+                        )
+                    if hasattr(self, "lbl_sync_status"):
+                        self.lbl_sync_status.setStyleSheet("color: #0F6CBD; padding-left: 4px; background: transparent;")
+                    if hasattr(self, "sep_status_msg"):
+                        self.sep_status_msg.setStyleSheet("color: #E5E7EB; margin: 3px 6px;")
                 else:
                     sb.setStyleSheet(
                         """
@@ -6762,10 +7193,19 @@ class PhotoGalleryMainWindow(QMainWindow):
                     event.accept()
                     return
 
-        # Thumbnail Grid View: Left and Right arrow navigation (when not focused on a text entry)
+        # Thumbnail Grid View: Arrow / Home / End / Page navigation (when not focused on a text entry)
         if self.central_stack.currentWidget() == self.grid_view:
-            if not is_text_entry and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier):
-                if event.key() in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+            if not is_text_entry and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
+                if event.key() in (
+                    Qt.Key_Left,
+                    Qt.Key_Right,
+                    Qt.Key_Up,
+                    Qt.Key_Down,
+                    Qt.Key_Home,
+                    Qt.Key_End,
+                    Qt.Key_PageUp,
+                    Qt.Key_PageDown,
+                ):
                     self.grid_view.keyPressEvent(event)
                     event.accept()
                     return
@@ -6796,6 +7236,14 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.show_grid_view()
                 event.accept()
                 return
+            if self.central_stack.currentWidget() == self.grid_view:
+                if self._active_map_media_ids is not None or self._active_bbox is not None:
+                    self._active_map_media_ids = None
+                    self._active_bbox = None
+                    self._active_map_location_label = None
+                    self.show_map_view()
+                    event.accept()
+                    return
             if self.central_stack.currentWidget() == self.map_view:
                 self.show_grid_view()
                 event.accept()
@@ -7165,25 +7613,57 @@ class PhotoGalleryMainWindow(QMainWindow):
 
     def eventFilter(self, watched: Any, event: Any) -> bool:
         if event.type() == QEvent.Type.KeyPress:
-            from PySide6.QtWidgets import QAbstractSpinBox
+            from PySide6.QtWidgets import QAbstractItemView, QAbstractSpinBox, QComboBox
             if (
-                self.central_stack.currentWidget() == self.media_viewer
-                and not getattr(self.media_viewer, "is_crop_mode", False)
-                and QApplication.activeModalWidget() is None
+                QApplication.activeModalWidget() is None
                 and QApplication.activePopupWidget() is None
             ):
                 focus_w = QApplication.focusWidget() or self.focusWidget()
                 target_watched = focus_w if focus_w is not None else self
-                if watched is target_watched and not isinstance(
-                    focus_w, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)
-                ):
-                    if event.key() in (Qt.Key_Left, Qt.Key_Right) and event.modifiers() in (
-                        Qt.NoModifier,
-                        Qt.KeypadModifier,
+                is_input_w = isinstance(
+                    focus_w, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox)
+                )
+                if watched is target_watched and not is_input_w:
+                    if (
+                        self.central_stack.currentWidget() == self.media_viewer
+                        and not getattr(self.media_viewer, "is_crop_mode", False)
                     ):
-                        self.navigate_single_viewer(-1 if event.key() == Qt.Key_Left else 1)
-                        event.accept()
-                        return True
+                        if event.key() in (Qt.Key_Left, Qt.Key_Right) and event.modifiers() in (
+                            Qt.NoModifier,
+                            Qt.KeypadModifier,
+                        ):
+                            self.navigate_single_viewer(-1 if event.key() == Qt.Key_Left else 1)
+                            event.accept()
+                            return True
+                    elif self.central_stack.currentWidget() == self.grid_view:
+                        # Allow left_nav_dock trees to keep their own arrow navigation when focused;
+                        # otherwise (ribbon buttons, status bar buttons, grid, or main window) navigate grid!
+                        in_left_dock = (
+                            focus_w is not None
+                            and hasattr(self, "left_nav_dock")
+                            and self.left_nav_dock is not None
+                            and self.left_nav_dock.isAncestorOf(focus_w)
+                            and isinstance(focus_w, QAbstractItemView)
+                        )
+                        if (
+                            not in_left_dock
+                            and focus_w is not self.grid_view
+                            and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier))
+                            and event.key() in (
+                                Qt.Key_Left,
+                                Qt.Key_Right,
+                                Qt.Key_Up,
+                                Qt.Key_Down,
+                                Qt.Key_Home,
+                                Qt.Key_End,
+                                Qt.Key_PageUp,
+                                Qt.Key_PageDown,
+                            )
+                        ):
+                            if self.grid_view._navigate_by_key(event.key(), event.modifiers()):
+                                self.grid_view.setFocus()
+                                event.accept()
+                                return True
         if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
             from PySide6.QtGui import QMouseEvent
             if isinstance(event, QMouseEvent):
@@ -7219,6 +7699,33 @@ class PhotoGalleryMainWindow(QMainWindow):
                 and self.catalog_model.rowCount() > 0
             ):
                 QTimer.singleShot(400, self.start_face_detection)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        try:
+            import ctypes
+            class MARGINS(ctypes.Structure):
+                _fields_ = [
+                    ("cxLeftWidth", ctypes.c_int),
+                    ("cxRightWidth", ctypes.c_int),
+                    ("cyTopHeight", ctypes.c_int),
+                    ("cyBottomHeight", ctypes.c_int),
+                ]
+            m = MARGINS(1, 1, 1, 1)
+            ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(int(self.winId()), ctypes.byref(m))
+        except Exception:
+            pass
+
+    def changeEvent(self, event: QEvent) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange:
+            if hasattr(self, "ribbon") and hasattr(self.ribbon, "update_window_controls"):
+                self.ribbon.update_window_controls()
+
+    def setWindowTitle(self, title: str) -> None:
+        super().setWindowTitle(title)
+        if hasattr(self, "ribbon") and hasattr(self.ribbon, "lbl_app_title"):
+            self.ribbon.lbl_app_title.setText(title)
 
     def closeEvent(self, event) -> None:
         self._save_app_state()

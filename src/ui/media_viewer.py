@@ -43,6 +43,7 @@ from PySide6.QtGui import (
     QImage,
     QKeyEvent,
     QMouseEvent,
+    QMovie,
     QPainter,
     QPainterPath,
     QPalette,
@@ -88,6 +89,16 @@ from legacy_reference.imgBrowserv13 import (
     EditCommand,
     ImageGraphicsView,
     MouseOverlay,
+)
+from src.imaging.image_loader import (
+    ALPHA_SAVE_DOT_EXT_SET,
+    RAW_DOT_EXT_SET,
+    RAW_EXT_SET,
+    build_save_pil_image,
+    decode_pil_to_srgb_and_alpha,
+    decode_raw_to_srgb,
+    is_animated_image_file,
+    transform_alpha_for_recipe,
 )
 from src.ui.crop_tool import CropOverlayItem, CropScene
 from src.ui.markup_overlay import (
@@ -1271,7 +1282,11 @@ class SingleMediaViewer(QWidget):
         self.current_is_video: bool = False
         self.master_pil_image: Image.Image | None = None
         self.master_np_rgb: np.ndarray | None = None
+        self.master_alpha: np.ndarray | None = None
         self.display_proxy_rgb: np.ndarray | None = None
+        self.display_proxy_alpha: np.ndarray | None = None
+        self._is_animated_image: bool = False
+        self._anim_movie: QMovie | None = None
         self._proxy_scale: float = 1.0
         self._is_sliding: bool = False
         self._master_render_timer = QTimer(self)
@@ -1327,6 +1342,12 @@ class SingleMediaViewer(QWidget):
         self.graphics_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.graphics_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scene = CropScene(self.graphics_view)
+        self._alpha_backdrop_item = QGraphicsRectItem()
+        self._alpha_backdrop_item.setZValue(-1.0)
+        self._alpha_backdrop_item.setPen(Qt.NoPen)
+        self._alpha_backdrop_item.setBrush(self._make_checkerboard_brush(False))
+        self._alpha_backdrop_item.setVisible(False)
+        self.scene.addItem(self._alpha_backdrop_item)
         self.pixmap_item = QGraphicsPixmapItem()
         self.scene.addItem(self.pixmap_item)
         self.scene.pixmap_item = self.pixmap_item
@@ -2051,9 +2072,106 @@ class SingleMediaViewer(QWidget):
         super().resizeEvent(event)
         self._position_floating_toolbars()
 
+    @staticmethod
+    def _make_checkerboard_brush(dark_mode: bool) -> QBrush:
+        tile = QPixmap(16, 16)
+        c1 = QColor("#1E222A") if dark_mode else QColor("#FFFFFF")
+        c2 = QColor("#2A303B") if dark_mode else QColor("#E6E9EE")
+        tile.fill(c1)
+        painter = QPainter(tile)
+        painter.fillRect(0, 0, 8, 8, c2)
+        painter.fillRect(8, 8, 8, 8, c2)
+        painter.end()
+        return QBrush(tile)
+
+    @staticmethod
+    def _build_pixmap_from_rgb_and_alpha(
+        rgb_np: np.ndarray, alpha_np: np.ndarray | None
+    ) -> QPixmap:
+        h, w = rgb_np.shape[:2]
+        if alpha_np is not None:
+            if alpha_np.shape[:2] != (h, w):
+                alpha_np = cv2.resize(alpha_np, (w, h), interpolation=cv2.INTER_LINEAR)
+            rgba = np.ascontiguousarray(np.dstack([rgb_np, alpha_np]))
+            qimg = QImage(rgba.data, w, h, 4 * w, QImage.Format_RGBA8888).copy()
+            return QPixmap.fromImage(qimg)
+        rgb_c = np.ascontiguousarray(rgb_np)
+        qimg = QImage(rgb_c.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+        return QPixmap.fromImage(qimg)
+
+    def _update_alpha_backdrop(self, w: int, h: int, visible: bool) -> None:
+        if hasattr(self, "_alpha_backdrop_item") and self._alpha_backdrop_item is not None:
+            self._alpha_backdrop_item.setRect(QRectF(0.0, 0.0, float(w), float(h)))
+            self._alpha_backdrop_item.setVisible(bool(visible))
+
+    def _should_play_animation(self) -> bool:
+        try:
+            has_undo = hasattr(self, "undo_stack") and self.undo_stack is not None and self.undo_stack.canUndo()
+        except RuntimeError:
+            has_undo = False
+        return bool(
+            self._is_animated_image
+            and not self.current_is_video
+            and self.current_recipe.is_default()
+            and not self.is_in_edit_mode()
+            and not has_undo
+        )
+
+    def _start_animated_image(self, file_path: Path) -> None:
+        self._stop_animated_image()
+        movie = QMovie(str(file_path), parent=self)
+        if not movie.isValid():
+            movie.deleteLater()
+            return
+        self._is_animated_image = True
+        self._anim_movie = movie
+        movie.frameChanged.connect(self._on_anim_frame_changed)
+        self._sync_animation_playback()
+
+    def _stop_animated_image(self) -> None:
+        movie = getattr(self, "_anim_movie", None)
+        self._anim_movie = None
+        self._is_animated_image = False
+        if movie is not None:
+            try:
+                movie.stop()
+                movie.deleteLater()
+            except RuntimeError:
+                pass
+
+    def _on_anim_frame_changed(self, _frame_idx: int) -> None:
+        if self._anim_movie is None or not self._should_play_animation():
+            return
+        pix = self._anim_movie.currentPixmap()
+        if not pix.isNull():
+            self.pixmap_item.setPixmap(pix)
+            self._update_alpha_backdrop(pix.width(), pix.height(), pix.hasAlphaChannel())
+
+    def _sync_animation_playback(self) -> None:
+        if self._anim_movie is None:
+            return
+        if self._should_play_animation():
+            if self._anim_movie.state() != QMovie.MovieState.Running:
+                self._anim_movie.start()
+            pix = self._anim_movie.currentPixmap()
+            if not pix.isNull():
+                self.pixmap_item.setPixmap(pix)
+                self._update_alpha_backdrop(pix.width(), pix.height(), pix.hasAlphaChannel())
+        else:
+            if self._anim_movie.state() == QMovie.MovieState.Running:
+                self._anim_movie.setPaused(True)
+            if getattr(self, "_adjusted_pixmap", None) is not None:
+                self.pixmap_item.setPixmap(self._adjusted_pixmap)
+                self._update_alpha_backdrop(
+                    self._adjusted_pixmap.width(),
+                    self._adjusted_pixmap.height(),
+                    self.master_alpha is not None,
+                )
+
     def _update_display_proxy(self) -> None:
         if self.master_np_rgb is None:
             self.display_proxy_rgb = None
+            self.display_proxy_alpha = None
             self._proxy_scale = 1.0
             return
         h, w = self.master_np_rgb.shape[:2]
@@ -2063,8 +2181,15 @@ class SingleMediaViewer(QWidget):
             pw = max(1, int(round(w * self._proxy_scale)))
             ph = max(1, int(round(h * self._proxy_scale)))
             self.display_proxy_rgb = cv2.resize(self.master_np_rgb, (pw, ph), interpolation=cv2.INTER_AREA)
+            if self.master_alpha is not None:
+                self.display_proxy_alpha = cv2.resize(
+                    self.master_alpha, (pw, ph), interpolation=cv2.INTER_AREA
+                )
+            else:
+                self.display_proxy_alpha = None
         else:
             self.display_proxy_rgb = self.master_np_rgb
+            self.display_proxy_alpha = self.master_alpha
             self._proxy_scale = 1.0
 
     def _scene_to_master(self, sx: float, sy: float) -> tuple[int, int]:
@@ -2088,8 +2213,11 @@ class SingleMediaViewer(QWidget):
         """Immediately rotates current master image in memory (0ms lag, no disk reload)."""
         if self.master_np_rgb is None or self.current_is_video:
             return
+        self._stop_animated_image()
         k = -1 if clockwise else 1
         self.master_np_rgb = np.ascontiguousarray(np.rot90(self.master_np_rgb, k))
+        if self.master_alpha is not None:
+            self.master_alpha = np.ascontiguousarray(np.rot90(self.master_alpha, k))
         self.master_pil_image = Image.fromarray(self.master_np_rgb)
         self.current_recipe.crop_rect = None
         self._update_display_proxy()
@@ -2155,12 +2283,15 @@ class SingleMediaViewer(QWidget):
         is_video: bool = False,
         people_regions: list[dict] | None = None,
         orientation: int = 1,
+        metadata_dirty: int = 0,
     ) -> bool:
         """Loads a static image or video into the SingleMediaViewer."""
         self.current_media_id = int(media_id)
         self.current_file_path = Path(file_path)
         self.current_is_video = bool(is_video)
         self.current_orientation = int(orientation or 1)
+        self._stop_animated_image()
+        self._update_alpha_backdrop(0, 0, False)
         self.undo_stack.clear()
         self.stop_face_tagging_mode()
         self.set_crop_mode(False)
@@ -2193,41 +2324,55 @@ class SingleMediaViewer(QWidget):
 
         ext = self.current_file_path.suffix.lstrip(".").lower()
         loaded = False
-        if ext in ("raf", "cr2", "cr3", "nef", "arw", "dng", "orf", "rw2"):
-            try:
-                import rawpy
-                with rawpy.imread(str(self.current_file_path)) as raw:
-                    rgb = raw.postprocess(use_camera_wb=True)
-                    self.master_np_rgb = np.ascontiguousarray(rgb)
-                    self.master_pil_image = Image.fromarray(self.master_np_rgb)
-                    loaded = True
-            except Exception:
-                loaded = False
+        is_anim = False
+        delta_angle = 0
+        if ext in RAW_EXT_SET:
+            rgb_raw = decode_raw_to_srgb(self.current_file_path)
+            if rgb_raw is not None:
+                self.master_np_rgb = rgb_raw
+                self.master_alpha = None
+                self.master_pil_image = Image.fromarray(self.master_np_rgb)
+                loaded = True
 
         if not loaded:
             try:
+                is_anim = is_animated_image_file(self.current_file_path)
                 with Image.open(self.current_file_path) as img:
-                    disk_exif = img.getexif()
-                    disk_orient = int(disk_exif.get(0x0112) or 1)
-                    transposed = ImageOps.exif_transpose(img)
+                    disk_orient = 1
+                    if not is_anim:
+                        try:
+                            disk_exif = img.getexif()
+                            disk_orient = int(disk_exif.get(0x0112) or 1)
+                        except Exception:
+                            disk_orient = 1
+                    rgb_arr, alpha_arr = decode_pil_to_srgb_and_alpha(img)
                     target_orient = int(orientation or 1)
-                    orient_to_angle = {1: 0, 6: 90, 3: 180, 8: 270}
-                    delta_angle = (
-                        orient_to_angle.get(target_orient, 0)
-                        - orient_to_angle.get(disk_orient, 0)
-                    ) % 360
-                    if delta_angle != 0:
-                        k = {90: -1, 180: 2, 270: 1}[delta_angle]
-                        transposed_np = np.ascontiguousarray(
-                            np.rot90(np.array(transposed.convert("RGB")), k)
-                        )
-                        self.master_pil_image = Image.fromarray(transposed_np)
-                        self.master_np_rgb = transposed_np
-                    else:
-                        self.master_pil_image = transposed.convert("RGB")
-                        self.master_np_rgb = np.array(self.master_pil_image)
+                    if disk_orient != 1 and target_orient == 1 and int(metadata_dirty or 0) == 0:
+                        self.current_orientation = disk_orient
+                    elif target_orient != disk_orient and (
+                        int(metadata_dirty or 0) == 1 or target_orient in (3, 6, 8)
+                    ):
+                        orient_to_angle = {1: 0, 6: 90, 3: 180, 8: 270}
+                        delta_angle = (
+                            orient_to_angle.get(target_orient, 0)
+                            - orient_to_angle.get(disk_orient, 0)
+                        ) % 360
+                        if delta_angle != 0:
+                            k = {90: -1, 180: 2, 270: 1}[delta_angle]
+                            rgb_arr = np.ascontiguousarray(np.rot90(rgb_arr, k))
+                            if alpha_arr is not None:
+                                alpha_arr = np.ascontiguousarray(np.rot90(alpha_arr, k))
+                    self.master_np_rgb = rgb_arr
+                    self.master_alpha = alpha_arr
+                    self.master_pil_image = Image.fromarray(self.master_np_rgb)
             except Exception:
-                return False
+                rgb_raw = decode_raw_to_srgb(self.current_file_path)
+                if rgb_raw is not None:
+                    self.master_np_rgb = rgb_raw
+                    self.master_alpha = None
+                    self.master_pil_image = Image.fromarray(self.master_np_rgb)
+                else:
+                    return False
 
         self._update_display_proxy()
         self._original_pixmap = None
@@ -2235,6 +2380,8 @@ class SingleMediaViewer(QWidget):
         self.current_recipe = PhotoAdjustmentRecipe()
         self.undo_stack.clear()
         self._render_current_recipe()
+        if is_anim and delta_angle == 0:
+            self._start_animated_image(self.current_file_path)
         self.set_zoom_mode("fit")
         self.recipe_changed.emit(self.current_recipe)
 
@@ -2263,13 +2410,19 @@ class SingleMediaViewer(QWidget):
                 self.display_proxy_rgb, proxy_rec, media_id=self.current_media_id
             )
             h, w = rendered_np.shape[:2]
-            qimg = QImage(rendered_np.data, w, h, 3 * w, QImage.Format_RGB888).copy()
-            pix = QPixmap.fromImage(qimg)
+            proxy_alpha = (
+                transform_alpha_for_recipe(self.display_proxy_alpha, proxy_rec, target_hw=(h, w))
+                if self.display_proxy_alpha is not None
+                else None
+            )
+            pix = self._build_pixmap_from_rgb_and_alpha(rendered_np, proxy_alpha)
             target_w = int(round(w / self._proxy_scale))
             target_h = int(round(h / self._proxy_scale))
             if target_w != w or target_h != h:
                 pix = pix.scaled(target_w, target_h, Qt.IgnoreAspectRatio, Qt.FastTransformation)
             self.pixmap_item.setPixmap(pix)
+            self._update_alpha_backdrop(pix.width(), pix.height(), proxy_alpha is not None)
+            self._sync_animation_playback()
             return
 
         rendered_np = render_adjusted_image(
@@ -2277,12 +2430,16 @@ class SingleMediaViewer(QWidget):
         )
         self.current_pil_image = Image.fromarray(rendered_np)
 
-        h, w, c = rendered_np.shape
-        bytes_per_line = 3 * w
-        qimg = QImage(rendered_np.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
-        pix = QPixmap.fromImage(qimg)
+        h, w, _c = rendered_np.shape
+        rendered_alpha = (
+            transform_alpha_for_recipe(self.master_alpha, self.current_recipe, target_hw=(h, w))
+            if self.master_alpha is not None
+            else None
+        )
+        pix = self._build_pixmap_from_rgb_and_alpha(rendered_np, rendered_alpha)
         self._adjusted_pixmap = pix
         self.pixmap_item.setPixmap(pix)
+        self._update_alpha_backdrop(pix.width(), pix.height(), rendered_alpha is not None)
         self.scene.setSceneRect(QRectF(0, 0, pix.width(), pix.height()))
         self.scene.crop_rect_item.set_image_rect(QRectF(0, 0, pix.width(), pix.height()))
         self.image_changed.emit(self.current_pil_image)
@@ -2300,8 +2457,14 @@ class SingleMediaViewer(QWidget):
                 self.master_np_rgb, default_rec, media_id=self.current_media_id
             )
             oh, ow = orig_np.shape[:2]
-            orig_qimg = QImage(orig_np.data, ow, oh, 3 * ow, QImage.Format_RGB888).copy()
-            self._original_pixmap = QPixmap.fromImage(orig_qimg)
+            orig_alpha = (
+                transform_alpha_for_recipe(self.master_alpha, default_rec, target_hw=(oh, ow))
+                if self.master_alpha is not None
+                else None
+            )
+            self._original_pixmap = self._build_pixmap_from_rgb_and_alpha(orig_np, orig_alpha)
+
+        self._sync_animation_playback()
 
     def update_image_display(self) -> None:
         """Legacy helper for test compatibility."""
@@ -2313,6 +2476,8 @@ class SingleMediaViewer(QWidget):
         bg_col = "#14171C" if is_dark else "#FFFFFF"
         self.graphics_view.setStyleSheet(f"background-color: {bg_col}; border: none;")
         self.scene.setBackgroundBrush(QBrush(QColor(bg_col)))
+        if hasattr(self, "_alpha_backdrop_item") and self._alpha_backdrop_item is not None:
+            self._alpha_backdrop_item.setBrush(self._make_checkerboard_brush(is_dark))
         self.video_container.setStyleSheet(f"background-color: {bg_col}; border: none;")
         self.video_widget.setStyleSheet(f"background-color: {bg_col}; border: none;")
         pal = self.video_widget.palette()
@@ -2412,6 +2577,7 @@ class SingleMediaViewer(QWidget):
             else:
                 if in_edit:
                     item.setVisible(False)
+        self._sync_animation_playback()
 
     def set_crop_mode(self, enabled: bool) -> None:
         self.is_crop_mode = bool(enabled)
@@ -3951,6 +4117,7 @@ class SingleMediaViewer(QWidget):
         self._cleanup_markup_temp_items()
         protected = {
             getattr(self, "pixmap_item", None),
+            getattr(self, "_alpha_backdrop_item", None),
             getattr(self.scene, "crop_rect_item", None),
             getattr(self, "_face_target_item", None),
             getattr(self, "_face_adjust_box_item", None),
@@ -4038,12 +4205,16 @@ class SingleMediaViewer(QWidget):
             self.master_np_rgb, self.current_recipe, media_id=self.current_media_id
         )
         self.current_pil_image = Image.fromarray(rendered_np)
-        h, w, c = rendered_np.shape
-        bytes_per_line = 3 * w
-        qimg = QImage(rendered_np.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
-        pix = QPixmap.fromImage(qimg)
+        h, w, _c = rendered_np.shape
+        rendered_alpha = (
+            transform_alpha_for_recipe(self.master_alpha, self.current_recipe, target_hw=(h, w))
+            if self.master_alpha is not None
+            else None
+        )
+        pix = self._build_pixmap_from_rgb_and_alpha(rendered_np, rendered_alpha)
         self._adjusted_pixmap = pix
         self.pixmap_item.setPixmap(pix)
+        self._update_alpha_backdrop(pix.width(), pix.height(), rendered_alpha is not None)
         self.scene.setSceneRect(QRectF(0, 0, pix.width(), pix.height()))
         self.scene.crop_rect_item.set_image_rect(QRectF(0, 0, pix.width(), pix.height()))
         self.image_changed.emit(self.current_pil_image)
@@ -4051,6 +4222,7 @@ class SingleMediaViewer(QWidget):
         # Update face overlays for current static image (clears overlays when empty)
         if hasattr(self, "_current_people_regions") and not self.current_is_video:
             self.render_face_regions(self._current_people_regions)
+        self._sync_animation_playback()
 
     def set_exposure_parameters(
         self, brightness: int, contrast: int, shadows: int, highlights: int, clarity: int = 0
@@ -4424,6 +4596,11 @@ class SingleMediaViewer(QWidget):
         ):
             return None
 
+        # Never overwrite proprietary Camera RAW sensor files in-place; route safely to Save as Copy (.jpg)
+        if self.current_file_path.suffix.lower() in RAW_DOT_EXT_SET:
+            return self.save_as_copy()
+
+        self._stop_animated_image()
         backup_dir = self.current_file_path.parent / ".OriginalFiles"
         backup_dir.mkdir(parents=True, exist_ok=True)
         backup_path = backup_dir / self.current_file_path.name
@@ -4447,9 +4624,17 @@ class SingleMediaViewer(QWidget):
         final_rendered = render_adjusted_image(
             self.master_np_rgb, self.current_recipe, media_id=self.current_media_id
         )
-        save_img = Image.fromarray(final_rendered)
+        final_alpha = (
+            transform_alpha_for_recipe(
+                self.master_alpha, self.current_recipe, target_hw=final_rendered.shape[:2]
+            )
+            if self.master_alpha is not None
+            else None
+        )
+        target_sfx = self.current_file_path.suffix.lower()
+        save_img = build_save_pil_image(final_rendered, final_alpha, target_sfx)
 
-        save_kwargs = {"quality": 95} if self.current_file_path.suffix.lower() in (".jpg", ".jpeg") else {}
+        save_kwargs = {"quality": 95} if target_sfx in (".jpg", ".jpeg") else {}
         try:
             with Image.open(backup_path if backup_path.exists() else self.current_file_path) as orig_pil:
                 orig_exif = orig_pil.getexif()
@@ -4475,8 +4660,14 @@ class SingleMediaViewer(QWidget):
                 except Exception:
                     pass
 
-        self.master_pil_image = save_img
-        self.master_np_rgb = final_rendered
+        self.master_alpha = final_alpha if target_sfx in ALPHA_SAVE_DOT_EXT_SET else None
+        self.master_np_rgb = (
+            final_rendered
+            if self.master_alpha is not None
+            else np.ascontiguousarray(np.array(save_img.convert("RGB"), dtype=np.uint8))
+        )
+        self.master_pil_image = Image.fromarray(self.master_np_rgb)
+        self._update_display_proxy()
         self.current_recipe = PhotoAdjustmentRecipe()
         self.undo_stack.clear()
         self._render_current_recipe()
@@ -4512,7 +4703,9 @@ class SingleMediaViewer(QWidget):
         switch_view = settings.value("save_copy_switch_view", True, type=bool)
 
         stem = self.current_file_path.stem
-        suffix = self.current_file_path.suffix
+        orig_suffix = self.current_file_path.suffix
+        is_raw_source = orig_suffix.lower() in RAW_DOT_EXT_SET
+        suffix = ".jpg" if is_raw_source else orig_suffix
 
         if "{stem}" in naming_pattern:
             base_pattern = naming_pattern.replace("{stem}", stem)
@@ -4521,7 +4714,16 @@ class SingleMediaViewer(QWidget):
 
         if forced_target == "choose" or (forced_target is None and loc_mode in ("ask", "prompt")):
             initial_path = str(self.current_file_path.parent / f"{base_pattern}{suffix}")
-            filter_str = f"Images (*{suffix});;All Files (*.*)"
+            if is_raw_source:
+                filter_str = (
+                    "JPEG (*.jpg *.jpeg);;PNG (*.png);;TIFF (*.tif *.tiff);;"
+                    "WebP (*.webp);;All Files (*.*)"
+                )
+            else:
+                filter_str = (
+                    f"Images (*{suffix});;JPEG (*.jpg *.jpeg);;PNG (*.png);;"
+                    "WebP (*.webp);;TIFF (*.tif *.tiff);;All Files (*.*)"
+                )
             chosen, _ = QFileDialog.getSaveFileName(
                 self,
                 "Save as Copy",
@@ -4531,6 +4733,8 @@ class SingleMediaViewer(QWidget):
             if not chosen:
                 return None
             candidate = Path(chosen)
+            if not candidate.suffix or candidate.suffix.lower() in RAW_DOT_EXT_SET:
+                candidate = candidate.with_suffix(".jpg")
         else:
             if forced_target == "original" or loc_mode == "original":
                 parent_dir = self.current_file_path.parent
@@ -4551,23 +4755,32 @@ class SingleMediaViewer(QWidget):
         final_rendered = render_adjusted_image(
             self.master_np_rgb, self.current_recipe, media_id=self.current_media_id
         )
-        save_img = Image.fromarray(final_rendered)
-        save_kwargs = {"quality": 95} if suffix.lower() in (".jpg", ".jpeg") else {}
-        try:
-            with Image.open(self.current_file_path) as orig_pil:
-                orig_exif = orig_pil.getexif()
-                if orig_exif:
-                    orig_exif[0x0112] = 1
-                    save_kwargs["exif"] = orig_exif
-        except Exception:
-            pass
+        final_alpha = (
+            transform_alpha_for_recipe(
+                self.master_alpha, self.current_recipe, target_hw=final_rendered.shape[:2]
+            )
+            if self.master_alpha is not None
+            else None
+        )
+        cand_sfx = candidate.suffix.lower()
+        save_img = build_save_pil_image(final_rendered, final_alpha, cand_sfx)
+        save_kwargs = {"quality": 95} if cand_sfx in (".jpg", ".jpeg") else {}
+        if not is_raw_source:
+            try:
+                with Image.open(self.current_file_path) as orig_pil:
+                    orig_exif = orig_pil.getexif()
+                    if orig_exif:
+                        orig_exif[0x0112] = 1
+                        save_kwargs["exif"] = orig_exif
+            except Exception:
+                pass
         save_img.save(candidate, **save_kwargs)
 
         mid = int(self.current_media_id)
 
         # Synchronously register folder & media in database so new_mid is valid immediately (0ms)
         new_mid: int | None = None
-        if self.catalog_repo is not None:
+        if getattr(self, "catalog_repo", None) is not None:
             try:
                 p_dir = candidate.parent
                 folder_id = self.catalog_repo.upsert_folder(
@@ -4652,14 +4865,20 @@ class SingleMediaViewer(QWidget):
 
         if switch_view:
             # Switch viewer to immediately display the newly saved copy
+            self._stop_animated_image()
             self.current_file_path = candidate
             self.current_orientation = 1
             if new_mid is not None:
                 self.current_media_id = new_mid
                 if hasattr(self, "media_ids") and new_mid in self.media_ids:
                     self.current_index = self.media_ids.index(new_mid)
-            self.master_pil_image = save_img
-            self.master_np_rgb = final_rendered
+            self.master_alpha = final_alpha if cand_sfx in ALPHA_SAVE_DOT_EXT_SET else None
+            self.master_np_rgb = (
+                final_rendered
+                if self.master_alpha is not None
+                else np.ascontiguousarray(np.array(save_img.convert("RGB"), dtype=np.uint8))
+            )
+            self.master_pil_image = Image.fromarray(self.master_np_rgb)
             self.current_recipe = PhotoAdjustmentRecipe()
             self.undo_stack.clear()
             self._update_display_proxy()
@@ -5293,10 +5512,15 @@ class SingleMediaViewer(QWidget):
         self._tag_someone_popup.focus_input()
         return True
 
-    def start_face_tag_mode_for_person(self, person_id: int, person_name: str) -> bool:
+    def start_face_tag_mode_for_person(
+        self,
+        person_id: int,
+        person_name: str,
+        initial_rect: QRectF | tuple[float, float, float, float] | None = None,
+    ) -> bool:
         """Starts interactive face tagging mode pre-targeted to position/link a box for person_name."""
         return self.start_face_tagging_mode(
-            initial_rect=None,
+            initial_rect=initial_rect,
             replace_person_id=person_id,
             prefill_name=person_name,
         )

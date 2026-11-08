@@ -50,7 +50,7 @@ NS = {
 for prefix, uri in NS.items():
     ET.register_namespace(prefix, uri)
 
-RAW_EXT_SET = {".raf", ".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2"}
+from src.imaging.image_loader import RAW_DOT_EXT_SET as RAW_EXT_SET
 
 
 def _rating_to_microsoft_percent(rating: int) -> int:
@@ -965,7 +965,6 @@ def _sync_single_media_item(
     except OSError:
         return None
 
-    RAW_EXT_SET = {".raf", ".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2"}
     xmp_packet = build_wlpg_xmp_packet(media_detail)
     orientation = int(media_detail.get("orientation") or 1)
     suffix = file_path.suffix.lower()

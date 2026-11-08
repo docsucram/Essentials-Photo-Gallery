@@ -16,7 +16,7 @@ from typing import Any, Sequence
 import numpy as np
 from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
-from src.core.face_engine import DetectedFace, FaceEngine, compute_iou
+from src.core.face_engine import DetectedFace, FaceEngine, compute_iou, compute_box_overlap
 from src.core.face_matcher import (
     FaceVectorMatcher,
     cosine_similarity,
@@ -242,6 +242,10 @@ class FaceDetectionWorker(QRunnable):
                     str(fpath),
                     orientation=int(r["orientation"] or 1),
                 )
+            except OSError as exc:
+                logger.debug("TargetedFaceScan: Skipping unreadable/unsupported image %s: %s", fpath, exc)
+                self.repo.mark_face_scan_failed([mid])
+                continue
             except Exception as exc:
                 logger.warning("TargetedFaceScan: Failed to detect faces in image %s: %s", fpath, exc)
                 self.repo.mark_face_scan_failed([mid])
@@ -411,6 +415,10 @@ class FaceDetectionWorker(QRunnable):
                         str(fpath),
                         orientation=orient,
                     )
+                except OSError as exc:
+                    logger.debug("Stage 1: skipping unreadable/unsupported image %s: %s", fpath, exc)
+                    self.repo.mark_face_scan_failed([mid])
+                    detected_faces = []
                 except Exception as exc:
                     logger.warning("Stage 1: face detection failed for %s: %s", fpath, exc)
                     from src.utils.scan_logger import log_scan_error
@@ -502,9 +510,9 @@ class FaceDetectionWorker(QRunnable):
                 if d_idx in claimed_d_indices:
                     continue
                 d_box = (d.rect_x, d.rect_y, d.rect_w, d.rect_h)
-                iou = compute_iou(r_box, d_box)
-                if iou > best_iou:
-                    best_iou = iou
+                overlap = compute_box_overlap(r_box, d_box)
+                if overlap > best_iou:
+                    best_iou = overlap
                     best_d_idx = d_idx
 
             if best_iou >= 0.25 and best_d_idx >= 0:
@@ -781,6 +789,12 @@ class FaceDetectionWorker(QRunnable):
                         str(fpath),
                         orientation=int(r["orientation"] or 1),
                     )
+                except OSError as exc:
+                    # PIL.UnidentifiedImageError inherits from OSError (e.g. HEIC/AVIF without plugin or proprietary TicoRAW)
+                    logger.debug("Skipping unreadable/unsupported image during face scan %s: %s", fpath, exc)
+                    self.repo.mark_face_scan_failed([mid])
+                    processed += 1
+                    continue
                 except Exception as exc:
                     logger.warning("Failed to detect faces in poison-pill image %s: %s", fpath, exc)
                     from src.utils.scan_logger import log_scan_error

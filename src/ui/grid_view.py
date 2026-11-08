@@ -1693,6 +1693,8 @@ class ThumbnailGridView(QListView):
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if self.catalog_model is None or self.card_delegate is None:
             return
+        if event.button() in (Qt.LeftButton, Qt.RightButton):
+            self.setFocus(Qt.MouseFocusReason)
         pos = event.position().toPoint()
         idx = self.indexAt(pos)
         self._press_index = idx
@@ -1777,6 +1779,8 @@ class ThumbnailGridView(QListView):
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if self.catalog_model is None or self.card_delegate is None:
             return
+        if event.button() in (Qt.LeftButton, Qt.RightButton):
+            self.setFocus(Qt.MouseFocusReason)
         pos = event.position().toPoint()
         idx = self.indexAt(pos)
         self._press_index = idx
@@ -1833,9 +1837,15 @@ class ThumbnailGridView(QListView):
                     if event.modifiers() & Qt.ControlModifier:
                         sel_model.select(idx, QItemSelectionModel.Toggle)
                         sel_model.setCurrentIndex(idx, QItemSelectionModel.NoUpdate)
+                        self._selection_anchor_vrow = idx.row()
                         self._pending_single_select = None
                     elif event.modifiers() & Qt.ShiftModifier:
-                        anchor = sel_model.currentIndex()
+                        anchor_vrow = getattr(self, "_selection_anchor_vrow", None)
+                        anchor = (
+                            self.catalog_model.index(anchor_vrow, 0)
+                            if anchor_vrow is not None
+                            else sel_model.currentIndex()
+                        )
                         if anchor.isValid():
                             r1, r2 = min(anchor.row(), idx.row()), max(anchor.row(), idx.row())
                             sel = QItemSelection(
@@ -1843,11 +1853,14 @@ class ThumbnailGridView(QListView):
                                 self.catalog_model.index(r2, 0),
                             )
                             sel_model.select(sel, QItemSelectionModel.ClearAndSelect)
+                            sel_model.setCurrentIndex(idx, QItemSelectionModel.NoUpdate)
                         else:
                             sel_model.select(idx, QItemSelectionModel.ClearAndSelect)
                             sel_model.setCurrentIndex(idx, QItemSelectionModel.NoUpdate)
+                            self._selection_anchor_vrow = idx.row()
                         self._pending_single_select = None
                     else:
+                        self._selection_anchor_vrow = idx.row()
                         if is_already_selected and len(sel_model.selectedIndexes()) > 1:
                             # Defer clearing other selections until release so drag of multi-selection is possible
                             self._pending_single_select = idx
@@ -2091,8 +2104,168 @@ class ThumbnailGridView(QListView):
     def dropEvent(self, event: QDropEvent) -> None:
         event.ignore()
 
+    def _ensure_vrow_visible(self, vrow: int) -> None:
+        if self.catalog_model is None:
+            return
+        crect = self.catalog_model.item_rect(vrow)
+        if not crect.isValid():
+            return
+        sb = self.verticalScrollBar()
+        if sb is None:
+            return
+        scroll_y = sb.value()
+        vp_h = max(1, self.viewport().height())
+        if crect.top() < scroll_y:
+            sb.setValue(max(0, crect.top() - 8))
+        elif crect.bottom() > scroll_y + vp_h:
+            sb.setValue(max(0, crect.bottom() - vp_h + 8))
+
+    def scrollTo(self, index: QModelIndex, hint: QAbstractItemView.ScrollHint = QAbstractItemView.EnsureVisible) -> None:
+        if index.isValid():
+            self._ensure_vrow_visible(index.row())
+
+    def _is_media_vrow(self, vrow: int) -> bool:
+        if self.catalog_model is None or vrow < 0 or vrow >= self.catalog_model.rowCount():
+            return False
+        idx = self.catalog_model.index(vrow, 0)
+        return bool(idx.isValid() and not idx.data(CatalogRoles.IsGroupHeaderRole))
+
+    def _first_media_vrow(self) -> int:
+        if self.catalog_model is None:
+            return -1
+        for r in range(self.catalog_model.rowCount()):
+            if self._is_media_vrow(r):
+                return r
+        return -1
+
+    def _last_media_vrow(self) -> int:
+        if self.catalog_model is None:
+            return -1
+        for r in range(self.catalog_model.rowCount() - 1, -1, -1):
+            if self._is_media_vrow(r):
+                return r
+        return -1
+
+    def _navigate_by_key(self, key: int, modifiers: Qt.KeyboardModifiers) -> bool:
+        if self.catalog_model is None or self.selectionModel() is None:
+            return False
+        n = self.catalog_model.rowCount()
+        if n <= 0:
+            return False
+
+        sel_model = self.selectionModel()
+        curr_idx = sel_model.currentIndex()
+        curr_vrow = curr_idx.row() if (curr_idx.isValid() and self._is_media_vrow(curr_idx.row())) else -1
+        if curr_vrow < 0:
+            sel_idxs = [i.row() for i in sel_model.selectedIndexes() if self._is_media_vrow(i.row())]
+            if sel_idxs:
+                curr_vrow = sel_idxs[0]
+
+        if curr_vrow < 0:
+            target_vrow = self._last_media_vrow() if key == Qt.Key_End else self._first_media_vrow()
+        elif key == Qt.Key_Home:
+            target_vrow = self._first_media_vrow()
+        elif key == Qt.Key_End:
+            target_vrow = self._last_media_vrow()
+        elif key in (Qt.Key_Left, Qt.Key_Right):
+            step = -1 if key == Qt.Key_Left else 1
+            r = curr_vrow + step
+            target_vrow = curr_vrow
+            while 0 <= r < n:
+                if self._is_media_vrow(r):
+                    target_vrow = r
+                    break
+                r += step
+        elif key in (Qt.Key_Up, Qt.Key_Down):
+            crect = self.catalog_model.item_rect(curr_vrow)
+            cx = crect.center().x()
+            cy = crect.center().y()
+            row_tol = max(8, crect.height() // 3)
+            step = -1 if key == Qt.Key_Up else 1
+            r = curr_vrow + step
+            target_row_cy: int | None = None
+            best_vrow = curr_vrow
+            best_dx = 10**9
+            while 0 <= r < n:
+                if self._is_media_vrow(r):
+                    rr = self.catalog_model.item_rect(r)
+                    rcy = rr.center().y()
+                    if abs(rcy - cy) >= row_tol:
+                        if target_row_cy is None:
+                            target_row_cy = rcy
+                        if abs(rcy - target_row_cy) <= row_tol:
+                            dx = abs(rr.center().x() - cx)
+                            if dx < best_dx:
+                                best_dx = dx
+                                best_vrow = r
+                        else:
+                            break
+                r += step
+            target_vrow = best_vrow
+        elif key in (Qt.Key_PageUp, Qt.Key_PageDown):
+            crect = self.catalog_model.item_rect(curr_vrow)
+            cx = crect.center().x()
+            vp_h = max(crect.height(), self.viewport().height() - crect.height() // 2)
+            target_y = crect.center().y() + (-vp_h if key == Qt.Key_PageUp else vp_h)
+            target_y = max(0, min(max(0, self.catalog_model.total_content_height - 1), target_y))
+            band = max(crect.height(), 120)
+            cands = [
+                r for r in self.catalog_model.visible_vrows_in_rect(target_y - band, target_y + band)
+                if self._is_media_vrow(r)
+            ]
+            if not cands:
+                target_vrow = self._first_media_vrow() if key == Qt.Key_PageUp else self._last_media_vrow()
+            else:
+                target_vrow = min(
+                    cands,
+                    key=lambda r: (
+                        abs(self.catalog_model.item_rect(r).center().y() - target_y) * 4
+                        + abs(self.catalog_model.item_rect(r).center().x() - cx)
+                    ),
+                )
+        else:
+            return False
+
+        if target_vrow < 0:
+            return False
+
+        target_idx = self.catalog_model.index(target_vrow, 0)
+        if modifiers & Qt.ShiftModifier:
+            anchor = getattr(self, "_selection_anchor_vrow", None)
+            if anchor is None or not self._is_media_vrow(anchor):
+                anchor = curr_vrow if curr_vrow >= 0 else target_vrow
+                self._selection_anchor_vrow = anchor
+            r1, r2 = min(anchor, target_vrow), max(anchor, target_vrow)
+            sel = QItemSelection(
+                self.catalog_model.index(r1, 0),
+                self.catalog_model.index(r2, 0),
+            )
+            sel_model.select(sel, QItemSelectionModel.ClearAndSelect)
+            sel_model.setCurrentIndex(target_idx, QItemSelectionModel.NoUpdate)
+        else:
+            self._selection_anchor_vrow = target_vrow
+            sel_model.select(target_idx, QItemSelectionModel.ClearAndSelect)
+            sel_model.setCurrentIndex(target_idx, QItemSelectionModel.NoUpdate)
+
+        self._ensure_vrow_visible(target_vrow)
+        self.viewport().update()
+        return True
+
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
+            if event.key() in (
+                Qt.Key_Left,
+                Qt.Key_Right,
+                Qt.Key_Up,
+                Qt.Key_Down,
+                Qt.Key_Home,
+                Qt.Key_End,
+                Qt.Key_PageUp,
+                Qt.Key_PageDown,
+            ):
+                if self._navigate_by_key(event.key(), event.modifiers()):
+                    event.accept()
+                    return
             if event.key() in (Qt.Key_Plus, Qt.Key_Equal) or event.text() in ("+", "="):
                 main_win = getattr(self, "main_window", None) or self.window()
                 if hasattr(main_win, "dispatch_ribbon_action"):
@@ -2855,4 +3028,9 @@ class ThumbnailGridView(QListView):
                 sb = self.verticalScrollBar()
                 sb.setValue(max(0, crect.top() - 40))
         self.viewport().update()
+
+
+# Backwards compatibility alias
+WLPGCardDelegate = MediaCardDelegate
+
 

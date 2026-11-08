@@ -49,15 +49,18 @@ from PySide6.QtGui import (
     QPixmap,
     QResizeEvent,
     QKeySequence,
+    QWheelEvent,
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QCompleter,
     QDialog,
     QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLayout,
     QLineEdit,
     QListView,
     QMenu,
@@ -80,6 +83,7 @@ from src.core.face_matcher import (
 )
 from src.db.connection import DualDatabaseEngine
 from src.db.repository import CatalogRepository, ThumbnailRepository
+from src.ui.person_header_bar import make_circular_avatar
 from src.ui.tag_someone_dialog import TagSomeoneDialog
 
 logger = logging.getLogger(__name__)
@@ -105,6 +109,11 @@ class FaceCardRecord:
     filename: str
     folder_path: str
     is_confirmed: bool = False
+    outlier_reason: str | None = None
+    boxless_id: int | None = None
+    is_boxless_match: bool = False
+    swap_person_id: int | None = None
+    swap_person_name: str | None = None
 
 
 class _FaceCardModel(QAbstractListModel):
@@ -148,6 +157,7 @@ class _FaceCardDelegate(QStyledItemDelegate):
 
     confirm_clicked = Signal(int, int)  # (face_id, person_id)
     reject_clicked = Signal(int, int)   # (face_id, person_id)
+    switch_clicked = Signal(int, int, str)  # (face_id, target_person_id, target_person_name)
 
     def __init__(
         self,
@@ -180,8 +190,17 @@ class _FaceCardDelegate(QStyledItemDelegate):
         card_rect = rect.adjusted(4, 4, -4, -4)
         is_conf = getattr(rec, "is_confirmed", False)
 
-        # 1. Background card fill & border (Distinct soft green for confirmed/tagged vs aero for suggestions)
-        if is_conf:
+        is_outlier = bool(getattr(rec, "outlier_reason", None))
+        is_boxless = bool(getattr(rec, "is_boxless_match", False))
+
+        # 1. Background card fill & border (Distinct attention border for outliers, blue for boxless, green for confirmed)
+        if is_outlier:
+            bg_color = QColor("#FEF2F2") if is_selected else (QColor("#FFFBEB") if is_hovered else QColor("#FFFFFF"))
+            border_color = QColor("#DC2626") if is_selected else (QColor("#F59E0B") if is_hovered else QColor("#FCA5A5"))
+        elif is_boxless:
+            bg_color = QColor("#F0F9FF") if is_selected else (QColor("#E0F2FE") if is_hovered else QColor("#FFFFFF"))
+            border_color = QColor("#0284C7") if is_selected else (QColor("#38BDF8") if is_hovered else QColor("#BAE6FD"))
+        elif is_conf:
             bg_color = QColor("#DDF3E4") if is_selected else (QColor("#EAF7EE") if is_hovered else QColor("#F3FAF5"))
             border_color = QColor("#2E7D32") if is_selected else (QColor("#4CAF50") if is_hovered else QColor("#81C784"))
         else:
@@ -191,7 +210,7 @@ class _FaceCardDelegate(QStyledItemDelegate):
         path = QPainterPath()
         path.addRoundedRect(QRectF(card_rect), 4.0, 4.0)
         painter.fillPath(path, QBrush(bg_color))
-        painter.setPen(QPen(border_color, 1.8 if (is_selected or is_conf) else 1.0))
+        painter.setPen(QPen(border_color, 1.8 if (is_selected or is_outlier or is_conf) else 1.0))
         painter.drawPath(path)
 
         # 2. Draw 96x96 Face Thumbnail
@@ -229,10 +248,51 @@ class _FaceCardDelegate(QStyledItemDelegate):
             painter.setFont(QFont("Segoe UI", 9))
             painter.drawText(thumb_rect, Qt.AlignCenter, "Face")
 
-        # 3. Status Badge: "✓ Tagged" (green) vs "? Suggestion" / "? 94%" (amber)
+        # 3. Status Badge: "✓ Tagged" (green) vs "? Suggestion" / "? 94%" (amber) / Outlier / Boxless
         badge_font = QFont("Segoe UI", 7, QFont.Bold)
         painter.setFont(badge_font)
-        if is_conf:
+        if is_outlier:
+            full_reason = str(rec.outlier_reason)
+            if "Looks like" in full_reason:
+                # e.g. "Looks like Dolores Corsi (72%)" -> "⇄ Dolores?"
+                inner = full_reason.replace("Looks like", "").strip()
+                tname = inner.split("(")[0].strip()
+                t_first = tname.split()[0] if tname else "someone"
+                pct_str = ""
+                if "(" in inner and ")" in inner:
+                    pct_str = inner[inner.find("("):inner.find(")")+1]
+                badge_text = f"⇄ {t_first}? {pct_str}".strip()
+                badge_bg = QColor("#DC2626")
+            elif "No face" in full_reason:
+                badge_text = "No Face"
+                badge_bg = QColor("#B91C1C")
+            else:
+                pct = int(round(rec.confidence * 100)) if rec.confidence else 0
+                badge_text = f"Low match ({pct}%)" if pct > 0 else "Low match"
+                badge_bg = QColor("#D97706")
+
+            fm = painter.fontMetrics()
+            elided = fm.elidedText(badge_text, Qt.TextElideMode.ElideRight, THUMB_SIZE - 8)
+            bw = min(THUMB_SIZE - 6, fm.horizontalAdvance(elided) + 8)
+            bh = 15
+            badge_rect = QRect(thumb_x + 3, thumb_y + 3, bw, bh)
+            badge_path = QPainterPath()
+            badge_path.addRoundedRect(QRectF(badge_rect), 3.0, 3.0)
+            painter.fillPath(badge_path, QBrush(badge_bg))
+            painter.setPen(QColor("#FFFFFF"))
+            painter.drawText(badge_rect, Qt.AlignCenter, elided)
+        elif is_boxless:
+            badge_text = "🔗 Missing Box"
+            badge_bg = QColor("#0284C7")
+            bw = 68
+            bh = 15
+            badge_rect = QRect(thumb_x + 3, thumb_y + 3, bw, bh)
+            badge_path = QPainterPath()
+            badge_path.addRoundedRect(QRectF(badge_rect), 3.0, 3.0)
+            painter.fillPath(badge_path, QBrush(badge_bg))
+            painter.setPen(QColor("#FFFFFF"))
+            painter.drawText(badge_rect, Qt.AlignCenter, badge_text)
+        elif is_conf:
             badge_text = "✓ Tagged"
             badge_bg = QColor("#2E7D32")
             bw = 50
@@ -256,22 +316,35 @@ class _FaceCardDelegate(QStyledItemDelegate):
             painter.setPen(QColor("#FFFFFF"))
             painter.drawText(badge_rect, Qt.AlignCenter, badge_text)
 
-        # 4. Hover Action Overlay Buttons: [✓] (Confirm) and [✕] (Reject)
-        if is_hovered or is_selected:
-            if not getattr(rec, "is_confirmed", False):
-                # Checkmark button (top right - 38px)
-                c_rect = QRect(thumb_x + THUMB_SIZE - 38, thumb_y + 3, 16, 16)
-                c_hover = (is_hovered and self.hover_btn == "confirm")
-                c_bg = QColor("#2E8B57") if c_hover else QColor(0, 0, 0, 150)
-                painter.setBrush(QBrush(c_bg))
+        # 4. Hover Action Overlay Buttons: [⇄] (Switch if swap outlier), [✓] (Confirm/Keep), and [✕] (Reject/Remove)
+        show_action_buttons = (not getattr(rec, "is_confirmed", False)) or bool(getattr(rec, "outlier_reason", None)) or bool(getattr(rec, "is_boxless_match", False))
+        if (is_hovered or is_selected) and show_action_buttons:
+            has_swap = bool(getattr(rec, "swap_person_name", None)) or ("Looks like" in getattr(rec, "outlier_reason", ""))
+            if has_swap:
+                # Switch person button (top right - 58px)
+                s_rect = QRect(thumb_x + THUMB_SIZE - 58, thumb_y + 3, 16, 16)
+                s_hover = (is_hovered and self.hover_btn == "switch")
+                s_bg = QColor("#0284C7") if s_hover else QColor(0, 0, 0, 160)
+                painter.setBrush(QBrush(s_bg))
                 painter.setPen(Qt.NoPen)
-                painter.drawEllipse(c_rect)
-                painter.setPen(QPen(QColor("#FFFFFF"), 1.8))
-                # Draw checkmark
-                cx = c_rect.x()
-                cy = c_rect.y()
-                painter.drawLine(cx + 4, cy + 8, cx + 7, cy + 12)
-                painter.drawLine(cx + 7, cy + 12, cx + 12, cy + 5)
+                painter.drawEllipse(s_rect)
+                painter.setPen(QColor("#FFFFFF"))
+                painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
+                painter.drawText(s_rect, Qt.AlignCenter, "⇄")
+
+            # Checkmark button (top right - 38px)
+            c_rect = QRect(thumb_x + THUMB_SIZE - 38, thumb_y + 3, 16, 16)
+            c_hover = (is_hovered and self.hover_btn == "confirm")
+            c_bg = QColor("#2E8B57") if c_hover else QColor(0, 0, 0, 150)
+            painter.setBrush(QBrush(c_bg))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(c_rect)
+            painter.setPen(QPen(QColor("#FFFFFF"), 1.8))
+            # Draw checkmark
+            cx = c_rect.x()
+            cy = c_rect.y()
+            painter.drawLine(cx + 4, cy + 8, cx + 7, cy + 12)
+            painter.drawLine(cx + 7, cy + 12, cx + 12, cy + 5)
 
             # Reject cross button (top right - 18px)
             r_rect = QRect(thumb_x + THUMB_SIZE - 18, thumb_y + 3, 16, 16)
@@ -297,15 +370,19 @@ class _FaceCardDelegate(QStyledItemDelegate):
         if rec is None:
             return False
 
+        has_swap = bool(getattr(rec, "swap_person_name", None)) or ("Looks like" in getattr(rec, "outlier_reason", ""))
         thumb_x = option.rect.x() + 4 + (option.rect.width() - 8 - THUMB_SIZE) // 2
         thumb_y = option.rect.y() + 8
+        s_rect = QRect(thumb_x + THUMB_SIZE - 58, thumb_y + 3, 16, 16) if has_swap else QRect()
         c_rect = QRect(thumb_x + THUMB_SIZE - 38, thumb_y + 3, 16, 16)
         r_rect = QRect(thumb_x + THUMB_SIZE - 18, thumb_y + 3, 16, 16)
 
         if event.type() == QEvent.MouseMove:
             pos = event.pos()
             self.hovered_row = index.row()
-            if c_rect.contains(pos):
+            if has_swap and s_rect.contains(pos):
+                self.hover_btn = "switch"
+            elif c_rect.contains(pos):
                 self.hover_btn = "confirm"
             elif r_rect.contains(pos):
                 self.hover_btn = "reject"
@@ -321,7 +398,15 @@ class _FaceCardDelegate(QStyledItemDelegate):
         elif event.type() == QEvent.MouseButtonRelease:
             pos = event.pos()
             pid = rec.suggested_person_id or 0
-            if c_rect.contains(pos) and not getattr(rec, "is_confirmed", False):
+            if has_swap and s_rect.contains(pos):
+                t_pid = getattr(rec, "swap_person_id", None) or 0
+                t_name = getattr(rec, "swap_person_name", None) or ""
+                if not t_name and "Looks like" in getattr(rec, "outlier_reason", ""):
+                    inner = rec.outlier_reason.replace("Looks like", "").strip()
+                    t_name = inner.split("(")[0].strip()
+                self.switch_clicked.emit(rec.face_id, t_pid, t_name)
+                return True
+            elif c_rect.contains(pos):
                 self.confirm_clicked.emit(rec.face_id, pid)
                 return True
             elif r_rect.contains(pos):
@@ -500,6 +585,7 @@ class _PersonGroupSectionWidget(QWidget):
     name_cluster_requested = Signal(str, list)   # (person_name, list[int] face_ids)
     open_media_requested = Signal(int)           # (media_id)
     preview_requested = Signal(object)           # (FaceCardRecord)
+    rename_merge_requested = Signal(int, str)    # (person_id, person_name)
 
     def __init__(
         self,
@@ -530,8 +616,9 @@ class _PersonGroupSectionWidget(QWidget):
 
         # Header Frame
         self.header_frame = QFrame(self)
+        self.header_frame.setObjectName("PersonHeaderFrame")
         self.header_frame.setStyleSheet(
-            "QFrame { background-color: #F4F7FB; border: 1px solid #D0DBE5; border-radius: 4px; padding: 2px; }"
+            "QFrame#PersonHeaderFrame { background-color: #F4F7FB; border: 1px solid #D0DBE5; border-radius: 4px; padding: 2px; }"
         )
         h_layout = QHBoxLayout(self.header_frame)
         h_layout.setContentsMargins(8, 4, 8, 4)
@@ -539,26 +626,44 @@ class _PersonGroupSectionWidget(QWidget):
 
         self.btn_toggle = QToolButton(self.header_frame)
         self.btn_toggle.setText("▼")
-        self.btn_toggle.setStyleSheet("border: none; font-size: 10px; color: #444444;")
+        self.btn_toggle.setStyleSheet("border: none; font-size: 10px; color: #55687C; background: transparent;")
         self.btn_toggle.clicked.connect(self._toggle_collapse)
         h_layout.addWidget(self.btn_toggle)
 
         cnt = len(records)
-        confirmed_info = f", {self.confirmed_count} confirmed" if self.confirmed_count > 0 else ""
         if self.person_id is not None:
-            title_text = f"{self.person_name}? ({cnt} suggestion{'s' if cnt != 1 else ''}{confirmed_info})"
+            # Interactive clickable name linking to rename/merge with suggestions
+            self.lbl_name = QLabel(self.person_name, self.header_frame)
+            self.lbl_name.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.lbl_name.setToolTip(f"Click to rename or merge '{self.person_name}' with existing contacts...")
+            self.lbl_name.setStyleSheet(
+                "QLabel { font-weight: bold; font-size: 13px; color: #005A9E; background: transparent; border: none; padding: 1px 4px; border-radius: 3px; }"
+                "QLabel:hover { background-color: #E2E8F0; text-decoration: underline; }"
+            )
+            self.lbl_name.mousePressEvent = lambda ev: (
+                self.rename_merge_requested.emit(self.person_id, self.person_name)
+                if ev.button() == Qt.MouseButton.LeftButton else None
+            )
+            h_layout.addWidget(self.lbl_name)
+
+            self.lbl_counts = QLabel("", self.header_frame)
+            self.lbl_counts.setStyleSheet("font-size: 11px; color: #55687C; background: transparent; border: none;")
+            h_layout.addWidget(self.lbl_counts)
+            self.lbl_title = self.lbl_counts
         elif self.is_unknown_cluster:
             title_text = f"{self.person_name} ({cnt} face{'s' if cnt != 1 else ''})"
+            self.lbl_title = QLabel(title_text, self.header_frame)
+            self.lbl_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #1E395B;")
+            h_layout.addWidget(self.lbl_title)
         else:
             title_text = f"{self.person_name} ({cnt} face{'s' if cnt != 1 else ''})"
-
-        self.lbl_title = QLabel(title_text, self.header_frame)
-        self.lbl_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #1E395B;")
-        h_layout.addWidget(self.lbl_title)
+            self.lbl_title = QLabel(title_text, self.header_frame)
+            self.lbl_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #1E395B;")
+            h_layout.addWidget(self.lbl_title)
         h_layout.addStretch(1)
 
         if self.person_id is not None:
-            self.btn_confirm_all = QPushButton(f"✓ Confirm All ({cnt})", self.header_frame)
+            self.btn_confirm_all = QPushButton("✓ Confirm All", self.header_frame)
             self.btn_confirm_all.setStyleSheet(
                 "QPushButton { background-color: #2E8B57; color: white; font-weight: bold; padding: 4px 10px; border-radius: 3px; border: 1px solid #236B42; }"
                 "QPushButton:hover { background-color: #3CB371; }"
@@ -597,6 +702,7 @@ class _PersonGroupSectionWidget(QWidget):
         self.delegate = _FaceCardDelegate(self.thumb_repo, self.pixmap_cache, self)
         self.delegate.confirm_clicked.connect(self._on_delegate_confirm)
         self.delegate.reject_clicked.connect(self._on_delegate_reject)
+        self.delegate.switch_clicked.connect(self._on_delegate_switch)
 
         self.list_view = _AutoHeightListView(self)
         self.list_view.setModel(self.model)
@@ -619,31 +725,60 @@ class _PersonGroupSectionWidget(QWidget):
         self.model.rowsRemoved.connect(lambda *args: self.list_view.update_height())
         self.list_view.update_height()
         v_layout.addWidget(self.list_view)
+        self._update_header_text()
 
     def _update_header_text(self) -> None:
-        unconf = [r for r in self.model._records if not getattr(r, "is_confirmed", False)]
-        conf = [r for r in self.model._records if getattr(r, "is_confirmed", False)]
-        cnt = len(unconf)
+        records = self.model._records
+        outliers = [r for r in records if getattr(r, "outlier_reason", None)]
+        boxless = [r for r in records if getattr(r, "is_boxless_match", False)]
+        unconf = [r for r in records if not getattr(r, "is_confirmed", False) and not getattr(r, "outlier_reason", None) and not getattr(r, "is_boxless_match", False)]
+
         sel_cnt = len(self.list_view.selectionModel().selectedIndexes())
         sel_text = f", {sel_cnt} selected" if sel_cnt > 0 else ""
-        total_conf = max(self.confirmed_count, len(conf))
-        confirmed_info = f", {total_conf} confirmed" if total_conf > 0 else ""
 
         if self.person_id is not None:
-            if cnt > 0:
-                title_text = f"{self.person_name}? ({cnt} suggestion{'s' if cnt != 1 else ''}{sel_text}{confirmed_info})"
+            if outliers:
+                o_cnt = len(outliers)
+                title_name = self.person_name
+                confirmed_info = f", {self.confirmed_count} confirmed" if self.confirmed_count > 0 else ""
+                counts_text = f"({o_cnt} flagged for review{sel_text}{confirmed_info})"
+                short_p = self.person_name if len(self.person_name) <= 14 else (self.person_name[:12] + "…")
+                btn_text = f"✓ Keep All as {short_p} ({o_cnt})"
+                btn_enabled = o_cnt > 0
+            elif boxless:
+                b_cnt = len(boxless)
+                title_name = self.person_name
+                confirmed_info = f", {self.confirmed_count} confirmed" if self.confirmed_count > 0 else ""
+                counts_text = f"({b_cnt} missing box{'' if b_cnt == 1 else 'es'}{sel_text}{confirmed_info})"
+                btn_text = f"🔗 Link All ({b_cnt})"
+                btn_enabled = b_cnt > 0
             else:
-                title_text = f"{self.person_name} ({total_conf} confirmed{sel_text})"
+                u_cnt = len(unconf)
+                title_name = f"{self.person_name}?" if u_cnt > 0 else self.person_name
+                confirmed_info = f", {self.confirmed_count} confirmed" if self.confirmed_count > 0 else ""
+                counts_text = f"({u_cnt} suggestion{'s' if u_cnt != 1 else ''}{sel_text}{confirmed_info})" if u_cnt > 0 else f"({self.confirmed_count} confirmed{sel_text})"
+                btn_text = f"✓ Confirm All ({u_cnt})"
+                btn_enabled = u_cnt > 0
+
+            if hasattr(self, "lbl_name"):
+                self.lbl_name.setText(title_name)
+            if hasattr(self, "lbl_counts"):
+                self.lbl_counts.setText(counts_text)
+            elif hasattr(self, "lbl_title"):
+                self.lbl_title.setText(f"{self.person_name} {counts_text}")
             if self.btn_confirm_all:
-                self.btn_confirm_all.setText(f"✓ Confirm All ({cnt})")
-                self.btn_confirm_all.setEnabled(cnt > 0)
+                self.btn_confirm_all.setText(btn_text)
+                self.btn_confirm_all.setEnabled(btn_enabled)
         elif self.is_unknown_cluster:
             total_cnt = len(self.model._records)
             title_text = f"{self.person_name} ({total_cnt} face{'s' if total_cnt != 1 else ''}{sel_text})"
+            if hasattr(self, "lbl_title"):
+                self.lbl_title.setText(title_text)
         else:
             total_cnt = len(self.model._records)
             title_text = f"{self.person_name} ({total_cnt} face{'s' if total_cnt != 1 else ''}{sel_text})"
-        self.lbl_title.setText(title_text)
+            if hasattr(self, "lbl_title"):
+                self.lbl_title.setText(title_text)
 
     def _on_save_name_clicked(self) -> None:
         if not self.txt_name:
@@ -668,6 +803,33 @@ class _PersonGroupSectionWidget(QWidget):
             self.confirm_all_requested.emit(self.person_id, face_ids)
 
     def _on_delegate_confirm(self, face_id: int, person_id: int) -> None:
+        rec = next((r for r in self.model._records if r.face_id == face_id), None)
+        if rec and getattr(rec, "outlier_reason", None):
+            try:
+                self.parent().repo.verify_face_tag(face_id)
+                self.model._records = [r for r in self.model._records if r.face_id != face_id]
+                self.model.layoutChanged.emit()
+                self._update_header_text()
+                if hasattr(self.parent(), "refresh_suggestions"):
+                    self.parent().refresh_suggestions()
+                return
+            except Exception as exc:
+                logger.warning("Failed to verify outlier tag: %s", exc)
+
+        if rec and getattr(rec, "is_boxless_match", False) and rec.suggested_person_id:
+            try:
+                self.parent().repo.assign_face_to_person(rec.face_id, rec.suggested_person_id)
+                self.model._records = [r for r in self.model._records if r.face_id != face_id]
+                self.model.layoutChanged.emit()
+                self._update_header_text()
+                if hasattr(self.parent(), "faces_confirmed"):
+                    self.parent().faces_confirmed.emit([face_id], rec.suggested_person_id)
+                if hasattr(self.parent(), "refresh_suggestions"):
+                    self.parent().refresh_suggestions()
+                return
+            except Exception as exc:
+                logger.warning("Failed to link boxless face: %s", exc)
+
         target_pid = person_id or self.person_id or 0
         if target_pid > 0:
             self.confirm_faces_requested.emit(target_pid, [face_id])
@@ -675,8 +837,51 @@ class _PersonGroupSectionWidget(QWidget):
             self.tag_as_requested.emit([face_id])
 
     def _on_delegate_reject(self, face_id: int, person_id: int) -> None:
+        rec = next((r for r in self.model._records if r.face_id == face_id), None)
+        if rec and getattr(rec, "outlier_reason", None):
+            try:
+                target_pid = person_id or self.person_id
+                self.parent().repo.unassign_face_person(face_id, target_pid)
+                self.model._records = [r for r in self.model._records if r.face_id != face_id]
+                self.model.layoutChanged.emit()
+                self._update_header_text()
+                if hasattr(self.parent(), "faces_rejected"):
+                    self.parent().faces_rejected.emit([face_id])
+                if hasattr(self.parent(), "refresh_suggestions"):
+                    self.parent().refresh_suggestions()
+                return
+            except Exception as exc:
+                logger.warning("Failed to unassign outlier face: %s", exc)
+
         target_pid = person_id or self.person_id or 0
         self.reject_faces_requested.emit(target_pid, [face_id])
+
+    def _on_delegate_switch(self, face_id: int, target_pid: int, target_pname: str) -> None:
+        rec = next((r for r in self.model._records if r.face_id == face_id), None)
+        t_pid = target_pid or (getattr(rec, "swap_person_id", None) if rec else None)
+        t_name = target_pname or (getattr(rec, "swap_person_name", None) if rec else None)
+        if not t_pid and not t_name and rec and getattr(rec, "outlier_reason", None):
+            reason = str(rec.outlier_reason)
+            if "Looks like" in reason:
+                inner = reason.replace("Looks like", "").strip()
+                t_name = inner.split("(")[0].strip()
+
+        parent_view = self.parent()
+        repo = getattr(parent_view, "repo", None)
+        dest = t_pid if (t_pid and t_pid > 0) else t_name
+        if repo and dest:
+            try:
+                new_pid = repo.assign_face_to_person(face_id, dest)
+                repo.verify_face_tag(face_id)
+                self.model._records = [r for r in self.model._records if r.face_id != face_id]
+                self.model.layoutChanged.emit()
+                self._update_header_text()
+                if hasattr(parent_view, "faces_confirmed"):
+                    parent_view.faces_confirmed.emit([face_id], new_pid)
+                if hasattr(parent_view, "refresh_suggestions"):
+                    parent_view.refresh_suggestions()
+            except Exception as exc:
+                logger.warning("Failed to switch face %d to %s: %s", face_id, dest, exc)
 
     def _on_double_clicked(self, index: QModelIndex) -> None:
         rec = index.data(Qt.UserRole)
@@ -694,6 +899,34 @@ class _PersonGroupSectionWidget(QWidget):
 
     def select_all(self) -> None:
         self.list_view.selectAll()
+
+    def set_dark_mode(self, is_dark: bool) -> None:
+        """Applies dark or light theme to section header."""
+        self._is_dark = bool(is_dark)
+        if is_dark:
+            self.header_frame.setStyleSheet(
+                "QFrame#PersonHeaderFrame { background-color: #1E232B; border: 1px solid #2D333F; border-radius: 4px; padding: 2px; }"
+            )
+            if hasattr(self, "lbl_name"):
+                self.lbl_name.setStyleSheet(
+                    "QLabel { font-weight: bold; font-size: 13px; color: #60A5FA; background: transparent; border: none; padding: 1px 4px; border-radius: 3px; }"
+                    "QLabel:hover { background-color: #2D3748; text-decoration: underline; }"
+                )
+            if hasattr(self, "lbl_counts"):
+                self.lbl_counts.setStyleSheet("font-size: 11px; color: #94A3B8; background: transparent; border: none;")
+            self.btn_toggle.setStyleSheet("border: none; font-size: 10px; color: #94A3B8; background: transparent;")
+        else:
+            self.header_frame.setStyleSheet(
+                "QFrame#PersonHeaderFrame { background-color: #F4F7FB; border: 1px solid #D0DBE5; border-radius: 4px; padding: 2px; }"
+            )
+            if hasattr(self, "lbl_name"):
+                self.lbl_name.setStyleSheet(
+                    "QLabel { font-weight: bold; font-size: 13px; color: #005A9E; background: transparent; border: none; padding: 1px 4px; border-radius: 3px; }"
+                    "QLabel:hover { background-color: #E2E8F0; text-decoration: underline; }"
+                )
+            if hasattr(self, "lbl_counts"):
+                self.lbl_counts.setStyleSheet("font-size: 11px; color: #55687C; background: transparent; border: none;")
+            self.btn_toggle.setStyleSheet("border: none; font-size: 10px; color: #55687C; background: transparent;")
 
     def remove_face_ids(self, face_ids: set[int]) -> int:
         """Removes face IDs from this section. Returns remaining count."""
@@ -714,31 +947,116 @@ class _PersonGroupSectionWidget(QWidget):
 
         face_ids = [r.face_id for r in sel]
         menu = QMenu(self)
+        is_outlier = any(getattr(r, "outlier_reason", None) for r in sel)
 
-        act_confirm = menu.addAction(f"✓ Confirm ({len(face_ids)})")
-        act_confirm.setEnabled(bool(self.person_id))
+        act_switch = None
+        act_confirm = None
+        act_reject = None
+        act_not_a_face = None
+        act_tag_as = None
+        act_ignore = None
 
-        act_reject = menu.addAction(f"✕ Not this person ({len(face_ids)})")
-        act_not_a_face = menu.addAction("Not a face (Delete region)")
-        act_tag_as = menu.addAction("Tag as...")
-        act_ignore = menu.addAction("Don't show again")
+        if is_outlier:
+            # Check for swap suggestion
+            swap_target_name = None
+            swap_target_pid = None
+            for r in sel:
+                s_name = getattr(r, "swap_person_name", None)
+                if not s_name and "Looks like" in getattr(r, "outlier_reason", ""):
+                    inner = r.outlier_reason.replace("Looks like", "").strip()
+                    s_name = inner.split("(")[0].strip()
+                if s_name:
+                    swap_target_name = s_name
+                    swap_target_pid = getattr(r, "swap_person_id", None)
+                    break
+
+            if swap_target_name:
+                act_switch = menu.addAction(f"⇄ Change to {swap_target_name}")
+                bold_font = QFont()
+                bold_font.setBold(True)
+                act_switch.setFont(bold_font)
+
+            act_confirm = menu.addAction(f"✓ Keep as {self.person_name} (Mark verified)")
+            act_reject = menu.addAction("✕ Remove tag from photo")
+            act_not_a_face = menu.addAction("Not a face (Delete box)")
+            act_tag_as = menu.addAction("Tag as somebody else...")
+        else:
+            act_confirm = menu.addAction(f"✓ Confirm ({len(face_ids)})")
+            act_confirm.setEnabled(bool(self.person_id))
+            act_reject = menu.addAction(f"✕ Not this person ({len(face_ids)})")
+            act_not_a_face = menu.addAction("Not a face (Delete region)")
+            act_tag_as = menu.addAction("Tag as...")
+            act_ignore = menu.addAction("Don't show again")
+
         menu.addSeparator()
+        act_rename = None
+        if self.person_id is not None:
+            act_rename = menu.addAction(f"✏ Rename or merge '{self.person_name}'...")
+            menu.addSeparator()
         act_open_single = menu.addAction("View photo in single image view")
         act_view_full = menu.addAction("View full photo (Space)")
 
         chosen = None
         if not getattr(self, "_suppress_menu_exec", False):
             chosen = menu.exec(self.list_view.viewport().mapToGlobal(pos))
-        if chosen == act_confirm and self.person_id is not None:
-            self.confirm_faces_requested.emit(self.person_id, face_ids)
+
+        parent_view = self.parent()
+        repo = getattr(parent_view, "repo", None)
+
+        if chosen == act_switch and swap_target_name and repo:
+            for r in sel:
+                dest = getattr(r, "swap_person_id", None) or getattr(r, "swap_person_name", None) or swap_target_pid or swap_target_name
+                if dest:
+                    try:
+                        new_pid = repo.assign_face_to_person(r.face_id, dest)
+                        repo.verify_face_tag(r.face_id)
+                        if hasattr(parent_view, "faces_confirmed"):
+                            parent_view.faces_confirmed.emit([r.face_id], new_pid)
+                    except Exception as exc:
+                        logger.warning("Failed to switch outlier face: %s", exc)
+            self.model._records = [r for r in self.model._records if r.face_id not in set(face_ids)]
+            self.model.layoutChanged.emit()
+            self._update_header_text()
+            if hasattr(parent_view, "refresh_suggestions"):
+                parent_view.refresh_suggestions()
+        elif chosen == act_confirm:
+            if is_outlier and repo:
+                for fid in face_ids:
+                    try:
+                        repo.verify_face_tag(fid)
+                    except Exception as exc:
+                        logger.warning("Failed to verify outlier tag: %s", exc)
+                self.model._records = [r for r in self.model._records if r.face_id not in set(face_ids)]
+                self.model.layoutChanged.emit()
+                self._update_header_text()
+                if hasattr(parent_view, "refresh_suggestions"):
+                    parent_view.refresh_suggestions()
+            elif self.person_id is not None:
+                self.confirm_faces_requested.emit(self.person_id, face_ids)
         elif chosen == act_reject:
-            self.reject_faces_requested.emit(self.person_id or 0, face_ids)
+            if is_outlier and repo:
+                for fid in face_ids:
+                    try:
+                        repo.unassign_face_person(fid, self.person_id)
+                    except Exception as exc:
+                        logger.warning("Failed to unassign outlier tag: %s", exc)
+                self.model._records = [r for r in self.model._records if r.face_id not in set(face_ids)]
+                self.model.layoutChanged.emit()
+                self._update_header_text()
+                if hasattr(parent_view, "faces_rejected"):
+                    parent_view.faces_rejected.emit(face_ids)
+                if hasattr(parent_view, "refresh_suggestions"):
+                    parent_view.refresh_suggestions()
+            else:
+                self.reject_faces_requested.emit(self.person_id or 0, face_ids)
         elif chosen == act_not_a_face:
             self.not_a_face_requested.emit(face_ids)
         elif chosen == act_tag_as:
             self.tag_as_requested.emit(face_ids)
         elif chosen == act_ignore:
             self.ignore_faces_requested.emit(face_ids)
+        elif chosen == act_rename and self.person_id is not None:
+            self.rename_merge_requested.emit(self.person_id, self.person_name)
         elif chosen == act_open_single and sel:
             self.open_media_requested.emit(sel[0].media_id)
         elif chosen == act_view_full and sel:
@@ -750,30 +1068,184 @@ class _PeopleAvatarPickerStrip(QWidget):
     """
     Horizontal top strip displaying circular avatars of people with suggestions.
     Allows 1-click filtering of the suggestion grid ('SPEC.md' Section 5.1).
+    Scrollable with smooth mouse-wheel navigation and overflow chevrons so
+    names never overlap, crowd, or get crushed even with dozens of people.
     """
 
     person_selected = Signal(object)  # person_id (int) or None for All
+    rename_merge_requested = Signal(int, str)  # (person_id, person_name)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(46)
-        self.setStyleSheet("background-color: #F8FAFC; border-bottom: 1px solid #D9E2EC;")
-
-        self._layout = QHBoxLayout(self)
-        self._layout.setContentsMargins(8, 4, 8, 4)
-        self._layout.setSpacing(6)
-
-        self._active_person_id: int | None = None
+        self.setFixedHeight(52)
+        self._is_dark: bool = False
+        self.__active_person_id: int | None = None
         self._buttons: dict[int | None, QPushButton] = {}
 
-    def populate(self, people_counts: list[tuple[int | None, str, int, bytes | None]]) -> None:
+        # Main layout holds left chevron, scroll area, right chevron
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(6, 2, 6, 2)
+        main_layout.setSpacing(4)
+
+        # Left scroll button (‹)
+        self.btn_left = QToolButton(self)
+        self.btn_left.setText("‹")
+        self.btn_left.setFixedSize(26, 32)
+        self.btn_left.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_left.setToolTip("Scroll left")
+        self.btn_left.clicked.connect(lambda: self._scroll_by(-280))
+        self.btn_left.setVisible(False)
+        main_layout.addWidget(self.btn_left)
+
+        # Horizontal Scroll Area
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.viewport().installEventFilter(self)
+
+        # Scroll Content Container
+        self.scroll_content = QWidget(self.scroll_area)
+        self.scroll_content.installEventFilter(self)
+        self._strip_layout = QHBoxLayout(self.scroll_content)
+        self._strip_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        self._strip_layout.setContentsMargins(4, 6, 4, 6)
+        self._strip_layout.setSpacing(6)
+        self._strip_layout.addStretch(1)
+
+        self.scroll_area.setWidget(self.scroll_content)
+        main_layout.addWidget(self.scroll_area, 1)
+
+        # Right scroll button (›)
+        self.btn_right = QToolButton(self)
+        self.btn_right.setText("›")
+        self.btn_right.setFixedSize(26, 32)
+        self.btn_right.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_right.setToolTip("Scroll right")
+        self.btn_right.clicked.connect(lambda: self._scroll_by(280))
+        self.btn_right.setVisible(False)
+        main_layout.addWidget(self.btn_right)
+
+        # Listen for scroll updates to show/hide chevrons
+        sb = self.scroll_area.horizontalScrollBar()
+        sb.valueChanged.connect(self._update_scroll_buttons)
+        sb.rangeChanged.connect(self._update_scroll_buttons)
+
+        self._apply_theme()
+
+    @property
+    def _active_person_id(self) -> int | None:
+        return self.__active_person_id
+
+    @_active_person_id.setter
+    def _active_person_id(self, person_id: int | None) -> None:
+        self.set_active_person_id(person_id)
+
+    def set_active_person_id(self, person_id: int | None) -> None:
+        self.__active_person_id = person_id
+        for pid, b in self._buttons.items():
+            b.setChecked(pid == person_id)
+        btn = self._buttons.get(person_id)
+        if btn is not None:
+            self.scroll_area.ensureWidgetVisible(btn, 50, 0)
+
+    def set_dark_mode(self, is_dark: bool) -> None:
+        self._is_dark = bool(is_dark)
+        self._apply_theme()
+
+    def _apply_theme(self) -> None:
+        if self._is_dark:
+            self.setStyleSheet("background-color: #171A20; border-bottom: 1px solid #2D323B;")
+            self.scroll_area.setStyleSheet("background: transparent; border: none;")
+            self.scroll_content.setStyleSheet("background: transparent;")
+            chev_style = (
+                "QToolButton { border: 1px solid #374151; border-radius: 13px; background-color: #1F2937; "
+                "color: #D1D5DB; font-size: 16px; font-weight: bold; padding-bottom: 2px; } "
+                "QToolButton:hover { background-color: #2D333E; border-color: #4B5563; color: #FFFFFF; } "
+                "QToolButton:pressed { background-color: #374151; } "
+                "QToolButton:disabled { border-color: #262B34; color: #4B5563; background-color: #1A1D23; }"
+            )
+        else:
+            self.setStyleSheet("background-color: #F8FAFC; border-bottom: 1px solid #D9E2EC;")
+            self.scroll_area.setStyleSheet("background: transparent; border: none;")
+            self.scroll_content.setStyleSheet("background: transparent;")
+            chev_style = (
+                "QToolButton { border: 1px solid #CBD5E1; border-radius: 13px; background-color: #FFFFFF; "
+                "color: #475569; font-size: 16px; font-weight: bold; padding-bottom: 2px; } "
+                "QToolButton:hover { background-color: #F1F5F9; border-color: #94A3B8; color: #0F172A; } "
+                "QToolButton:pressed { background-color: #E2E8F0; } "
+                "QToolButton:disabled { border-color: #E2E8F0; color: #CBD5E1; background-color: #F8FAFC; }"
+            )
+        self.btn_left.setStyleSheet(chev_style)
+        self.btn_right.setStyleSheet(chev_style)
+        for btn_key, btn in self._buttons.items():
+            btn.setStyleSheet(self._button_style(has_icon=(btn_key is not None)))
+        self._update_scroll_buttons()
+
+    def _button_style(self, has_icon: bool) -> str:
+        padding = "padding: 0px 10px 0px 6px;" if has_icon else "padding: 0px 12px;"
+        if self._is_dark:
+            return (
+                f"QPushButton {{ border: 1px solid #374151; border-radius: 16px; {padding} "
+                "background-color: #1F2937; color: #E5E7EB; font-size: 11px; font-weight: 500; text-align: left; } "
+                "QPushButton:hover { background-color: #2D333E; border-color: #4B5563; } "
+                "QPushButton:checked { background-color: #2563EB; color: #FFFFFF; border-color: #2563EB; font-weight: bold; } "
+                "QPushButton:checked:hover { background-color: #1D4ED8; border-color: #1D4ED8; }"
+            )
+        else:
+            return (
+                f"QPushButton {{ border: 1px solid #CBD5E1; border-radius: 16px; {padding} "
+                "background-color: #FFFFFF; color: #1E293B; font-size: 11px; font-weight: 500; text-align: left; } "
+                "QPushButton:hover { background-color: #F1F5F9; border-color: #94A3B8; } "
+                "QPushButton:checked { background-color: #0078D4; color: #FFFFFF; border-color: #0078D4; font-weight: bold; } "
+                "QPushButton:checked:hover { background-color: #0067B8; border-color: #0067B8; }"
+            )
+
+    def eventFilter(self, watched: Any, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.Wheel:
+            if isinstance(event, QWheelEvent):
+                delta = event.pixelDelta().x() or event.pixelDelta().y()
+                if delta == 0:
+                    delta = event.angleDelta().x() or event.angleDelta().y()
+                if delta != 0:
+                    sb = self.scroll_area.horizontalScrollBar()
+                    step = int(delta * 1.5) if abs(delta) > 30 else (120 if delta < 0 else -120)
+                    sb.setValue(sb.value() - step)
+                    return True
+        return super().eventFilter(watched, event)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_scroll_buttons()
+
+    def _scroll_by(self, delta: int) -> None:
+        sb = self.scroll_area.horizontalScrollBar()
+        sb.setValue(sb.value() + delta)
+
+    def _update_scroll_buttons(self) -> None:
+        sb = self.scroll_area.horizontalScrollBar()
+        max_val = sb.maximum()
+        if max_val <= 0:
+            self.btn_left.setVisible(False)
+            self.btn_right.setVisible(False)
+        else:
+            self.btn_left.setVisible(True)
+            self.btn_right.setVisible(True)
+            self.btn_left.setEnabled(sb.value() > 0)
+            self.btn_right.setEnabled(sb.value() < max_val)
+
+    def populate(
+        self,
+        people_counts: list[tuple[int | None, str, int, bytes | None]],
+        mode: str = "suggestions",
+    ) -> None:
         """
         Populates avatar buttons: list of (person_id, name, count, thumb_blob).
-        person_id=None represents 'All Suggestions'.
+        person_id=None represents 'All Suggestions' / 'All Flagged'.
         """
-        # Clear existing
-        while self._layout.count() > 0:
-            item = self._layout.takeAt(0)
+        while self._strip_layout.count() > 0:
+            item = self._strip_layout.takeAt(0)
             w = item.widget()
             if w:
                 w.deleteLater()
@@ -781,43 +1253,88 @@ class _PeopleAvatarPickerStrip(QWidget):
 
         # All button
         total_count = sum(cnt for _pid, _name, cnt, _blob in people_counts)
-        btn_all = QPushButton(f"All Suggestions ({total_count})", self)
+        if mode == "outliers":
+            all_text = f"All Flagged ({total_count})"
+        elif mode == "boxless":
+            all_text = f"All Missing Boxes ({total_count})"
+        else:
+            all_text = f"All Suggestions ({total_count})"
+        btn_all = QPushButton(all_text, self.scroll_content)
+        btn_all.setFixedHeight(32)
+        btn_all.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_all.setCheckable(True)
-        btn_all.setChecked(self._active_person_id is None)
-        btn_all.setStyleSheet(
-            "QPushButton { border: 1px solid #B0C4DE; border-radius: 14px; padding: 4px 12px; background-color: #FFFFFF; font-weight: bold; }"
-            "QPushButton:checked { background-color: #1E395B; color: white; border-color: #1E395B; }"
-        )
+        btn_all.setChecked(self.__active_person_id is None)
+        btn_all.setToolTip(f"Show all face suggestions ({total_count} total)")
+
+        fm_all = btn_all.fontMetrics()
+        all_w = max(115, fm_all.horizontalAdvance(all_text) + 26)
+        btn_all.setFixedWidth(all_w)
+        btn_all.setStyleSheet(self._button_style(has_icon=False))
         btn_all.clicked.connect(lambda: self._on_clicked(None))
-        self._layout.addWidget(btn_all)
+        self._strip_layout.addWidget(btn_all)
         self._buttons[None] = btn_all
 
         for pid, name, count, thumb_blob in people_counts:
             if count <= 0:
                 continue
             btn_key = -1 if pid is None else pid
-            btn = QPushButton(f"{name} ({count})", self)
+            name_clean = (str(name) if name is not None else "").strip() or "Unnamed"
+            display_name = name_clean if len(name_clean) <= 26 else name_clean[:24] + "…"
+            btn_text = f"{display_name} ({count})"
+            btn = QPushButton(btn_text, self.scroll_content)
+            btn.setFixedHeight(32)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setCheckable(True)
-            btn.setChecked(self._active_person_id == btn_key)
-            if thumb_blob:
-                qimg = QImage.fromData(thumb_blob)
-                if not qimg.isNull():
-                    pix = QPixmap.fromImage(qimg).scaled(22, 22, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    btn.setIcon(QIcon(pix))
-            btn.setStyleSheet(
-                "QPushButton { border: 1px solid #B0C4DE; border-radius: 14px; padding: 4px 10px; background-color: #FFFFFF; font-size: 11px; }"
-                "QPushButton:checked { background-color: #1E395B; color: white; border-color: #1E395B; }"
-            )
+            btn.setChecked(self.__active_person_id == btn_key)
+            btn.setToolTip(f"{name_clean} ({count} suggestion{'s' if count != 1 else ''})")
+
+            # High-res circular avatar or color-coded initials fallback
+            pm = make_circular_avatar(thumb_blob, name_clean, size=24)
+            has_avatar = False
+            if pm and not pm.isNull():
+                btn.setIcon(QIcon(pm))
+                btn.setIconSize(QSize(22, 22))
+                has_avatar = True
+
+            fm = btn.fontMetrics()
+            text_w = fm.horizontalAdvance(btn_text)
+            needed_w = max(70, text_w + (36 if has_avatar else 24))
+            btn.setFixedWidth(needed_w)
+
+            btn.setStyleSheet(self._button_style(has_icon=has_avatar))
             btn.clicked.connect(lambda checked=False, p=btn_key: self._on_clicked(p))
-            self._layout.addWidget(btn)
+            if pid is not None:
+                btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                btn.customContextMenuRequested.connect(
+                    lambda pos, p=pid, n=name_clean, b=btn: self._show_btn_context_menu(pos, p, n, b)
+                )
+            self._strip_layout.addWidget(btn)
             self._buttons[btn_key] = btn
 
-        self._layout.addStretch(1)
+        self._strip_layout.addStretch(1)
+
+        # Enforce minimum width on scroll_content so QScrollArea never crushes buttons
+        spacing = self._strip_layout.spacing()
+        total_w = sum(b.width() for b in self._buttons.values()) + max(0, len(self._buttons) - 1) * spacing + 32
+        self.scroll_content.setMinimumWidth(total_w)
+        self.scroll_content.adjustSize()
+
+        active_btn = self._buttons.get(self.__active_person_id)
+        if active_btn is not None:
+            active_btn.setChecked(True)
+            QTimer.singleShot(0, lambda: self.scroll_area.ensureWidgetVisible(active_btn, 50, 0))
+
+        QTimer.singleShot(0, self._update_scroll_buttons)
+
+    def _show_btn_context_menu(self, pos: QPoint, person_id: int, person_name: str, btn: QWidget) -> None:
+        menu = QMenu(self)
+        act_rename = menu.addAction(f"✏ Rename or merge '{person_name}'...")
+        act = menu.exec(btn.mapToGlobal(pos))
+        if act == act_rename:
+            self.rename_merge_requested.emit(person_id, person_name)
 
     def _on_clicked(self, person_id: int | None) -> None:
-        self._active_person_id = person_id
-        for pid, b in self._buttons.items():
-            b.setChecked(pid == person_id)
+        self.set_active_person_id(person_id)
         self.person_selected.emit(person_id)
 
 
@@ -831,8 +1348,10 @@ class BatchPeopleView(QWidget):
     faces_confirmed = Signal(list, int)        # (list[int] face_ids, int person_id)
     faces_rejected = Signal(list)              # (list[int] face_ids)
     faces_ignored = Signal(list)               # (list[int] face_ids)
+    person_renamed = Signal(int, str)          # (int person_id, str new_name)
     back_to_gallery_requested = Signal()
     open_media_requested = Signal(int)         # (media_id)
+    card_selection_changed = Signal(str, object, str)  # (mode, swap_suggested_name, person_name)
 
     def __init__(self, engine: DualDatabaseEngine, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -848,6 +1367,7 @@ class BatchPeopleView(QWidget):
         self._sections: dict[int | None, _PersonGroupSectionWidget] = {}
         self._all_records: list[FaceCardRecord] = []
         self._filter_person_id: int | None = None
+        self._current_view_mode: str = "suggestions"
         self._scan_current: int = 0
         self._scan_total: int = 0
 
@@ -941,12 +1461,21 @@ class BatchPeopleView(QWidget):
         )
         h_banner = QHBoxLayout(self.banner)
         h_banner.setContentsMargins(14, 6, 14, 6)
-        lbl_banner_text = QLabel(
+        h_banner.setSpacing(12)
+        self.lbl_banner_text = QLabel(
             "ℹ  As you act on these suggestions, the faces will be removed from the list below, and the confirmed faces will be tagged in your photos.",
             self.banner,
         )
-        lbl_banner_text.setStyleSheet("color: #665200; font-size: 11px;")
-        h_banner.addWidget(lbl_banner_text)
+        self.lbl_banner_text.setStyleSheet("color: #665200; font-size: 11px;")
+        h_banner.addWidget(self.lbl_banner_text)
+
+        self.chk_include_no_face = QCheckBox("Show tags without detected face (side profiles, occluded)", self.banner)
+        self.chk_include_no_face.setStyleSheet("color: #665200; font-size: 11px;")
+        self.chk_include_no_face.setChecked(False)
+        self.chk_include_no_face.setVisible(False)
+        self.chk_include_no_face.toggled.connect(lambda: self.refresh_suggestions(debounce=False))
+        h_banner.addWidget(self.chk_include_no_face)
+
         h_banner.addStretch(1)
 
         btn_dismiss_banner = QToolButton(self.banner)
@@ -962,6 +1491,7 @@ class BatchPeopleView(QWidget):
         # ---------------------------------------------------------------------
         self.avatar_strip = _PeopleAvatarPickerStrip(self)
         self.avatar_strip.person_selected.connect(self._on_avatar_strip_filtered)
+        self.avatar_strip.rename_merge_requested.connect(self._on_rename_merge_person)
         main_layout.addWidget(self.avatar_strip)
 
         # ---------------------------------------------------------------------
@@ -1040,7 +1570,7 @@ class BatchPeopleView(QWidget):
         self._is_dark = bool(is_dark)
         if is_dark:
             self.action_bar.setStyleSheet("background-color: #1B1E24; border-bottom: 1px solid #2D323B;")
-            self.avatar_strip.setStyleSheet("background-color: #171A20; border-bottom: 1px solid #2D323B;")
+            self.avatar_strip.set_dark_mode(True)
             self.scroll_area.setStyleSheet(
                 """
                 QScrollArea {
@@ -1066,7 +1596,7 @@ class BatchPeopleView(QWidget):
             )
         else:
             self.action_bar.setStyleSheet("background-color: #F0F4F8; border-bottom: 1px solid #D0DBE5;")
-            self.avatar_strip.setStyleSheet("background-color: #F8FAFC; border-bottom: 1px solid #D9E2EC;")
+            self.avatar_strip.set_dark_mode(False)
             self.scroll_area.setStyleSheet(
                 """
                 QScrollArea {
@@ -1103,13 +1633,62 @@ class BatchPeopleView(QWidget):
         self._filter_person_id = person_id
         self.refresh_suggestions()
 
+    def set_use_ribbon_mode(self, use_ribbon: bool) -> None:
+        """Shows or hides the internal action bar when ribbon has a dedicated contextual tab."""
+        self._use_ribbon_mode = bool(use_ribbon)
+        if hasattr(self, "action_bar"):
+            self.action_bar.setVisible(not use_ribbon)
+
+    def set_view_mode(self, mode: str) -> None:
+        """Sets active view mode: 'suggestions', 'outliers', or 'boxless'."""
+        if mode not in ("suggestions", "outliers", "boxless"):
+            mode = "suggestions"
+        if getattr(self, "_current_view_mode", "suggestions") == mode:
+            return
+        self._current_view_mode = mode
+        if hasattr(self, "lbl_banner_text") and self.lbl_banner_text is not None:
+            if mode == "outliers":
+                self.lbl_banner_text.setText(
+                    "⚠  Review Potential Outliers: These faces were tagged with a person but have low visual similarity to that person's other photos or closely resemble someone else. Confirm to keep or reject to unassign."
+                )
+            elif mode == "boxless":
+                self.lbl_banner_text.setText(
+                    "🔗  Missing Face Boxes: These photos have person tags that lack bounding boxes, and an unassigned face box was detected in the photo. Confirm to link the box to the person."
+                )
+            else:
+                self.lbl_banner_text.setText(
+                    "ℹ  As you act on these suggestions, the faces will be removed from the list below, and the confirmed faces will be tagged in your photos."
+                )
+        if hasattr(self, "chk_include_no_face") and self.chk_include_no_face is not None:
+            self.chk_include_no_face.setVisible(mode == "outliers")
+        if hasattr(self, "btn_confirm"):
+            if mode == "outliers":
+                self.btn_confirm.setText("✓ Keep (Enter)")
+                self.btn_reject.setText("✕ Remove Tag (Del)")
+            elif mode == "boxless":
+                self.btn_confirm.setText("✓ Link Box (Enter)")
+                self.btn_reject.setText("✕ Skip (Del)")
+            else:
+                self.btn_confirm.setText("✓ Confirm (Enter)")
+                self.btn_reject.setText("✕ Not this person (Del)")
+        self.refresh_suggestions()
+        self._on_selection_changed()
+
     def _update_empty_state_label(self) -> None:
         has_visible_sections = any(not sec.isHidden() for sec in self._sections.values())
         if has_visible_sections:
             self.lbl_empty_state.setVisible(False)
             return
         self.lbl_empty_state.setVisible(True)
-        if self._scan_total > 0 and self._scan_current < self._scan_total:
+        if self._current_view_mode == "outliers":
+            self.lbl_empty_state.setText(
+                "✓ No face tag outliers found!\n\nAll confirmed face tags match their person models closely."
+            )
+        elif self._current_view_mode == "boxless":
+            self.lbl_empty_state.setText(
+                "✓ No missing face boxes found!\n\nAll person tags either have bounding boxes or have no unassigned detected faces."
+            )
+        elif self._scan_total > 0 and self._scan_current < self._scan_total:
             self.lbl_empty_state.setText(
                 f"Finding people in your photos... ({self._scan_current:,} of {self._scan_total:,} photos scanned)\n\n"
                 "Detected face suggestions will appear here automatically as scanning progresses."
@@ -1138,33 +1717,88 @@ class BatchPeopleView(QWidget):
 
     def _do_refresh_suggestions(self) -> None:
         """Internal execution of suggestion reload."""
-        conf_thresh = getattr(self, "_min_confidence_threshold", 0.52)
-        raw_rows = self.repo.get_pending_face_suggestions(limit=5000, min_confidence=conf_thresh, include_unnamed=True)
-        if getattr(self, "_show_tagged_faces", False):
+        mode = getattr(self, "_current_view_mode", "suggestions")
+        if mode == "outliers":
             target_pid = None if (self._filter_person_id is None or self._filter_person_id == -1) else self._filter_person_id
-            confirmed_rows = self.repo.get_confirmed_faces(limit=5000, person_id=target_pid)
-        else:
-            confirmed_rows = []
-
-        all_raw = raw_rows + confirmed_rows
-
-        self._all_records = [
-            FaceCardRecord(
-                face_id=int(r["id"]),
-                media_id=int(r["media_id"]),
-                suggested_person_id=int(r["suggested_person_id"]) if r.get("suggested_person_id") is not None else None,
-                suggested_name=str(r["suggested_name"]) if r.get("suggested_name") else None,
-                confidence=float(r.get("confidence") or 0.0),
-                rect_x=float(r["rect_x"]),
-                rect_y=float(r["rect_y"]),
-                rect_w=float(r["rect_w"]),
-                rect_h=float(r["rect_h"]),
-                filename=str(r["filename"]),
-                folder_path=str(r["folder_path"]),
-                is_confirmed=bool(r.get("is_confirmed", False)),
+            inc_no_face = getattr(self, "chk_include_no_face", None) is not None and self.chk_include_no_face.isChecked()
+            raw_rows = self.repo.get_face_tag_outliers(
+                min_similarity_threshold=0.38,
+                limit=1000,
+                include_no_face_boxes=inc_no_face,
             )
-            for r in all_raw
-        ]
+            if target_pid is not None:
+                raw_rows = [r for r in raw_rows if r.get("person_id") == target_pid]
+            self._all_records = [
+                FaceCardRecord(
+                    face_id=int(r["id"]),
+                    media_id=int(r["media_id"]),
+                    suggested_person_id=int(r.get("person_id")) if r.get("person_id") is not None else None,
+                    suggested_name=str(r.get("person_name") or ""),
+                    confidence=float(r.get("confidence") or 0.0),
+                    rect_x=float(r["rect_x"]),
+                    rect_y=float(r["rect_y"]),
+                    rect_w=float(r["rect_w"]),
+                    rect_h=float(r["rect_h"]),
+                    filename=str(r["filename"]),
+                    folder_path=str(r["folder_path"]),
+                    is_confirmed=True,
+                    outlier_reason=str(r.get("outlier_reason") or "Outlier"),
+                    swap_person_id=int(r["swap_person_id"]) if r.get("swap_person_id") else None,
+                    swap_person_name=str(r["swap_person_name"]) if r.get("swap_person_name") else None,
+                )
+                for r in raw_rows
+            ]
+        elif mode == "boxless":
+            raw_rows = self.repo.get_boxless_people_matches(limit=1000)
+            if self._filter_person_id is not None and self._filter_person_id != -1:
+                raw_rows = [r for r in raw_rows if r.get("person_id") == self._filter_person_id]
+            self._all_records = [
+                FaceCardRecord(
+                    face_id=int(r["face_id"]),
+                    media_id=int(r["media_id"]),
+                    suggested_person_id=int(r["person_id"]),
+                    suggested_name=str(r["person_name"]),
+                    confidence=float(r.get("confidence") or 0.88),
+                    rect_x=float(r["rect_x"]),
+                    rect_y=float(r["rect_y"]),
+                    rect_w=float(r["rect_w"]),
+                    rect_h=float(r["rect_h"]),
+                    filename=str(r["filename"]),
+                    folder_path=str(r["folder_path"]),
+                    is_confirmed=False,
+                    boxless_id=int(r["boxless_id"]),
+                    is_boxless_match=True,
+                )
+                for r in raw_rows
+            ]
+        else:
+            conf_thresh = getattr(self, "_min_confidence_threshold", 0.52)
+            raw_rows = self.repo.get_pending_face_suggestions(limit=5000, min_confidence=conf_thresh, include_unnamed=True)
+            if getattr(self, "_show_tagged_faces", False):
+                target_pid = None if (self._filter_person_id is None or self._filter_person_id == -1) else self._filter_person_id
+                confirmed_rows = self.repo.get_confirmed_faces(limit=5000, person_id=target_pid)
+            else:
+                confirmed_rows = []
+
+            all_raw = raw_rows + confirmed_rows
+
+            self._all_records = [
+                FaceCardRecord(
+                    face_id=int(r["id"]),
+                    media_id=int(r["media_id"]),
+                    suggested_person_id=int(r["suggested_person_id"]) if r.get("suggested_person_id") is not None else None,
+                    suggested_name=str(r["suggested_name"]) if r.get("suggested_name") else None,
+                    confidence=float(r.get("confidence") or 0.0),
+                    rect_x=float(r["rect_x"]),
+                    rect_y=float(r["rect_y"]),
+                    rect_w=float(r["rect_w"]),
+                    rect_h=float(r["rect_h"]),
+                    filename=str(r["filename"]),
+                    folder_path=str(r["folder_path"]),
+                    is_confirmed=bool(r.get("is_confirmed", False)),
+                )
+                for r in all_raw
+            ]
 
         # Group records by suggested_person_id
         grouped: dict[int | None, list[FaceCardRecord]] = {}
@@ -1194,14 +1828,19 @@ class BatchPeopleView(QWidget):
         # Populate Avatar Picker Strip
         picker_data: list[tuple[int | None, str, int, bytes | None]] = []
         for pid, p_name in sorted(person_names.items(), key=lambda x: x[1].lower()):
-            cnt = len([r for r in grouped.get(pid, []) if not r.is_confirmed])
+            if mode == "outliers":
+                cnt = len([r for r in grouped.get(pid, []) if getattr(r, "outlier_reason", None)])
+            elif mode == "boxless":
+                cnt = len([r for r in grouped.get(pid, []) if getattr(r, "is_boxless_match", False)])
+            else:
+                cnt = len([r for r in grouped.get(pid, []) if not r.is_confirmed])
             picker_data.append((pid, p_name, cnt, person_thumbs.get(pid)))
 
         if None in grouped and grouped[None]:
             unnamed_cnt = len([r for r in grouped[None] if not r.is_confirmed])
             picker_data.append((None, "Unnamed", unnamed_cnt, None))
 
-        self.avatar_strip.populate(picker_data)
+        self.avatar_strip.populate(picker_data, mode=mode)
 
         # Clear existing section widgets
         for sec in self._sections.values():
@@ -1234,8 +1873,10 @@ class BatchPeopleView(QWidget):
             sec.not_a_face_requested.connect(self._on_section_not_a_face)
             sec.ignore_faces_requested.connect(self._on_section_ignore_faces)
             sec.tag_as_requested.connect(self._on_section_tag_as)
+            sec.rename_merge_requested.connect(self._on_rename_merge_person)
             sec.open_media_requested.connect(self.open_media_requested.emit)
             sec.preview_requested.connect(self._open_quick_preview)
+            sec.list_view.selectionModel().selectionChanged.connect(lambda *args: self._on_selection_changed())
 
             idx = max(0, self.scroll_layout.count() - 1)
             self.scroll_layout.insertWidget(idx, sec)
@@ -1307,6 +1948,7 @@ class BatchPeopleView(QWidget):
                 sec.tag_as_requested.connect(self._on_section_tag_as)
                 sec.open_media_requested.connect(self.open_media_requested.emit)
                 sec.preview_requested.connect(self._open_quick_preview)
+                sec.list_view.selectionModel().selectionChanged.connect(lambda *args: self._on_selection_changed())
 
                 idx = max(0, self.scroll_layout.count() - 1)
                 self.scroll_layout.insertWidget(idx, sec)
@@ -1326,6 +1968,47 @@ class BatchPeopleView(QWidget):
             else:
                 sec.setVisible(sec.person_id == person_id)
         self._update_empty_state_label()
+
+    def _on_rename_merge_person(self, person_id: int, current_name: str) -> None:
+        """Opens MergePeopleDialog to rename a contact with suggestions or merge into another."""
+        from src.ui.people_directory_view import MergePeopleDialog
+
+        try:
+            all_named = self.repo.get_people_list()
+        except Exception:
+            all_named = []
+
+        candidates = [p for p in all_named if int(p["id"]) != int(person_id)]
+        src_info = next((p for p in all_named if int(p["id"]) == int(person_id)), None)
+        src_thumb = src_info.get("thumbnail_blob") if src_info else None
+        src_cnt = src_info.get("photo_count", 0) if src_info else 0
+
+        dlg = MergePeopleDialog(
+            source_person_name=current_name,
+            candidates=candidates,
+            source_person_id=person_id,
+            source_photo_count=src_cnt,
+            source_thumb_blob=src_thumb,
+            parent=self,
+        )
+        if dlg.exec() == QDialog.Accepted:
+            if dlg.is_rename():
+                target_name = dlg.target_person_name()
+                try:
+                    actual_id = self.repo.rename_person(person_id, target_name)
+                    self.refresh_suggestions()
+                    self.person_renamed.emit(actual_id, target_name)
+                except Exception as exc:
+                    logger.warning("Failed to rename person: %s", exc)
+            else:
+                dst_id = dlg.target_person_id()
+                if dst_id is not None:
+                    try:
+                        self.repo.merge_people(person_id, dst_id)
+                        self.refresh_suggestions()
+                        self.person_renamed.emit(dst_id, "")
+                    except Exception as exc:
+                        logger.warning("Failed to merge people: %s", exc)
 
     # -------------------------------------------------------------------------
     # Batch Actions: Confirm, Reject, Ignore, Tag As
@@ -1355,10 +2038,34 @@ class BatchPeopleView(QWidget):
                     return
             return
 
+        # Check if any cards are outliers (Review Outliers mode)
+        outlier_cards = [r for r in selected if getattr(r, "outlier_reason", None)]
+        for r in outlier_cards:
+            try:
+                self.repo.verify_face_tag(r.face_id)
+            except Exception as exc:
+                logger.warning("Failed to verify outlier tag: %s", exc)
+
+        if outlier_cards:
+            outlier_fids = {r.face_id for r in outlier_cards}
+            self._remove_faces_from_view(outlier_fids)
+            self.refresh_suggestions()
+            return
+
+        # Check if any cards are boxless matches
+        boxless_cards = [r for r in selected if getattr(r, "is_boxless_match", False)]
+        for r in boxless_cards:
+            if r.suggested_person_id:
+                try:
+                    self.repo.assign_face_to_person(r.face_id, r.suggested_person_id)
+                except Exception as exc:
+                    logger.warning("Failed to link boxless face: %s", exc)
+
+        normal_cards = [r for r in selected if not getattr(r, "is_boxless_match", False)]
         # Group by suggested person
         by_person: dict[int, list[int]] = {}
         unnamed_ids: list[int] = []
-        for r in selected:
+        for r in normal_cards:
             if r.suggested_person_id:
                 by_person.setdefault(r.suggested_person_id, []).append(r.face_id)
             else:
@@ -1370,13 +2077,27 @@ class BatchPeopleView(QWidget):
         if unnamed_ids:
             self._prompt_tag_as(unnamed_ids)
 
+        if boxless_cards:
+            boxless_fids = {r.face_id for r in boxless_cards}
+            self._remove_faces_from_view(boxless_fids)
+            self.faces_confirmed.emit(list(boxless_fids), 0)
+            self.refresh_suggestions()
+
     def reject_selected(self) -> None:
-        """Rejects all currently selected face suggestions (Delete / Backspace)."""
+        """Rejects all currently selected face suggestions or unassigns outliers (Delete / Backspace)."""
         selected = self.get_all_selected_records()
         if not selected:
             return
 
-        for r in selected:
+        outlier_cards = [r for r in selected if getattr(r, "outlier_reason", None)]
+        for r in outlier_cards:
+            try:
+                self.repo.unassign_face_person(r.face_id, r.suggested_person_id)
+            except Exception:
+                self.repo.reject_face_suggestion(r.face_id, r.suggested_person_id)
+
+        normal_cards = [r for r in selected if not getattr(r, "outlier_reason", None)]
+        for r in normal_cards:
             pid = r.suggested_person_id
             self.repo.reject_face_suggestion(r.face_id, pid)
 
@@ -1388,6 +2109,54 @@ class BatchPeopleView(QWidget):
             self.refresh_suggestions()
         except Exception as e:
             logger.debug("Fast rematch after reject_selected failed: %s", e)
+
+    def switch_selected(self) -> None:
+        """Switches all currently selected outlier cards to their suggested/swap person."""
+        selected = self.get_all_selected_records()
+        if not selected:
+            return
+
+        switched_fids: set[int] = set()
+        for r in selected:
+            t_pid = getattr(r, "swap_person_id", None)
+            t_name = getattr(r, "swap_person_name", None)
+            if not t_pid and not t_name and getattr(r, "outlier_reason", None):
+                reason = str(r.outlier_reason)
+                if "Looks like" in reason:
+                    inner = reason.replace("Looks like", "").strip()
+                    t_name = inner.split("(")[0].strip()
+
+            dest = t_pid if (t_pid and t_pid > 0) else t_name
+            if dest:
+                try:
+                    new_pid = self.repo.assign_face_to_person(r.face_id, dest)
+                    self.repo.verify_face_tag(r.face_id)
+                    switched_fids.add(r.face_id)
+                    self.faces_confirmed.emit([r.face_id], new_pid)
+                except Exception as exc:
+                    logger.warning("Failed to switch selected face %d to %s: %s", r.face_id, dest, exc)
+
+        if switched_fids:
+            self._remove_faces_from_view(switched_fids)
+            self.refresh_suggestions()
+            self._on_selection_changed()
+
+    def _on_selection_changed(self) -> None:
+        mode = getattr(self, "_current_view_mode", "suggestions")
+        selected = self.get_all_selected_records()
+        swap_name = None
+        person_name = None
+        if selected:
+            for r in selected:
+                s_name = getattr(r, "swap_person_name", None)
+                if not s_name and "Looks like" in getattr(r, "outlier_reason", ""):
+                    inner = r.outlier_reason.replace("Looks like", "").strip()
+                    s_name = inner.split("(")[0].strip()
+                if s_name:
+                    swap_name = s_name
+                    break
+            person_name = selected[0].suggested_name
+        self.card_selection_changed.emit(mode, swap_name, person_name)
 
     def ignore_selected(self) -> None:
         """Sets selected faces to state = -2 (Don't show again, I key)."""
@@ -1408,18 +2177,57 @@ class BatchPeopleView(QWidget):
 
     def _prompt_tag_as(self, face_ids: list[int]) -> None:
         """Prompts the user for a person's name with autocomplete and assigns the faces."""
+        if not face_ids:
+            return
         all_people = self.repo.get_people_list()
         name, pid = TagSomeoneDialog.prompt(all_people, self, title="Tag someone")
         if name and name.strip():
             clean_name = name.strip()
             if pid is None or pid < 0:
                 pid = self.repo.upsert_person(clean_name)
-            self._confirm_and_update_centroid(pid, face_ids)
+
+            # Immediately remove from view so thumbnails disappear with zero lag
+            fids_set = set(face_ids)
+            self._remove_faces_from_view(fids_set)
+
+            is_outliers = (getattr(self, "_current_view_mode", "suggestions") == "outliers")
+            for fid in face_ids:
+                try:
+                    self.repo.assign_face_to_person(fid, pid)
+                    if is_outliers:
+                        self.repo.verify_face_tag(fid)
+                except Exception as exc:
+                    logger.warning("Failed to assign face %d to %s: %s", fid, clean_name, exc)
+
+            self.faces_confirmed.emit(face_ids, pid)
+            self.refresh_suggestions()
+            self._on_selection_changed()
 
     # -------------------------------------------------------------------------
     # Internal Section Action Handlers
     # -------------------------------------------------------------------------
     def _on_section_confirm_all(self, person_id: int, face_ids: list[int]) -> None:
+        if getattr(self, "_current_view_mode", "suggestions") == "outliers":
+            for fid in face_ids:
+                try:
+                    self.repo.verify_face_tag(fid)
+                except Exception as exc:
+                    logger.warning("Failed to verify outlier tag: %s", exc)
+            self._remove_faces_from_view(set(face_ids))
+            self.refresh_suggestions()
+            return
+
+        if getattr(self, "_current_view_mode", "suggestions") == "boxless":
+            for fid in face_ids:
+                try:
+                    self.repo.assign_face_to_person(fid, person_id)
+                except Exception as exc:
+                    logger.warning("Failed to link boxless face: %s", exc)
+            self._remove_faces_from_view(set(face_ids))
+            self.faces_confirmed.emit(face_ids, person_id)
+            self.refresh_suggestions()
+            return
+
         self._confirm_and_update_centroid(person_id, face_ids)
 
     def _on_section_name_cluster(self, name: str, face_ids: list[int]) -> None:
@@ -1430,6 +2238,16 @@ class BatchPeopleView(QWidget):
         self._confirm_and_update_centroid(pid, face_ids)
 
     def _on_section_confirm_faces(self, person_id: int, face_ids: list[int]) -> None:
+        if getattr(self, "_current_view_mode", "suggestions") == "outliers":
+            for fid in face_ids:
+                try:
+                    self.repo.verify_face_tag(fid)
+                except Exception as exc:
+                    logger.warning("Failed to verify outlier tag: %s", exc)
+            self._remove_faces_from_view(set(face_ids))
+            self.refresh_suggestions()
+            self._on_selection_changed()
+            return
         self._confirm_and_update_centroid(person_id, face_ids)
 
     def _on_section_reject_faces(self, person_id: int, face_ids: list[int]) -> None:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 import sqlite3
 import threading
 from collections.abc import Generator
@@ -125,15 +126,15 @@ class DualDatabaseEngine:
 
         with self.write_lock:
             cat_conn = self.catalog_conn()
-            self._migrate_catalog_schema(cat_conn)
             cat_conn.executescript(catalog_ddl)
+            self._migrate_catalog_schema(cat_conn)
             cat_conn.commit()
             self._configure_catalog_conn(cat_conn)
 
             if thumbnails_ddl.strip():
                 thumb_conn = self.thumbnails_conn()
-                self._migrate_thumbnails_schema(thumb_conn)
                 thumb_conn.executescript(thumbnails_ddl)
+                self._migrate_thumbnails_schema(thumb_conn)
                 thumb_conn.commit()
                 self._configure_thumbnails_conn(thumb_conn)
 
@@ -427,6 +428,147 @@ class DualDatabaseEngine:
                 )
         except Exception as exc:
             logger.warning("Error in dedup_media_tags_v2 migration: %s", exc)
+
+        # 10. Geotag location columns (location_country, location_state, location_city) & saved_places
+        try:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS saved_places (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    admin2 TEXT,
+                    admin1 TEXT,
+                    country TEXT,
+                    cc TEXT,
+                    lat REAL NOT NULL,
+                    lon REAL NOT NULL,
+                    formatted_address TEXT NOT NULL,
+                    source TEXT DEFAULT 'nominatim',
+                    created_at REAL
+                );
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_saved_places_name ON saved_places(name COLLATE NOCASE);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_saved_places_formatted ON saved_places(formatted_address COLLATE NOCASE);")
+
+            media_cols = {r[1] for r in cur.execute("PRAGMA table_info(media);").fetchall()}
+            if media_cols:
+                if "location_country" not in media_cols:
+                    cur.execute("ALTER TABLE media ADD COLUMN location_country TEXT;")
+                if "location_state" not in media_cols:
+                    cur.execute("ALTER TABLE media ADD COLUMN location_state TEXT;")
+                if "location_city" not in media_cols:
+                    cur.execute("ALTER TABLE media ADD COLUMN location_city TEXT;")
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_media_places ON media(location_country, location_state, location_city) WHERE location_country IS NOT NULL;"
+                )
+
+            # One-time startup migration: auto-populate location_country, location_state, location_city
+            # for all existing geotagged rows where lat IS NOT NULL
+            cur.execute("CREATE TABLE IF NOT EXISTS schema_flags (name TEXT PRIMARY KEY);")
+            mig_done = cur.execute(
+                "SELECT 1 FROM schema_flags WHERE name = 'places_location_migration_v1';"
+            ).fetchone()
+            if not mig_done and media_cols:
+                from src.core.geotag_resolver import reverse_geocode
+                geotagged_rows = cur.execute(
+                    "SELECT id, lat, lon, location_name FROM media WHERE lat IS NOT NULL AND lon IS NOT NULL;"
+                ).fetchall()
+                for row in geotagged_rows:
+                    m_id = int(row[0])
+                    m_lat = float(row[1])
+                    m_lon = float(row[2])
+                    m_loc = row[3]
+                    rev = reverse_geocode(m_lat, m_lon)
+                    if rev:
+                        rev_city = rev.get("city") or rev.get("name")
+                        rev_state = rev.get("state") or rev.get("admin1")
+                        rev_country = rev.get("country")
+                        rev_fmt = rev.get("formatted_address")
+                        cur.execute(
+                            """
+                            UPDATE media
+                            SET location_country = COALESCE(location_country, ?),
+                                location_state = COALESCE(location_state, ?),
+                                location_city = COALESCE(location_city, ?),
+                                location_name = COALESCE(location_name, ?)
+                            WHERE id = ?;
+                            """,
+                            (rev_country, rev_state, rev_city, rev_fmt, m_id),
+                        )
+                cur.execute(
+                    "INSERT OR IGNORE INTO schema_flags(name) VALUES ('places_location_migration_v1');"
+                )
+        except Exception as exc:
+            logger.warning("Error in places_location_migration_v1: %s", exc)
+
+        # 9b. One-time cleanup of raw administrative codes (ENG -> England, numeric state codes -> NULL)
+        try:
+            cur.execute("CREATE TABLE IF NOT EXISTS schema_flags (name TEXT PRIMARY KEY);")
+            mig2_done = cur.execute(
+                "SELECT 1 FROM schema_flags WHERE name = 'places_location_cleanup_v2';"
+            ).fetchone()
+            if not mig2_done and media_cols:
+                # 1. Normalize UK subdivision codes in media
+                cur.execute(
+                    """
+                    UPDATE media
+                    SET location_state = 'England'
+                    WHERE (location_state = 'ENG' OR location_state = 'eng')
+                      AND (location_country = 'United Kingdom' OR location_country IS NULL OR location_country = 'GB');
+                    """
+                )
+                cur.execute(
+                    """
+                    UPDATE media
+                    SET location_state = 'Wales'
+                    WHERE (location_state = 'WLS' OR location_state = 'wls')
+                      AND (location_country = 'United Kingdom' OR location_country IS NULL OR location_country = 'GB');
+                    """
+                )
+                cur.execute(
+                    """
+                    UPDATE media
+                    SET location_state = 'Scotland'
+                    WHERE (location_state = 'SCT' OR location_state = 'sct')
+                      AND (location_country = 'United Kingdom' OR location_country IS NULL OR location_country = 'GB');
+                    """
+                )
+                cur.execute(
+                    """
+                    UPDATE media
+                    SET location_state = 'Northern Ireland'
+                    WHERE (location_state = 'NIR' OR location_state = 'nir')
+                      AND (location_country = 'United Kingdom' OR location_country IS NULL OR location_country = 'GB');
+                    """
+                )
+                # 2. Normalize location_name if it contains ", ENG,"
+                cur.execute(
+                    """
+                    UPDATE media
+                    SET location_name = REPLACE(location_name, ', ENG,', ', England,')
+                    WHERE location_name LIKE '%, ENG,%';
+                    """
+                )
+                # 3. Clean up numeric-only administrative codes (e.g. '01', '07', '39')
+                cur.execute(
+                    """
+                    UPDATE media
+                    SET location_state = NULL
+                    WHERE location_state GLOB '[0-9]*' AND location_state NOT GLOB '*[^0-9]*';
+                    """
+                )
+                # Clean up numeric codes in location_name (e.g. "Wuppertal, 07, Germany" -> "Wuppertal, Germany")
+                num_loc_rows = cur.execute(
+                    "SELECT id, location_name FROM media WHERE location_name GLOB '*, [0-9]*,*';"
+                ).fetchall()
+                for r_id, r_name in num_loc_rows:
+                    if r_name:
+                        cleaned = re.sub(r',\s*\d+\s*,', ',', str(r_name))
+                        cur.execute("UPDATE media SET location_name = ? WHERE id = ?;", (cleaned, r_id))
+                cur.execute(
+                    "INSERT OR IGNORE INTO schema_flags(name) VALUES ('places_location_cleanup_v2');"
+                )
+        except Exception as exc:
+            logger.warning("Error in places_location_cleanup_v2: %s", exc)
 
         # 10. One-time cleanup of boxless face crops (16x16 corner crops) and unscanned face versions:
         try:

@@ -15,11 +15,15 @@ import re
 import struct
 import threading
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
 import cv2
 from PIL import ExifTags, Image, ImageOps
+
+warnings.filterwarnings("ignore", message=r".*AVIF support not installed.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=r".*Corrupt EXIF data.*", category=UserWarning)
 from PySide6.QtCore import (
     QBuffer,
     QByteArray,
@@ -37,6 +41,8 @@ from PySide6.QtCore import (
 QLoggingCategory.setFilterRules(
     "qt.gui.imageio.jpeg.warning=false\n"
     "qt.gui.imageio.warning=false\n"
+    "qt.imageformats.tiff=false\n"
+    "qt.imageformats.*.warning=false\n"
 )
 from PySide6.QtGui import (
     QColor,
@@ -62,16 +68,19 @@ from src.workers.xmp_sync_worker import (
 import src.workers.xmp_sync_worker as _xmp_sync_module
 import xml.etree.ElementTree as ET
 
+_HAS_HEIF = False
 try:
     import pillow_heif
     pillow_heif.register_heif_opener()
+    _HAS_HEIF = True
 except (ImportError, Exception):
     pass
 
-RAW_EXT_SET = {"raf", "cr2", "cr3", "nef", "arw", "dng", "orf", "rw2"}
-HEIF_EXT_SET = {"heic", "heif"}
-IMAGE_EXT_SET = {"png", "jpg", "jpeg", "gif", "bmp", "ico", "tiff", "tif", "webp"} | RAW_EXT_SET | HEIF_EXT_SET
-VIDEO_EXT_SET = {"mp4", "avi", "mkv", "mov", "wmv", "flv"}
+from src.imaging.image_loader import RAW_EXT_SET
+
+HEIF_EXT_SET = {"heic", "heif"} if _HAS_HEIF else set()
+IMAGE_EXT_SET = {"png", "jpg", "jpeg", "gif", "bmp", "ico", "tiff", "tif", "webp"} | set(RAW_EXT_SET) | HEIF_EXT_SET
+VIDEO_EXT_SET = {"mp4", "avi", "mkv", "mov", "wmv", "flv", "m4v", "webm", "3gp", "ts", "mts", "m2ts"}
 ALL_MEDIA_EXT_SET = IMAGE_EXT_SET | VIDEO_EXT_SET
 IGNORED_DIR_NAMES = {
     ".originalfiles",
@@ -1625,7 +1634,13 @@ class ThumbnailDecodeWorker(QRunnable):
                     try:
                         thumb = raw.extract_thumb()
                         if thumb.format == rawpy.ThumbFormat.JPEG:
-                            qimg = QImage.fromData(thumb.data, "JPEG")
+                            ba = QByteArray(thumb.data)
+                            buf = QBuffer(ba)
+                            buf.open(QIODevice.ReadOnly)
+                            t_reader = QImageReader(buf)
+                            t_reader.setAutoTransform(True)
+                            qimg = t_reader.read()
+                            buf.close()
                         elif thumb.format == rawpy.ThumbFormat.BITMAP:
                             h, w, ch = thumb.data.shape
                             qimg = QImage(thumb.data.data, w, h, ch * w, QImage.Format_RGB888).copy()
@@ -1633,7 +1648,10 @@ class ThumbnailDecodeWorker(QRunnable):
                         qimg = None
 
                     if qimg is None or qimg.isNull():
-                        rgb = raw.postprocess(half_size=True, use_camera_wb=True)
+                        try:
+                            rgb = raw.postprocess(half_size=True, use_camera_wb=True)
+                        except Exception:
+                            rgb = raw.postprocess(half_size=True, use_auto_wb=True)
                         h, w, ch = rgb.shape
                         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
 
@@ -1649,6 +1667,18 @@ class ThumbnailDecodeWorker(QRunnable):
             except Exception:
                 pass
 
+            # Fallback to Windows Imaging Component for camera RAWs (e.g. Nikon Z9 High Efficiency)
+            try:
+                from src.imaging.image_loader import extract_wic_thumbnail
+
+                wic_img = extract_wic_thumbnail(self.file_path, THUMB_MAX_DIM)
+                if wic_img is not None and not wic_img.isNull():
+                    return wic_img
+            except Exception:
+                pass
+
+        # For 16-bit/float TIFFs or CMYK files where QImageReader can clip or miss profiles,
+        # check after QImageReader read and apply QColorSpace -> sRGB conversion cleanly.
         reader = QImageReader(str(self.file_path))
         reader.setAutoTransform(True)
         orig_size = reader.size()
@@ -1664,6 +1694,27 @@ class ThumbnailDecodeWorker(QRunnable):
         disk_trans = reader.transformation()
         del reader
         if not qimg.isNull():
+            # Convert wide-gamut embedded ICC profiles (Display P3, Adobe RGB, ProPhoto) to sRGB
+            try:
+                if qimg.colorSpace().isValid():
+                    from PySide6.QtGui import QColorSpace
+
+                    srgb_cs = QColorSpace(QColorSpace.NamedColorSpace.SRgb)
+                    if qimg.colorSpace() != srgb_cs:
+                        qimg.convertToColorSpace(srgb_cs)
+            except Exception:
+                pass
+            # Normalize 16-bit/float Qt formats cleanly to 8-bit RGB/RGBA for WebP caching
+            if qimg.format() not in (
+                QImage.Format_RGB32,
+                QImage.Format_ARGB32,
+                QImage.Format_ARGB32_Premultiplied,
+                QImage.Format_RGB888,
+                QImage.Format_RGBA8888,
+            ):
+                qimg = qimg.convertToFormat(
+                    QImage.Format_RGBA8888 if qimg.hasAlphaChannel() else QImage.Format_RGB888
+                )
             # Reconcile disk EXIF transformation with self.orientation from catalog.db
             # Note: QImageReader with setAutoTransform(True) already applies disk EXIF orientation!
             disk_orient = 1
@@ -1715,22 +1766,69 @@ class ThumbnailDecodeWorker(QRunnable):
                 )
             return qimg
 
-        # Fallback via Pillow for CMYK or uncommon formats
+        # Fallback via Pillow for CMYK, 16-bit/float TIFF, or uncommon formats
         try:
+            from src.imaging.image_loader import (
+                convert_icc_to_srgb,
+                is_pil_true_animation,
+                normalize_pil_bit_depth,
+            )
+
             with Image.open(self.file_path) as pil_img:
-                pil_img = ImageOps.exif_transpose(pil_img)
-                if pil_img.mode not in ("RGB", "RGBA"):
-                    pil_img = pil_img.convert("RGBA")
+                if is_pil_true_animation(pil_img):
+                    try:
+                        pil_img.seek(0)
+                    except Exception:
+                        pass
+                    pil_img = pil_img.copy()
+                else:
+                    pil_img = ImageOps.exif_transpose(pil_img)
+                pil_img = normalize_pil_bit_depth(pil_img)
+                pil_img = convert_icc_to_srgb(pil_img)
+                has_alpha = (pil_img.mode in ("RGBA", "LA", "PA")) or (
+                    pil_img.mode == "P" and "transparency" in pil_img.info
+                )
+                pil_img = pil_img.convert("RGBA" if has_alpha else "RGB")
                 pil_img.thumbnail((THUMB_MAX_DIM, THUMB_MAX_DIM), Image.Resampling.BILINEAR)
                 raw_bytes = pil_img.tobytes("raw", pil_img.mode)
+                stride = (4 if pil_img.mode == "RGBA" else 3) * pil_img.width
                 fmt = (
                     QImage.Format_RGBA8888
                     if pil_img.mode == "RGBA"
                     else QImage.Format_RGB888
                 )
                 return QImage(
-                    raw_bytes, pil_img.width, pil_img.height, fmt
+                    raw_bytes, pil_img.width, pil_img.height, stride, fmt
                 ).copy()
+        except Exception:
+            pass
+
+        # Fallback for RAW files named with .tiff/.tif or unhandled formats via rawpy and WIC
+        try:
+            import rawpy
+
+            with rawpy.imread(str(self.file_path)) as raw:
+                try:
+                    rgb = raw.postprocess(half_size=True, use_camera_wb=True)
+                except Exception:
+                    rgb = raw.postprocess(half_size=True, use_auto_wb=True)
+                h, w, ch = rgb.shape
+                qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+                if qimg.width() > THUMB_MAX_DIM or qimg.height() > THUMB_MAX_DIM:
+                    qimg = qimg.scaled(
+                        THUMB_MAX_DIM,
+                        THUMB_MAX_DIM,
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
+                return qimg
+        except Exception:
+            pass
+
+        try:
+            from src.imaging.image_loader import extract_wic_thumbnail
+
+            return extract_wic_thumbnail(self.file_path, THUMB_MAX_DIM)
         except Exception:
             return None
 
@@ -1767,15 +1865,17 @@ class ThumbnailDecodeWorker(QRunnable):
 
             # Reconcile frame rotation with orientation metadata if OpenCV did not auto-rotate
             target_orient = int(self.orientation or 1)
-            if target_orient == 1 and not cap.get(cv2.CAP_PROP_ORIENTATION_AUTO):
-                target_orient = _extract_mp4_orientation(self.file_path)
+            if target_orient == 1 or good_frame.shape[1] > good_frame.shape[0]:
+                detected_orient = _extract_mp4_orientation(self.file_path)
+                if detected_orient != 1:
+                    target_orient = detected_orient
 
             if target_orient in (5, 6, 7, 8) and good_frame.shape[1] > good_frame.shape[0]:
-                if target_orient == 6:
+                if target_orient in (5, 6):
                     good_frame = cv2.rotate(good_frame, cv2.ROTATE_90_CLOCKWISE)
-                elif target_orient == 8:
+                elif target_orient in (7, 8):
                     good_frame = cv2.rotate(good_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            elif target_orient == 3 and not cap.get(cv2.CAP_PROP_ORIENTATION_AUTO):
+            elif target_orient == 3:
                 good_frame = cv2.rotate(good_frame, cv2.ROTATE_180)
 
             rgb = cv2.cvtColor(good_frame, cv2.COLOR_BGR2RGB)

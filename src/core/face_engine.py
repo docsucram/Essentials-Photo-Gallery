@@ -23,6 +23,8 @@ from typing import Any
 # Suppress InsightFace / skimage SimilarityTransform.estimate deprecation FutureWarning
 warnings.filterwarnings("ignore", message=r".*`estimate` is deprecated.*", category=FutureWarning)
 warnings.filterwarnings("ignore", category=FutureWarning, module=r"insightface.*")
+warnings.filterwarnings("ignore", message=r".*AVIF support not installed.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=r".*Corrupt EXIF data.*", category=UserWarning)
 
 import cv2
 import numpy as np
@@ -72,6 +74,39 @@ def compute_iou(
     if union <= 0.0:
         return 0.0
     return float(inter / union)
+
+
+def compute_box_overlap(
+    box1: tuple[float, float, float, float],
+    box2: tuple[float, float, float, float],
+) -> float:
+    """
+    Computes a robust matching score between two normalized (x, y, w, h) bounding boxes.
+    Handles discrepancies between wide head/hair boxes (e.g. WLPG MP:RegionInfo) and
+    tight facial landmark boxes (InsightFace/RetinaFace) by considering:
+    1. Intersection-over-Union (IoU)
+    2. Intersection-over-Minimum-Area (IoM: containment ratio)
+    Returns maximum matching ratio in range [0.0, 1.0].
+    """
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+
+    ix1 = max(x1, x2)
+    iy1 = max(y1, y2)
+    ix2 = min(x1 + w1, x2 + w2)
+    iy2 = min(y1 + h1, y2 + h2)
+
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+
+    inter = (ix2 - ix1) * (iy2 - iy1)
+    area1 = max(1e-6, w1 * h1)
+    area2 = max(1e-6, w2 * h2)
+    union = area1 + area2 - inter
+
+    iou = float(inter / union) if union > 0 else 0.0
+    iom = float(inter / min(area1, area2))
+    return max(iou, iom * 0.75)
 
 
 class FaceEngine:
@@ -189,23 +224,46 @@ class FaceEngine:
             p = Path(image)
             if not p.exists():
                 return np.zeros((10, 10, 3), dtype=np.uint8)
-            with Image.open(p) as pil_img:
-                disk_exif = pil_img.getexif()
-                disk_orient = int(disk_exif.get(0x0112) or 1)
-                transposed = ImageOps.exif_transpose(pil_img)
-                # If explicit orientation override was passed
-                target_orient = int(orientation or 1)
-                orient_to_angle = {1: 0, 6: 90, 3: 180, 8: 270}
-                delta_angle = (
-                    orient_to_angle.get(target_orient, 0)
-                    - orient_to_angle.get(disk_orient, 0)
-                ) % 360
-                if delta_angle != 0:
-                    k = {90: -1, 180: 2, 270: 1}[delta_angle]
-                    return np.ascontiguousarray(
-                        np.rot90(np.array(transposed.convert("RGB")), k)
-                    )
-                return np.ascontiguousarray(np.array(transposed.convert("RGB")))
+            from src.imaging.image_loader import (
+                RAW_EXT_SET,
+                decode_pil_to_srgb_and_alpha,
+                decode_raw_to_srgb,
+                is_pil_true_animation,
+            )
+
+            ext = p.suffix.lstrip(".").lower()
+            if ext in RAW_EXT_SET:
+                rgb_raw = decode_raw_to_srgb(p)
+                if rgb_raw is None:
+                    raise OSError(f"Unsupported or unreadable RAW file: {p}")
+                return rgb_raw
+
+            try:
+                with Image.open(p) as pil_img:
+                    disk_orient = 1
+                    if not is_pil_true_animation(pil_img):
+                        try:
+                            disk_exif = pil_img.getexif()
+                            disk_orient = int(disk_exif.get(0x0112) or 1)
+                        except Exception:
+                            disk_orient = 1
+                    rgb_arr, _ = decode_pil_to_srgb_and_alpha(pil_img)
+                    target_orient = int(orientation or 1)
+                    if target_orient != disk_orient and target_orient in (3, 6, 8):
+                        orient_to_angle = {1: 0, 6: 90, 3: 180, 8: 270}
+                        delta_angle = (
+                            orient_to_angle.get(target_orient, 0)
+                            - orient_to_angle.get(disk_orient, 0)
+                        ) % 360
+                        if delta_angle != 0:
+                            k = {90: -1, 180: 2, 270: 1}[delta_angle]
+                            return np.ascontiguousarray(np.rot90(rgb_arr, k))
+                    return rgb_arr
+            except Exception:
+                rgb_raw = decode_raw_to_srgb(p)
+                if rgb_raw is not None:
+                    return rgb_raw
+                raise
 
         if isinstance(image, Image.Image):
             rgb_pil = image.convert("RGB")

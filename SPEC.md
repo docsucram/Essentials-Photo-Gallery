@@ -27,16 +27,19 @@ Build a high-performance, 64-bit Windows desktop replacement for **Windows Live 
 - **Polaroid Card Delegate:** Interactive on-card 5-star rating widget, flag toggle pin, selection checkbox, video duration badge, and hover highlights.
 - **Browser-Style History:** Forward/Back view history navigation (`Alt+Left` / `Alt+Right`, mouse thumb buttons).
 
-### 2.2 Authentic WLPG Aero Ribbon Toolbar
+### 2.2 Authentic WLPG Ribbon Toolbar, Integrated Title Bar & Themes
 - **Tabs:** `Home`, `Edit`, `Find`, `Create`, `View`.
-- **Quick Find Face Carousel:** Horizontal circular avatar carousel with names for instant 1-click person filtering.
+- **Integrated Title Bar & Quick Access Toolbar (QAT):** Title bar merges custom application branding, customizable QAT actions (New folder, Open with, Save, Undo, Redo, Delete, Slideshow, Thumbnails, Map, People, Rotate), and native Windows window control buttons.
+- **Ribbon Context Menu:** Right-click actions for customizing QAT, toggling QAT above/below ribbon, and minimizing ribbon (<kbd>Ctrl</kbd> + <kbd>F1</kbd>).
+- **Quick Find People Carousel & Resizable Dropdown:** Horizontal circular avatar carousel with names for instant 1-click person filtering, paired with an integrated dropdown combining Top People and Other People A-Z, resizable via a bottom-right corner grip.
 - **Effects Preview Gallery:** 8 photographic preview tiles (*None, Classic Chrome, Warm Portrait, Vivid Landscape, Matte Vintage, Fine Art B&W, Cool Cinema, Sepia*) with smooth $0..100\%$ intensity blending.
 - **Descriptive Tag Split Button:** Main button click opens the tag pane / focuses tag entry (`Ctrl+T`); dropdown arrow accesses *Manage tags...* and *Clean up unused tags*.
-- **Full Dark Theme Styling:** Dynamic adaptation across all ribbon groups, carousels, and dialogs.
+- **Three Visual Themes:** Dynamic styling across **Classic Aero (Light)**, **Microsoft Fluent (Windows 11)** with vector icon sets and smooth tab indicator, and **Dark Studio**.
 
 ### 2.3 Left Navigation Dock & Hierarchical Filtering
 - **Folders:** Directory tree with *"Include subfolders"* recursion and drag-and-drop file organization.
 - **Date Taken:** Hierarchical tree (`Year -> Month -> Day`) with live item counts.
+- **Places:** Hierarchical tree (`Country -> State / County -> City / Town`) with live item counts and instant grid filtering.
 - **Descriptive Tags:** Nested tag hierarchy with drag-and-drop reparenting, live count badges, and 3-state Boolean checkboxes (`Checked = Include (AND/OR)`, `Unchecked = Neutral`, `Alt-Check/Right-Click = Exclude (NOT)`).
 - **Tag Hierarchy Manager:** Dedicated dialog with interactive tree, drag-and-drop, and *Clean Up Duplicate Root Tags* tool to merge orphan leaf tags into hierarchical paths with user confirmation and restore tracking.
 - **People & Ratings:** Alphabetic directory of tagged people with face avatars, plus 5-star down to 1-star ratings filters.
@@ -73,6 +76,13 @@ Build a high-performance, 64-bit Windows desktop replacement for **Windows Live 
 - Integrated directly into the **Find** ribbon tab (`Clean up` group).
 - Combines $O(1)$ fast byte hashing for exact duplicates, multi-index 64-bit `pHash`/`dHash` for perceptual near-duplicates, and time-delta clustering with Laplacian sharpness variance scoring for photo bursts.
 - Side-by-side visual comparison workspace with attribute metric matrix, 1-click smart auto-selection rules (*Highest Resolution*, *Largest File Size*, *Oldest Date*, *Most Metadata*, *Best Sharpness*), and safe removal via the Windows Recycle Bin (`send2trash`).
+
+### 2.9 Geotagging, Interactive World Map & Places Engine
+- **Interactive Leaflet Map View:** Embedded world map supporting 4 raster layers (Clean Voyager, OpenStreetMap, Satellite, Terrain) with persistent tile caching and offline vector canvas fallback.
+- **Spatial R*Tree Queries:** Queries SQLite `media_rtree` in $<5\text{ms}$ to cluster and plot markers within the active bounding box; clicking any cluster or pin filters the main gallery.
+- **Offline Gazetteer & Nominatim Caching:** Embedded database of 3,500+ world cities and UK settlements with sub-2ms KD-tree reverse geocoding, plus OpenStreetMap Nominatim resolution with SQLite caching in `saved_places`.
+- **Hierarchical Places Tree:** Collapsible `Country -> State/County -> City` navigation in the Left Navigation Dock with live item counts.
+- **Metadata Synchronization:** Bidirectional GPS coordinates and IPTC/XMP location data sync (`Iptc4xmpExt:LocationCreated`).
 
 ---
 

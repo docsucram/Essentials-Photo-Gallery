@@ -469,6 +469,7 @@ class LeftNavigationDock(QDockWidget):
     files_dropped_on_folder = Signal(int, str, list, bool)
     people_directory_requested = Signal()
     tag_hierarchy_changed = Signal()
+    place_selected = Signal(str, str, str)  # country, state, city
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Navigation", parent)
@@ -498,12 +499,16 @@ class LeftNavigationDock(QDockWidget):
         self._edited_only: bool = False
         self._media_type: Literal["all", "image", "video", "raw"] = "all"
         self._favourite_paths: list[str] = []
+        self._location_country: str | None = None
+        self._location_state: str | None = None
+        self._location_city: str | None = None
 
         # Section visibility state (Options dialog)
         self._show_dates: bool = True
         self._show_tags: bool = True
         self._show_people: bool = True
         self._show_ratings: bool = True
+        self._show_places: bool = True
 
         # Fast lookup maps for tree items
         self._folder_items: dict[int, QTreeWidgetItem] = {}
@@ -708,6 +713,14 @@ class LeftNavigationDock(QDockWidget):
             self.root_ratings.setForeground(0, section_color)
             self.root_ratings.setExpanded(False)
 
+            # 6. Places root
+            self.root_places = QTreeWidgetItem(self.tree, ["Places"])
+            self.root_places.setData(0, _NODE_TYPE_ROLE, "section_places")
+            self.root_places.setIcon(0, make_wlpg_icon("geotag", 16))
+            self.root_places.setFont(0, sec_font)
+            self.root_places.setForeground(0, section_color)
+            self.root_places.setExpanded(False)
+
             # Apply user-configured navigation section visibilities
             if hasattr(self, "_show_dates"):
                 self.root_dates.setHidden(not self._show_dates)
@@ -717,6 +730,8 @@ class LeftNavigationDock(QDockWidget):
                 self.root_tags.setHidden(not self._show_tags)
             if hasattr(self, "_show_ratings"):
                 self.root_ratings.setHidden(not self._show_ratings)
+            if hasattr(self, "_show_places"):
+                self.root_places.setHidden(not self._show_places)
         finally:
             self.tree.blockSignals(False)
 
@@ -939,6 +954,66 @@ class LeftNavigationDock(QDockWidget):
                 self.root_ratings.addChild(r_item)
                 self._rating_items[r_val] = r_item
 
+            # 6. Populate Places hierarchy (Country -> State/Region -> City)
+            places_icon = make_wlpg_icon("geotag", 16)
+            if hasattr(repo, "get_places_hierarchy"):
+                places_data = repo.get_places_hierarchy()
+                countries: dict[str, dict[str, dict[str, int]]] = {}
+                for p in places_data:
+                    c = (p.get("country") or "").strip()
+                    s = (p.get("state") or "").strip()
+                    city = (p.get("city") or "").strip()
+                    cnt = int(p.get("count", 0))
+
+                    # Normalize UK subdivision codes (ENG -> England)
+                    if c in ("United Kingdom", "GB", "UK"):
+                        if s.upper() in ("ENG", "ENGLAND"):
+                            s = "England"
+                        elif s.upper() in ("WLS", "WALES"):
+                            s = "Wales"
+                        elif s.upper() in ("SCT", "SCOTLAND"):
+                            s = "Scotland"
+                        elif s.upper() in ("NIR", "NORTHERN IRELAND"):
+                            s = "Northern Ireland"
+
+                    # If state is numeric code (e.g. '01', '07', '39'), treat as empty so city attaches directly to country
+                    if s.isdigit():
+                        s = ""
+
+                    countries.setdefault(c, {}).setdefault(s, {})[city] = (
+                        countries.setdefault(c, {}).setdefault(s, {}).get(city, 0) + cnt
+                    )
+
+                for c_name in sorted(countries.keys()):
+                    states = countries[c_name]
+                    c_total = sum(cnt for s_cities in states.values() for cnt in s_cities.values())
+                    c_item = QTreeWidgetItem([f"{c_name} ({c_total})"])
+                    c_item.setData(0, _NODE_TYPE_ROLE, "place")
+                    c_item.setData(0, _NODE_PAYLOAD_ROLE, (c_name, "", ""))
+                    c_item.setIcon(0, places_icon)
+                    self.root_places.addChild(c_item)
+
+                    for s_name in sorted(states.keys()):
+                        cities = states[s_name]
+                        if s_name:
+                            s_total = sum(cities.values())
+                            s_item = QTreeWidgetItem([f"{s_name} ({s_total})"])
+                            s_item.setData(0, _NODE_TYPE_ROLE, "place")
+                            s_item.setData(0, _NODE_PAYLOAD_ROLE, (c_name, s_name, ""))
+                            s_item.setIcon(0, places_icon)
+                            c_item.addChild(s_item)
+                            parent_for_city = s_item
+                        else:
+                            parent_for_city = c_item
+
+                        for city_name, city_cnt in sorted(cities.items()):
+                            if city_name:
+                                ct_item = QTreeWidgetItem([f"{city_name} ({city_cnt})"])
+                                ct_item.setData(0, _NODE_TYPE_ROLE, "place")
+                                ct_item.setData(0, _NODE_PAYLOAD_ROLE, (c_name, s_name, city_name))
+                                ct_item.setIcon(0, places_icon)
+                                parent_for_city.addChild(ct_item)
+
             self.root_folders.setExpanded(True)
             self.root_tags.setExpanded(True)
             self.root_people.setExpanded(was_people_expanded)
@@ -1147,6 +1222,13 @@ class LeftNavigationDock(QDockWidget):
             return
         if ntype == "section_ratings":
             self.select_ratings([])
+            return
+        if ntype == "section_places":
+            item.setExpanded(not item.isExpanded())
+            return
+        if ntype == "place":
+            country, state, city = payload if isinstance(payload, tuple) else (str(payload), "", "")
+            self.place_selected.emit(country, state, city)
             return
         if ntype == "folder":
             self._folder_id = int(payload)

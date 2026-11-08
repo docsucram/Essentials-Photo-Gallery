@@ -375,8 +375,8 @@ class AppSettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Photo Gallery Options")
         self.engine = engine
-        self.resize(580, 540)
-        self.setMinimumSize(540, 500)
+        self.resize(600, 550)
+        self.setMinimumSize(560, 500)
 
         self.compact_requested: bool = False
         self.prune_backups_requested: bool = False
@@ -417,20 +417,6 @@ class AppSettingsDialog(QDialog):
         v_gen = QVBoxLayout(tab_general)
         v_gen.setContentsMargins(14, 14, 14, 14)
         v_gen.setSpacing(12)
-
-        # Tooltips group
-        lbl_tooltips = QLabel("Tooltips", tab_general)
-        lbl_tooltips.setFont(QFont("Segoe UI", 9, QFont.Bold))
-        v_gen.addWidget(lbl_tooltips)
-
-        self.chk_tooltip_previews = QCheckBox("Show photo and video previews in tooltips", tab_general)
-        self.chk_tooltip_previews.setChecked(tooltip_previews)
-        v_gen.addWidget(self.chk_tooltip_previews)
-
-        sep1 = QFrame(tab_general)
-        sep1.setFrameShape(QFrame.HLine)
-        sep1.setFrameShadow(QFrame.Sunken)
-        v_gen.addWidget(sep1)
 
         # Face detection and recognition
         lbl_face = QLabel("Face detection and recognition", tab_general)
@@ -487,8 +473,8 @@ class AppSettingsDialog(QDialog):
         h_theme = QHBoxLayout()
         lbl_theme = QLabel("Visual theme:", tab_general)
         self.cmb_theme = QComboBox(tab_general)
-        self.cmb_theme.addItem("WLPG Classic Aero (Light)", "wlpg_aero")
-        self.cmb_theme.addItem("Modern Neutral", "modern")
+        self.cmb_theme.addItem("Classic Aero", "wlpg_aero")
+        self.cmb_theme.addItem("Modern Fluent", "modern")
         self.cmb_theme.addItem("Dark Studio", "dark")
         t_idx = self.cmb_theme.findData(current_theme)
         if t_idx >= 0:
@@ -510,6 +496,16 @@ class AppSettingsDialog(QDialog):
         h_icon_theme.addWidget(lbl_icon_theme)
         h_icon_theme.addWidget(self.cmb_icon_theme, 1)
         v_gen.addLayout(h_icon_theme)
+
+        def _on_theme_selection_changed(idx: int) -> None:
+            theme_val = str(self.cmb_theme.itemData(idx) or "")
+            target_icon = "fluent" if theme_val == "modern" else "wlpg_aero" if theme_val == "wlpg_aero" else None
+            if target_icon:
+                match_idx = self.cmb_icon_theme.findData(target_icon)
+                if match_idx >= 0:
+                    self.cmb_icon_theme.setCurrentIndex(match_idx)
+
+        self.cmb_theme.currentIndexChanged.connect(_on_theme_selection_changed)
 
         sep4 = QFrame(tab_general)
         sep4.setFrameShape(QFrame.HLine)
@@ -555,6 +551,7 @@ class AppSettingsDialog(QDialog):
         self.face_tab = FaceRecognitionOptionsTab(engine=self.engine, parent=self)
         self.face_tab.purge_rescan_requested.connect(self._on_face_purge_rescan)
         self.face_tab.fast_rematch_requested.connect(self._on_face_fast_rematch)
+        self.face_tab.heal_faces_requested.connect(self._on_face_heal_requested)
         self.tab_widget.addTab(self.face_tab, "Face Recognition")
 
         # -------------------------------------------------------------
@@ -939,12 +936,6 @@ class AppSettingsDialog(QDialog):
         self.btn_backup_catalog.clicked.connect(self._on_backup_clicked)
         maint_layout.addWidget(self.btn_backup_catalog)
 
-        self.btn_heal_faces = QPushButton(
-            "Re-parse & Heal Face Regions from Files", maint_frame
-        )
-        self.btn_heal_faces.clicked.connect(self._on_heal_faces_clicked)
-        maint_layout.addWidget(self.btn_heal_faces)
-
         self.lbl_maint_status = QLabel("", maint_frame)
         self.lbl_maint_status.setStyleSheet("color: #3B82F6; font-weight: 600;")
         maint_layout.addWidget(self.lbl_maint_status)
@@ -1124,6 +1115,9 @@ class AppSettingsDialog(QDialog):
         self.heal_faces_requested = True
         self.lbl_maint_status.setText("✓ Re-parse & heal face regions queued on close.")
 
+    def _on_face_heal_requested(self) -> None:
+        self.heal_faces_requested = True
+
     def pause_write_back_enabled(self) -> bool:
         return not self.chk_write_to_files.isChecked()
 
@@ -1152,7 +1146,7 @@ class AppSettingsDialog(QDialog):
         return self.chk_show_ratings.isChecked()
 
     def tooltip_previews_enabled(self) -> bool:
-        return self.chk_tooltip_previews.isChecked()
+        return True
 
     def find_people_enabled(self) -> bool:
         return self.chk_find_people.isChecked()

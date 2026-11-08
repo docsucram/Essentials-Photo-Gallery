@@ -24,8 +24,8 @@ Standalone 64-bit Windows installers (`EssentialsPhotoGallery_Setup_x64.exe`) ar
 
 ## Highlights & Features
 
-- **Classic WLPG Ribbon Look & Feel (with Themes)**
-  Recreates the familiar *Home*, *Edit*, *Find*, *Create*, and *View* ribbon layout, left navigation tree, and right-hand tag/information pane—now with **Light and Dark theme** support.
+- **Classic WLPG Ribbon Look & Feel (with Modern Themes & Integrated QAT)**
+  Recreates the authentic ribbon layout (*Home*, *Edit*, *Find*, *Create*, *View*), integrated title bar with Quick Access Toolbar (QAT), left navigation tree, and right-hand tag/information pane. Supports three distinct themes: **Classic Aero (Light)**, modern **Microsoft Fluent (Windows 11)** with vector icons and dynamic tab indicator, and **Dark Studio**.
 
 - **WLPG Hierarchical Tagging**
   Full support for nested descriptive tags (`Place/England/London`, `Subject/Occasions/...`), drag-and-drop tag tree management, star ratings, flags, captions, and fast multi-tag filtering—compatible with existing WLPG XMP/EXIF tags.
@@ -34,7 +34,7 @@ Standalone 64-bit Windows installers (`EssentialsPhotoGallery_Setup_x64.exe`) ar
   WLPG was a 32-bit app that would frequently hit out-of-memory errors on large collections or high-megapixel cameras. Essentials Photo Gallery is native 64-bit with virtualised grid scrolling and separate SQLite catalog and thumbnail databases, designed to stay snappy even with **500,000+ photos and videos**.
 
 - **Updated Facial Recognition & People View**
-  Replaces WLPG's ageing face detector with local **SCRFD + ArcFace (ONNX)** models for much faster, more accurate face detection and suggestions. Includes a dedicated People view, quick-find carousel, face crop view, and batch confirmation tools—all running 100% locally offline.
+  Replaces WLPG's ageing face detector with local **SCRFD + ArcFace (ONNX)** models for much faster, more accurate face detection and suggestions. Includes a dedicated People view, expandable Quick Find People dropdown with corner resizing, face crop view, and batch confirmation tools—all running 100% locally offline.
 
 - **Updated Creation Tools**
   Brings back WLPG's multi-photo creation workflows without needing old external plugins:
@@ -42,17 +42,17 @@ Standalone 64-bit Windows installers (`EssentialsPhotoGallery_Setup_x64.exe`) ar
   - **Photo Fuse** (combine the best smiles/expressions from a group burst into one photo)
   - **Panoramic Stitching** (automatic panorama stitcher inspired by Microsoft ICE)
 
-- **New — Duplicate & Burst Photo Finder**
+- **Interactive World Map & Hierarchical Places Tree**
+  Full interactive Leaflet world map with persistent disk tile caching (Clean Voyager, Street, Satellite, Terrain) and offline vector canvas fallback. Features sub-5ms spatial clustering backed by SQLite R*Tree (`media_rtree`), an offline gazetteer with 3,500+ world cities and UK settlements, Nominatim reverse geocoding with local SQLite caching, and a collapsible **Places** hierarchy (`Country -> State / County -> City / Town`) in the navigation dock with live item counts.
+
+- **Duplicate & Burst Photo Finder**
   Finds exact file duplicates, resized/re-saved copies (via perceptual hashing), and rapid burst sequences, with side-by-side sharpness comparison to help clean up clutter safely via the Recycle Bin.
 
-- **New — Markup Tools**
+- **Markup & Privacy Redaction Tools**
   Built-in annotation toolbar in single-image view for drawing arrows, boxes, circles, text callouts, zoom magnifier loupes, and blur/pixelate redaction before saving or copying.
 
-- **New — Portrait Blur & Relighting Tools**
+- **Portrait Blur & Relighting Tools**
   Alongside classic WLPG quick edits (crop, straighten, red-eye, spot fix/retouch, exposure, colour, and effects), adds depth-based background portrait blur, subject relighting, and colour pop.
-
-- **New — Map View *(WIP)***
-  View and pin geotagged photos on an interactive world map. *(Currently a work in progress.)*
 
 ---
 

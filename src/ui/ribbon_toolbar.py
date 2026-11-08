@@ -23,17 +23,22 @@ from typing import Any, Literal
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
+    QCloseEvent,
     QColor,
+    QContextMenuEvent,
     QCursor,
     QFont,
     QFontMetrics,
     QIcon,
     QImage,
+    QKeyEvent,
     QLinearGradient,
+    QMouseEvent,
+    QPaintEvent,
     QPainter,
     QPainterPath,
     QPen,
@@ -41,6 +46,7 @@ from PySide6.QtGui import (
     QPolygonF,
     QRadialGradient,
     QResizeEvent,
+    QShowEvent,
 )
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -61,8 +67,10 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QStyle,
+    QStyleOptionButton,
     QStyleOptionToolButton,
     QStylePainter,
+    QTabBar,
     QTabWidget,
     QToolButton,
     QVBoxLayout,
@@ -91,7 +99,24 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
     pix.fill(Qt.transparent)
     p = QPainter(pix)
     p.setRenderHint(QPainter.Antialiasing, True)
+    p.setRenderHint(QPainter.SmoothPixmapTransform, True)
     s = float(size)
+
+    if kind in ("flower", "app_logo", "about", "photo_gallery", "about_photo_gallery"):
+        for res_name in ("essentials_photo_gallery.png", "photogallery_live.png", "essentials_photo_gallery.ico"):
+            p_ico = Path(__file__).resolve().parent.parent.parent / "resources" / "icons" / res_name
+            if p_ico.exists():
+                pix_ico = QPixmap(str(p_ico))
+                if not pix_ico.isNull():
+                    scaled = pix_ico.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    x_off = max(0, (size - scaled.width()) // 2)
+                    y_off = max(0, (size - scaled.height()) // 2)
+                    p.drawPixmap(x_off, y_off, scaled)
+                    break
+        p.end()
+        icon = QIcon(pix)
+        _ICON_CACHE[key] = icon
+        return icon
 
     if kind in ("folder", "folder_add", "folder_open"):
         grad = QLinearGradient(0, s * 0.2, 0, s * 0.88)
@@ -373,7 +398,7 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawRoundedRect(QRectF(s * 0.42, s * 0.24, s * 0.46, s * 0.22), 1.5, 1.5)
         p.drawRoundedRect(QRectF(s * 0.42, s * 0.56, s * 0.46, s * 0.22), 1.5, 1.5)
 
-    elif kind in ("person", "people_tag", "batch_people", "person_question", "person_none"):
+    elif kind in ("person", "people", "people_tag", "batch_people", "person_question", "person_none", "tag_as"):
         if kind == "batch_people":
             p.setPen(QPen(QColor("#2A5E8A"), 1.0))
             p.setBrush(QColor("#82B8E6"))
@@ -415,6 +440,19 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
             p.drawEllipse(QPointF(s * 0.78, s * 0.72), s * 0.18, s * 0.18)
             p.setPen(QPen(QColor("#C9302C"), 1.8, Qt.SolidLine, Qt.RoundCap))
             p.drawLine(QPointF(s * 0.68, s * 0.72), QPointF(s * 0.88, s * 0.72))
+        elif kind == "tag_as":
+            p.setPen(QPen(QColor("#1E5288"), 1.0))
+            p.setBrush(QColor("#38BDF8"))
+            tag_p = QPolygonF([
+                QPointF(s * 0.62, s * 0.60),
+                QPointF(s * 0.86, s * 0.60),
+                QPointF(s * 0.86, s * 0.80),
+                QPointF(s * 0.74, s * 0.92),
+                QPointF(s * 0.62, s * 0.80),
+            ])
+            p.drawPolygon(tag_p)
+            p.setBrush(QColor("#FFFFFF"))
+            p.drawEllipse(QPointF(s * 0.74, s * 0.68), 1.5, 1.5)
 
     elif kind == "caption":
         # Landscape photo card with note/callout matching WLPG
@@ -515,7 +553,7 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         if kind == "zoom_in":
             p.drawLine(QPointF(s * 0.44, s * 0.28), QPointF(s * 0.44, s * 0.60))
 
-    elif kind == "fit_window":
+    elif kind in ("fit_window", "fit_photos"):
         p.setPen(QPen(QColor("#2B78C5"), 1.6, Qt.SolidLine, Qt.RoundCap))
         p.setBrush(Qt.NoBrush)
         p.drawLine(QPointF(s * 0.18, s * 0.36), QPointF(s * 0.18, s * 0.20))
@@ -629,10 +667,43 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
             )
         p.drawPolygon(tri)
 
-    elif kind == "delete":
-        p.setPen(QPen(QColor("#C9302C"), 2.4, Qt.SolidLine, Qt.RoundCap))
+    elif kind in ("delete", "cross", "reject", "not_this_person", "close", "cancel"):
+        p.setPen(QPen(QColor("#C9302C"), max(2.4, s * 0.12), Qt.SolidLine, Qt.RoundCap))
         p.drawLine(QPointF(s * 0.24, s * 0.24), QPointF(s * 0.76, s * 0.76))
         p.drawLine(QPointF(s * 0.76, s * 0.24), QPointF(s * 0.24, s * 0.76))
+
+    elif kind in ("check", "confirm", "checkmark"):
+        # Glossy Aero vibrant green checkmark
+        path = QPainterPath()
+        path.moveTo(s * 0.16, s * 0.52)
+        path.lineTo(s * 0.38, s * 0.76)
+        path.lineTo(s * 0.84, s * 0.22)
+        p.setPen(QPen(QColor("#104B1F"), max(1.4, s * 0.08), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.drawPath(path)
+        grad = QLinearGradient(0, s * 0.2, 0, s * 0.8)
+        grad.setColorAt(0.0, QColor("#54D26E"))
+        grad.setColorAt(0.5, QColor("#28A745"))
+        grad.setColorAt(1.0, QColor("#19692C"))
+        p.setPen(QPen(grad, max(2.4, s * 0.16), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.drawPath(path)
+
+    elif kind in ("warning", "alert", "outlier"):
+        # Amber / golden warning triangle with '!'
+        p.setPen(QPen(QColor("#B45309"), 1.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        tri_grad = QLinearGradient(0, s * 0.14, 0, s * 0.88)
+        tri_grad.setColorAt(0.0, QColor("#FDE047"))
+        tri_grad.setColorAt(0.5, QColor("#F59E0B"))
+        tri_grad.setColorAt(1.0, QColor("#D97706"))
+        p.setBrush(tri_grad)
+        tri = QPolygonF([
+            QPointF(s * 0.50, s * 0.14),
+            QPointF(s * 0.88, s * 0.86),
+            QPointF(s * 0.12, s * 0.86),
+        ])
+        p.drawPolygon(tri)
+        p.setPen(QPen(QColor("#78350F"), max(1.5, s * 0.10), Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.50, s * 0.38), QPointF(s * 0.50, s * 0.62))
+        p.drawPoint(QPointF(s * 0.50, s * 0.74))
 
     elif kind in ("pin", "pin_active"):
         p.setPen(QPen(QColor("#24548A") if kind == "pin_active" else QColor("#5A738E"), 1.2))
@@ -1238,12 +1309,27 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawLine(QPointF(s * 0.12, s * 0.26), QPointF(s * 0.74, s * 0.26))
         p.drawLine(QPointF(s * 0.74, s * 0.26), QPointF(s * 0.74, s * 0.88))
 
-    elif kind == "options":
-        p.setPen(QPen(QColor("#486581"), 1.6))
-        p.setBrush(QColor("#AFC6DD"))
-        p.drawEllipse(QPointF(s * 0.5, s * 0.5), s * 0.30, s * 0.30)
-        p.setBrush(QColor("#F5F8FC"))
-        p.drawEllipse(QPointF(s * 0.5, s * 0.5), s * 0.13, s * 0.13)
+    elif kind in ("options", "settings", "gear"):
+        p.setPen(QPen(QColor("#244260"), 1.2))
+        p.setBrush(QColor("#627D98"))
+        center = QPointF(s * 0.5, s * 0.5)
+        outer_r = s * 0.38
+        inner_r = s * 0.28
+        hole_r = s * 0.14
+        num_teeth = 8
+        cog_path = QPainterPath()
+        for i in range(num_teeth * 2):
+            angle = i * (math.pi / num_teeth)
+            r = outer_r if (i % 2 == 0) else inner_r
+            pt = QPointF(center.x() + r * math.cos(angle), center.y() + r * math.sin(angle))
+            if i == 0:
+                cog_path.moveTo(pt)
+            else:
+                cog_path.lineTo(pt)
+        cog_path.closeSubpath()
+        hole = QPainterPath()
+        hole.addEllipse(center, hole_r, hole_r)
+        p.drawPath(cog_path.subtracted(hole))
 
     elif kind in ("nav_back", "nav_forward"):
         grad = QLinearGradient(0, 0, 0, s)
@@ -1790,24 +1876,33 @@ def make_symbol_icon(kind: str, size: int = 14) -> QIcon:
 
 
 def make_person_avatar_pixmap(
-    name: str, blob: bytes | None, size: int = 38, circular: bool = False
+    name: str, blob: bytes | None, size: int = 38, circular: bool = False, framed: bool = False
 ) -> QPixmap:
-    """Renders a framed WLPG face avatar pixmap from JPEG/PNG bytes (or a silhouette fallback)."""
+    """Renders a face avatar pixmap from JPEG/PNG bytes (or a silhouette fallback)."""
     canvas = QPixmap(size, size)
     canvas.fill(Qt.transparent)
     painter = QPainter(canvas)
     painter.setRenderHint(QPainter.Antialiasing, True)
     painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
-    frame_rect = QRectF(1.0, 1.0, size - 2.0, size - 2.0)
-    painter.setPen(QPen(QColor("#9EB6CE"), 1.0))
-    painter.setBrush(QColor("#FFFFFF"))
-    painter.drawRoundedRect(frame_rect, 3.0, 3.0)
+    if framed:
+        frame_rect = QRectF(1.0, 1.0, size - 2.0, size - 2.0)
+        painter.setPen(QPen(QColor("#9EB6CE"), 1.0))
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.drawRoundedRect(frame_rect, 3.0, 3.0)
 
-    inner_rect = QRectF(2.5, 2.5, size - 5.0, size - 5.0)
-    clip = QPainterPath()
-    clip.addRoundedRect(inner_rect, 2.0, 2.0)
-    painter.setClipPath(clip)
+        inner_rect = QRectF(2.5, 2.5, size - 5.0, size - 5.0)
+        clip = QPainterPath()
+        clip.addRoundedRect(inner_rect, 2.0, 2.0)
+        painter.setClipPath(clip)
+    else:
+        inner_rect = QRectF(0.0, 0.0, float(size), float(size))
+        clip = QPainterPath()
+        if circular:
+            clip.addEllipse(inner_rect)
+        else:
+            clip.addRoundedRect(inner_rect, 2.0, 2.0)
+        painter.setClipPath(clip)
 
     drew_img = False
     if blob:
@@ -2114,9 +2209,9 @@ class _RibbonLargeToolButton(QToolButton):
                 self.icon().paint(painter, QRect(ix, iy, sz.width(), sz.height()), Qt.AlignmentFlag.AlignCenter, mode, state)
             return
 
-        # 1. Paint Icon tightly at top (WLPG puts large 32x32 icons near top, y=5)
+        # 1. Paint Icon tightly at top (WLPG puts large 32x32 icons near top, y=4)
         ix = (r.width() - sz.width()) // 2
-        iy = 5
+        iy = 4
         if not self.icon().isNull():
             mode = QIcon.Mode.Normal if self.isEnabled() else QIcon.Mode.Disabled
             if self.underMouse() and self.isEnabled():
@@ -2140,16 +2235,25 @@ class _RibbonLargeToolButton(QToolButton):
             or getattr(self, "_has_menu", False)
         )
 
-        ty = iy + sz.height() + 2  # y = 39
         fm = painter.fontMetrics()
         lines = self.text().split("\n")
 
-        if len(lines) == 1:
+        if has_menu and len(lines) == 1:
+            # WLPG menu button: icon at y=4, text slightly higher (y=36)
+            # giving comfortable, even spacing between the 32x32 icon and the dropdown arrow below
+            ty = 36
             line_h = fm.height()
+            text_rect = QRect(1, ty, r.width() - 2, line_h + 2)
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, self.text())
+            arrow_y = 54
+        elif len(lines) == 1:
+            line_h = fm.height()
+            ty = iy + sz.height() + 3
             text_rect = QRect(1, ty, r.width() - 2, line_h + 2)
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, self.text())
             arrow_y = ty + line_h + 1
         else:
+            ty = iy + sz.height() + 1
             total_th = fm.lineSpacing() * len(lines)
             text_rect = QRect(1, ty, r.width() - 2, total_th + 4)
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap, self.text())
@@ -3225,7 +3329,7 @@ class _FaceCarouselWidget(QWidget):
             btn.setStyleSheet(
                 """
                 QToolButton {
-                    border: 1px solid transparent;
+                    border: 1px solid #C8D7E6;
                     border-radius: 2px;
                     background: transparent;
                     padding: 0px;
@@ -3260,33 +3364,462 @@ class _FaceCarouselWidget(QWidget):
             self.person_clicked.emit(person_id)
 
     def _show_people_dropdown(self) -> None:
-        menu = QMenu(self)
-        menu.setObjectName("WLPGPeopleDropdownMenu")
-        menu.setStyleSheet(
+        if hasattr(self, "_active_popup") and self._active_popup is not None:
+            try:
+                if self._active_popup.isVisible():
+                    self._active_popup.close()
+                    self._active_popup = None
+                    return
+            except RuntimeError:
+                self._active_popup = None
+
+        popup = _WLPGPeopleDropdownPopup(self, self._all_people_list)
+        self._active_popup = popup
+        popup.person_selected.connect(self.person_clicked.emit)
+        popup.boolean_mode_selected.connect(self.boolean_mode_selected.emit)
+        popup.special_filter_selected.connect(self.special_filter_selected.emit)
+
+        last_sz = getattr(self, "_last_dropdown_size", None)
+        target_w = max(580, last_sz.width() if last_sz else 580)
+        target_h = max(260, last_sz.height() if last_sz else 380)
+
+        # In WLPG, the dropdown integrates Top people by directly overlaying the carousel box
+        pos = self.container.mapToGlobal(QPoint(0, 0))
+        screen = self.screen() or (QApplication.primaryScreen() if QApplication.instance() else None)
+        if screen:
+            avail = screen.availableGeometry()
+            if pos.x() + target_w > avail.right():
+                pos.setX(max(avail.left() + 10, avail.right() - target_w - 10))
+            if pos.y() + target_h > avail.bottom():
+                pos.setY(max(avail.top() + 10, avail.bottom() - target_h - 10))
+
+        popup.move(pos)
+        popup.resize(target_w, target_h)
+        popup.show()
+
+
+class _CornerResizeGrip(QWidget):
+    """Bottom-right diagonal resize gripper matching classic Windows/Aero."""
+
+    def __init__(self, target_window: QWidget, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.target_window = target_window
+        self.setFixedSize(14, 14)
+        self.setCursor(Qt.SizeFDiagCursor)
+        self._dragging = False
+        self._drag_start_pos = QPoint()
+        self._drag_start_size: QSize | None = None
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, False)
+        dot_color = QColor("#7DA2CE")
+        highlight = QColor("#FFFFFF")
+        dots = [
+            (10, 2),
+            (6, 6), (10, 6),
+            (2, 10), (6, 10), (10, 10)
+        ]
+        for x, y in dots:
+            p.fillRect(x + 1, y + 1, 2, 2, highlight)
+            p.fillRect(x, y, 2, 2, dot_color)
+        p.end()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton:
+            self._dragging = True
+            self._drag_start_pos = event.globalPosition().toPoint()
+            self._drag_start_size = self.target_window.size()
+            self.grabMouse()
+            event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._dragging and self._drag_start_size is not None:
+            delta = event.globalPosition().toPoint() - self._drag_start_pos
+            min_w = self.target_window.minimumWidth()
+            min_h = self.target_window.minimumHeight()
+            new_w = max(min_w, self._drag_start_size.width() + delta.x())
+            new_h = max(min_h, self._drag_start_size.height() + delta.y())
+            self.target_window.resize(new_w, new_h)
+            event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton:
+            self._dragging = False
+            self.releaseMouse()
+            event.accept()
+
+
+class _WLPGPeopleDropdownPopup(QWidget):
+    """
+    Authentic Windows Live Photo Gallery People Quick Find popup matching media_1794133844741_7f43b71b.jpg:
+    - Same avatar size (54x54 button with 50x50 avatar) as in-ribbon strip
+    - Minimum 10 columns (580px) wide, maintaining full width even when main window shrinks
+    - Resizable via bottom-right corner grip, reflowing the grid dynamically
+    - Integrates Top people at the top and Other people A - Z in a single scrollable area
+    - Bottom frame with boolean & special filter options and resize grip
+    """
+
+    person_selected = Signal(int)
+    boolean_mode_selected = Signal(str)
+    special_filter_selected = Signal(str)
+
+    def __init__(
+        self,
+        parent_carousel: "_FaceCarouselWidget",
+        people: Sequence[dict[str, Any]],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.parent_carousel = parent_carousel
+        self.setObjectName("WLPGPeopleDropdownPopup")
+        self.setMinimumSize(580, 260)
+
+        is_dark = getattr(parent_carousel, "_is_dark", False)
+        bg = "#1E222B" if is_dark else "#FFFFFF"
+        border = "#4B5563" if is_dark else "#7DA2CE"
+        self.setStyleSheet(
+            f"""
+            QWidget#WLPGPeopleDropdownPopup {{
+                background: {bg};
+                border: 1px solid {border};
+            }}
             """
-            QMenu#WLPGPeopleDropdownMenu {
-                background: #FFFFFF;
-                border: 1px solid #7DA2CE;
+        )
+
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(1, 1, 1, 1)
+        vbox.setSpacing(0)
+
+        # Sort people into Top 10 and Other People A-Z
+        all_people = list(people)
+        top_people = sorted(
+            all_people,
+            key=lambda p: (int(p.get("media_count", 0)), int(p.get("confirmed_count", 0))),
+            reverse=True,
+        )
+        self._top_10 = top_people[:10]
+        top_ids = {int(p["id"]) for p in self._top_10}
+        self._other_people = sorted(
+            [p for p in all_people if int(p["id"]) not in top_ids],
+            key=lambda p: str(p.get("name", "")).lower(),
+        )
+
+        # Scroll Area hosting Top people and Other people A-Z
+        self.scroll = QScrollArea(self)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setStyleSheet(
+            f"""
+            QScrollArea {{
+                background: {bg};
+                border: none;
+            }}
+            QScrollBar:vertical {{
+                border: none;
+                background: transparent;
+                width: 10px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: #CBD5E1;
+                min-height: 24px;
+                border-radius: 4px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: #94A3B8;
+            }}
+            QScrollBar::handle:vertical:pressed {{
+                background: #64748B;
+            }}
+            QScrollBar::sub-line:vertical, QScrollBar::add-line:vertical {{
+                border: none;
+                background: transparent;
+                height: 0px;
+                width: 0px;
+            }}
+            QScrollBar::sub-page:vertical, QScrollBar::add-page:vertical {{
+                border: none;
+                background: transparent;
+            }}
+            """
+        )
+
+        self.scroll_content = QWidget()
+        self.scroll_content.setStyleSheet(f"background: {bg};")
+        self.content_layout = QVBoxLayout(self.scroll_content)
+        self.content_layout.setContentsMargins(4, 4, 4, 4)
+        self.content_layout.setSpacing(4)
+
+        hdr_style = (
+            "background: #2D333B; border-bottom: 1px solid #3E4651; color: #E2E8F0;"
+            if is_dark
+            else "background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F9FBFE, stop:1 #EBF2F8);"
+            "border-bottom: 1px solid #D5E0EA; color: #35506E;"
+        ) + "font-weight: bold; font-size: 8.5pt; font-family: 'Segoe UI'; padding: 3px 6px;"
+
+        # 1. Section Header: Top people
+        self.lbl_top = QLabel("Top people", self.scroll_content)
+        self.lbl_top.setStyleSheet(hdr_style)
+        self.content_layout.addWidget(self.lbl_top)
+
+        btn_style = (
+            """
+            QToolButton {
+                border: 1px solid #3E4651;
+                border-radius: 2px;
+                background: #252A34;
                 padding: 0px;
+            }
+            QToolButton:hover {
+                border: 1px solid #60A5FA;
+                background: #2E3646;
+            }
+            """
+            if is_dark
+            else """
+            QToolButton {
+                border: 1px solid #C8D7E6;
+                border-radius: 2px;
+                background: #FFFFFF;
+                padding: 0px;
+            }
+            QToolButton:hover {
+                border: 1px solid #E2B034;
+                background: #FFF8E6;
             }
             """
         )
-        widget = _WLPGPeopleMenuWidget(menu, self._all_people_list)
-        widget.person_selected.connect(self.person_clicked.emit)
-        widget.boolean_mode_selected.connect(self.boolean_mode_selected.emit)
-        widget.special_filter_selected.connect(self.special_filter_selected.emit)
 
-        wa = QWidgetAction(menu)
-        wa.setDefaultWidget(widget)
-        menu.addAction(wa)
+        self.top_grid_widget = QWidget(self.scroll_content)
+        self.top_grid_widget.setStyleSheet("background: transparent;")
+        self.top_grid = QGridLayout(self.top_grid_widget)
+        self.top_grid.setContentsMargins(0, 2, 0, 4)
+        self.top_grid.setSpacing(2)
+        self.top_grid.setAlignment(Qt.AlignLeft)
 
-        pos = self.container.mapToGlobal(QPoint(0, self.container.height()))
-        screen = self.screen() or (QApplication.primaryScreen() if QApplication.instance() else None)
-        if screen:
-            avail_w = screen.availableGeometry().right()
-            if pos.x() + 480 > avail_w:
-                pos.setX(max(10, avail_w - 490))
-        menu.exec(pos)
+        for col, p in enumerate(self._top_10):
+            pid = int(p["id"])
+            name = str(p.get("name", ""))
+            cnt = int(p.get("media_count", 0))
+            blob = p.get("thumbnail_blob")
+            btn = QToolButton(self.top_grid_widget)
+            btn.setFixedSize(54, 54)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setToolTip(f"{name} ({cnt} items)")
+            pix = make_person_avatar_pixmap(name, blob, size=50)
+            btn.setIcon(QIcon(pix))
+            btn.setIconSize(QSize(50, 50))
+            btn.setStyleSheet(btn_style)
+            btn.clicked.connect(lambda _c=False, person_id=pid: self._on_person_clicked(person_id))
+            self.top_grid.addWidget(btn, 0, col)
+
+        self.content_layout.addWidget(self.top_grid_widget)
+
+        # 2. Section Header: Other people A - Z
+        self._other_buttons: list[QToolButton] = []
+        self._current_cols: int = 10
+        if self._other_people:
+            self.lbl_other = QLabel("Other people A - Z", self.scroll_content)
+            self.lbl_other.setStyleSheet(hdr_style)
+            self.content_layout.addWidget(self.lbl_other)
+
+            self.other_grid_widget = QWidget(self.scroll_content)
+            self.other_grid_widget.setStyleSheet("background: transparent;")
+            self.other_grid = QGridLayout(self.other_grid_widget)
+            self.other_grid.setContentsMargins(0, 2, 0, 4)
+            self.other_grid.setSpacing(2)
+            self.other_grid.setAlignment(Qt.AlignLeft)
+
+            for p in self._other_people:
+                pid = int(p["id"])
+                name = str(p.get("name", ""))
+                cnt = int(p.get("media_count", 0))
+                blob = p.get("thumbnail_blob")
+                btn = QToolButton(self.other_grid_widget)
+                btn.setFixedSize(54, 54)
+                btn.setCursor(Qt.PointingHandCursor)
+                btn.setToolTip(f"{name} ({cnt} items)")
+                pix = make_person_avatar_pixmap(name, blob, size=50)
+                btn.setIcon(QIcon(pix))
+                btn.setIconSize(QSize(50, 50))
+                btn.setStyleSheet(btn_style)
+                btn.clicked.connect(lambda _c=False, person_id=pid: self._on_person_clicked(person_id))
+                self._other_buttons.append(btn)
+
+            self.content_layout.addWidget(self.other_grid_widget)
+
+        self.content_layout.addStretch(1)
+        self.scroll.setWidget(self.scroll_content)
+        vbox.addWidget(self.scroll, 1)
+
+        # 3. Pinned Bottom Actions + Corner Resize Grip
+        bottom_frame = QFrame(self)
+        bottom_frame.setObjectName("WLPGPeopleDropdownBottomFrame")
+        b_bg = "#181B20" if is_dark else "#F6F9FD"
+        b_border = "#333A45" if is_dark else "#D5E0EA"
+        bottom_frame.setStyleSheet(
+            f"QFrame#WLPGPeopleDropdownBottomFrame {{ background: {b_bg}; border-top: 1px solid {b_border}; }}"
+        )
+        bottom_layout = QHBoxLayout(bottom_frame)
+        bottom_layout.setContentsMargins(6, 4, 4, 4)
+        bottom_layout.setSpacing(0)
+
+        b_vbox = QVBoxLayout()
+        b_vbox.setContentsMargins(0, 0, 0, 0)
+        b_vbox.setSpacing(2)
+
+        opt_style = (
+            """
+            QToolButton {
+                border: 1px solid transparent;
+                border-radius: 2px;
+                background: transparent;
+                color: #E2E8F0;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+                text-align: left;
+                padding: 2px 6px;
+            }
+            QToolButton:hover {
+                background: #2E3646;
+                border: 1px solid #60A5FA;
+            }
+            """
+            if is_dark
+            else """
+            QToolButton {
+                border: 1px solid transparent;
+                border-radius: 2px;
+                background: transparent;
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+                text-align: left;
+                padding: 2px 6px;
+            }
+            QToolButton:hover {
+                background: #E5F1FB;
+                border: 1px solid #A0C5E8;
+            }
+            """
+        )
+
+        self.btn_and = QToolButton(bottom_frame)
+        self.btn_and.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_and.setText("&and")
+        self.btn_and.setIcon(make_wlpg_icon("boolean_and", 14))
+        self.btn_and.setIconSize(QSize(14, 14))
+        self.btn_and.setStyleSheet(opt_style)
+        self.btn_and.setFixedHeight(22)
+        self.btn_and.clicked.connect(lambda: self._on_boolean_mode("AND"))
+        b_vbox.addWidget(self.btn_and)
+
+        self.btn_or = QToolButton(bottom_frame)
+        self.btn_or.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_or.setText("&or")
+        self.btn_or.setIcon(make_wlpg_icon("boolean_or", 14))
+        self.btn_or.setIconSize(QSize(14, 14))
+        self.btn_or.setStyleSheet(opt_style)
+        self.btn_or.setFixedHeight(22)
+        self.btn_or.clicked.connect(lambda: self._on_boolean_mode("OR"))
+        b_vbox.addWidget(self.btn_or)
+
+        self.btn_all_tagged = QToolButton(bottom_frame)
+        self.btn_all_tagged.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_all_tagged.setText("All &tagged or detected")
+        self.btn_all_tagged.setIcon(make_wlpg_icon("person", 14))
+        self.btn_all_tagged.setIconSize(QSize(14, 14))
+        self.btn_all_tagged.setStyleSheet(opt_style)
+        self.btn_all_tagged.setFixedHeight(22)
+        self.btn_all_tagged.clicked.connect(lambda: self._on_special_filter("all_people"))
+        b_vbox.addWidget(self.btn_all_tagged)
+
+        self.btn_detected = QToolButton(bottom_frame)
+        self.btn_detected.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_detected.setText("All &detected but not tagged")
+        self.btn_detected.setIcon(make_wlpg_icon("person_question", 14))
+        self.btn_detected.setIconSize(QSize(14, 14))
+        self.btn_detected.setStyleSheet(opt_style)
+        self.btn_detected.setFixedHeight(22)
+        self.btn_detected.clicked.connect(lambda: self._on_special_filter("detected_untagged"))
+        b_vbox.addWidget(self.btn_detected)
+
+        self.btn_untagged = QToolButton(bottom_frame)
+        self.btn_untagged.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_untagged.setText("&Not tagged or detected")
+        self.btn_untagged.setIcon(make_wlpg_icon("person_none", 14))
+        self.btn_untagged.setIconSize(QSize(14, 14))
+        self.btn_untagged.setStyleSheet(opt_style)
+        self.btn_untagged.setFixedHeight(22)
+        self.btn_untagged.clicked.connect(lambda: self._on_special_filter("untagged"))
+        b_vbox.addWidget(self.btn_untagged)
+
+        bottom_layout.addLayout(b_vbox, 1)
+
+        grip_vbox = QVBoxLayout()
+        grip_vbox.setContentsMargins(0, 0, 0, 0)
+        grip_vbox.addStretch(1)
+        self.grip = _CornerResizeGrip(self, bottom_frame)
+        grip_vbox.addWidget(self.grip, 0, Qt.AlignRight | Qt.AlignBottom)
+        bottom_layout.addLayout(grip_vbox, 0)
+
+        vbox.addWidget(bottom_frame, 0)
+
+    def _reflow_other_grid(self) -> None:
+        if not hasattr(self, "other_grid") or not self._other_buttons:
+            return
+        viewport_w = self.scroll.viewport().width()
+        cols = max(10, (viewport_w - 4) // 56)
+        if cols == self._current_cols and self.other_grid.count() > 0:
+            return
+        self._current_cols = cols
+
+        while self.other_grid.count() > 0:
+            self.other_grid.takeAt(0)
+
+        for i, btn in enumerate(self._other_buttons):
+            row = i // cols
+            col = i % cols
+            self.other_grid.addWidget(btn, row, col)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._reflow_other_grid()
+        if hasattr(self, "parent_carousel") and self.parent_carousel is not None:
+            self.parent_carousel._last_dropdown_size = self.size()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._reflow_other_grid()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if hasattr(self, "parent_carousel") and self.parent_carousel is not None:
+            if getattr(self.parent_carousel, "_active_popup", None) is self:
+                self.parent_carousel._active_popup = None
+        super().closeEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() == Qt.Key_Escape:
+            self.close()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+    def _on_person_clicked(self, pid: int) -> None:
+        self.close()
+        self.person_selected.emit(pid)
+
+    def _on_boolean_mode(self, mode: str) -> None:
+        self.close()
+        self.boolean_mode_selected.emit(mode)
+
+    def _on_special_filter(self, kind: str) -> None:
+        self.close()
+        self.special_filter_selected.emit(kind)
 
 
 class _WLPGPeopleMenuWidget(QWidget):
@@ -3309,7 +3842,7 @@ class _WLPGPeopleMenuWidget(QWidget):
     ) -> None:
         super().__init__(parent or menu)
         self.menu = menu
-        self.setFixedWidth(476)
+        self.setFixedWidth(580)
         self.setObjectName("WLPGPeopleMenuWidget")
         self.setStyleSheet(
             """
@@ -3345,8 +3878,8 @@ class _WLPGPeopleMenuWidget(QWidget):
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setFrameShape(QFrame.NoFrame)
         other_rows = (len(other_people) + 9) // 10 if other_people else 0
-        needed_h = 80 + (32 + other_rows * 46 if other_rows > 0 else 0) + 12
-        scroll.setFixedHeight(min(360, max(140, needed_h)))
+        needed_h = 95 + (32 + other_rows * 56 if other_rows > 0 else 0) + 12
+        scroll.setFixedHeight(min(380, max(160, needed_h)))
         scroll.setStyleSheet(
             """
             QScrollArea {
@@ -3434,12 +3967,12 @@ class _WLPGPeopleMenuWidget(QWidget):
             cnt = int(p.get("media_count", 0))
             blob = p.get("thumbnail_blob")
             btn = QToolButton(top_grid_widget)
-            btn.setFixedSize(42, 42)
+            btn.setFixedSize(54, 54)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setToolTip(f"{name} ({cnt} items)")
-            pix = make_person_avatar_pixmap(name, blob, size=40)
+            pix = make_person_avatar_pixmap(name, blob, size=50)
             btn.setIcon(QIcon(pix))
-            btn.setIconSize(QSize(40, 40))
+            btn.setIconSize(QSize(50, 50))
             btn.setStyleSheet(btn_style)
             btn.clicked.connect(lambda _c=False, person_id=pid: self._on_person_clicked(person_id))
             top_grid.addWidget(btn, 0, col)
@@ -3471,12 +4004,12 @@ class _WLPGPeopleMenuWidget(QWidget):
                 cnt = int(p.get("media_count", 0))
                 blob = p.get("thumbnail_blob")
                 btn = QToolButton(other_grid_widget)
-                btn.setFixedSize(42, 42)
+                btn.setFixedSize(54, 54)
                 btn.setCursor(Qt.PointingHandCursor)
                 btn.setToolTip(f"{name} ({cnt} items)")
-                pix = make_person_avatar_pixmap(name, blob, size=40)
+                pix = make_person_avatar_pixmap(name, blob, size=50)
                 btn.setIcon(QIcon(pix))
-                btn.setIconSize(QSize(40, 40))
+                btn.setIconSize(QSize(50, 50))
                 btn.setStyleSheet(btn_style)
                 btn.clicked.connect(lambda _c=False, person_id=pid: self._on_person_clicked(person_id))
                 other_grid.addWidget(btn, r, c)
@@ -4036,6 +4569,172 @@ def create_wlpg_rating_menu(
     return menu
 
 
+class _WindowControlButton(QPushButton):
+    """
+    Native-styled vector window control button for Minimize, Maximize, Restore, Close.
+    Provides pixel-perfect vector lines and overlapping boxes matching Windows 11 / Office.
+    """
+
+    def __init__(self, kind: str, parent: QWidget | None = None) -> None:
+        text_map = {"min": "─", "max": "□", "restore": "❐", "close": "✕"}
+        super().__init__(text_map.get(kind, ""), parent)
+        self.kind = kind
+        self.setMouseTracking(True)
+
+    def set_kind(self, kind: str) -> None:
+        self.kind = kind
+        text_map = {"min": "─", "max": "□", "restore": "❐", "close": "✕"}
+        self.setText(text_map.get(kind, ""))
+        self.update()
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        painter = QStylePainter(self)
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        opt.text = ""
+        painter.drawControl(QStyle.CE_PushButton, opt)
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, self.kind == "close")
+
+        if self.kind == "close" and (self.underMouse() or self.isDown()):
+            color = QColor("#FFFFFF")
+        else:
+            col = opt.palette.buttonText().color()
+            if col.isValid() and col.alpha() > 0:
+                color = col
+            else:
+                color = QColor("#CBD5E1") if getattr(self.window(), "_is_dark", False) else QColor("#1E395B")
+
+        pen = QPen(color, 1.0)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+
+        w = float(self.width())
+        h = float(self.height())
+        cx = w / 2.0
+        cy = h / 2.0
+
+        if self.kind == "min":
+            # 10px horizontal line
+            p.drawLine(QPointF(cx - 5.0, cy), QPointF(cx + 5.0, cy))
+        elif self.kind == "max":
+            # 10x10 square outline
+            p.drawRect(QRectF(cx - 5.0, cy - 5.0, 10.0, 10.0))
+        elif self.kind == "restore":
+            # Native overlapping squares (back square offset top-right, front square bottom-left)
+            fx = cx - 5.5
+            fy = cy - 2.5
+            bx = cx - 2.5
+            by = cy - 5.5
+            p.drawLine(QPointF(bx, by), QPointF(bx + 8.0, by))
+            p.drawLine(QPointF(bx + 8.0, by), QPointF(bx + 8.0, by + 8.0))
+            p.drawLine(QPointF(bx + 5.0, by + 8.0), QPointF(bx + 8.0, by + 8.0))
+            p.drawLine(QPointF(bx, by), QPointF(bx, by + 3.0))
+            p.drawRect(QRectF(fx, fy, 8.0, 8.0))
+        elif self.kind == "close":
+            pen.setWidthF(1.2)
+            p.setPen(pen)
+            s = 4.8
+            p.drawLine(QPointF(cx - s, cy - s), QPointF(cx + s, cy + s))
+            p.drawLine(QPointF(cx + s, cy - s), QPointF(cx - s, cy + s))
+        p.end()
+
+
+class _RibbonTitleBar(QWidget):
+    """
+    Custom integrated window title bar for Essentials Photo Gallery / Office Ribbon.
+    Supports native OS dragging via windowHandle().startSystemMove() and double-click maximize/restore.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("RibbonTopHeader")
+        self.setFixedHeight(32)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton:
+            win = self.window()
+            handle = win.windowHandle() if win else None
+            if handle is not None:
+                handle.startSystemMove()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton:
+            win = self.window()
+            if win:
+                if win.isMaximized():
+                    win.showNormal()
+                else:
+                    win.showMaximized()
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
+
+class _RibbonTabBar(QTabBar):
+    """
+    Custom QTabBar supporting Fluent UI active tab indicator:
+    - In Modern Fluent theme:
+      * Normally (not hovered): indicator line is slightly less wide (centered under tab text).
+      * On mouse over: smoothly expands to full width of tab.
+      * Does not curl up on mouse over (drawn as crisp vector bar).
+      * Sits 2-3 px higher than the bottom edge so it sits slightly above the main start of the ribbon.
+    - In Classic Aero / Dark themes:
+      * Standard native tab painting without custom indicator.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self._hover_tab_idx: int = -1
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        super().mouseMoveEvent(event)
+        idx = self.tabAt(event.pos())
+        if idx != self._hover_tab_idx:
+            self._hover_tab_idx = idx
+            self.update()
+
+    def leaveEvent(self, event: QEvent) -> None:
+        super().leaveEvent(event)
+        if self._hover_tab_idx != -1:
+            self._hover_tab_idx = -1
+            self.update()
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        super().paintEvent(event)
+
+        parent_ribbon = self.window().findChild(RibbonToolbar) if self.window() else None
+        if parent_ribbon is None:
+            p = self.parent()
+            while p and not isinstance(p, RibbonToolbar):
+                p = p.parent()
+            parent_ribbon = p
+
+        theme_mode = getattr(parent_ribbon, "_current_theme_mode", "wlpg_aero")
+        if theme_mode == "modern":
+            cur_idx = self.currentIndex()
+            if cur_idx >= 0:
+                rect = self.tabRect(cur_idx)
+                if rect.isValid() and not rect.isEmpty():
+                    is_hovered = (self._hover_tab_idx == cur_idx) or rect.contains(self.mapFromGlobal(QCursor.pos()))
+                    p = QPainter(self)
+                    p.setRenderHint(QPainter.Antialiasing, True)
+                    # Normally slightly less wide, expanding on hover
+                    w = float(rect.width() - 8) if is_hovered else max(24.0, float(rect.width() - 28))
+                    x = rect.x() + (rect.width() - w) / 2.0
+                    # Position 2-3 px higher than bottom of tab
+                    y = float(rect.bottom() - 4)
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(QColor("#0F6CBD"))
+                    p.drawRoundedRect(QRectF(x, y, w, 3.0), 1.5, 1.5)
+                    p.end()
+
+
 class RibbonToolbar(QWidget):
     """
     Top WLPG Ribbon (`Home`, `Edit`, `Find`, `Create`, `View`) + `Search by:` Scope Header Bar.
@@ -4069,6 +4768,9 @@ class RibbonToolbar(QWidget):
     forward_requested = Signal()
     undo_requested = Signal()
     redo_requested = Signal()
+    qat_thumbnails_clicked = Signal()
+    qat_map_clicked = Signal()
+    qat_people_clicked = Signal()
     filter_month_selected = Signal(int)                     # 0 for all, 1..12
 
     # Real-time preview & adjustment signals for Exposure and Color menus
@@ -4124,9 +4826,9 @@ class RibbonToolbar(QWidget):
 
         self.btn_back = QToolButton(self.qat_container)
         self.btn_back.setObjectName("QATCircleBtn")
-        self.btn_back.setIcon(make_wlpg_icon("nav_back", 18))
-        self.btn_back.setIconSize(QSize(18, 18))
-        self.btn_back.setFixedSize(22, 22)
+        self.btn_back.setIcon(make_wlpg_icon("nav_back", 20))
+        self.btn_back.setIconSize(QSize(20, 20))
+        self.btn_back.setFixedSize(24, 24)
         self.btn_back.setToolTip("Back (Alt+Left Arrow)")
         self.btn_back.setCursor(Qt.PointingHandCursor)
         self.btn_back.setEnabled(False)
@@ -4135,9 +4837,9 @@ class RibbonToolbar(QWidget):
 
         self.btn_forward = QToolButton(self.qat_container)
         self.btn_forward.setObjectName("QATCircleBtn")
-        self.btn_forward.setIcon(make_wlpg_icon("nav_forward", 18))
-        self.btn_forward.setIconSize(QSize(18, 18))
-        self.btn_forward.setFixedSize(22, 22)
+        self.btn_forward.setIcon(make_wlpg_icon("nav_forward", 20))
+        self.btn_forward.setIconSize(QSize(20, 20))
+        self.btn_forward.setFixedSize(24, 24)
         self.btn_forward.setToolTip("Forward (Alt+Right Arrow)")
         self.btn_forward.setCursor(Qt.PointingHandCursor)
         self.btn_forward.setEnabled(False)
@@ -4148,9 +4850,9 @@ class RibbonToolbar(QWidget):
 
         self.btn_print = QToolButton(self.qat_container)
         self.btn_print.setObjectName("QATBtn")
-        self.btn_print.setIcon(make_wlpg_icon("print", 16))
-        self.btn_print.setIconSize(QSize(16, 16))
-        self.btn_print.setFixedSize(22, 22)
+        self.btn_print.setIcon(make_wlpg_icon("print", 18))
+        self.btn_print.setIconSize(QSize(18, 18))
+        self.btn_print.setFixedSize(24, 24)
         self.btn_print.setToolTip("Print (Ctrl+P)")
         self.btn_print.setCursor(Qt.PointingHandCursor)
         self.btn_print.setVisible(False)
@@ -4159,9 +4861,9 @@ class RibbonToolbar(QWidget):
 
         self.btn_undo = QToolButton(self.qat_container)
         self.btn_undo.setObjectName("QATBtn")
-        self.btn_undo.setIcon(make_wlpg_icon("undo", 16))
-        self.btn_undo.setIconSize(QSize(16, 16))
-        self.btn_undo.setFixedSize(22, 22)
+        self.btn_undo.setIcon(make_wlpg_icon("undo", 18))
+        self.btn_undo.setIconSize(QSize(18, 18))
+        self.btn_undo.setFixedSize(24, 24)
         self.btn_undo.setToolTip("Undo (Ctrl+Z)")
         self.btn_undo.setCursor(Qt.PointingHandCursor)
         self.btn_undo.setEnabled(False)
@@ -4170,20 +4872,104 @@ class RibbonToolbar(QWidget):
 
         self.btn_redo = QToolButton(self.qat_container)
         self.btn_redo.setObjectName("QATBtn")
-        self.btn_redo.setIcon(make_wlpg_icon("redo", 16))
-        self.btn_redo.setIconSize(QSize(16, 16))
-        self.btn_redo.setFixedSize(22, 22)
+        self.btn_redo.setIcon(make_wlpg_icon("redo", 18))
+        self.btn_redo.setIconSize(QSize(18, 18))
+        self.btn_redo.setFixedSize(24, 24)
         self.btn_redo.setToolTip("Redo (Ctrl+Y)")
         self.btn_redo.setCursor(Qt.PointingHandCursor)
         self.btn_redo.setEnabled(False)
         self.btn_redo.clicked.connect(self.redo_requested.emit)
         self.qat_layout.addWidget(self.btn_redo)
 
+        # Gallery View button
+        self.btn_qat_thumbnails = QToolButton(self.qat_container)
+        self.btn_qat_thumbnails.setObjectName("QATBtn")
+        self.btn_qat_thumbnails.setIcon(make_wlpg_icon("thumbnail_view", 18))
+        self.btn_qat_thumbnails.setIconSize(QSize(18, 18))
+        self.btn_qat_thumbnails.setFixedSize(24, 24)
+        self.btn_qat_thumbnails.setToolTip("Gallery view (Ctrl+0)")
+        self.btn_qat_thumbnails.setCursor(Qt.PointingHandCursor)
+        self.btn_qat_thumbnails.setVisible(False)
+        self.btn_qat_thumbnails.clicked.connect(self.qat_thumbnails_clicked.emit)
+        self.qat_layout.addWidget(self.btn_qat_thumbnails)
+
+        # World Map View button
+        self.btn_qat_map = QToolButton(self.qat_container)
+        self.btn_qat_map.setObjectName("QATBtn")
+        self.btn_qat_map.setIcon(make_wlpg_icon("globe", 18))
+        self.btn_qat_map.setIconSize(QSize(18, 18))
+        self.btn_qat_map.setFixedSize(24, 24)
+        self.btn_qat_map.setToolTip("World Map View")
+        self.btn_qat_map.setCursor(Qt.PointingHandCursor)
+        self.btn_qat_map.setVisible(False)
+        self.btn_qat_map.clicked.connect(self.qat_map_clicked.emit)
+        self.qat_layout.addWidget(self.btn_qat_map)
+
+        # People View button
+        self.btn_qat_people = QToolButton(self.qat_container)
+        self.btn_qat_people.setObjectName("QATBtn")
+        self.btn_qat_people.setIcon(make_wlpg_icon("person", 18))
+        self.btn_qat_people.setIconSize(QSize(18, 18))
+        self.btn_qat_people.setFixedSize(24, 24)
+        self.btn_qat_people.setToolTip("People View")
+        self.btn_qat_people.setCursor(Qt.PointingHandCursor)
+        self.btn_qat_people.setVisible(False)
+        self.btn_qat_people.clicked.connect(self.qat_people_clicked.emit)
+        self.qat_layout.addWidget(self.btn_qat_people)
+
+        # Rotate Left QAT button
+        self.btn_qat_rot_left = QToolButton(self.qat_container)
+        self.btn_qat_rot_left.setObjectName("QATBtn")
+        self.btn_qat_rot_left.setIcon(make_wlpg_icon("rotate_ccw", 18))
+        self.btn_qat_rot_left.setIconSize(QSize(18, 18))
+        self.btn_qat_rot_left.setFixedSize(24, 24)
+        self.btn_qat_rot_left.setToolTip("Rotate left (Ctrl+,)")
+        self.btn_qat_rot_left.setCursor(Qt.PointingHandCursor)
+        self.btn_qat_rot_left.setVisible(False)
+        self.btn_qat_rot_left.clicked.connect(lambda: self.action_triggered.emit("rotate_left"))
+        self.qat_layout.addWidget(self.btn_qat_rot_left)
+
+        # Rotate Right QAT button
+        self.btn_qat_rot_right = QToolButton(self.qat_container)
+        self.btn_qat_rot_right.setObjectName("QATBtn")
+        self.btn_qat_rot_right.setIcon(make_wlpg_icon("rotate_cw", 18))
+        self.btn_qat_rot_right.setIconSize(QSize(18, 18))
+        self.btn_qat_rot_right.setFixedSize(24, 24)
+        self.btn_qat_rot_right.setToolTip("Rotate right (Ctrl+.)")
+        self.btn_qat_rot_right.setCursor(Qt.PointingHandCursor)
+        self.btn_qat_rot_right.setVisible(False)
+        self.btn_qat_rot_right.clicked.connect(lambda: self.action_triggered.emit("rotate_right"))
+        self.qat_layout.addWidget(self.btn_qat_rot_right)
+
+        # Delete QAT button
+        self.btn_qat_delete = QToolButton(self.qat_container)
+        self.btn_qat_delete.setObjectName("QATBtn")
+        self.btn_qat_delete.setIcon(make_wlpg_icon("delete", 18))
+        self.btn_qat_delete.setIconSize(QSize(18, 18))
+        self.btn_qat_delete.setFixedSize(24, 24)
+        self.btn_qat_delete.setToolTip("Delete (Del)")
+        self.btn_qat_delete.setCursor(Qt.PointingHandCursor)
+        self.btn_qat_delete.setVisible(False)
+        self.btn_qat_delete.clicked.connect(lambda: self.action_triggered.emit("delete"))
+        self.qat_layout.addWidget(self.btn_qat_delete)
+
+        # Slide Show QAT button
+        self.btn_qat_slideshow = QToolButton(self.qat_container)
+        self.btn_qat_slideshow.setObjectName("QATBtn")
+        self.btn_qat_slideshow.setIcon(make_wlpg_icon("slideshow", 18))
+        self.btn_qat_slideshow.setIconSize(QSize(18, 18))
+        self.btn_qat_slideshow.setFixedSize(24, 24)
+        self.btn_qat_slideshow.setToolTip("Slide show (F12)")
+        self.btn_qat_slideshow.setCursor(Qt.PointingHandCursor)
+        self.btn_qat_slideshow.setVisible(False)
+        self.btn_qat_slideshow.clicked.connect(lambda: self.action_triggered.emit("slide_show"))
+        self.qat_layout.addWidget(self.btn_qat_slideshow)
+
         self.btn_qat_menu = QToolButton(self.qat_container)
         self.btn_qat_menu.setObjectName("QATBtn")
         self.btn_qat_menu.setIcon(make_wlpg_icon("qat_menu", 14))
         self.btn_qat_menu.setIconSize(QSize(14, 14))
-        self.btn_qat_menu.setFixedSize(14, 22)
+        self.btn_qat_menu.setFixedSize(14, 24)
         self.btn_qat_menu.setToolTip("Customize Quick Access Toolbar")
         self.btn_qat_menu.setCursor(Qt.PointingHandCursor)
         self.btn_qat_menu.setPopupMode(QToolButton.InstantPopup)
@@ -4203,26 +4989,77 @@ class RibbonToolbar(QWidget):
         self.act_qat_print.setCheckable(True)
         self.act_qat_print.setChecked(False)
         self.act_qat_print.toggled.connect(self.btn_print.setVisible)
+        self.act_qat_print.toggled.connect(self._save_qat_settings)
 
         self.act_qat_back = qat_menu.addAction("Back")
         self.act_qat_back.setCheckable(True)
         self.act_qat_back.setChecked(True)
         self.act_qat_back.toggled.connect(self.btn_back.setVisible)
+        self.act_qat_back.toggled.connect(self._save_qat_settings)
 
         self.act_qat_forward = qat_menu.addAction("Forward")
         self.act_qat_forward.setCheckable(True)
         self.act_qat_forward.setChecked(True)
         self.act_qat_forward.toggled.connect(self.btn_forward.setVisible)
+        self.act_qat_forward.toggled.connect(self._save_qat_settings)
 
         self.act_qat_undo = qat_menu.addAction("Undo")
         self.act_qat_undo.setCheckable(True)
         self.act_qat_undo.setChecked(True)
         self.act_qat_undo.toggled.connect(self.btn_undo.setVisible)
+        self.act_qat_undo.toggled.connect(self._save_qat_settings)
 
         self.act_qat_redo = qat_menu.addAction("Redo")
         self.act_qat_redo.setCheckable(True)
         self.act_qat_redo.setChecked(True)
         self.act_qat_redo.toggled.connect(self.btn_redo.setVisible)
+        self.act_qat_redo.toggled.connect(self._save_qat_settings)
+
+        qat_menu.addSeparator()
+
+        self.act_qat_thumbnails = qat_menu.addAction("Gallery View")
+        self.act_qat_thumbnails.setCheckable(True)
+        self.act_qat_thumbnails.setChecked(False)
+        self.act_qat_thumbnails.toggled.connect(self.btn_qat_thumbnails.setVisible)
+        self.act_qat_thumbnails.toggled.connect(self._save_qat_settings)
+
+        self.act_qat_map = qat_menu.addAction("World Map View")
+        self.act_qat_map.setCheckable(True)
+        self.act_qat_map.setChecked(False)
+        self.act_qat_map.toggled.connect(self.btn_qat_map.setVisible)
+        self.act_qat_map.toggled.connect(self._save_qat_settings)
+
+        self.act_qat_people = qat_menu.addAction("People View")
+        self.act_qat_people.setCheckable(True)
+        self.act_qat_people.setChecked(False)
+        self.act_qat_people.toggled.connect(self.btn_qat_people.setVisible)
+        self.act_qat_people.toggled.connect(self._save_qat_settings)
+
+        qat_menu.addSeparator()
+
+        self.act_qat_rot_left = qat_menu.addAction("Rotate Left")
+        self.act_qat_rot_left.setCheckable(True)
+        self.act_qat_rot_left.setChecked(False)
+        self.act_qat_rot_left.toggled.connect(self.btn_qat_rot_left.setVisible)
+        self.act_qat_rot_left.toggled.connect(self._save_qat_settings)
+
+        self.act_qat_rot_right = qat_menu.addAction("Rotate Right")
+        self.act_qat_rot_right.setCheckable(True)
+        self.act_qat_rot_right.setChecked(False)
+        self.act_qat_rot_right.toggled.connect(self.btn_qat_rot_right.setVisible)
+        self.act_qat_rot_right.toggled.connect(self._save_qat_settings)
+
+        self.act_qat_delete = qat_menu.addAction("Delete")
+        self.act_qat_delete.setCheckable(True)
+        self.act_qat_delete.setChecked(False)
+        self.act_qat_delete.toggled.connect(self.btn_qat_delete.setVisible)
+        self.act_qat_delete.toggled.connect(self._save_qat_settings)
+
+        self.act_qat_slideshow = qat_menu.addAction("Slide Show")
+        self.act_qat_slideshow.setCheckable(True)
+        self.act_qat_slideshow.setChecked(False)
+        self.act_qat_slideshow.toggled.connect(self.btn_qat_slideshow.setVisible)
+        self.act_qat_slideshow.toggled.connect(self._save_qat_settings)
 
         qat_menu.addSeparator()
 
@@ -4234,41 +5071,82 @@ class RibbonToolbar(QWidget):
         self.act_qat_minimize.setChecked(False)
         self.act_qat_minimize.triggered.connect(self._toggle_ribbon_collapse)
 
+        qat_menu.addSeparator()
+        self.act_qat_reset = qat_menu.addAction("Reset Quick Access Toolbar")
+        self.act_qat_reset.triggered.connect(self.reset_qat_to_defaults)
+
         self.btn_qat_menu.setMenu(qat_menu)
         self.qat_layout.addWidget(self.btn_qat_menu)
 
-        # Above Ribbon Header Bar
-        self.top_header = QWidget(self)
-        self.top_header.setObjectName("RibbonTopHeader")
-        self.top_header.setFixedHeight(26)
+        # Above Ribbon Header Bar (Integrated Custom Title Bar)
+        self.top_header = _RibbonTitleBar(self)
         self.top_hbox = QHBoxLayout(self.top_header)
-        self.top_hbox.setContentsMargins(6, 2, 8, 2)
+        self.top_hbox.setContentsMargins(6, 0, 0, 0)
         self.top_hbox.setSpacing(3)
+
+        self.lbl_app_icon = QLabel(self.top_header)
+        self.lbl_app_icon.setObjectName("RibbonAppIcon")
+        self.lbl_app_icon.setFixedSize(22, 22)
+        self.lbl_app_icon.setPixmap(make_wlpg_icon("app_logo", 20).pixmap(20, 20))
+        self.lbl_app_icon.setAlignment(Qt.AlignCenter)
+        self.lbl_app_icon.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.top_hbox.addWidget(self.lbl_app_icon)
+
+        self.header_div_icon = QFrame(self.top_header)
+        self.header_div_icon.setObjectName("RibbonHeaderDiv")
+        self.header_div_icon.setFrameShape(QFrame.VLine)
+        self.header_div_icon.setFrameShadow(QFrame.Plain)
+        self.header_div_icon.setFixedSize(1, 16)
+        self.header_div_icon.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.top_hbox.addWidget(self.header_div_icon)
 
         self.top_hbox.addWidget(self.qat_container)
 
         self.header_div = QFrame(self.top_header)
-        self.header_div.setVisible(False)
+        self.header_div.setObjectName("RibbonHeaderDiv")
+        self.header_div.setFrameShape(QFrame.VLine)
+        self.header_div.setFrameShadow(QFrame.Plain)
+        self.header_div.setFixedSize(1, 16)
+        self.header_div.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.top_hbox.addWidget(self.header_div)
 
         self.lbl_app_title = QLabel("Essentials Photo Gallery", self.top_header)
-        self.lbl_app_title.setVisible(False)
+        self.lbl_app_title.setObjectName("RibbonAppTitle")
+        self.lbl_app_title.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.top_hbox.addWidget(self.lbl_app_title)
 
         self.top_hbox.addStretch(1)
 
-        self.btn_help = QToolButton(self.top_header)
-        self.btn_help.setObjectName("QATBtn")
-        self.btn_help.setIcon(make_wlpg_icon("help", 16))
-        self.btn_help.setIconSize(QSize(16, 16))
-        self.btn_help.setFixedSize(22, 22)
-        self.btn_help.setToolTip("Help (F1)")
-        self.btn_help.setCursor(Qt.PointingHandCursor)
-        self.btn_help.clicked.connect(lambda: self.action_triggered.emit("help"))
-        self.top_hbox.addWidget(self.btn_help)
+        self.btn_win_min = _WindowControlButton("min", self.top_header)
+        self.btn_win_min.setObjectName("WinMinBtn")
+        self.btn_win_min.setFixedSize(46, 32)
+        self.btn_win_min.setToolTip("Minimize")
+        self.btn_win_min.setCursor(Qt.ArrowCursor)
+        self.btn_win_min.clicked.connect(self._on_win_min_clicked)
+        self.top_hbox.addWidget(self.btn_win_min)
+
+        self.btn_win_max = _WindowControlButton("max", self.top_header)
+        self.btn_win_max.setObjectName("WinMaxBtn")
+        self.btn_win_max.setFixedSize(46, 32)
+        self.btn_win_max.setToolTip("Maximize")
+        self.btn_win_max.setCursor(Qt.ArrowCursor)
+        self.btn_win_max.clicked.connect(self._on_win_max_clicked)
+        self.top_hbox.addWidget(self.btn_win_max)
+
+        self.btn_win_close = _WindowControlButton("close", self.top_header)
+        self.btn_win_close.setObjectName("WinCloseBtn")
+        self.btn_win_close.setFixedSize(46, 32)
+        self.btn_win_close.setToolTip("Close (Alt+F4)")
+        self.btn_win_close.setCursor(Qt.ArrowCursor)
+        self.btn_win_close.clicked.connect(self._on_win_close_clicked)
+        self.top_hbox.addWidget(self.btn_win_close)
 
         main_vbox.addWidget(self.top_header)
 
         # 1. 5-Tab Ribbon Widget
         self.tab_widget = QTabWidget(self)
+        self.tab_widget.setTabBar(_RibbonTabBar(self.tab_widget))
+        self.tab_widget.tabBar().setDrawBase(False)
         self.tab_widget.setObjectName("RibbonTabs")
         self.tab_widget.setFixedHeight(120)
 
@@ -4277,43 +5155,10 @@ class RibbonToolbar(QWidget):
         self.btn_file.setObjectName("RibbonFileBtn")
         self.btn_file.setCursor(Qt.PointingHandCursor)
         file_menu = QMenu(self.btn_file)
+        file_menu.setObjectName("RibbonFileMenu")
         file_menu.setMinimumWidth(260)
-        file_menu.setStyleSheet(
-            """
-            QMenu {
-                background-color: #FFFFFF;
-                border: 1px solid #7DA2CE;
-                border-radius: 2px;
-                padding: 4px 0px;
-                font-family: 'Segoe UI', sans-serif;
-                font-size: 9pt;
-                color: #1E395B;
-            }
-            QMenu::item {
-                padding: 6px 24px 6px 36px;
-                background-color: transparent;
-                border: 1px solid transparent;
-                border-radius: 2px;
-                margin: 1px 4px;
-            }
-            QMenu::item:selected {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F0F6FD, stop:1 #D9E8F8);
-                border: 1px solid #A8CEF5;
-                color: #1E395B;
-            }
-            QMenu::item:disabled {
-                color: #A0B2C6;
-            }
-            QMenu::icon {
-                padding-left: 8px;
-            }
-            QMenu::separator {
-                height: 1px;
-                background: #E5EEF7;
-                margin: 4px 8px;
-            }
-            """
-        )
+        self.file_menu = file_menu
+        self._apply_file_menu_stylesheet(False)
         file_menu.addAction(make_wlpg_icon("import", 16), "Import from camera or scanner...", lambda: self.action_triggered.emit("import_media"))
         file_menu.addAction(make_wlpg_icon("folder_add", 16), "Include folder...", lambda: self.action_triggered.emit("add_folder"))
         file_menu.addAction(make_wlpg_icon("print", 16), "Print...\tCtrl+P", lambda: self.action_triggered.emit("print"))
@@ -4326,7 +5171,7 @@ class RibbonToolbar(QWidget):
         file_menu.addAction(self.act_pause_write_back)
         file_menu.addSeparator()
         file_menu.addAction(make_wlpg_icon("options", 16), "Options...", lambda: self.action_triggered.emit("open_settings"))
-        file_menu.addAction(make_wlpg_icon("flower", 16), "About Photo Gallery", lambda: self.action_triggered.emit("about_photo_gallery"))
+        file_menu.addAction(make_wlpg_icon("app_logo", 16), "About Essentials Photo Gallery", lambda: self.action_triggered.emit("about_photo_gallery"))
         file_menu.addSeparator()
         file_menu.addAction("Exit", lambda: self.action_triggered.emit("exit_app"))
         self.btn_file.setMenu(file_menu)
@@ -4337,12 +5182,15 @@ class RibbonToolbar(QWidget):
         self.tab_find = self._build_find_tab()
         self.tab_create = self._build_create_tab()
         self.tab_view = self._build_view_tab()
+        self.tab_batch_people = self._build_batch_people_tab()
 
         self.tab_widget.addTab(self.tab_home, "Home")
         self.tab_widget.addTab(self.tab_edit, "Edit")
         self.tab_widget.addTab(self.tab_find, "Find")
         self.tab_widget.addTab(self.tab_create, "Create")
         self.tab_widget.addTab(self.tab_view, "View")
+        self.tab_widget.addTab(self.tab_batch_people, "Batch people tagging")
+        self.tab_widget.tabBar().setTabVisible(5, False)
 
         self.tab_widget.tabBarDoubleClicked.connect(self._on_tab_bar_double_clicked)
         self.tab_widget.tabBarClicked.connect(self._on_tab_bar_clicked)
@@ -4476,6 +5324,12 @@ class RibbonToolbar(QWidget):
         scope_hbox.addWidget(self.btn_close_scope)
 
         main_vbox.addWidget(self.scope_bar)
+
+        for w in (self, self.top_header, self.tab_widget, self.tab_widget.tabBar(), self.below_ribbon_bar,
+                  self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, self.tab_batch_people):
+            w.installEventFilter(self)
+
+        self._load_qat_settings()
         self._apply_aero_stylesheet()
 
     def remove_embedded_scope_bar(self) -> None:
@@ -4540,8 +5394,13 @@ class RibbonToolbar(QWidget):
                 if is_large:
                     btn.setFixedSize(34, 70)
                 else:
-                    w = 34 if has_menu else 26
-                    btn.setFixedWidth(w)
+                    w = 32 if has_menu else 24
+                    btn.setIconSize(QSize(16, 16))
+                    btn.setFixedSize(w, 22)
+                    if has_menu:
+                        btn.setStyleSheet("QToolButton { padding: 1px 12px 1px 2px; }")
+                    else:
+                        btn.setStyleSheet("QToolButton, QPushButton { padding: 1px 2px 1px 2px; }")
             tip = getattr(btn, "_tooltip_override", None) or orig.replace("\n", " ")
             btn.setToolTip(tip)
         else:
@@ -4559,11 +5418,14 @@ class RibbonToolbar(QWidget):
                 if isinstance(btn, QToolButton):
                     btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon if is_large else Qt.ToolButtonTextBesideIcon)
                 btn.setText(orig)
+                btn.setStyleSheet("")
+                btn.setIconSize(QSize(32, 32) if is_large else QSize(16, 16))
                 if is_large:
                     btn.setFixedHeight(70)
                     orig_w = getattr(btn, "_orig_min_w", 50)
                     btn.setFixedWidth(orig_w)
                 else:
+                    btn.setFixedHeight(22)
                     btn.setMinimumWidth(btn.sizeHint().width())
                     btn.setMaximumWidth(16777215)
             tip = getattr(btn, "_tooltip_override", None) or orig.replace("\n", " ")
@@ -4589,7 +5451,7 @@ class RibbonToolbar(QWidget):
             fm = btn.fontMetrics()
             lines = text.split("\n")
             max_w = max((fm.horizontalAdvance(line) for line in lines), default=36)
-            btn._orig_min_w = max(46, min(58, max_w + 10))
+            btn._orig_min_w = max(46, min(76, max_w + 10))
             btn.setFixedWidth(btn._orig_min_w)
             btn.setFixedHeight(70)
             btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -4847,7 +5709,7 @@ class RibbonToolbar(QWidget):
             fm = btn.fontMetrics()
             lines = text.split("\n")
             max_w = max((fm.horizontalAdvance(line) for line in lines), default=36)
-            btn._orig_min_w = max(46, min(58, max_w + 10))
+            btn._orig_min_w = max(46, min(76, max_w + 10))
             btn.setFixedWidth(btn._orig_min_w)
             btn.setFixedHeight(70)
             btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -4885,10 +5747,32 @@ class RibbonToolbar(QWidget):
                     size = 32 if getattr(btn, "_is_large", False) else 16
                     btn.setIcon(make_wlpg_icon(kind, size))
                     btn.setIconSize(QSize(size, size))
+            if hasattr(self, "btn_back"):
+                self.btn_back.setIcon(make_wlpg_icon("nav_back", 20))
+            if hasattr(self, "btn_forward"):
+                self.btn_forward.setIcon(make_wlpg_icon("nav_forward", 20))
             if hasattr(self, "btn_undo"):
-                self.btn_undo.setIcon(make_wlpg_icon("undo", 16))
+                self.btn_undo.setIcon(make_wlpg_icon("undo", 18))
             if hasattr(self, "btn_redo"):
-                self.btn_redo.setIcon(make_wlpg_icon("redo", 16))
+                self.btn_redo.setIcon(make_wlpg_icon("redo", 18))
+            if hasattr(self, "btn_print"):
+                self.btn_print.setIcon(make_wlpg_icon("print", 18))
+            if hasattr(self, "btn_qat_thumbnails"):
+                self.btn_qat_thumbnails.setIcon(make_wlpg_icon("thumbnail_view", 18))
+            if hasattr(self, "btn_qat_map"):
+                self.btn_qat_map.setIcon(make_wlpg_icon("globe", 18))
+            if hasattr(self, "btn_qat_people"):
+                self.btn_qat_people.setIcon(make_wlpg_icon("person", 18))
+            if hasattr(self, "btn_qat_rot_left"):
+                self.btn_qat_rot_left.setIcon(make_wlpg_icon("rotate_ccw", 18))
+            if hasattr(self, "btn_qat_rot_right"):
+                self.btn_qat_rot_right.setIcon(make_wlpg_icon("rotate_cw", 18))
+            if hasattr(self, "btn_qat_delete"):
+                self.btn_qat_delete.setIcon(make_wlpg_icon("delete", 18))
+            if hasattr(self, "btn_qat_slideshow"):
+                self.btn_qat_slideshow.setIcon(make_wlpg_icon("slideshow", 18))
+            if hasattr(self, "lbl_app_icon"):
+                self.lbl_app_icon.setPixmap(make_wlpg_icon("app_logo", 20).pixmap(20, 20))
         finally:
             self.setUpdatesEnabled(True)
 
@@ -5036,10 +5920,33 @@ class RibbonToolbar(QWidget):
 
         # --- 5. View Tab Priority Collapse ---
         for btn in getattr(self, "view_details_checkboxes", []):
-            self._set_button_compact(btn, width < 1150)
+            self._set_button_compact(btn, width < 1280)
 
         for btn in getattr(self, "view_arrange_buttons", []):
-            self._set_button_compact(btn, width < 980)
+            self._set_button_compact(btn, width < 1180)
+
+        for btn in (
+            getattr(self, "btn_reverse_sort", None),
+            getattr(self, "btn_detail_rating", None),
+            getattr(self, "btn_detail_caption", None),
+            getattr(self, "btn_detail_flags", None),
+        ):
+            if btn is not None:
+                self._set_button_compact(btn, width < 1050)
+
+        for btn in (
+            getattr(self, "btn_zoom_in", None),
+            getattr(self, "btn_zoom_out", None),
+            getattr(self, "btn_view_thumbnails", None),
+            getattr(self, "btn_view_map", None),
+            getattr(self, "btn_view_slideshow", None),
+            getattr(self, "btn_toggle_nav_pane", None),
+            getattr(self, "btn_toggle_tag_pane", None),
+            getattr(self, "btn_layout_grid", None),
+            getattr(self, "btn_layout_mosaic", None),
+        ):
+            if btn is not None:
+                self._set_button_compact(btn, width < 920)
 
         # --- 6. Group Box Minimum Width Synchronization ---
         for page in (
@@ -5053,9 +5960,11 @@ class RibbonToolbar(QWidget):
                 for i in range(page.layout().count()):
                     w = page.layout().itemAt(i).widget()
                     if w and hasattr(w, "content_layout") and hasattr(w, "content_widget"):
-                        # Clear old min widths so group box can shrink when children are hidden
+                        # Clear old min/max widths so group box can shrink when children are hidden
                         w.content_widget.setMinimumWidth(0)
+                        w.content_widget.setMaximumWidth(16777215)
                         w.setMinimumWidth(0)
+                        w.setMaximumWidth(16777215)
                         # Invalidate sub-layouts to ensure compacted button sizes are reflected
                         for j in range(w.content_layout.count()):
                             sub = w.content_layout.itemAt(j)
@@ -5109,6 +6018,7 @@ class RibbonToolbar(QWidget):
             self.btn_collapse_ribbon.setText("▲")
             if hasattr(self, "act_qat_minimize"):
                 self.act_qat_minimize.setChecked(False)
+        self._save_qat_settings()
 
     def set_ribbon_collapsed(self, collapsed: bool) -> None:
         if collapsed:
@@ -5121,6 +6031,7 @@ class RibbonToolbar(QWidget):
             self.btn_collapse_ribbon.setText("▲")
             if hasattr(self, "act_qat_minimize"):
                 self.act_qat_minimize.setChecked(False)
+        self._save_qat_settings()
 
     def _toggle_qat_position(self) -> None:
         self.set_qat_below_ribbon(not getattr(self, "_qat_below_ribbon", False))
@@ -5129,16 +6040,246 @@ class RibbonToolbar(QWidget):
         self._qat_below_ribbon = bool(below)
         if self._qat_below_ribbon:
             self.top_hbox.removeWidget(self.qat_container)
+            self.qat_container.setParent(self.below_ribbon_bar)
             self.below_ribbon_layout.insertWidget(0, self.qat_container)
-            self.top_header.hide()
+            self.qat_container.show()
+            if hasattr(self, "header_div_icon"):
+                self.header_div_icon.hide()
+            if hasattr(self, "header_div"):
+                self.header_div.hide()
             self.below_ribbon_bar.show()
             self.act_qat_position.setText("Show above the Ribbon")
         else:
             self.below_ribbon_layout.removeWidget(self.qat_container)
-            self.top_hbox.insertWidget(0, self.qat_container)
+            self.qat_container.setParent(self.top_header)
+            # Insert right after header_div_icon (index 2)
+            self.top_hbox.insertWidget(2, self.qat_container)
+            self.qat_container.show()
+            if hasattr(self, "header_div_icon"):
+                self.header_div_icon.show()
+            if hasattr(self, "header_div"):
+                self.header_div.show()
             self.below_ribbon_bar.hide()
-            self.top_header.show()
             self.act_qat_position.setText("Show below the Ribbon")
+        self._save_qat_settings()
+
+    def _on_win_min_clicked(self) -> None:
+        win = self.window()
+        if win:
+            win.showMinimized()
+
+    def _on_win_max_clicked(self) -> None:
+        win = self.window()
+        if win:
+            if win.isMaximized():
+                win.showNormal()
+            else:
+                win.showMaximized()
+            self.update_window_controls()
+
+    def _on_win_close_clicked(self) -> None:
+        win = self.window()
+        if win:
+            win.close()
+
+    def update_window_controls(self) -> None:
+        win = self.window()
+        is_max = win.isMaximized() if win else False
+        if hasattr(self, "btn_win_max"):
+            if isinstance(self.btn_win_max, _WindowControlButton):
+                self.btn_win_max.set_kind("restore" if is_max else "max")
+            else:
+                self.btn_win_max.setText("❐" if is_max else "□")
+            self.btn_win_max.setToolTip("Restore Down" if is_max else "Maximize")
+
+    def _save_qat_settings(self) -> None:
+        try:
+            settings = QSettings("PhotoGallery64", "PhotoGallery64")
+            visible: list[str] = []
+            action_map = {
+                "print": getattr(self, "act_qat_print", None),
+                "back": getattr(self, "act_qat_back", None),
+                "forward": getattr(self, "act_qat_forward", None),
+                "undo": getattr(self, "act_qat_undo", None),
+                "redo": getattr(self, "act_qat_redo", None),
+                "thumbnails": getattr(self, "act_qat_thumbnails", None),
+                "map": getattr(self, "act_qat_map", None),
+                "people": getattr(self, "act_qat_people", None),
+                "rotate_left": getattr(self, "act_qat_rot_left", None),
+                "rotate_right": getattr(self, "act_qat_rot_right", None),
+                "delete": getattr(self, "act_qat_delete", None),
+                "slideshow": getattr(self, "act_qat_slideshow", None),
+            }
+            for key, act in action_map.items():
+                if act and act.isChecked():
+                    visible.append(key)
+            settings.setValue("qat_visible_actions", ",".join(visible))
+            settings.setValue("qat_below_ribbon", bool(getattr(self, "_qat_below_ribbon", False)))
+            settings.setValue("ribbon_minimized", bool(self.tab_widget.height() <= 36))
+        except Exception:
+            pass
+
+    def reset_qat_to_defaults(self) -> None:
+        """Resets Quick Access Toolbar to the authentic default actions: Back, Forward, Undo, Redo."""
+        action_map = {
+            "print": getattr(self, "act_qat_print", None),
+            "back": getattr(self, "act_qat_back", None),
+            "forward": getattr(self, "act_qat_forward", None),
+            "undo": getattr(self, "act_qat_undo", None),
+            "redo": getattr(self, "act_qat_redo", None),
+            "thumbnails": getattr(self, "act_qat_thumbnails", None),
+            "map": getattr(self, "act_qat_map", None),
+            "people": getattr(self, "act_qat_people", None),
+            "rotate_left": getattr(self, "act_qat_rot_left", None),
+            "rotate_right": getattr(self, "act_qat_rot_right", None),
+            "delete": getattr(self, "act_qat_delete", None),
+            "slideshow": getattr(self, "act_qat_slideshow", None),
+        }
+        for key, act in action_map.items():
+            if act:
+                act.setChecked(key in ("back", "forward", "undo", "redo"))
+        self._save_qat_settings()
+
+    def _load_qat_settings(self) -> None:
+        try:
+            settings = QSettings("PhotoGallery64", "PhotoGallery64")
+            # Migration check: v2 defaults ensure clean back, forward, undo, redo defaults
+            v2_flag = settings.value("qat_defaults_v2", None)
+            if v2_flag is None:
+                settings.setValue("qat_defaults_v2", 1)
+                settings.setValue("qat_visible_actions", "back,forward,undo,redo")
+
+            raw_visible = settings.value("qat_visible_actions", None)
+            action_map = {
+                "print": getattr(self, "act_qat_print", None),
+                "back": getattr(self, "act_qat_back", None),
+                "forward": getattr(self, "act_qat_forward", None),
+                "undo": getattr(self, "act_qat_undo", None),
+                "redo": getattr(self, "act_qat_redo", None),
+                "thumbnails": getattr(self, "act_qat_thumbnails", None),
+                "map": getattr(self, "act_qat_map", None),
+                "people": getattr(self, "act_qat_people", None),
+                "rotate_left": getattr(self, "act_qat_rot_left", None),
+                "rotate_right": getattr(self, "act_qat_rot_right", None),
+                "delete": getattr(self, "act_qat_delete", None),
+                "slideshow": getattr(self, "act_qat_slideshow", None),
+            }
+            if raw_visible is not None:
+                if isinstance(raw_visible, str):
+                    visible_set = set(raw_visible.split(",")) if raw_visible else set()
+                elif isinstance(raw_visible, (list, tuple)):
+                    visible_set = set(raw_visible)
+                else:
+                    visible_set = {"back", "forward", "undo", "redo"}
+                for key, act in action_map.items():
+                    if act:
+                        act.setChecked(key in visible_set)
+
+            below = settings.value("qat_below_ribbon", None)
+            if below is not None:
+                below_bool = str(below).lower() in ("true", "1")
+                self.set_qat_below_ribbon(below_bool)
+
+            minimized = settings.value("ribbon_minimized", None)
+            if minimized is not None:
+                min_bool = str(minimized).lower() in ("true", "1")
+                self.set_ribbon_collapsed(min_bool)
+        except Exception:
+            pass
+
+    def _get_qat_key_for_widget(self, w: QWidget | None) -> str | None:
+        target = w
+        while target and target != self:
+            if target in (getattr(self, "btn_rot_ccw", None), getattr(self, "btn_edit_rot_l", None), getattr(self, "btn_qat_rot_left", None)):
+                return "rotate_left"
+            if target in (getattr(self, "btn_rot_cw", None), getattr(self, "btn_edit_rot_r", None), getattr(self, "btn_qat_rot_right", None)):
+                return "rotate_right"
+            if target in (getattr(self, "btn_delete", None), getattr(self, "btn_edit_del", None), getattr(self, "btn_qat_delete", None)):
+                return "delete"
+            if target in (getattr(self, "btn_slide", None), getattr(self, "btn_qat_slideshow", None)):
+                return "slideshow"
+            if target in (getattr(self, "btn_print", None),):
+                return "print"
+            if target in (getattr(self, "btn_back", None),):
+                return "back"
+            if target in (getattr(self, "btn_forward", None),):
+                return "forward"
+            if target in (getattr(self, "btn_undo", None),):
+                return "undo"
+            if target in (getattr(self, "btn_redo", None),):
+                return "redo"
+            if target in (getattr(self, "btn_qat_thumbnails", None),):
+                return "thumbnails"
+            if target in (getattr(self, "btn_qat_map", None), getattr(self, "btn_map", None)):
+                return "map"
+            if target in (getattr(self, "btn_qat_people", None), getattr(self, "btn_people_tag", None)):
+                return "people"
+            target = target.parentWidget()
+        return None
+
+    def _show_ribbon_context_menu(self, global_pos: QPoint, clicked_widget: QWidget | None = None) -> None:
+        menu = QMenu(self)
+        menu.setFont(QFont("Segoe UI", 9))
+
+        target = clicked_widget or QApplication.widgetAt(global_pos)
+        qat_key = self._get_qat_key_for_widget(target)
+
+        action_map = {
+            "print": getattr(self, "act_qat_print", None),
+            "back": getattr(self, "act_qat_back", None),
+            "forward": getattr(self, "act_qat_forward", None),
+            "undo": getattr(self, "act_qat_undo", None),
+            "redo": getattr(self, "act_qat_redo", None),
+            "thumbnails": getattr(self, "act_qat_thumbnails", None),
+            "map": getattr(self, "act_qat_map", None),
+            "people": getattr(self, "act_qat_people", None),
+            "rotate_left": getattr(self, "act_qat_rot_left", None),
+            "rotate_right": getattr(self, "act_qat_rot_right", None),
+            "delete": getattr(self, "act_qat_delete", None),
+            "slideshow": getattr(self, "act_qat_slideshow", None),
+        }
+
+        if qat_key and action_map.get(qat_key):
+            act = action_map[qat_key]
+            if act.isChecked():
+                a_toggle = menu.addAction("Remove from Quick Access Toolbar")
+                a_toggle.triggered.connect(lambda: act.setChecked(False))
+            else:
+                a_toggle = menu.addAction("Add to Quick Access Toolbar")
+                a_toggle.triggered.connect(lambda: act.setChecked(True))
+        else:
+            a_dummy = menu.addAction("Add to Quick Access Toolbar")
+            a_dummy.setEnabled(False)
+
+        menu.addSeparator()
+
+        if getattr(self, "_qat_below_ribbon", False):
+            act_pos = menu.addAction("Show Quick Access Toolbar above the Ribbon")
+        else:
+            act_pos = menu.addAction("Show Quick Access Toolbar below the Ribbon")
+        act_pos.triggered.connect(self._toggle_qat_position)
+
+        menu.addSeparator()
+
+        is_min = (self.tab_widget.height() <= 36)
+        act_min = menu.addAction("Minimize the Ribbon")
+        act_min.setCheckable(True)
+        act_min.setChecked(is_min)
+        act_min.triggered.connect(self._toggle_ribbon_collapse)
+
+        menu.exec(global_pos)
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        self._show_ribbon_context_menu(event.globalPos(), None)
+        event.accept()
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.ContextMenu:
+            if not isinstance(obj, (QLineEdit, QMenu)):
+                if obj != getattr(self, "btn_file", None):
+                    self._show_ribbon_context_menu(event.globalPos(), obj if isinstance(obj, QWidget) else None)
+                    return True
+        return super().eventFilter(obj, event)
 
     def set_back_enabled(self, enabled: bool) -> None:
         self.btn_back.setEnabled(enabled)
@@ -5495,81 +6636,25 @@ class RibbonToolbar(QWidget):
         )
         self.btn_qf_rated.setMenu(rated_menu)
 
-        # Split Flagged Button: Left part toggles red flag filter, right arrow opens choice menu
-        self.btn_qf_flagged = QToolButton(grp_qfind)
-        self.btn_qf_flagged.setPopupMode(QToolButton.MenuButtonPopup)
-        self.btn_qf_flagged.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.btn_qf_flagged.setIcon(make_wlpg_icon("flag", 13))
-        self.btn_qf_flagged.setText("Flagged")
+        # Flagged Dropdown Filter Button
+        self.btn_qf_flagged = self._make_btn("Flagged", "flag", grp_qfind)
         self.btn_qf_flagged.setFixedHeight(19)
-        self.btn_qf_flagged.setCheckable(True)
-        self.btn_qf_flagged.original_text = "Flagged"
-        self.btn_qf_flagged._orig_text = "Flagged"
-        setattr(self.btn_qf_flagged, "set_compact", lambda compact, b=self.btn_qf_flagged: self._set_button_compact(b, compact))
-        self.btn_qf_flagged.setCheckable(True)
-        self.btn_qf_flagged.setCursor(Qt.PointingHandCursor)
-        self.btn_qf_flagged.setStyleSheet(
-            f"""
-            QToolButton {{
-                font-family: 'Segoe UI';
-                font-size: 8pt;
-                padding: 0 10px 0 3px;
-                border: 1px solid transparent;
-                border-radius: 2px;
-                color: #1E395B;
-                background: transparent;
-            }}
-            QToolButton:hover {{
-                background: #E8F1FC;
-                border-color: #B8D6FB;
-            }}
-            QToolButton:checked {{
-                background: #CCE4F7;
-                border-color: #7BAEDB;
-                color: #C00000;
-                font-weight: bold;
-            }}
-            QToolButton::menu-button {{
-                border: none;
-                background: transparent;
-                width: 12px;
-            }}
-            QToolButton::menu-arrow {{
-                image: url("{ARROW_DROPDOWN_PATH}");
-                width: 7px;
-                height: 4px;
-            }}
-            """
-        )
+        self.btn_qf_flagged.setPopupMode(QToolButton.InstantPopup)
+        self.btn_qf_flagged.setStyleSheet("font-size: 8pt; padding: 0 10px 0 3px;")
         flagged_menu = QMenu(self.btn_qf_flagged)
         act_f_all = flagged_menu.addAction("All items")
         act_f_flagged = flagged_menu.addAction("Flagged")
         act_f_unflagged = flagged_menu.addAction("Not flagged")
 
-        def _on_flag_btn_clicked(checked: bool):
-            self.flag_filter_selected.emit(1 if checked else None)
-            self.flagged_filter_selected.emit(checked)
-
-        self.btn_qf_flagged.clicked.connect(_on_flag_btn_clicked)
-
         def _on_menu_all():
-            self.btn_qf_flagged.blockSignals(True)
-            self.btn_qf_flagged.setChecked(False)
-            self.btn_qf_flagged.blockSignals(False)
             self.flag_filter_selected.emit(None)
             self.flagged_filter_selected.emit(False)
 
         def _on_menu_flagged():
-            self.btn_qf_flagged.blockSignals(True)
-            self.btn_qf_flagged.setChecked(True)
-            self.btn_qf_flagged.blockSignals(False)
             self.flag_filter_selected.emit(1)
             self.flagged_filter_selected.emit(True)
 
         def _on_menu_unflagged():
-            self.btn_qf_flagged.blockSignals(True)
-            self.btn_qf_flagged.setChecked(False)
-            self.btn_qf_flagged.blockSignals(False)
             self.flag_filter_selected.emit(0)
             self.flagged_filter_selected.emit(False)
 
@@ -6586,17 +7671,28 @@ class RibbonToolbar(QWidget):
         hbox.addWidget(grp_zoom)
 
         # ---------------------------------------------------------------------
-        # Group 4: Views Group (Slide show 2-button vertical split & World Map)
+        # Group 4: Views Group (Thumbnails, World Map, Slide show)
         # ---------------------------------------------------------------------
         grp_slideshow = _RibbonGroupBox("Views", page)
         self.grp_slideshow = grp_slideshow
-        split_view, self.btn_view_slideshow = self._make_slideshow_split_button(grp_slideshow)
-        grp_slideshow.content_layout.addWidget(split_view)
+
+        self.btn_view_thumbnails = self._make_btn(
+            "Gallery", "layout_grid", grp_slideshow, large=True, checkable=True
+        )
+        self.btn_view_thumbnails.setToolTip("View gallery photo and video thumbnails (Ctrl+0)")
+        self.btn_view_thumbnails.setChecked(True)
+        self.btn_view_thumbnails.clicked.connect(
+            lambda: self.action_triggered.emit("show_thumbnails_view")
+        )
+        grp_slideshow.content_layout.addWidget(self.btn_view_thumbnails)
 
         self.btn_view_map = self._make_btn("World\nMap", "globe", grp_slideshow, large=True, checkable=True)
         self.btn_view_map.setToolTip("Explore geotagged photos on the World Map (Leaflet / Offline)")
         self.btn_view_map.clicked.connect(lambda: self.action_triggered.emit("toggle_map_view"))
         grp_slideshow.content_layout.addWidget(self.btn_view_map)
+
+        split_view, self.btn_view_slideshow = self._make_slideshow_split_button(grp_slideshow)
+        grp_slideshow.content_layout.addWidget(split_view)
         hbox.addWidget(grp_slideshow)
 
         # ---------------------------------------------------------------------
@@ -6638,7 +7734,7 @@ class RibbonToolbar(QWidget):
         grp_layout = _RibbonGroupBox("Photo layout", page)
         self.grp_layout = grp_layout
         self.btn_layout_grid = self._make_btn(
-            "WLPG Grid", "layout_grid", grp_layout, large=True, checkable=True
+            "Grid", "layout_grid", grp_layout, large=True, checkable=True
         )
         self.btn_layout_grid.setChecked(True)
         self.btn_layout_mosaic = self._make_btn(
@@ -6920,12 +8016,172 @@ class RibbonToolbar(QWidget):
             except RuntimeError:
                 pass
 
-    def set_active_mode(self, mode: Literal["grid", "viewer", "map"]) -> None:
-        """Switches Ribbon context when entering/exiting Single Media Viewer or World Map."""
+    def _build_batch_people_tab(self) -> QWidget:
+        page = _RibbonPage()
+        hbox = QHBoxLayout(page)
+        hbox.setContentsMargins(4, 2, 4, 2)
+        hbox.setSpacing(4)
+
+        # ---------------------------------------------------------------------
+        # Group 1: Selection
+        # ---------------------------------------------------------------------
+        grp_sel = _RibbonGroupBox("Selection", page)
+        self.btn_batch_select_all = self._make_btn("Select all", "select_all", grp_sel, large=True)
+        self.btn_batch_select_all.setToolTip("Select all face suggestions (Ctrl+A)")
+        self.btn_batch_select_all.clicked.connect(lambda: self.action_triggered.emit("batch_select_all"))
+        grp_sel.content_layout.addWidget(self.btn_batch_select_all)
+        hbox.addWidget(grp_sel)
+
+        # ---------------------------------------------------------------------
+        # Group 2: Actions
+        # ---------------------------------------------------------------------
+        grp_act = _RibbonGroupBox("Actions", page)
+        self.btn_batch_confirm = self._make_btn("Confirm", "check", grp_act, large=True)
+        self.btn_batch_confirm.setToolTip("Confirm selected face tags (Enter)")
+        self.btn_batch_confirm.clicked.connect(lambda: self.action_triggered.emit("batch_confirm"))
+
+        self.btn_batch_reject = self._make_btn("Not this\nperson", "delete", grp_act, large=True)
+        self.btn_batch_reject.setToolTip("Reject suggestion / not this person (Del)")
+        self.btn_batch_reject.clicked.connect(lambda: self.action_triggered.emit("batch_reject"))
+
+        self.btn_batch_tag_as = self._make_btn("Tag as", "tag_as", grp_act, large=True)
+        self.btn_batch_tag_as.setToolTip("Tag selected face(s) as another person...")
+        self.btn_batch_tag_as.clicked.connect(lambda: self.action_triggered.emit("batch_tag_as"))
+
+        self.btn_batch_ignore = self._make_btn("Don't show\nagain", "person_none", grp_act, large=True)
+        self.btn_batch_ignore.setToolTip("Ignore / don't suggest this face again (I)")
+        self.btn_batch_ignore.clicked.connect(lambda: self.action_triggered.emit("batch_ignore"))
+
+        grp_act.content_layout.addWidget(self.btn_batch_confirm)
+        grp_act.content_layout.addWidget(self.btn_batch_reject)
+        grp_act.content_layout.addWidget(self.btn_batch_tag_as)
+        grp_act.content_layout.addWidget(self.btn_batch_ignore)
+        hbox.addWidget(grp_act)
+
+        # ---------------------------------------------------------------------
+        # Group 3: Health & Filter
+        # ---------------------------------------------------------------------
+        grp_health = _RibbonGroupBox("Health & Mode", page)
+        v_modes = QVBoxLayout()
+        v_modes.setContentsMargins(0, 0, 0, 0)
+        v_modes.setSpacing(1)
+
+        self.btn_batch_mode_sugg = self._make_btn("Suggestions", "batch_people", grp_health, large=False, checkable=True)
+        self.btn_batch_mode_sugg.setChecked(True)
+        self.btn_batch_mode_sugg.setToolTip("View pending face recognition suggestions")
+        self.btn_batch_mode_sugg.clicked.connect(lambda: self._on_batch_mode_clicked("suggestions"))
+
+        self.btn_batch_mode_outliers = self._make_btn("Review Outliers", "warning", grp_health, large=False, checkable=True)
+        self.btn_batch_mode_outliers.setToolTip("Review potential mis-tagged faces or visual outliers")
+        self.btn_batch_mode_outliers.clicked.connect(lambda: self._on_batch_mode_clicked("outliers"))
+
+        self.btn_batch_mode_boxless = self._make_btn("Missing Face Boxes", "tag", grp_health, large=False, checkable=True)
+        self.btn_batch_mode_boxless.setToolTip("Review photos with person tags missing face bounding boxes")
+        self.btn_batch_mode_boxless.clicked.connect(lambda: self._on_batch_mode_clicked("boxless"))
+
+        v_modes.addWidget(self.btn_batch_mode_sugg)
+        v_modes.addWidget(self.btn_batch_mode_outliers)
+        v_modes.addWidget(self.btn_batch_mode_boxless)
+        grp_health.content_layout.addLayout(v_modes)
+
+        self.btn_batch_options = self._make_btn("Face\nOptions...", "options", grp_health, large=True)
+        self.btn_batch_options.setToolTip("Configure face recognition models and rescan settings...")
+        self.btn_batch_options.clicked.connect(lambda: self.action_triggered.emit("batch_face_options"))
+        grp_health.content_layout.addWidget(self.btn_batch_options)
+        hbox.addWidget(grp_health)
+
+        # ---------------------------------------------------------------------
+        # Group 4: Close
+        # ---------------------------------------------------------------------
+        grp_close = _RibbonGroupBox("Close", page)
+        self.btn_batch_close = self._make_btn("Close", "cross", grp_close, large=True)
+        self.btn_batch_close.setToolTip("Return to Gallery view (Esc)")
+        self.btn_batch_close.clicked.connect(lambda: self.action_triggered.emit("batch_close"))
+        grp_close.content_layout.addWidget(self.btn_batch_close)
+        hbox.addWidget(grp_close)
+
+        hbox.addStretch(1)
+
+        return page
+
+    def _on_batch_mode_clicked(self, mode: str) -> None:
+        if hasattr(self, "btn_batch_mode_sugg"):
+            self.btn_batch_mode_sugg.setChecked(mode == "suggestions")
+        if hasattr(self, "btn_batch_mode_outliers"):
+            self.btn_batch_mode_outliers.setChecked(mode == "outliers")
+        if hasattr(self, "btn_batch_mode_boxless"):
+            self.btn_batch_mode_boxless.setChecked(mode == "boxless")
+        self.update_batch_action_labels(mode)
+        self.action_triggered.emit(f"batch_mode_{mode}")
+
+    def update_batch_action_labels(
+        self,
+        mode: str = "suggestions",
+        swap_suggested_name: str | None = None,
+        person_name: str | None = None,
+    ) -> None:
+        """Dynamically update Batch People Tagging action button labels & visibility based on mode and selection."""
+        if not hasattr(self, "btn_batch_confirm"):
+            return
+        if mode == "outliers":
+            # Outlier mode: explicit actions
+            self.btn_batch_confirm.setText("Keep\ntag")
+            self.btn_batch_confirm.setToolTip(f"Keep face as {person_name or 'current person'} (mark verified)")
+            self.btn_batch_reject.setText("Remove\ntag")
+            self.btn_batch_reject.setToolTip("Remove person tag from this photo")
+            if hasattr(self, "btn_batch_tag_as"):
+                self.btn_batch_tag_as.setText("Tag as")
+            if hasattr(self, "btn_batch_ignore"):
+                self.btn_batch_ignore.setText("Not a\nface")
+                self.btn_batch_ignore.setToolTip("Mark as not a face and delete face box")
+        elif mode == "boxless":
+            self.btn_batch_confirm.setText("Add\nbox")
+            self.btn_batch_confirm.setToolTip("Add face bounding box for this person")
+            self.btn_batch_reject.setText("Remove\ntag")
+            self.btn_batch_reject.setToolTip("Remove person tag from this photo")
+            if hasattr(self, "btn_batch_tag_as"):
+                self.btn_batch_tag_as.setText("Tag as")
+            if hasattr(self, "btn_batch_ignore"):
+                self.btn_batch_ignore.setText("Don't show\nagain")
+                self.btn_batch_ignore.setToolTip("Ignore")
+        else:
+            # Suggestions mode
+            self.btn_batch_confirm.setText("Confirm")
+            self.btn_batch_confirm.setToolTip("Confirm selected face tags (Enter)")
+            self.btn_batch_reject.setText("Not this\nperson")
+            self.btn_batch_reject.setToolTip("Reject suggestion / not this person (Del)")
+            if hasattr(self, "btn_batch_tag_as"):
+                self.btn_batch_tag_as.setText("Tag as")
+            if hasattr(self, "btn_batch_ignore"):
+                self.btn_batch_ignore.setText("Don't show\nagain")
+                self.btn_batch_ignore.setToolTip("Ignore / don't suggest this face again (I)")
+
+    def set_active_mode(self, mode: Literal["grid", "viewer", "map", "batch_people"]) -> None:
+        """Switches Ribbon context when entering/exiting Single Media Viewer, World Map, or Batch People Tagging."""
+        if mode == "batch_people":
+            for i in range(5):
+                self.tab_widget.tabBar().setTabVisible(i, False)
+            if hasattr(self, "tab_batch_people"):
+                self.tab_widget.tabBar().setTabVisible(5, True)
+                self.tab_widget.setCurrentWidget(self.tab_batch_people)
+            if hasattr(self, "scope_bar") and self.scope_bar is not None:
+                self.scope_bar.setVisible(False)
+            return
+
+        if hasattr(self, "tab_batch_people"):
+            idx = self.tab_widget.indexOf(self.tab_batch_people)
+            if idx >= 0:
+                self.tab_widget.tabBar().setTabVisible(idx, False)
+            if self.tab_widget.currentWidget() == self.tab_batch_people:
+                self.tab_widget.setCurrentWidget(self.tab_home)
+
         if mode == "viewer":
             # In Single Image View, hide Home (0) and Find (2), showing File, Edit, Create, View
             self.tab_widget.tabBar().setTabVisible(0, False)
+            self.tab_widget.tabBar().setTabVisible(1, True)
             self.tab_widget.tabBar().setTabVisible(2, False)
+            self.tab_widget.tabBar().setTabVisible(3, True)
+            self.tab_widget.tabBar().setTabVisible(4, True)
             self._set_edit_tab_mode("viewer")
             self.tab_widget.setCurrentWidget(self.tab_edit)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
@@ -6947,21 +8203,25 @@ class RibbonToolbar(QWidget):
             if hasattr(self, "grp_zoom"):
                 self.grp_zoom.adjust_to_content()
         elif mode == "map":
-            self.tab_widget.tabBar().setTabVisible(0, True)
-            self.tab_widget.tabBar().setTabVisible(2, True)
+            for i in range(5):
+                self.tab_widget.tabBar().setTabVisible(i, True)
             self.tab_widget.setCurrentWidget(self.tab_view)
             if hasattr(self, "btn_view_map"):
                 self.btn_view_map.setChecked(True)
+            if hasattr(self, "btn_view_thumbnails"):
+                self.btn_view_thumbnails.setChecked(False)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
                 self.scope_bar.setVisible(False)
         else:
             # Grid mode: restore Home and Find tabs
-            self.tab_widget.tabBar().setTabVisible(0, True)
-            self.tab_widget.tabBar().setTabVisible(2, True)
+            for i in range(5):
+                self.tab_widget.tabBar().setTabVisible(i, True)
             if hasattr(self, "btn_view_map"):
                 self.btn_view_map.setChecked(False)
+            if hasattr(self, "btn_view_thumbnails"):
+                self.btn_view_thumbnails.setChecked(True)
             self._set_edit_tab_mode("grid")
-            if self.tab_widget.currentWidget() == self.tab_edit:
+            if self.tab_widget.currentWidget() in (self.tab_edit, getattr(self, "tab_batch_people", None)):
                 self.tab_widget.setCurrentWidget(self.tab_home)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
                 self.scope_bar.setVisible(True)
@@ -6983,16 +8243,111 @@ class RibbonToolbar(QWidget):
                 self.grp_zoom.adjust_to_content()
 
 
+    def _apply_file_menu_stylesheet(self, is_dark: bool) -> None:
+        menu = getattr(self, "file_menu", None) or (self.btn_file.menu() if hasattr(self, "btn_file") else None)
+        if menu is None:
+            return
+        if is_dark:
+            menu.setStyleSheet(
+                """
+                QMenu {
+                    background-color: #1B1E24;
+                    border: 1px solid #333A45;
+                    border-radius: 2px;
+                    padding: 4px 0px;
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 9pt;
+                    color: #E2E8F0;
+                }
+                QMenu::item {
+                    padding: 6px 24px 6px 36px;
+                    background-color: transparent;
+                    border: 1px solid transparent;
+                    border-radius: 2px;
+                    margin: 1px 4px;
+                    color: #E2E8F0;
+                }
+                QMenu::item:selected {
+                    background-color: #2563EB;
+                    border: 1px solid #3B82F6;
+                    color: #FFFFFF;
+                }
+                QMenu::item:disabled {
+                    color: #64748B;
+                }
+                QMenu::icon {
+                    padding-left: 8px;
+                }
+                QMenu::separator {
+                    height: 1px;
+                    background: #2D323B;
+                    margin: 4px 8px;
+                }
+                """
+            )
+        else:
+            menu.setStyleSheet(
+                """
+                QMenu {
+                    background-color: #FFFFFF;
+                    border: 1px solid #7DA2CE;
+                    border-radius: 2px;
+                    padding: 4px 0px;
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 9pt;
+                    color: #1E395B;
+                }
+                QMenu::item {
+                    padding: 6px 24px 6px 36px;
+                    background-color: transparent;
+                    border: 1px solid transparent;
+                    border-radius: 2px;
+                    margin: 1px 4px;
+                    color: #1E395B;
+                }
+                QMenu::item:selected {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F0F6FD, stop:1 #D9E8F8);
+                    border: 1px solid #A8CEF5;
+                    color: #1E395B;
+                }
+                QMenu::item:disabled {
+                    color: #A0B2C6;
+                }
+                QMenu::icon {
+                    padding-left: 8px;
+                }
+                QMenu::separator {
+                    height: 1px;
+                    background: #E5EEF7;
+                    margin: 4px 8px;
+                }
+                """
+            )
+
     def _apply_aero_stylesheet(self) -> None:
+        self._dark_mode = False
+        self._is_dark = False
+        self._current_theme_mode = "wlpg_aero"
         icon_check = (get_icons_dir() / "check_dark.svg").as_posix()
         arrow_drop_down = (get_icons_dir() / "arrow_dropdown_mini.svg").as_posix()
         self.setStyleSheet(
             """
+            QTabWidget#RibbonTabs {
+                border: none;
+                background: transparent;
+            }
+            QTabWidget#RibbonTabs > QTabBar {
+                qproperty-drawBase: 0;
+                border: none;
+                background: transparent;
+            }
             QTabWidget#RibbonTabs::pane {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #F4F8FD, stop:0.55 #EBF2FA, stop:1 #DDE8F5);
                 border-top: 1px solid #9EB6CE;
                 border-bottom: 1px solid #A8BDD4;
+                border-left: none;
+                border-right: none;
                 top: -1px;
             }
             QTabWidget#RibbonTabs > QTabBar::tab {
@@ -7065,7 +8420,8 @@ class RibbonToolbar(QWidget):
                 text-align: center;
             }
             QPushButton#CompactRibbonBtn,
-            QToolButton#CompactRibbonBtn {
+            QToolButton#CompactRibbonBtn,
+            QToolButton#CompactRibbonToolBtn {
                 background: transparent;
                 border: 1px solid transparent;
                 border-radius: 2px;
@@ -7077,8 +8433,10 @@ class RibbonToolbar(QWidget):
             }
             QPushButton#LargeRibbonBtn:hover,
             QToolButton#LargeRibbonBtn:hover,
+            QToolButton#LargeRibbonToolBtn:hover,
             QPushButton#CompactRibbonBtn:hover,
-            QToolButton#CompactRibbonBtn:hover {
+            QToolButton#CompactRibbonBtn:hover,
+            QToolButton#CompactRibbonToolBtn:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #FFFDF5, stop:1 #FCE7A2);
                 border: 1px solid #D9B152;
@@ -7095,16 +8453,20 @@ class RibbonToolbar(QWidget):
             }
             QPushButton#LargeRibbonBtn:checked,
             QToolButton#LargeRibbonBtn:checked,
+            QToolButton#LargeRibbonToolBtn:checked,
             QPushButton#CompactRibbonBtn:checked,
-            QToolButton#CompactRibbonBtn:checked {
+            QToolButton#CompactRibbonBtn:checked,
+            QToolButton#CompactRibbonToolBtn:checked {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #EAF4FD, stop:1 #BBDDF7);
                 border: 1px solid #7DA2CE;
             }
             QPushButton#LargeRibbonBtn:checked:hover,
             QToolButton#LargeRibbonBtn:checked:hover,
+            QToolButton#LargeRibbonToolBtn:checked:hover,
             QPushButton#CompactRibbonBtn:checked:hover,
-            QToolButton#CompactRibbonBtn:checked:hover {
+            QToolButton#CompactRibbonBtn:checked:hover,
+            QToolButton#CompactRibbonToolBtn:checked:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #F0F7FE, stop:1 #A8D3F5);
                 border: 1px solid #6BA0D6;
@@ -7142,16 +8504,20 @@ class RibbonToolbar(QWidget):
                 font-size: 8pt;
                 text-align: center;
             }
-            QToolButton#CompactRibbonToolBtn,
-            QToolButton#CompactRibbonBtn {
+            QToolButton#CompactRibbonBtn,
+            QToolButton#CompactRibbonToolBtn {
                 background: transparent;
                 border: 1px solid transparent;
                 border-radius: 2px;
-                padding: 1px 13px 1px 4px;
+                padding: 1px 4px;
                 color: #1E395B;
                 font-family: 'Segoe UI';
                 font-size: 8.5pt;
                 text-align: left;
+            }
+            QToolButton#CompactRibbonToolBtn,
+            QToolButton#CompactRibbonBtn[has_menu="true"] {
+                padding: 1px 13px 1px 4px;
             }
             QToolButton#LargeRibbonToolBtn:hover,
             QToolButton#LargeRibbonBtn:hover,
@@ -7307,7 +8673,7 @@ class RibbonToolbar(QWidget):
             }
             QWidget#RibbonTopHeader {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F4F8FD, stop:1 #E0EBF7);
-                border-bottom: 1px solid #C4D6E8;
+                border-bottom: none;
             }
             QWidget#RibbonBelowQAT {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F4F8FC, stop:1 #E4ECF5);
@@ -7358,6 +8724,49 @@ class RibbonToolbar(QWidget):
                 image: none;
                 width: 0px;
             }
+            QWidget#RibbonTopHeader {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F0F6FC, stop:0.5 #E1EDF9, stop:1 #D2E4F6);
+                border-bottom: none;
+            }
+            QLabel#RibbonAppTitle {
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+                font-weight: 500;
+                margin-left: 4px;
+            }
+            QFrame#RibbonHeaderDiv {
+                background: #B6CEE8;
+                border: none;
+            }
+            QPushButton#WinMinBtn, QPushButton#WinMaxBtn {
+                border: none;
+                background: transparent;
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 9pt;
+            }
+            QPushButton#WinMinBtn:hover, QPushButton#WinMaxBtn:hover {
+                background: #CFE3F7;
+            }
+            QPushButton#WinMinBtn:pressed, QPushButton#WinMaxBtn:pressed {
+                background: #B8D6F2;
+            }
+            QPushButton#WinCloseBtn {
+                border: none;
+                background: transparent;
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 9.5pt;
+            }
+            QPushButton#WinCloseBtn:hover {
+                background: #E81123;
+                color: #FFFFFF;
+            }
+            QPushButton#WinCloseBtn:pressed {
+                background: #C42B1C;
+                color: #FFFFFF;
+            }
             QToolTip {
                 background-color: #FFFFFF;
                 color: #1E395B;
@@ -7378,6 +8787,7 @@ class RibbonToolbar(QWidget):
             if hasattr(btn, "_is_dark"):
                 btn._is_dark = False
                 btn.update()
+        self._apply_file_menu_stylesheet(False)
 
     def set_dark_mode(self, is_dark: bool) -> None:
         self._dark_mode = bool(is_dark)
@@ -7387,18 +8797,32 @@ class RibbonToolbar(QWidget):
                 btn._is_dark = self._dark_mode
                 btn.update()
         if not self._dark_mode:
-            self._apply_aero_stylesheet()
+            if getattr(self, "_current_theme_mode", "wlpg_aero") == "modern":
+                self._apply_fluent_stylesheet()
+            else:
+                self._apply_aero_stylesheet()
             return
 
         icon_check = (get_icons_dir() / "check_white.svg").as_posix()
         arrow_drop_down = (get_icons_dir() / "arrow_dropdown_mini_dark.svg").as_posix()
         self.setStyleSheet(
             """
+            QTabWidget#RibbonTabs {
+                border: none;
+                background: transparent;
+            }
+            QTabWidget#RibbonTabs > QTabBar {
+                qproperty-drawBase: 0;
+                border: none;
+                background: transparent;
+            }
             QTabWidget#RibbonTabs::pane {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #20242B, stop:0.55 #1B1E24, stop:1 #16191E);
                 border-top: 1px solid #333A45;
                 border-bottom: 1px solid #2D333D;
+                border-left: none;
+                border-right: none;
                 top: -1px;
             }
             QTabWidget#RibbonTabs > QTabBar::tab {
@@ -7478,11 +8902,15 @@ class RibbonToolbar(QWidget):
                 background: transparent;
                 border: 1px solid transparent;
                 border-radius: 2px;
-                padding: 1px 13px 1px 4px;
+                padding: 1px 4px;
                 color: #E2E8F0;
                 font-family: 'Segoe UI';
                 font-size: 8.5pt;
                 text-align: left;
+            }
+            QToolButton#CompactRibbonToolBtn,
+            QToolButton#CompactRibbonBtn[has_menu="true"] {
+                padding: 1px 13px 1px 4px;
             }
             QPushButton#LargeRibbonBtn:disabled,
             QToolButton#LargeRibbonBtn:disabled,
@@ -7514,7 +8942,8 @@ class RibbonToolbar(QWidget):
             QPushButton#LargeRibbonBtn:checked,
             QToolButton#LargeRibbonBtn:checked,
             QPushButton#CompactRibbonBtn:checked,
-            QToolButton#CompactRibbonBtn:checked {
+            QToolButton#CompactRibbonBtn:checked,
+            QToolButton#CompactRibbonToolBtn:checked {
                 background: #1E3A5F;
                 border: 1px solid #3B82F6;
                 color: #FFFFFF;
@@ -7649,7 +9078,7 @@ class RibbonToolbar(QWidget):
             }
             QWidget#RibbonTopHeader {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1C2026, stop:1 #16191E);
-                border-bottom: 1px solid #2D333D;
+                border-bottom: none;
             }
             QWidget#RibbonBelowQAT {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1C2026, stop:1 #16191E);
@@ -7694,10 +9123,53 @@ class RibbonToolbar(QWidget):
                 image: none;
                 width: 0px;
             }
+            QWidget#RibbonTopHeader {
+                background: #1B1E24;
+                border-bottom: none;
+            }
+            QLabel#RibbonAppTitle {
+                color: #94A3B8;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+                font-weight: 500;
+                margin-left: 4px;
+            }
+            QFrame#RibbonHeaderDiv {
+                background: #333A45;
+                border: none;
+            }
+            QPushButton#WinMinBtn, QPushButton#WinMaxBtn {
+                border: none;
+                background: transparent;
+                color: #CBD5E1;
+                font-family: 'Segoe UI';
+                font-size: 9pt;
+            }
+            QPushButton#WinMinBtn:hover, QPushButton#WinMaxBtn:hover {
+                background: #2E3642;
+            }
+            QPushButton#WinMinBtn:pressed, QPushButton#WinMaxBtn:pressed {
+                background: #3B4452;
+            }
+            QPushButton#WinCloseBtn {
+                border: none;
+                background: transparent;
+                color: #CBD5E1;
+                font-family: 'Segoe UI';
+                font-size: 9.5pt;
+            }
+            QPushButton#WinCloseBtn:hover {
+                background: #E81123;
+                color: #FFFFFF;
+            }
+            QPushButton#WinCloseBtn:pressed {
+                background: #C42B1C;
+                color: #FFFFFF;
+            }
             QToolTip {
-                background-color: #FFFFFF;
-                color: #1E395B;
-                border: 1px solid #7DA2CE;
+                background-color: #1E242C;
+                color: #E2E8F0;
+                border: 1px solid #333A45;
                 border-radius: 2px;
                 padding: 3px 6px;
                 font-family: 'Segoe UI';
@@ -7710,3 +9182,400 @@ class RibbonToolbar(QWidget):
                 carousel.set_dark_mode(True)
         if hasattr(self, "effects_gallery") and hasattr(self.effects_gallery, "set_dark_mode"):
             self.effects_gallery.set_dark_mode(True)
+        self._apply_file_menu_stylesheet(True)
+
+    def apply_theme_mode(self, theme_name: str) -> None:
+        self._current_theme_mode = theme_name
+        if theme_name == "dark":
+            self.set_dark_mode(True)
+        elif theme_name == "modern":
+            self._apply_fluent_stylesheet()
+        else:
+            self.set_dark_mode(False)
+        self.refresh_icons()
+        if hasattr(self, "tab_widget") and self.tab_widget.tabBar():
+            self.tab_widget.tabBar().update()
+
+    def _apply_fluent_stylesheet(self) -> None:
+        self._dark_mode = False
+        self._is_dark = False
+        self._current_theme_mode = "modern"
+        arrow_drop_down = ARROW_DROPDOWN_PATH
+        self.setStyleSheet(
+            """
+            QWidget#RibbonTopHeader {
+                background: #F3F4F6;
+                border-bottom: none;
+            }
+            QLabel#RibbonAppTitle {
+                color: #374151;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+                font-weight: 500;
+                margin-left: 4px;
+            }
+            QFrame#RibbonHeaderDiv {
+                background: #E5E7EB;
+                border: none;
+            }
+            QPushButton#WinMinBtn, QPushButton#WinMaxBtn {
+                border: none;
+                background: transparent;
+                color: #1F2937;
+                font-family: 'Segoe UI';
+                font-size: 9pt;
+            }
+            QPushButton#WinMinBtn:hover, QPushButton#WinMaxBtn:hover {
+                background: #E5E7EB;
+            }
+            QPushButton#WinMinBtn:pressed, QPushButton#WinMaxBtn:pressed {
+                background: #D1D5DB;
+            }
+            QPushButton#WinCloseBtn {
+                border: none;
+                background: transparent;
+                color: #1F2937;
+                font-family: 'Segoe UI';
+                font-size: 9.5pt;
+            }
+            QPushButton#WinCloseBtn:hover {
+                background: #E81123;
+                color: #FFFFFF;
+            }
+            QPushButton#WinCloseBtn:pressed {
+                background: #C42B1C;
+                color: #FFFFFF;
+            }
+            QTabWidget#RibbonTabs {
+                border: none;
+                background: transparent;
+            }
+            QTabWidget#RibbonTabs > QTabBar {
+                qproperty-drawBase: 0;
+                border: none;
+                background: transparent;
+            }
+            QTabWidget#RibbonTabs::pane {
+                background: #FFFFFF;
+                border-top: 1px solid #E5E7EB;
+                border-bottom: 1px solid #E5E7EB;
+                border-left: none;
+                border-right: none;
+                top: -1px;
+            }
+            QTabWidget#RibbonTabs > QTabBar::tab {
+                background: transparent;
+                border: none;
+                padding: 4px 14px;
+                margin-top: 2px;
+                margin-bottom: 0px;
+                color: #4B5563;
+                font-family: 'Segoe UI';
+                font-size: 9pt;
+                font-weight: 500;
+            }
+            QTabWidget#RibbonTabs > QTabBar::tab:hover {
+                background: #F3F4F6;
+                border-radius: 4px;
+                color: #111827;
+            }
+            QTabWidget#RibbonTabs > QTabBar::tab:selected {
+                background: #FFFFFF;
+                border: none;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
+                color: #0F6CBD;
+                font-weight: 600;
+            }
+            QTabWidget#RibbonTabs > QTabBar::tab:selected:hover {
+                background: #FFFFFF;
+                border: none;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
+            }
+            QPushButton#RibbonFileBtn {
+                background: #0F6CBD;
+                color: #FFFFFF;
+                font-family: 'Segoe UI';
+                font-size: 9pt;
+                font-weight: 600;
+                border: 1px solid #0F6CBD;
+                border-radius: 4px;
+                padding: 3px 14px;
+                margin-left: 2px;
+                margin-right: 4px;
+                margin-top: 1px;
+            }
+            QPushButton#RibbonFileBtn:hover {
+                background: #115EA3;
+                border-color: #115EA3;
+            }
+            QPushButton#RibbonFileBtn::menu-indicator {
+                image: none;
+                width: 0px;
+            }
+            QFrame#RibbonGroupBox {
+                border: none;
+                border-right: 1px solid #E5E7EB;
+                background: transparent;
+            }
+            QFrame#RibbonGroupBox QLabel {
+                color: #6B7280;
+                font-size: 8pt;
+                font-family: 'Segoe UI';
+                border: none;
+                background: transparent;
+                padding-bottom: 1px;
+            }
+            QFrame#FaceCarouselContainer,
+            QFrame#RibbonArrangeBox {
+                background: #FFFFFF;
+                border: 1px solid #E5E7EB;
+                border-radius: 4px;
+            }
+            QFrame#FaceCarouselContainer QToolButton {
+                border: 1px solid #E5E7EB;
+                border-radius: 3px;
+                background: transparent;
+                padding: 0px;
+            }
+            QFrame#FaceCarouselContainer QToolButton:hover {
+                border: 1px solid #0F6CBD;
+                background: #EFF6FF;
+            }
+            QPushButton#LargeRibbonBtn,
+            QToolButton#LargeRibbonBtn,
+            QToolButton#LargeRibbonToolBtn {
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                padding: 0px 1px 2px 1px;
+                margin: 0px;
+                color: #1F2937;
+                font-family: 'Segoe UI';
+                font-size: 8pt;
+                text-align: center;
+            }
+            QPushButton#LargeRibbonBtn:hover,
+            QToolButton#LargeRibbonBtn:hover,
+            QToolButton#LargeRibbonToolBtn:hover {
+                background: #E5E7EB;
+                border: 1px solid #D1D5DB;
+                color: #111827;
+            }
+            QPushButton#LargeRibbonBtn:pressed,
+            QToolButton#LargeRibbonBtn:pressed,
+            QToolButton#LargeRibbonToolBtn:pressed {
+                background: #D1D5DB;
+                border: 1px solid #9CA3AF;
+            }
+            QPushButton#LargeRibbonBtn:checked,
+            QToolButton#LargeRibbonBtn:checked,
+            QToolButton#LargeRibbonToolBtn:checked {
+                background: #EFF6FF;
+                border: 1px solid #BFDBFE;
+                color: #0F6CBD;
+            }
+            QPushButton#LargeRibbonBtn:checked:hover,
+            QToolButton#LargeRibbonBtn:checked:hover,
+            QToolButton#LargeRibbonToolBtn:checked:hover {
+                background: #DBEAFE;
+                border: 1px solid #93C5FD;
+                color: #0F6CBD;
+            }
+            QPushButton#LargeRibbonBtn:disabled,
+            QToolButton#LargeRibbonBtn:disabled,
+            QToolButton#LargeRibbonToolBtn:disabled {
+                color: #9CA3AF;
+            }
+            QPushButton#CompactRibbonBtn,
+            QToolButton#CompactRibbonBtn,
+            QToolButton#CompactRibbonToolBtn,
+            QToolButton#RibbonModeToggleBtn {
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                padding: 1px 4px;
+                color: #1F2937;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+                text-align: left;
+            }
+            QPushButton#CompactRibbonBtn:hover,
+            QToolButton#CompactRibbonBtn:hover,
+            QToolButton#CompactRibbonToolBtn:hover,
+            QToolButton#RibbonModeToggleBtn:hover {
+                background: #E5E7EB;
+                border: 1px solid #D1D5DB;
+                color: #111827;
+            }
+            QPushButton#CompactRibbonBtn:pressed,
+            QToolButton#CompactRibbonBtn:pressed,
+            QToolButton#CompactRibbonToolBtn:pressed,
+            QToolButton#RibbonModeToggleBtn:pressed {
+                background: #D1D5DB;
+                border: 1px solid #9CA3AF;
+            }
+            QPushButton#CompactRibbonBtn:checked,
+            QToolButton#CompactRibbonBtn:checked,
+            QToolButton#CompactRibbonToolBtn:checked,
+            QToolButton#RibbonModeToggleBtn:checked {
+                background: #EFF6FF;
+                border: 1px solid #BFDBFE;
+                color: #0F6CBD;
+            }
+            QPushButton#CompactRibbonBtn:checked:hover,
+            QToolButton#CompactRibbonBtn:checked:hover,
+            QToolButton#CompactRibbonToolBtn:checked:hover,
+            QToolButton#RibbonModeToggleBtn:checked:hover {
+                background: #DBEAFE;
+                border: 1px solid #93C5FD;
+                color: #0F6CBD;
+            }
+            QPushButton#CompactRibbonBtn:disabled,
+            QToolButton#CompactRibbonBtn:disabled,
+            QToolButton#CompactRibbonToolBtn:disabled {
+                color: #9CA3AF;
+            }
+            QToolButton#CompactRibbonBtn[has_menu="true"],
+            QToolButton#CompactRibbonToolBtn[has_menu="true"] {
+                padding: 1px 13px 1px 4px;
+            }
+            QToolButton#CompactRibbonBtn::menu-indicator,
+            QToolButton#CompactRibbonToolBtn::menu-indicator {
+                image: url({arrow_drop_down});
+                width: 7px;
+                height: 4px;
+                subcontrol-position: center right;
+                subcontrol-origin: padding;
+                right: 3px;
+                top: 1px;
+            }
+            QToolButton#LargeRibbonBtn::menu-indicator,
+            QToolButton#LargeRibbonToolBtn::menu-indicator {
+                image: url({arrow_drop_down});
+                width: 7px;
+                height: 4px;
+                subcontrol-position: bottom center;
+                subcontrol-origin: padding;
+                bottom: 2px;
+            }
+            QWidget#TagDescSplitContainer,
+            QWidget#SlideshowSplitContainer,
+            QWidget#SaveCopySplitContainer {
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 4px;
+            }
+            QToolButton#SlideshowTopBtn,
+            QToolButton#TagDescTopBtn,
+            QToolButton#SaveCopyTopBtn {
+                background: transparent;
+                border: 1px solid transparent;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
+                padding: 1px;
+            }
+            QToolButton#SlideshowTopBtn:hover,
+            QToolButton#TagDescTopBtn:hover,
+            QToolButton#SaveCopyTopBtn:hover {
+                background: #E5E7EB;
+                border: 1px solid #D1D5DB;
+            }
+            QToolButton#SlideshowTopBtn:pressed,
+            QToolButton#TagDescTopBtn:pressed,
+            QToolButton#SaveCopyTopBtn:pressed {
+                background: #D1D5DB;
+                border: 1px solid #9CA3AF;
+            }
+            QToolButton#SlideshowBottomBtn,
+            QToolButton#TagDescBottomBtn,
+            QToolButton#SaveCopyBottomBtn {
+                background: transparent;
+                border: 1px solid transparent;
+                border-top-left-radius: 0px;
+                border-top-right-radius: 0px;
+                border-bottom-left-radius: 4px;
+                border-bottom-right-radius: 4px;
+                color: #1F2937;
+                font-family: 'Segoe UI';
+                font-size: 8pt;
+                text-align: center;
+                padding: 0px 1px 1px 1px;
+            }
+            QToolButton#SlideshowBottomBtn:hover,
+            QToolButton#TagDescBottomBtn:hover,
+            QToolButton#SaveCopyBottomBtn:hover {
+                background: #E5E7EB;
+                border: 1px solid #D1D5DB;
+            }
+            QToolButton#SlideshowBottomBtn:pressed,
+            QToolButton#TagDescBottomBtn:pressed,
+            QToolButton#SaveCopyBottomBtn:pressed {
+                background: #D1D5DB;
+                border: 1px solid #9CA3AF;
+            }
+            QToolButton#SlideshowBottomBtn::menu-indicator,
+            QToolButton#TagDescBottomBtn::menu-indicator,
+            QToolButton#SaveCopyBottomBtn::menu-indicator {
+                image: none;
+                width: 0px;
+                height: 0px;
+            }
+            QToolButton#QATCircleBtn,
+            QToolButton#QATBtn {
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                padding: 1px;
+            }
+            QToolButton#QATCircleBtn:hover,
+            QToolButton#QATBtn:hover {
+                background: #E5E7EB;
+                border: 1px solid #D1D5DB;
+            }
+            QToolButton#QATCircleBtn:pressed,
+            QToolButton#QATBtn:pressed {
+                background: #D1D5DB;
+            }
+            QToolButton#QATBtn:disabled,
+            QToolButton#QATCircleBtn:disabled {
+                opacity: 0.35;
+            }
+            QFrame#SearchScopeBar,
+            QWidget#RibbonBelowQAT {
+                background: #F9FAFB;
+                border-bottom: 1px solid #E5E7EB;
+            }
+            QToolTip {
+                background-color: #FFFFFF;
+                color: #1F2937;
+                border: 1px solid #E5E7EB;
+                border-radius: 4px;
+                padding: 3px 6px;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+            }
+            """.replace("{arrow_drop_down}", arrow_drop_down)
+        )
+        for carousel in (getattr(self, "home_face_carousel", None), getattr(self, "find_face_carousel", None)):
+            if carousel and hasattr(carousel, "set_dark_mode"):
+                carousel.set_dark_mode(False)
+        if hasattr(self, "effects_gallery") and hasattr(self.effects_gallery, "set_dark_mode"):
+            self.effects_gallery.set_dark_mode(False)
+        for btn in getattr(self, "_responsive_large_buttons", []):
+            if hasattr(btn, "_is_dark"):
+                btn._is_dark = False
+                btn.update()
+        self._apply_file_menu_stylesheet(False)
+
+
+# Backwards compatibility alias
+PhotoGalleryRibbonToolbar = RibbonToolbar
+

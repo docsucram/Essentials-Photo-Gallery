@@ -42,6 +42,7 @@ from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
+    QIcon,
     QLinearGradient,
     QMouseEvent,
     QPainter,
@@ -61,6 +62,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMenu,
     QPlainTextEdit,
     QPushButton,
@@ -69,6 +72,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QSplitterHandle,
     QStackedWidget,
+    QStyle,
     QTextEdit,
     QTimeEdit,
     QToolButton,
@@ -79,6 +83,12 @@ from PySide6.QtWidgets import (
 from legacy_reference.imgBrowserv13 import (
     _format_exif_orientation,
     format_file_size,
+)
+from src.core.geotag_resolver import (
+    resolve_location_query,
+    reverse_geocode,
+    search_places_offline,
+    search_places_online,
 )
 from src.db.repository import _epoch_to_datetime_utc
 from src.ui.ribbon_toolbar import make_person_avatar_pixmap, make_symbol_icon, make_wlpg_icon
@@ -457,7 +467,7 @@ class _UnknownFaceCardWidget(QFrame):
         self.face_id = int(face_id)
         self.setObjectName("UnknownFaceCard")
         self.setMouseTracking(True)
-        self.setFixedHeight(36)
+        self.setFixedHeight(40)
         self.setProperty("hovered", "false")
         self.setStyleSheet(
             """
@@ -477,11 +487,11 @@ class _UnknownFaceCardWidget(QFrame):
         hbox.setSpacing(4)
 
         self.icon_lbl = QLabel(self)
-        self.icon_lbl.setFixedSize(30, 30)
-        self.icon_lbl.setStyleSheet("border: 1px solid #8A9BA8; background: #EAECEE;")
+        self.icon_lbl.setFixedSize(34, 34)
+        self.icon_lbl.setStyleSheet("border: none; background: transparent; border-radius: 2px;")
         if icon_pixmap is not None and not icon_pixmap.isNull():
             self.icon_lbl.setPixmap(
-                icon_pixmap.scaled(30, 30, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                icon_pixmap.scaled(34, 34, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
             )
         hbox.addWidget(self.icon_lbl)
 
@@ -741,7 +751,7 @@ class _PersonTagCardWidget(QFrame):
         self.is_boxless = bool(is_boxless)
         self.setObjectName("PersonTagCard")
         self.setMouseTracking(True)
-        self.setFixedHeight(36)
+        self.setFixedHeight(40)
         self.setProperty("hovered", "false")
 
         self.setStyleSheet(
@@ -786,11 +796,11 @@ class _PersonTagCardWidget(QFrame):
         hbox.setSpacing(4)
 
         self.icon_lbl = QLabel(self)
-        self.icon_lbl.setFixedSize(30, 30)
-        self.icon_lbl.setStyleSheet("border: 1px solid #8A9BA8; background: #EAECEE;")
+        self.icon_lbl.setFixedSize(34, 34)
+        self.icon_lbl.setStyleSheet("border: none; background: transparent; border-radius: 2px;")
         if icon_pixmap is not None and not icon_pixmap.isNull():
             self.icon_lbl.setPixmap(
-                icon_pixmap.scaled(30, 30, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                icon_pixmap.scaled(34, 34, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
             )
         hbox.addWidget(self.icon_lbl)
 
@@ -1665,6 +1675,200 @@ class _DescriptiveTagInput(QLineEdit):
         super().keyPressEvent(event)
 
 
+def _make_cross_icon(size: int = 16) -> QIcon:
+    """Creates a clean subtle '✕' icon matching DescriptiveTagRowWidget."""
+    icon = QIcon()
+    for mode, col in [(QIcon.Normal, "#4C4C4C"), (QIcon.Active, "#C50F1F"), (QIcon.Selected, "#C50F1F")]:
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(QPen(QColor(col), 1.25, Qt.SolidLine, Qt.RoundCap))
+        m = size * 0.30
+        p.drawLine(QPointF(m, m), QPointF(size - m, size - m))
+        p.drawLine(QPointF(size - m, m), QPointF(m, size - m))
+        p.end()
+        icon.addPixmap(pm, mode)
+    return icon
+
+
+class _GeotagInput(QLineEdit):
+    """
+    WLPG-style Geotag input field featuring sub-2ms gazetteer autocomplete,
+    a 'Searching...' status indicator, background Nominatim lookup, and [✕] clear action.
+    """
+
+    place_selected = Signal(str, float, float)  # formatted_name, lat, lon
+    geotag_cleared = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("InlineEdit")
+        self.setPlaceholderText("Add geotag")
+        self.lbl_status: QLabel | None = None
+        self._db_engine: Any = None
+        self._current_places: list[dict[str, Any]] = []
+
+        self._model = QStringListModel(self)
+        self._completer = QCompleter(self._model, self)
+        self._completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._completer.setFilterMode(Qt.MatchContains)
+        self._completer.setCompletionMode(QCompleter.PopupCompletion)
+        self._completer.activated[str].connect(self._on_completer_activated)
+        self.setCompleter(self._completer)
+
+        popup = self._completer.popup()
+        if popup is not None:
+            popup.setStyleSheet("""
+                QListView {
+                    border: 1px solid #0066CC;
+                    background-color: #FFFFFF;
+                    color: #1E395B;
+                    font-size: 11px;
+                    padding: 2px;
+                    outline: none;
+                }
+                QListView::item {
+                    padding: 5px 8px;
+                    border-radius: 2px;
+                }
+                QListView::item:hover {
+                    background-color: #EBF3FB;
+                    color: #0066CC;
+                }
+                QListView::item:selected {
+                    background-color: #0066CC;
+                    color: #FFFFFF;
+                }
+            """)
+
+        self.act_clear = self.addAction(
+            _make_cross_icon(16),
+            QLineEdit.TrailingPosition,
+        )
+        self.act_clear.setToolTip("Remove geotag")
+        self.act_clear.setVisible(False)
+        self.act_clear.triggered.connect(self.clear_geotag)
+
+        self.textEdited.connect(self._on_text_edited)
+        self.textChanged.connect(self._on_text_changed)
+
+        self._online_timer = QTimer(self)
+        self._online_timer.setSingleShot(True)
+        self._online_timer.setInterval(350)
+        self._online_timer.timeout.connect(self._trigger_online_search)
+
+    def enterEvent(self, event: Any) -> None:
+        super().enterEvent(event)
+        if bool(self.text().strip()):
+            self.act_clear.setVisible(True)
+
+    def leaveEvent(self, event: Any) -> None:
+        super().leaveEvent(event)
+        self.act_clear.setVisible(False)
+
+    def _on_text_changed(self, text: str) -> None:
+        if not text.strip():
+            self.act_clear.setVisible(False)
+        elif self.underMouse():
+            self.act_clear.setVisible(True)
+
+    def _on_text_edited(self, text: str) -> None:
+        clean = text.strip()
+        if not clean:
+            if self.lbl_status is not None:
+                self.lbl_status.setVisible(False)
+            self._model.setStringList([])
+            if self._completer.popup() is not None:
+                self._completer.popup().hide()
+            return
+
+        if self.lbl_status is not None:
+            self.lbl_status.setText("Searching...")
+            self.lbl_status.setVisible(True)
+
+        places = search_places_offline(clean, limit=12, db_engine=self._db_engine)
+        self._current_places = places
+        items = [p["formatted_address"] for p in places]
+        self._model.setStringList(items)
+
+        if items:
+            self._completer.complete()
+
+        # If few local results and query >= 3 chars, trigger background Nominatim
+        if len(places) < 3 and len(clean) >= 3:
+            self._online_timer.start(350)
+        else:
+            if self.lbl_status is not None:
+                self.lbl_status.setVisible(False)
+
+    def _trigger_online_search(self) -> None:
+        query = self.text().strip()
+        if len(query) < 3:
+            if self.lbl_status is not None:
+                self.lbl_status.setVisible(False)
+            return
+
+        import threading
+        def _fetch():
+            try:
+                results = search_places_online(query, db_engine=self._db_engine, timeout=2.0, limit=6)
+                if results and self.text().strip().lower() == query.lower():
+                    QTimer.singleShot(0, lambda: self._apply_online_results(results))
+                else:
+                    QTimer.singleShot(0, lambda: self.lbl_status.setVisible(False) if self.lbl_status else None)
+            except Exception:
+                if self.lbl_status is not None:
+                    QTimer.singleShot(0, lambda: self.lbl_status.setVisible(False))
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _apply_online_results(self, new_places: list[dict[str, Any]]) -> None:
+        if self.lbl_status is not None:
+            self.lbl_status.setVisible(False)
+        existing_fmts = {p["formatted_address"] for p in self._current_places}
+        added = False
+        for p in new_places:
+            fmt = p["formatted_address"]
+            if fmt not in existing_fmts:
+                self._current_places.append(p)
+                existing_fmts.add(fmt)
+                added = True
+        if added:
+            items = [p["formatted_address"] for p in self._current_places]
+            self._model.setStringList(items)
+            self._completer.complete()
+
+    def _on_completer_activated(self, text: str) -> None:
+        val = text.strip()
+        if self.lbl_status is not None:
+            self.lbl_status.setVisible(False)
+        matched = next((p for p in self._current_places if p["formatted_address"].lower() == val.lower()), None)
+        if matched is None:
+            lat, lon, fmt = resolve_location_query(val, allow_network=False, db_engine=self._db_engine)
+        else:
+            lat, lon, fmt = matched["lat"], matched["lon"], matched["formatted_address"]
+
+        self.setText(fmt or val)
+        if lat is not None and lon is not None:
+            self.place_selected.emit(fmt or val, float(lat), float(lon))
+
+    def clear_geotag(self) -> None:
+        self.clear()
+        self.act_clear.setVisible(False)
+        if self.lbl_status is not None:
+            self.lbl_status.setVisible(False)
+        self.geotag_cleared.emit()
+
+    def contextMenuEvent(self, event: Any) -> None:
+        menu = self.createStandardContextMenu()
+        if self.text().strip():
+            menu.addSeparator()
+            act_rm = menu.addAction("Remove geotag")
+            act_rm.triggered.connect(self.clear_geotag)
+        menu.exec(event.globalPos())
+
+
 class _FineTuneGroup(QFrame):
     """Rounded card group box for Fine-Tune controls matching media_1792165772919_087b03d2.png."""
 
@@ -1879,6 +2083,7 @@ class TagAndCaptionDock(QDockWidget):
     depth_relight_changed = Signal(int, int, int, int)       # near, far, warmth_near, warmth_far
     depth_haze_changed = Signal(int, int)                    # haze, haze_warmth
     depth_reset_requested = Signal()
+    map_location_selected = Signal(list, str, float, float)  # media_ids, label, lat, lon
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Tag and caption", parent)
@@ -2020,6 +2225,11 @@ class TagAndCaptionDock(QDockWidget):
     def current_mode(self) -> str:
         return self._current_mode
 
+    def bind_database_engine(self, engine: Any) -> None:
+        self._db_engine = engine
+        if hasattr(self, "txt_geotag") and isinstance(self.txt_geotag, _GeotagInput):
+            self.txt_geotag._db_engine = engine
+
     # -------------------------------------------------------------------------
     # Page 1: Information & Tag Pane (docs/reference_ui/main_ui.png & media_1792165701201_517fc7f1.png)
     # -------------------------------------------------------------------------
@@ -2050,6 +2260,35 @@ class TagAndCaptionDock(QDockWidget):
         top_vbox.setContentsMargins(10, 2, 10, 8)
         top_vbox.setSpacing(6)
 
+        # 0. Locations in View (shown in World Map View)
+        self.locations_in_view_container = QWidget(top_content)
+        loc_vbox = QVBoxLayout(self.locations_in_view_container)
+        loc_vbox.setContentsMargins(0, 0, 0, 4)
+        loc_vbox.setSpacing(4)
+
+        lbl_locations = QLabel("Locations in this view", self.locations_in_view_container)
+        lbl_locations.setObjectName("SectionTitle")
+        loc_vbox.addWidget(lbl_locations)
+
+        self.list_locations_in_view = QListWidget(self.locations_in_view_container)
+        self.list_locations_in_view.setFixedHeight(140)
+        self.list_locations_in_view.setStyleSheet(
+            "QListWidget { border: 1px solid #C8D2E0; border-radius: 2px; background: #FFFFFF; font-family: 'Segoe UI'; font-size: 9pt; } "
+            "QListWidget::item { padding: 3px 6px; } "
+            "QListWidget::item:hover { background-color: #E5F3FF; } "
+            "QListWidget::item:selected { background-color: #CCE8FF; color: #000000; font-weight: 600; }"
+        )
+        self.list_locations_in_view.itemClicked.connect(self._on_location_in_view_clicked)
+        loc_vbox.addWidget(self.list_locations_in_view)
+
+        sep = QFrame(self.locations_in_view_container)
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color: #E2E8F0;")
+        loc_vbox.addWidget(sep)
+
+        self.locations_in_view_container.hide()
+        top_vbox.addWidget(self.locations_in_view_container)
+
         # 1. People tags (Add people tags box above the tagged people list, matching media_1792269887974_67460900.png)
         lbl_people = QLabel("People tags", top_content)
         lbl_people.setObjectName("SectionTitle")
@@ -2074,15 +2313,29 @@ class TagAndCaptionDock(QDockWidget):
         self.people_chips_layout.setSpacing(3)
         top_vbox.addWidget(self.people_chips_container)
 
-        # 2. Geotag
-        lbl_geo = QLabel("Geotag", top_content)
-        lbl_geo.setObjectName("SectionTitle")
-        top_vbox.addWidget(lbl_geo)
+        # 2. Geotag (with Searching... status label and autocomplete)
+        geo_hdr_row = QWidget(top_content)
+        geo_hdr_layout = QHBoxLayout(geo_hdr_row)
+        geo_hdr_layout.setContentsMargins(0, 0, 0, 0)
+        geo_hdr_layout.setSpacing(4)
 
-        self.txt_geotag = QLineEdit(top_content)
+        lbl_geo = QLabel("Geotag", geo_hdr_row)
+        lbl_geo.setObjectName("SectionTitle")
+        geo_hdr_layout.addWidget(lbl_geo)
+
+        self.lbl_geotag_status = QLabel("", geo_hdr_row)
+        self.lbl_geotag_status.setStyleSheet("color: #718096; font-size: 11px; font-style: italic;")
+        self.lbl_geotag_status.setVisible(False)
+        geo_hdr_layout.addStretch(1)
+        geo_hdr_layout.addWidget(self.lbl_geotag_status)
+        top_vbox.addWidget(geo_hdr_row)
+
+        self.txt_geotag = _GeotagInput(top_content)
         self.txt_geotag.setObjectName("InlineEdit")
-        self.txt_geotag.setPlaceholderText("Add geotag")
+        self.txt_geotag.lbl_status = self.lbl_geotag_status
         self.txt_geotag.returnPressed.connect(self._on_geotag_committed)
+        self.txt_geotag.place_selected.connect(self._on_place_selected)
+        self.txt_geotag.geotag_cleared.connect(self._on_geotag_cleared)
         top_vbox.addWidget(self.txt_geotag)
 
         # 3. Caption
@@ -3067,6 +3320,43 @@ class TagAndCaptionDock(QDockWidget):
             if item.widget() is not None:
                 item.widget().deleteLater()
 
+    def _on_location_in_view_clicked(self, item: QListWidgetItem) -> None:
+        data = item.data(Qt.UserRole)
+        if data and len(data) >= 4:
+            mids, label, lat, lon = data[0], data[1], data[2], data[3]
+            self.map_location_selected.emit(mids, label, lat, lon)
+
+    def set_map_clusters(self, clusters: Sequence[dict[str, Any]]) -> None:
+        """Populates the Locations in View list for Map View."""
+        self.list_locations_in_view.clear()
+        for c in clusters:
+            label = str(c.get("label", ""))
+            cnt = int(c.get("count", len(c.get("media_ids", []))))
+            item = QListWidgetItem(f"📍 {label} ({cnt})")
+            item.setData(
+                Qt.UserRole,
+                (
+                    c.get("media_ids", []),
+                    label,
+                    float(c.get("lat", 0.0)),
+                    float(c.get("lon", 0.0)),
+                ),
+            )
+            self.list_locations_in_view.addItem(item)
+
+    def set_view_mode(self, mode: str) -> None:
+        """Toggles between standard 'grid' and 'map' mode in RightTagDock."""
+        self._view_mode = mode
+        if mode == "map":
+            self.locations_in_view_container.show()
+        else:
+            self.locations_in_view_container.hide()
+
+    @property
+    def selected_count(self) -> int:
+        """Returns the number of currently selected media items."""
+        return len(getattr(self, "_selected_ids", []))
+
     def set_total_view_count(self, count: int) -> None:
         """Updates total view items count for the Information pane empty state."""
         self._total_view_count = max(0, int(count))
@@ -3139,7 +3429,7 @@ class TagAndCaptionDock(QDockWidget):
                 pid = int(p.get("person_id") or p.get("id") or 0) if (p.get("person_id") or (p.get("id") and pname)) else None
                 st = int(p.get("state", 1 if (pid and not p.get("is_unconfirmed")) else 0))
                 blob = p.get("thumbnail_blob")
-                pix = make_person_avatar_pixmap(pname or "Unknown", blob, size=30, circular=False)
+                pix = make_person_avatar_pixmap(pname or "Unknown", blob, size=34, circular=False)
 
                 if st == 0 and not pname:
                     # Detected unknown face ("Who is this?")
@@ -3307,7 +3597,15 @@ class TagAndCaptionDock(QDockWidget):
                 self.lbl_lon.setText(f"{float(lon):.5f}" if lon is not None else "Unavailable")
 
                 self.txt_caption.setText(str(summary.get("caption") or ""))
-                self.txt_geotag.setText(str(summary.get("location_name") or ""))
+                loc_name = str(summary.get("location_name") or "").strip()
+                if not loc_name and lat is not None and lon is not None:
+                    try:
+                        rev = reverse_geocode(float(lat), float(lon))
+                        if rev and rev.get("formatted_address"):
+                            loc_name = rev["formatted_address"]
+                    except Exception:
+                        pass
+                self.txt_geotag.setText(loc_name)
             else:
                 lead = summary.get("lead", {})
                 self.lbl_selection_header.setText(f"{count} items selected")
@@ -3360,11 +3658,21 @@ class TagAndCaptionDock(QDockWidget):
                 self.lbl_focal_length.setText("-")
                 self.lbl_iso.setText("-")
                 self._apply_video_info_rows(None)
-                self.lbl_lat.setText("Unavailable")
-                self.lbl_lon.setText("Unavailable")
+                lead_lat = lead.get("lat")
+                lead_lon = lead.get("lon")
+                self.lbl_lat.setText(f"{float(lead_lat):.5f}" if lead_lat is not None else "Unavailable")
+                self.lbl_lon.setText(f"{float(lead_lon):.5f}" if lead_lon is not None else "Unavailable")
 
                 self.txt_caption.setText(str(lead.get("caption") or ""))
-                self.txt_geotag.setText(str(lead.get("location_name") or ""))
+                common_loc = str(summary.get("common_location_name") or lead.get("location_name") or "").strip()
+                if not common_loc and lead_lat is not None and lead_lon is not None:
+                    try:
+                        rev = reverse_geocode(float(lead_lat), float(lead_lon))
+                        if rev and rev.get("formatted_address"):
+                            common_loc = rev["formatted_address"]
+                    except Exception:
+                        pass
+                self.txt_geotag.setText(common_loc)
         finally:
             self._updating_ui = False
 
@@ -3472,6 +3780,20 @@ class TagAndCaptionDock(QDockWidget):
         if self._updating_ui or not self._selected_ids:
             return
         self.geotag_edited.emit(self.txt_geotag.text().strip())
+
+    def _on_place_selected(self, place_name: str, lat: float, lon: float) -> None:
+        if self._updating_ui or not self._selected_ids:
+            return
+        self.lbl_lat.setText(f"{lat:.5f}")
+        self.lbl_lon.setText(f"{lon:.5f}")
+        self.geotag_edited.emit(place_name)
+
+    def _on_geotag_cleared(self) -> None:
+        if self._updating_ui or not self._selected_ids:
+            return
+        self.lbl_lat.setText("Unavailable")
+        self.lbl_lon.setText("Unavailable")
+        self.geotag_edited.emit("")
 
     def _on_add_tag_return(self) -> None:
         text = self.txt_add_tag.text().strip()
@@ -3704,3 +4026,6 @@ class TagAndCaptionDock(QDockWidget):
             }
             """
         )
+
+
+RightTagDock = TagAndCaptionDock

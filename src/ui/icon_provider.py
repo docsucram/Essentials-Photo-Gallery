@@ -35,6 +35,11 @@ _FLUENT_MAP: dict[str, tuple[str, str]] = {
     "import": ("ri.download-cloud-2-line", "#107C41"),
     "options": ("msc.settings-gear", "#484644"),
     "settings": ("msc.settings-gear", "#484644"),
+    "app_logo": ("ri.gallery-fill", "#0078D4"),
+    "flower": ("ri.gallery-fill", "#0078D4"),
+    "about": ("ri.gallery-fill", "#0078D4"),
+    "about_photo_gallery": ("ri.gallery-fill", "#0078D4"),
+    "photo_gallery": ("ri.gallery-fill", "#0078D4"),
     # Manage
     "delete": ("msc.trash", "#D83B01"),
     "copy": ("msc.copy", "#0078D4"),
@@ -100,6 +105,7 @@ _FLUENT_MAP: dict[str, tuple[str, str]] = {
     "zoom_in": ("msc.zoom-in", "#0078D4"),
     "zoom_out": ("msc.zoom-out", "#0078D4"),
     "fit_window": ("ri.aspect-ratio-line", "#0078D4"),
+    "fit_photos": ("ri.focus-3-line", "#0078D4"),
     "actual_size": ("ri.fullscreen-line", "#0078D4"),
     "actual_pixels": ("ri.fullscreen-line", "#0078D4"),
     # Photo Adjustments (Edit Tab)

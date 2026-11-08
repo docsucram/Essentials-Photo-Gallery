@@ -30,14 +30,16 @@ Gallery/
 │   └── themes/
 │       ├── wlpg_aero.qss                        # Authentic Windows Live Photo Gallery Aero (Light) theme
 │       ├── dark.qss                             # Dark studio theme
-│       └── modern.qss                           # Modern neutral theme
+│       └── modern.qss                           # Modern Microsoft Fluent UI theme
 ├── src/
 │   ├── __init__.py
 │   ├── core/
 │   │   ├── __init__.py
 │   │   ├── duplicate_finder.py                  # DuplicateDetectionEngine: Exact byte hashing, pHash/dHash, burst analysis & rules
 │   │   ├── face_engine.py                       # FaceEngine: Dual InsightFace SCRFD+ArcFace & deterministic OpenCV fallback
-│   │   └── face_matcher.py                      # FaceVectorMatcher: NumPy N×512 BLAS matrix similarity & running centroids (<1ms)
+│   │   ├── face_matcher.py                      # FaceVectorMatcher: NumPy N×512 BLAS matrix similarity & running centroids (<1ms)
+│   │   ├── gazetteer_data.py                    # Built-in offline gazetteer dataset (3,500+ world cities & UK settlements)
+│   │   └── geotag_resolver.py                   # GeotagResolver: Sub-2ms KD-tree reverse geocoding & Nominatim SQLite cache
 │   ├── db/
 │   │   ├── __init__.py
 │   │   ├── connection.py                        # DualDatabaseEngine: Thread-local WAL connection manager, backup & optimize
@@ -72,7 +74,7 @@ Gallery/
 │   │   └── tag_someone_dialog.py                # TagSomeoneDialog: Autocomplete face-tagging dialog
 │   ├── utils/
 │   │   ├── __init__.py
-│   │   ├── geotag_resolver.py                   # Offline Gazetteer of 160+ cities & coordinate string parser
+│   │   ├── geotag_resolver.py                   # Legacy bridge mapping to core.geotag_resolver
 │   │   └── paths.py                             # Standard paths resolver (AppData, user libraries, temporary caches)
 │   └── workers/
 │       ├── __init__.py
@@ -181,18 +183,29 @@ CREATE INDEX idx_tag_closure_desc ON tag_closure(descendant_id);
 +------------------------------------------------------------------------------------+
 ```
 
-### 3.1 Ribbon Toolbar (`src/ui/ribbon_toolbar.py`)
+### 3.1 Ribbon Toolbar & Integrated Title Bar (`src/ui/ribbon_toolbar.py`)
 - **Tabs:** `Home`, `Edit`, `Find`, `Create`, `View`.
-- **Quick Access Toolbar (QAT):** Top-left strip with Undo, Redo, Save, and Slideshow actions.
+- **Integrated Custom Title Bar:** Seamlessly combines application title, branding, Quick Access Toolbar, and native Windows-proportioned window control buttons (minimize, maximize/restore, close) with proper hover states (red accent for close).
+- **Quick Access Toolbar (QAT):** Top strip integrated into the title bar (or toggled below the ribbon) featuring customizable actions (New folder, Open with, Save, Undo, Redo, Delete, Slideshow, Thumbnails, Map, People, Rotate left/right) persisted in `QSettings`.
+- **Ribbon Context Menu:** Right-clicking anywhere on the ribbon or title bar surfaces:
+  - *Customize Quick Access Toolbar...*
+  - *Show Quick Access Toolbar above / below the Ribbon*
+  - *Minimize the Ribbon* (<kbd>Ctrl</kbd> + <kbd>F1</kbd>)
 - **Responsive Multi-Stage Collapse:** Dynamically priority-collapses button labels, compacts group layouts, and resizes carousels based on window width ($>1550\text{px}$ down to $<750\text{px}$).
-- **Quick Find Face Carousel:** Horizontal strip of circular avatars with names; clicking filters the library immediately to that person.
+- **Quick Find People Carousel & Resizable Dropdown:**
+  - Horizontal strip of circular avatars with names for instant 1-click person filtering.
+  - Expandable dropdown combining *Top people* and *Other people A - Z* with unified non-repeating avatar tiles matching ribbon thumbnail size.
+  - Bottom-right corner resize grip allowing users to expand or shrink the dropdown height and width (clamped to ribbon width minimum).
 - **Effects Preview Gallery:** 8 live thumbnail preview tiles (*None, Classic Chrome, Warm Portrait, Vivid Landscape, Matte Vintage, Fine Art B&W, Cool Cinema, Sepia*) with smooth $0..100\%$ intensity blending.
 - **Descriptive Tag Split Button:** Clicking the button directly opens the Tag pane / focuses tag entry (`Ctrl+T`); clicking the arrow dropdown shows *Manage tags...* and *Clean up unused tags*.
-- **Dark Theme Adaptation:** Automatic theme propagation ensuring Quick Find and Effects containers render with dark `#14171C` backgrounds and subtle `#333A45` borders.
+- **Theming & Dynamic Tab Indicator:**
+  - Full support for **Classic Aero**, **Modern Fluent (Windows 11)**, and **Dark Studio**.
+  - In Modern Fluent theme, ribbon tab selection indicator is rendered via vector drawing without curling at tab borders, expanding smoothly on hover and hovering slightly above the ribbon frame.
 
 ### 3.2 Left Navigation Dock (`src/ui/left_nav_dock.py`)
 - **Folders:** Directory tree with *"Include subfolders"* recursion toggle, Favourites, and drag-and-drop file copy/move support.
 - **Date Taken:** Grouped tree `Year -> Month -> Day, Weekday` with live item counts.
+- **Places:** Hierarchical geographic tree `Country -> State / County -> City / Town` (e.g. `United Kingdom -> Surrey -> Claygate`) with live item counts and instant grid filtering.
 - **Descriptive Tags:** Nested tag tree with drag-and-drop reparenting, live item count badges, and 3-state Boolean checkboxes:
   - Checked: Include tag (`AND` or `OR` mode selectable).
   - Unchecked: Neutral.
@@ -206,7 +219,7 @@ CREATE INDEX idx_tag_closure_desc ON tag_closure(descendant_id);
 #### 1. Thumbnail Grid View (`src/ui/grid_view.py` & `src/ui/grid_model.py`)
 - **Virtualised Presentation:** `QListView` in `IconMode` with `uniformItemSizes = True`.
 - **Memory Efficiency:** Holds only numeric IDs and metadata tuples in memory (~30 MB for 100k items, ~150 MB for 500k items).
-- **Collapsible Section Headers:** Groups items by active sort criteria (Date, Rating, Folder, Person, Tag) using $O(\log G)$ binary-searched header resolution.
+- **Collapsible Section Headers:** Groups items by active sort criteria (Date, Rating, Folder, Person, Tag, Places) using $O(\log G)$ binary-searched header resolution.
 - **Polaroid Card Delegate:**
   - Polaroid card styling with subtle borders and hover highlights.
   - Interactive on-card 5-star rating widget and flag toggle pin.
@@ -230,6 +243,7 @@ CREATE INDEX idx_tag_closure_desc ON tag_closure(descendant_id);
 - **High-Speed Biometric Confirmation:** Virtualised grid rendering pre-cropped $96 \times 96$ WebP face thumbnails directly from `thumbnails.db`.
 - **Section Grouping:** Grouped by suggested person with collapsible headers and 1-click `[Confirm Selected]` button.
 - **Quick Full-Photo Preview Popover (`Space`):** Instantly displays the complete photo centered on the face box with highlight border in a non-modal overlay without leaving the batch workflow.
+- **Workspace Mode Transition:** Automatically hides Left Navigation Dock and Right Tag/Caption Dock while active to maximize workspace; restores docks reliably when exiting back to Gallery or Single Image view.
 - **Keyboard Ergonomics:** `Enter` (Confirm selected), `Delete` / `Backspace` (Not this person), `I` (Don't show again), `Esc` (Back to Gallery).
 
 #### 4. People Directory View (`src/ui/people_directory_view.py`)
@@ -238,8 +252,11 @@ CREATE INDEX idx_tag_closure_desc ON tag_closure(descendant_id);
 - **Person Timeline Strip:** Single-row horizontal face crop strip with 1-click `[✓ Confirm all]` action.
 
 #### 5. World Map View (`src/ui/map_view.py`)
-- Embedded Leaflet OpenStreetMap with hardware acceleration via `QWebEngineView`.
-- Queries SQLite `media_rtree` for the active bounding box, rendering interactive photo clusters and pins.
+- Embedded Leaflet OpenStreetMap with hardware acceleration via `QWebEngineView`, disk tile caching, and 4 map layers (Clean Voyager, OpenStreetMap, Satellite, Terrain).
+- Queries SQLite `media_rtree` for the active bounding box, rendering interactive photo clusters and pins in $<5\text{ms}$.
+- Offline zero-dependency vector map fallback canvas with drawn continental outlines for offline or headless environments.
+- Supported by offline gazetteer (`src/core/geotag_resolver.py` & `src/core/gazetteer_data.py`) with 3,500+ world cities and UK settlements, KD-Tree nearest-neighbor resolution, and Nominatim reverse geocoding with local SQLite caching in `saved_places`.
+- Automatically hides side docks to maximize map canvas, restoring them when returning to Gallery or Single Image view.
 
 #### 6. Fullscreen Slideshow (`src/ui/slideshow_view.py`)
 - Hardware-accelerated Ken Burns pan/zoom and cross-fade transition engine with floating HUD controls.
@@ -247,7 +264,7 @@ CREATE INDEX idx_tag_closure_desc ON tag_closure(descendant_id);
 ### 3.4 Right Tag & Caption Dock (`src/ui/right_tag_dock.py`)
 - **Info Pane (`Ctrl+I`):**
   - People tags with circular face crop avatars and `+ Add people tag` action.
-  - Geotag display with `+ Add geotag` resolver.
+  - Geotag display with `+ Add geotag` resolver, coordinate formatting, hover clear 'x' button, and bidirectional XMP/EXIF synchronization.
   - Multi-line editable Caption box.
   - Descriptive tag chips with `(x)` dismissal and autocomplete input.
   - Full EXIF/camera metadata summary.
@@ -256,6 +273,10 @@ CREATE INDEX idx_tag_closure_desc ON tag_closure(descendant_id);
   - Sliders: Brightness, Contrast, Shadows, Highlights, Clarity, Temperature, Tint, Saturation, Sharpen, Denoise, Dehaze, Vignette.
 
 ### 3.5 Specialized Dialogs & Tools
+- **Application Options Dialog (`AppSettingsDialog` in `src/ui/dialogs.py`):**
+  - **General Settings:** Visual Theme selector (*Classic Aero*, *Modern Fluent*, *Dark Studio*) with synchronized icon theme defaults (*WLPG Classic Aero*, *Microsoft Fluent UI*, *Modern Minimalist*), Safe Mode file write-back toggle, and navigation tree section toggles.
+  - **Face Recognition Options:** Live ONNX engine status, clarified Sensitivity Sliders (*Detection Confidence*, *Match Threshold*, *Minimum Face Size*) with intuitive percentage/pixel readouts, and the *Re-parse & Heal Face Regions from Files* maintenance action.
+  - **Original Files & Database Maintenance:** Configurable retention days for `.OriginalFiles/`, online catalog backup snapshotting (`sqlite3.Connection.backup()`), thumbnail cache purge, and orphan media cleanup.
 - **Relative Time Shift Dialog (`ChangeTimeTakenDialog` in `src/ui/dialogs.py`):**
   - Evaluates $\Delta t = T_{\text{lead\_new}} - T_{\text{lead\_original}}$ and updates all selected items by the relative offset in a single SQLite transaction, marking `metadata_dirty = 1`.
 - **Tag Hierarchy Management Dialog (`TagHierarchyDialog` in `src/ui/tag_hierarchy_dialog.py`):**

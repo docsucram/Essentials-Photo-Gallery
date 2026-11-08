@@ -1,6 +1,6 @@
 # Essentials Photo Gallery — Future Ideas & Innovation Roadmap (`futureideas.md`)
 
-This document tracks forward-looking enhancements and next-generation capabilities planned for **Essentials Photo Gallery**. Features that have already been designed, implemented, and verified in the core engine (such as the 32-bit floating-point perceptual tone engine, U-Point selective control points, auto-straighten with inscribed crop, ICE-style panorama stitching, multi-photo collages, Photo Fuse, portrait bokeh, Color Pop, 3D motion synthesis, vector privacy redaction, and the **Perceptual Duplicate & Burst Finder**) are documented in [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`editing_engine.md`](editing_engine.md).
+This document tracks forward-looking enhancements and next-generation capabilities planned for **Essentials Photo Gallery**. Features that have already been designed, implemented, and verified in the core engine (such as the 32-bit floating-point perceptual tone engine, U-Point selective control points, auto-straighten with inscribed crop, ICE-style panorama stitching, multi-photo collages, Photo Fuse, portrait bokeh, Color Pop, 3D motion synthesis, vector privacy redaction, the **Perceptual Duplicate & Burst Finder**, and the **Interactive Leaflet World Map & Hierarchical Places Tree**) are documented in [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`editing_engine.md`](editing_engine.md).
 
 All future ideas follow the core design philosophy of **Essentials Photo Gallery**: **100% local, private, and offline execution** with zero external cloud dependencies or telemetry, maintaining sub-10ms UI query fluidity at 500,000+ photo scale.
 
@@ -43,15 +43,31 @@ All future ideas follow the core design philosophy of **Essentials Photo Gallery
 
 ---
 
-## 3. Geolocation & Places Hierarchy
+## 3. Geolocation, Places & Mapping (As-Built & Next Steps)
 
-### 3.1 Hierarchical Offline Reverse Geocoding Tree
-- **Current State:** `PhotoGallery64` currently includes an offline gazetteer (`geotag_resolver.py`) with 160+ major world cities and coordinate string parsing.
-- **Future Enhancement:**
-  - Embed an offline GeoNames spatial KD-tree (~15 MB compressed) covering all global settlements with population $> 1,000$.
-  - Automatically populate a collapsible **Places** section in the Left Navigation Dock:
-    `Country -> State / County -> City / Town` (e.g., `United Kingdom -> Surrey -> Claygate`).
-  - Clicking any administrative level immediately filters the grid with item counts, matching the ergonomics of the `Date taken` and `Descriptive tags` trees.
+### 3.1 Hierarchical Offline Reverse Geocoding & Map View [IMPLEMENTED]
+- **Status:** **Completed & Operational** (documented in [`ARCHITECTURE.md`](ARCHITECTURE.md#33-center-area-qstackedwidget)).
+- **Implemented Capabilities:**
+  - **Comprehensive Offline Gazetteer (`src/core/gazetteer_data.py`):** 3,500+ world cities and detailed UK settlements built-in with sub-2ms prefix/substring search and KD-Tree reverse geocoding via `reverse_geocoder` / `scipy.spatial.cKDTree` or `numpy`.
+  - **Online Nominatim Fallback & SQLite Caching:** Automatic resolution for remote areas with persistent caching in `saved_places` to minimize network calls.
+  - **Collapsible Places Hierarchy in Left Navigation Dock:** Automatically populates `Country -> State / County -> City / Town` (e.g. `United Kingdom -> Surrey -> Claygate`) with live item counts and instant grid filtering.
+  - **Interactive Leaflet World Map View (`src/ui/map_view.py`):** Hardware-accelerated interactive map with persistent disk tile caching (Clean Voyager, Street, Satellite, Terrain), SQLite R*Tree spatial query (`media_rtree`), instant cluster/pin filtering, and offline vector map canvas fallback.
+  - **Ribbon & Dock Geotagging Controls:** Instant geotagging dialog, right-pane geotag editing with hover clear 'x', coordinate format parsing, and bidirectional XMP/EXIF synchronization.
+
+### 3.2 GPX Track Log Auto-Geotagging (Future Idea)
+- **Concept:** Automatically geotag photos captured on cameras without built-in GPS by correlating photo timestamps with a recorded GPX or KML track log (from a smartphone, smartwatch, or GPS logger).
+- **Workflow:**
+  - Select a set of photos $\to$ Right-click $\to$ *"Geotag from GPX Track..."*.
+  - User chooses a `.gpx` file and sets a camera clock time-offset calibration if the camera clock differed from satellite time.
+  - Linearly interpolates latitude, longitude, and elevation between adjacent track points based on UTC `date_taken` timestamps.
+  - Previews matched points on the Leaflet map with confidence indicators before committing to database and XMP sidecars.
+
+### 3.3 Map Polygon Geofencing & Geographic Smart Albums (Future Idea)
+- **Concept:** Interactive polygon / lasso and circular radius selection tools directly on the World Map View.
+- **Features:**
+  - Draw a custom boundary (e.g., surrounding a national park, holiday resort, or city neighborhood).
+  - Filter grid photos falling within the polygon via SQLite spatial R*Tree bounding box filter followed by ray-casting point-in-polygon tests.
+  - Save geographic boundaries as persistent Smart Albums in the Left Navigation Dock.
 
 ---
 
@@ -101,3 +117,22 @@ All future ideas follow the core design philosophy of **Essentials Photo Gallery
   - Add a `.cube` file loader supporting industry-standard 3D LUT files ($17 \times 17 \times 17$ up to $65 \times 65 \times 65$).
   - Trilinear interpolation in NumPy/C++ executing in `<8 ms` on preview proxies.
   - Allow users to import LUT collections (e.g., Kodak Portra, CineStill, Kodak Kodachrome, Fuji Velvia) and adjust blend intensity.
+
+---
+
+## 7. Next-Generation Image Formats & Lightweight Codec Additions
+
+### 7.1 HEIC / HEIF & AVIF Support (`pillow-heif`)
+- **Current State:** Standard raster, camera RAW (`rawpy`), 16-bit/float TIFF, animated GIF/WebP, transparency, and wide-gamut ICC -> sRGB color management work out of the box with zero extra codec wheels. Apple `.heic`/`.hif` and `.avif` files are not yet decoded natively because neither standard Pillow wheels nor PySide6 ship `libheif` / `libdav1d` by default.
+- **Future Enhancement (~8–12 MB installer impact):**
+  - Add `pillow-heif` (`register_heif_opener()` + `register_avif_opener()`) to unlock hardware-friendly 8-bit and 10-bit **HEIC, HEIF, HIF, and AVIF** decoding for both background thumbnailing (`scanner_thumb_worker.py`) and full-resolution Single Image View (`image_loader.py`).
+  - Preserve embedded Display P3 ICC profiles (standard on iPhone HEIC captures) through the existing LittleCMS2 `convert_icc_to_srgb()` pipeline, plus alpha channels and EXIF/XMP metadata read-back.
+  - **PyInstaller Packaging:** Include `collect_dynamic_libs("pillow_heif")` and hidden import `"pillow_heif"` in `photogallery.spec`.
+
+### 7.2 JPEG XL (`.jxl`) Support (`pillow-jxl-plugin`)
+- **Current State:** `.jxl` is not yet registered in scanner discovery or Pillow/Qt image readers.
+- **Future Enhancement (~4–6 MB installer impact):**
+  - Add `pillow-jxl-plugin` (wrapping `libjxl`) and add `.jxl` to `IMAGE_EXTENSIONS` in `scanner_thumb_worker.py`.
+  - Unlocks lossless-recompressed JPEGs, HDR / 16-bit channels, alpha transparency, wide-gamut XYB / ICC profiles, and optional high-efficiency `.jxl` export in **Save as Copy**.
+  - **PyInstaller Packaging:** Include `collect_dynamic_libs("pillow_jxl")` and hidden import `"pillow_jxl"` in `photogallery.spec`.
+

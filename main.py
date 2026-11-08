@@ -30,10 +30,13 @@ def create_app(argv: list[str] | None = None) -> QApplication:
     QLoggingCategory.setFilterRules(
         "qt.gui.imageio.jpeg.warning=false\n"
         "qt.gui.imageio.warning=false\n"
+        "qt.imageformats.tiff=false\n"
+        "qt.imageformats.*.warning=false\n"
     )
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     app = QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName("Essentials Photo Gallery")
     app.setOrganizationName("Essentials Photo Gallery")

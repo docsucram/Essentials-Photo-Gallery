@@ -171,7 +171,11 @@ def _build_boolean_search_sql(search_text: str) -> tuple[str, list[Any]]:
     return final_sql, params
 
 
-RAW_EXTENSIONS: tuple[str, ...] = ("raf", "cr2", "cr3", "nef", "arw", "dng", "orf", "rw2")
+RAW_EXTENSIONS: tuple[str, ...] = (
+    "raf", "cr2", "cr3", "nef", "nrw", "arw", "dng", "orf", "ori",
+    "rw2", "rwl", "raw", "pef", "srw", "3fr", "mrw", "sr2", "srf",
+    "x3f", "erf", "kdc", "dcr", "mos", "mef", "iiq"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1423,6 +1427,35 @@ class CatalogRepository:
                 items,
             )
             conn.commit()
+
+    def get_geotag_bounds(self) -> tuple[float, float, float, float] | None:
+        """
+        Returns bounding box (min_lat, max_lat, min_lon, max_lon) across all geotagged media,
+        or None if no photos have geotags.
+        """
+        conn = self.engine.catalog_conn()
+        row = conn.execute(
+            """
+            SELECT MIN(lat) AS min_lat, MAX(lat) AS max_lat,
+                   MIN(lon) AS min_lon, MAX(lon) AS max_lon
+            FROM media
+            WHERE lat IS NOT NULL AND lon IS NOT NULL;
+            """
+        ).fetchone()
+        if (
+            row
+            and row["min_lat"] is not None
+            and row["max_lat"] is not None
+            and row["min_lon"] is not None
+            and row["max_lon"] is not None
+        ):
+            return (
+                float(row["min_lat"]),
+                float(row["max_lat"]),
+                float(row["min_lon"]),
+                float(row["max_lon"]),
+            )
+        return None
 
     def rename_media(self, media_id: int, new_filename: str) -> None:
         """Renames a media file record in catalog.db."""
@@ -3301,6 +3334,15 @@ class CatalogRepository:
         if person_id:
             self.refresh_person_avatar(int(person_id), invalidated_face_ids=[int(face_id)])
 
+    def verify_face_tag(self, face_id: int) -> None:
+        """Marks a confirmed face tag as verified to exclude from outlier reviews."""
+        conn = self.engine.catalog_conn()
+        with self.engine.write_lock:
+            conn.execute(
+                "UPDATE media_people SET similarity_score = 1.0 WHERE id = ?;", (int(face_id),)
+            )
+            conn.commit()
+
     def recalculate_person_centroid(self, person_id: int) -> None:
         """Recalculates ArcFace centroid/sub-centroids for person_id from confirmed faces."""
         try:
@@ -4011,6 +4053,300 @@ class CatalogRepository:
                 (int(limit),),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_face_tag_outliers(
+        self,
+        min_similarity_threshold: float = 0.38,
+        limit: int = 500,
+        include_no_face_boxes: bool = False,
+    ) -> list[dict[str, Any]]:
+        """
+        Scans confirmed face tags (state = 1) and detects potential errors:
+        1. Confirmed face box with missing embedding (box drawn on non-face region) - optional
+        2. Low cosine similarity (< threshold) to assigned person's centroid (likely wrong face)
+        3. Significantly higher similarity to another known person (likely misidentified person)
+        Returns structured records ready for BatchPeopleView review.
+        """
+        import numpy as np
+        from src.core.face_matcher import deserialize_embedding
+
+        conn = self.engine.catalog_conn()
+        # 1. Fetch people centroids
+        p_rows = conn.execute(
+            "SELECT id, name, centroid_embedding FROM people WHERE centroid_embedding IS NOT NULL;"
+        ).fetchall()
+        if not p_rows:
+            return []
+
+        p_centroids: dict[int, np.ndarray] = {}
+        p_names: dict[int, str] = {}
+        p_ids_list: list[int] = []
+        c_matrix_list: list[np.ndarray] = []
+
+        for pr in p_rows:
+            pid = int(pr["id"])
+            p_names[pid] = str(pr["name"])
+            try:
+                vec = deserialize_embedding(pr["centroid_embedding"])
+                if vec is not None and vec.size == 512:
+                    norm = float(np.linalg.norm(vec))
+                    if norm > 0:
+                        vec = vec / norm
+                    p_centroids[pid] = vec
+                    p_ids_list.append(pid)
+                    c_matrix_list.append(vec)
+            except Exception:
+                continue
+
+        if not c_matrix_list:
+            return []
+
+        c_matrix = np.stack(c_matrix_list, axis=0)  # (N_people, 512)
+
+        # 2. Fetch confirmed faces with boxes (excluding already human-verified outliers)
+        face_rows = conn.execute(
+            """
+            SELECT mp.id AS face_id, mp.media_id, mp.person_id, p.name AS person_name,
+                   mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h, mp.embedding,
+                   m.filename, f.path AS folder_path
+            FROM media_people mp
+            JOIN people p ON p.id = mp.person_id
+            JOIN media m ON m.id = mp.media_id
+            JOIN folders f ON f.id = m.folder_id
+            WHERE mp.state = 1 AND mp.rect_w > 0.005
+              AND (mp.similarity_score IS NULL OR mp.similarity_score < 0.99)
+            ORDER BY m.id DESC
+            LIMIT 4000;
+            """
+        ).fetchall()
+
+        outliers: list[dict[str, Any]] = []
+
+        for fr in face_rows:
+            pid = int(fr["person_id"])
+            pname = str(fr["person_name"])
+            emb_blob = fr["embedding"]
+
+            # Case A: Missing embedding on non-zero box (optional to show/hide)
+            if not emb_blob:
+                if include_no_face_boxes:
+                    outliers.append({
+                        "id": fr["face_id"],
+                        "face_id": fr["face_id"],
+                        "media_id": fr["media_id"],
+                        "person_id": pid,
+                        "person_name": pname,
+                        "suggested_person_id": pid,
+                        "suggested_name": f"{pname} (No face in box)",
+                        "rect_x": fr["rect_x"],
+                        "rect_y": fr["rect_y"],
+                        "rect_w": fr["rect_w"],
+                        "rect_h": fr["rect_h"],
+                        "confidence": 0.0,
+                        "filename": fr["filename"],
+                        "folder_path": fr["folder_path"],
+                        "is_confirmed": True,
+                        "outlier_reason": "No face detected in box",
+                    })
+                    if len(outliers) >= limit:
+                        break
+                continue
+
+            try:
+                f_vec = deserialize_embedding(emb_blob)
+                if f_vec is None or f_vec.size != 512:
+                    continue
+                norm = float(np.linalg.norm(f_vec))
+                if norm > 0:
+                    f_vec = f_vec / norm
+            except Exception:
+                continue
+
+            # Compare to assigned centroid
+            own_centroid = p_centroids.get(pid)
+            own_sim = float(np.dot(f_vec, own_centroid)) if own_centroid is not None else 1.0
+
+            # Compare to all centroids
+            all_sims = np.dot(c_matrix, f_vec)  # (N_people,)
+            best_idx = int(np.argmax(all_sims))
+            best_sim = float(all_sims[best_idx])
+            best_pid = p_ids_list[best_idx]
+            best_pname = p_names.get(best_pid, "Unknown")
+
+            is_outlier = False
+            reason = ""
+            disp_name = pname
+            disp_conf = own_sim
+
+            if own_centroid is not None and own_sim < min_similarity_threshold:
+                is_outlier = True
+                disp_conf = own_sim
+                if best_pid != pid and best_sim >= 0.58 and best_sim >= (own_sim + 0.15):
+                    reason = f"Looks like {best_pname} ({int(best_sim*100)}%)"
+                    disp_name = f"{pname} → {best_pname}?"
+                    disp_conf = best_sim
+                else:
+                    reason = f"Low match ({int(own_sim*100)}%)"
+                    disp_name = f"{pname} (Low match)"
+            elif best_pid != pid and best_sim >= 0.65 and best_sim >= (own_sim + 0.20):
+                is_outlier = True
+                reason = f"Looks like {best_pname} ({int(best_sim*100)}%)"
+                disp_name = f"{pname} → {best_pname}?"
+                disp_conf = best_sim
+
+            if is_outlier:
+                outliers.append({
+                    "id": fr["face_id"],
+                    "face_id": fr["face_id"],
+                    "media_id": fr["media_id"],
+                    "person_id": pid,
+                    "person_name": pname,
+                    "suggested_person_id": pid,
+                    "suggested_name": disp_name,
+                    "swap_person_id": best_pid if "Looks like" in reason else None,
+                    "swap_person_name": best_pname if "Looks like" in reason else None,
+                    "rect_x": fr["rect_x"],
+                    "rect_y": fr["rect_y"],
+                    "rect_w": fr["rect_w"],
+                    "rect_h": fr["rect_h"],
+                    "confidence": disp_conf,
+                    "filename": fr["filename"],
+                    "folder_path": fr["folder_path"],
+                    "is_confirmed": True,
+                    "outlier_reason": reason,
+                })
+                if len(outliers) >= limit:
+                    break
+
+        return outliers
+
+    def get_boxless_people_matches(self, limit: int = 500) -> list[dict[str, Any]]:
+        """
+        Finds photos where a person is tagged without a face rectangle (state = 1, rect_w <= 0.005)
+        paired with unassigned detected face boxes (state = 0, rect_w > 0.005) on the same photo.
+        """
+        conn = self.engine.catalog_conn()
+        rows = conn.execute(
+            """
+            SELECT mp.id AS boxless_id, mp.media_id, mp.person_id, p.name AS person_name,
+                   mp2.id AS face_id, mp2.rect_x, mp2.rect_y, mp2.rect_w, mp2.rect_h,
+                   COALESCE(mp2.similarity_score, 0.0) AS confidence,
+                   m.filename, f.path AS folder_path
+            FROM media_people mp
+            JOIN people p ON p.id = mp.person_id
+            JOIN media_people mp2 ON mp2.media_id = mp.media_id AND mp2.state = 0 AND mp2.rect_w > 0.005
+            JOIN media m ON m.id = mp.media_id
+            JOIN folders f ON f.id = m.folder_id
+            WHERE mp.state = 1 AND (mp.rect_w IS NULL OR mp.rect_w <= 0.005)
+            ORDER BY p.name COLLATE NOCASE ASC, m.id DESC
+            LIMIT ?;
+            """,
+            (int(limit),),
+        ).fetchall()
+        results: list[dict[str, Any]] = []
+        for r in rows:
+            results.append({
+                "id": r["face_id"],
+                "face_id": r["face_id"],
+                "boxless_id": r["boxless_id"],
+                "media_id": r["media_id"],
+                "person_id": r["person_id"],
+                "person_name": r["person_name"],
+                "suggested_person_id": r["person_id"],
+                "suggested_name": f"{r['person_name']} (Missing Box)",
+                "rect_x": r["rect_x"],
+                "rect_y": r["rect_y"],
+                "rect_w": r["rect_w"],
+                "rect_h": r["rect_h"],
+                "confidence": r["confidence"],
+                "filename": r["filename"],
+                "folder_path": r["folder_path"],
+                "is_confirmed": False,
+                "is_boxless_match": True,
+            })
+        return results
+
+    def auto_link_unambiguous_boxless_faces(self) -> int:
+        """
+        Auto-links photos that have EXACTLY 1 boxless confirmed person tag and EXACTLY 1 unassigned face box.
+        Consolidates the boxless row and assigns the face box to that person in one transaction.
+        Returns the number of faces linked.
+        """
+        conn = self.engine.catalog_conn()
+        rows = conn.execute(
+            """
+            SELECT mp.media_id, mp.id AS boxless_id, mp.person_id, p.name AS person_name,
+                   mp2.id AS face_id
+            FROM media_people mp
+            JOIN people p ON p.id = mp.person_id
+            JOIN media_people mp2 ON mp2.media_id = mp.media_id AND mp2.state = 0 AND mp2.rect_w > 0.005
+            WHERE mp.state = 1 AND (mp.rect_w IS NULL OR mp.rect_w <= 0.005)
+            GROUP BY mp.media_id
+            HAVING COUNT(DISTINCT mp.id) = 1 AND COUNT(DISTINCT mp2.id) = 1;
+            """
+        ).fetchall()
+        if not rows:
+            return 0
+
+        linked_count = 0
+        for r in rows:
+            face_id = int(r["face_id"])
+            p_name = str(r["person_name"])
+            self.assign_face_to_person(face_id, p_name)
+            linked_count += 1
+        return linked_count
+
+    def get_places_hierarchy(self) -> list[dict[str, Any]]:
+        """
+        Retrieves aggregate location counts (country, state, city) for media,
+        normalizing admin subdivision codes (e.g. UK ENG -> England) and stripping
+        numeric administrative codes (e.g. '01', '07').
+        """
+        conn = self.engine.catalog_conn()
+        rows = conn.execute(
+            """
+            SELECT location_country, location_state, location_city, COUNT(*) as cnt
+            FROM media
+            WHERE (location_country IS NOT NULL AND location_country != '')
+               OR (location_state IS NOT NULL AND location_state != '')
+               OR (location_city IS NOT NULL AND location_city != '')
+            GROUP BY location_country, location_state, location_city
+            ORDER BY location_country, location_state, location_city;
+            """
+        ).fetchall()
+
+        grouped: dict[tuple[str, str, str], int] = {}
+        for r in rows:
+            country = (r["location_country"] or "").strip()
+            state = (r["location_state"] or "").strip()
+            city = (r["location_city"] or "").strip()
+            cnt = int(r["cnt"])
+
+            if country in ("United Kingdom", "GB", "UK"):
+                if state.upper() in ("ENG", "ENGLAND"):
+                    state = "England"
+                elif state.upper() in ("WLS", "WALES"):
+                    state = "Wales"
+                elif state.upper() in ("SCT", "SCOTLAND"):
+                    state = "Scotland"
+                elif state.upper() in ("NIR", "NORTHERN IRELAND"):
+                    state = "Northern Ireland"
+
+            if state.isdigit():
+                state = ""
+
+            key = (country, state, city)
+            grouped[key] = grouped.get(key, 0) + cnt
+
+        result = []
+        for (country, state, city), count in sorted(grouped.items()):
+            result.append({
+                "country": country,
+                "state": state,
+                "city": city,
+                "count": count,
+            })
+        return result
 
     def reset_face_scan_for_media(self, media_ids: Sequence[int]) -> int:
         """
