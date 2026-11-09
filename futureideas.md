@@ -120,19 +120,24 @@ All future ideas follow the core design philosophy of **Essentials Photo Gallery
 
 ---
 
-## 7. Next-Generation Image Formats & Lightweight Codec Additions
+## 7. Next-Generation Image Formats & Lightweight Codec Additions [IMPLEMENTED]
 
-### 7.1 HEIC / HEIF & AVIF Support (`pillow-heif`)
-- **Current State:** Standard raster, camera RAW (`rawpy`), 16-bit/float TIFF, animated GIF/WebP, transparency, and wide-gamut ICC -> sRGB color management work out of the box with zero extra codec wheels. Apple `.heic`/`.hif` and `.avif` files are not yet decoded natively because neither standard Pillow wheels nor PySide6 ship `libheif` / `libdav1d` by default.
-- **Future Enhancement (~8–12 MB installer impact):**
-  - Add `pillow-heif` (`register_heif_opener()` + `register_avif_opener()`) to unlock hardware-friendly 8-bit and 10-bit **HEIC, HEIF, HIF, and AVIF** decoding for both background thumbnailing (`scanner_thumb_worker.py`) and full-resolution Single Image View (`image_loader.py`).
-  - Preserve embedded Display P3 ICC profiles (standard on iPhone HEIC captures) through the existing LittleCMS2 `convert_icc_to_srgb()` pipeline, plus alpha channels and EXIF/XMP metadata read-back.
-  - **PyInstaller Packaging:** Include `collect_dynamic_libs("pillow_heif")` and hidden import `"pillow_heif"` in `photogallery.spec`.
+### 7.1 HEIC / HEIF & AVIF Support (`pillow-heif`, `pillow-avif-plugin`) [IMPLEMENTED]
+- **Status:** **Completed & Operational**
+- **Implemented Capabilities:**
+  - Integrated `pillow-heif` and `pillow-avif-plugin` via centralized `register_nextgen_codecs()` in `src/imaging/image_loader.py` and `main.py`.
+  - Enables native 8-bit and 10-bit **HEIC, HEIF, HIF, and AVIF** decoding for both background thumbnail generation (`_decode_nextgen_thumbnail()` in `scanner_thumb_worker.py`) and full-resolution Single Image View (`media_viewer.py` and `image_loader.py`).
+  - Automatically converts embedded Display P3 ICC color profiles (standard on Apple iPhone captures) and wide-gamut profiles to calibrated sRGB via LittleCMS2 (`convert_icc_to_srgb()`).
+  - Full transparency / alpha preservation (`ALPHA_SAVE_DOT_EXT_SET`) and EXIF / XMP metadata extraction.
+  - Export & Save as Copy support with configurable quality and metadata preservation in `SingleMediaViewer`.
+  - **PyInstaller Packaging:** Includes dynamic libraries, data files, and hidden imports for `pillow_heif` and `pillow_avif` in `photogallery.spec`.
 
-### 7.2 JPEG XL (`.jxl`) Support (`pillow-jxl-plugin`)
-- **Current State:** `.jxl` is not yet registered in scanner discovery or Pillow/Qt image readers.
-- **Future Enhancement (~4–6 MB installer impact):**
-  - Add `pillow-jxl-plugin` (wrapping `libjxl`) and add `.jxl` to `IMAGE_EXTENSIONS` in `scanner_thumb_worker.py`.
-  - Unlocks lossless-recompressed JPEGs, HDR / 16-bit channels, alpha transparency, wide-gamut XYB / ICC profiles, and optional high-efficiency `.jxl` export in **Save as Copy**.
-  - **PyInstaller Packaging:** Include `collect_dynamic_libs("pillow_jxl")` and hidden import `"pillow_jxl"` in `photogallery.spec`.
+### 7.2 JPEG XL (`.jxl`) Support (`pillow-jxl-plugin`) [IMPLEMENTED]
+- **Status:** **Completed & Operational**
+- **Implemented Capabilities:**
+  - Integrated `pillow-jxl-plugin` (wrapping `libjxl`) with automatic Pillow plugin registration in `register_nextgen_codecs()`.
+  - Added `.jxl` across all scanner extension sets (`NEXTGEN_EXT_SET`, `IMAGE_EXT_SET`, `ALL_MEDIA_EXT_SET`), folder watchers, import dialogs, and catalog grouping (`JPEG XL Image (*.jxl)` in `repository.py`).
+  - Full alpha transparency support, bit-depth normalization, and LittleCMS2 color management.
+  - High-efficiency `.jxl` export in **Save as Copy** and **Save Adjustments to Disk** with serialized EXIF preservation.
+  - **PyInstaller Packaging:** Includes dynamic libraries, data files, and hidden imports for `pillow_jxl` in `photogallery.spec`.
 

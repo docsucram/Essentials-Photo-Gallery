@@ -197,7 +197,9 @@ class FilterQuerySpec:
     flagged_only: bool = False
     flag_filter: int | None = None  # 1 = flagged only, 0 = unflagged only, None = all
     edited_only: bool = False
+    edited_filter: int | None = None  # 1 = edited only, 0 = unedited only, None = all
     media_type: Literal["all", "image", "video", "raw"] = "all"
+    orientation_filter: Literal["all", "landscape", "portrait"] = "all"
     search_text: str = ""
     bbox: tuple[float, float, float, float] | None = None  # (min_lat, max_lat, min_lon, max_lon)
     media_ids: tuple[int, ...] | None = None  # Explicit media ID filtering (e.g. from map cluster clicks)
@@ -746,8 +748,11 @@ class CatalogRepository:
         elif flag_val == 0:
             where_clauses.append("m.flag = 0")
 
-        if spec.edited_only:
+        edited_val = getattr(spec, "edited_filter", None)
+        if edited_val == 1 or spec.edited_only:
             where_clauses.append("m.original_backup_path IS NOT NULL")
+        elif edited_val == 0:
+            where_clauses.append("m.original_backup_path IS NULL")
 
         # 6. Media Type filter
         if spec.media_type == "image":
@@ -758,14 +763,33 @@ class CatalogRepository:
             raw_clauses = " OR ".join(f"m.filename LIKE '%.{ext}'" for ext in RAW_EXTENSIONS)
             where_clauses.append(f"(m.is_video = 0 AND ({raw_clauses}))")
 
+        # 6b. Orientation filter (landscape vs portrait)
+        orient_val = getattr(spec, "orientation_filter", "all")
+        if orient_val == "landscape":
+            where_clauses.append(
+                "((m.orientation IN (5, 6, 7, 8) AND m.height > m.width) OR (COALESCE(m.orientation, 1) NOT IN (5, 6, 7, 8) AND m.width > m.height))"
+            )
+        elif orient_val == "portrait":
+            where_clauses.append(
+                "((m.orientation IN (5, 6, 7, 8) AND m.width > m.height) OR (COALESCE(m.orientation, 1) NOT IN (5, 6, 7, 8) AND m.height > m.width))"
+            )
+
         # 6b. Explicit media_ids filter (e.g. from World Map cluster click)
         if spec.media_ids is not None:
             if not spec.media_ids:
                 where_clauses.append("1 = 0")
-            else:
+            elif len(spec.media_ids) <= 900:
                 placeholders = ",".join("?" for _ in spec.media_ids)
                 where_clauses.append(f"m.id IN ({placeholders})")
                 params.extend(spec.media_ids)
+            else:
+                # For very large cluster selections (>900 IDs), chunk into OR clauses to prevent SQLite limit errors
+                id_subclauses = []
+                for chunk in _iter_id_chunks(spec.media_ids, 900):
+                    placeholders = ",".join("?" for _ in chunk)
+                    id_subclauses.append(f"m.id IN ({placeholders})")
+                    params.extend(chunk)
+                where_clauses.append(f"({' OR '.join(id_subclauses)})")
 
         # 7. World Map Bounding Box filter (via media_rtree virtual table or media.lat/lon fallback)
         if spec.bbox is not None:
@@ -1171,6 +1195,12 @@ class CatalogRepository:
                     gkey = "QuickTime Video (*.mov)"
                 elif e == ".webp":
                     gkey = "WebP Image (*.webp)"
+                elif e in (".heic", ".heif", ".hif"):
+                    gkey = "HEIF Image (*.heic, *.heif)"
+                elif e == ".avif":
+                    gkey = "AVIF Image (*.avif)"
+                elif e == ".jxl":
+                    gkey = "JPEG XL Image (*.jxl)"
                 elif e in (".tif", ".tiff"):
                     gkey = "TIFF Image (*.tif, *.tiff)"
                 elif e == ".gif":
@@ -2089,18 +2119,40 @@ class CatalogRepository:
     def extract_face_crop_blob(
         file_path: str | Path,
         rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0),
-        target_size: int = 72,
+        target_size: int = 128,
+        orientation: int = 1,
     ) -> bytes | None:
         """
-        Extracts a square 72x72 face avatar JPEG blob from `file_path` using the normalized
-        MP:RegionInfo rectangle `(rx, ry, rw, rh)` (or a center square if rw/rh == 0).
+        Extracts a square face avatar JPEG blob from `file_path` using the normalized
+        rectangle `(rx, ry, rw, rh)` on the upright image oriented according to `orientation`.
         """
         try:
             p = Path(file_path)
             if not p.exists() or not p.is_file():
                 return None
             with Image.open(p) as raw_img:
+                disk_orient = 1
+                try:
+                    disk_exif = raw_img.getexif()
+                    disk_orient = int(disk_exif.get(0x0112) or 1)
+                except Exception:
+                    pass
+
                 img = ImageOps.exif_transpose(raw_img)
+                target_orient = int(orientation or 1)
+                if target_orient != 1 and target_orient != disk_orient:
+                    orient_to_angle = {1: 0, 6: 90, 3: 180, 8: 270}
+                    delta_angle = (
+                        orient_to_angle.get(target_orient, 0)
+                        - orient_to_angle.get(disk_orient, 0)
+                    ) % 360
+                    if delta_angle == 90:
+                        img = img.rotate(-90, expand=True)
+                    elif delta_angle == 180:
+                        img = img.rotate(180, expand=True)
+                    elif delta_angle == 270:
+                        img = img.rotate(90, expand=True)
+
                 if img.mode != "RGB":
                     img = img.convert("RGB")
                 w, h = img.size
@@ -2133,7 +2185,7 @@ class CatalogRepository:
                     (target_size, target_size), Image.Resampling.LANCZOS
                 )
                 buf = io.BytesIO()
-                cropped.save(buf, format="JPEG", quality=88)
+                cropped.save(buf, format="JPEG", quality=90)
                 return buf.getvalue()
         except Exception:
             return None
@@ -2172,6 +2224,18 @@ class CatalogRepository:
                 tconn.commit()
         except Exception:
             pass
+
+    def get_face_thumbnail(self, media_people_id: int) -> bytes | None:
+        """Retrieves cached face thumbnail crop from thumbnails database if available."""
+        try:
+            conn = self.engine.thumbnails_conn()
+            row = conn.execute(
+                "SELECT crop_webp FROM face_thumbnails WHERE face_id = ?;",
+                (int(media_people_id),),
+            ).fetchone()
+            return bytes(row["crop_webp"]) if row and row["crop_webp"] else None
+        except Exception:
+            return None
 
     def refresh_person_avatar(
         self,
@@ -2218,7 +2282,7 @@ class CatalogRepository:
             cand_row = conn_read.execute(
                 """
                 SELECT mp.id AS face_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
-                       m.filename, f.path AS folder_path
+                       m.filename, m.orientation, f.path AS folder_path
                 FROM media_people mp
                 JOIN media m ON m.id = mp.media_id
                 JOIN folders f ON f.id = m.folder_id
@@ -2232,7 +2296,7 @@ class CatalogRepository:
             cand_row = conn_read.execute(
                 """
                 SELECT mp.id AS face_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
-                       m.filename, f.path AS folder_path
+                       m.filename, m.orientation, f.path AS folder_path
                 FROM media_people mp
                 JOIN media m ON m.id = mp.media_id
                 JOIN folders f ON f.id = m.folder_id
@@ -2248,14 +2312,18 @@ class CatalogRepository:
         new_avatar_fid: int | None = None
         if cand_row is not None:
             new_avatar_fid = int(cand_row["face_id"])
-            full_path = os.path.join(str(cand_row["folder_path"]), str(cand_row["filename"]))
-            rect = (
-                float(cand_row["rect_x"] or 0.0),
-                float(cand_row["rect_y"] or 0.0),
-                float(cand_row["rect_w"] or 0.0),
-                float(cand_row["rect_h"] or 0.0),
-            )
-            new_blob = self.extract_face_crop_blob(full_path, rect)
+            # Prefer the pre-computed upright face thumbnail directly (matches the UI face crop)
+            new_blob = self.get_face_thumbnail(new_avatar_fid)
+            if not new_blob:
+                full_path = os.path.join(str(cand_row["folder_path"]), str(cand_row["filename"]))
+                rect = (
+                    float(cand_row["rect_x"] or 0.0),
+                    float(cand_row["rect_y"] or 0.0),
+                    float(cand_row["rect_w"] or 0.0),
+                    float(cand_row["rect_h"] or 0.0),
+                )
+                orient = int(cand_row["orientation"] or 1)
+                new_blob = self.extract_face_crop_blob(full_path, rect, orientation=orient)
 
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
@@ -2319,7 +2387,7 @@ class CatalogRepository:
 
         media_row = conn_read.execute(
             """
-            SELECT m.is_video, m.filename, f.path AS folder_path
+            SELECT m.is_video, m.filename, m.orientation, f.path AS folder_path
             FROM media m
             JOIN folders f ON f.id = m.folder_id
             WHERE m.id = ?;
@@ -2331,6 +2399,7 @@ class CatalogRepository:
 
         is_video = bool(media_row["is_video"])
         rx, ry, rw, rh = (0.0, 0.0, 0.0, 0.0) if is_video else rect
+        orient = int(media_row["orientation"] or 1)
 
         # 2. Extract face thumbnail crop OUTSIDE write_lock if needed
         face_crop_blob: bytes | None = None
@@ -2339,7 +2408,7 @@ class CatalogRepository:
                 str(media_row["folder_path"]), str(media_row["filename"])
             )
             face_crop_blob = self.extract_face_crop_blob(
-                full_img_path, (rx, ry, rw, rh)
+                full_img_path, (rx, ry, rw, rh), orientation=orient
             )
         if thumbnail_blob is None and not is_video:
             existing_p = conn_read.execute(
@@ -2354,7 +2423,7 @@ class CatalogRepository:
                         str(media_row["folder_path"]), str(media_row["filename"])
                     )
                     thumbnail_blob = self.extract_face_crop_blob(
-                        full_img_path, (rx, ry, rw, rh)
+                        full_img_path, (rx, ry, rw, rh), orientation=orient
                     )
 
         # 3. Perform atomic DB mutations inside write lock
@@ -2754,7 +2823,7 @@ class CatalogRepository:
         conn_read = self.engine.catalog_conn()
         row = conn_read.execute(
             """
-            SELECT m.filename, f.path AS folder_path,
+            SELECT m.filename, m.orientation, f.path AS folder_path,
                    mp.id AS face_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h
             FROM media m
             JOIN folders f ON f.id = m.folder_id
@@ -2767,17 +2836,25 @@ class CatalogRepository:
         ).fetchone()
         if row is None:
             return False
-        full_path = os.path.join(str(row["folder_path"]), str(row["filename"]))
-        rect = (
-            float(row["rect_x"] or 0.0),
-            float(row["rect_y"] or 0.0),
-            float(row["rect_w"] or 0.0),
-            float(row["rect_h"] or 0.0),
-        )
-        blob = self.extract_face_crop_blob(full_path, rect)
+        fid = int(row["face_id"]) if row["face_id"] is not None else None
+        blob: bytes | None = None
+        if fid is not None:
+            # Prefer the pre-computed upright face thumbnail directly
+            blob = self.get_face_thumbnail(fid)
+
+        if not blob:
+            full_path = os.path.join(str(row["folder_path"]), str(row["filename"]))
+            rect = (
+                float(row["rect_x"] or 0.0),
+                float(row["rect_y"] or 0.0),
+                float(row["rect_w"] or 0.0),
+                float(row["rect_h"] or 0.0),
+            )
+            orient = int(row["orientation"] or 1)
+            blob = self.extract_face_crop_blob(full_path, rect, orientation=orient)
+
         if not blob:
             return False
-        fid = int(row["face_id"]) if row["face_id"] is not None else None
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
             conn.execute(
@@ -3569,31 +3646,35 @@ class CatalogRepository:
 
     def set_person_display_picture_from_face(self, person_id: int, face_id: int) -> bool:
         """Sets people.thumbnail_blob for person_id from a specific media_people face record."""
-        conn_read = self.engine.catalog_conn()
-        row = conn_read.execute(
-            """
-            SELECT m.id AS media_id, m.filename, f.path AS folder_path,
-                   mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h
-            FROM media_people mp
-            JOIN media m ON m.id = mp.media_id
-            JOIN folders f ON f.id = m.folder_id
-            WHERE mp.id = ?
-            LIMIT 1;
-            """,
-            (int(face_id),),
-        ).fetchone()
-        if not row:
-            return False
-        full_path = os.path.join(str(row["folder_path"]), str(row["filename"]))
-        rect = (
-            float(row["rect_x"] or 0.0),
-            float(row["rect_y"] or 0.0),
-            float(row["rect_w"] or 0.0),
-            float(row["rect_h"] or 0.0),
-        )
-        blob = self.extract_face_crop_blob(full_path, rect)
+        # 1. Prefer existing face crop thumbnail directly (matches the upright UI face crop)
+        blob = self.get_face_thumbnail(int(face_id))
+
         if not blob:
-            blob = self.get_face_thumbnail(int(face_id))
+            conn_read = self.engine.catalog_conn()
+            row = conn_read.execute(
+                """
+                SELECT m.id AS media_id, m.filename, m.orientation, f.path AS folder_path,
+                       mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h
+                FROM media_people mp
+                JOIN media m ON m.id = mp.media_id
+                JOIN folders f ON f.id = m.folder_id
+                WHERE mp.id = ?
+                LIMIT 1;
+                """,
+                (int(face_id),),
+            ).fetchone()
+            if not row:
+                return False
+            full_path = os.path.join(str(row["folder_path"]), str(row["filename"]))
+            rect = (
+                float(row["rect_x"] or 0.0),
+                float(row["rect_y"] or 0.0),
+                float(row["rect_w"] or 0.0),
+                float(row["rect_h"] or 0.0),
+            )
+            orient = int(row["orientation"] or 1)
+            blob = self.extract_face_crop_blob(full_path, rect, orientation=orient)
+
         if not blob:
             return False
         with self.engine.write_lock:
@@ -4376,6 +4457,32 @@ class CatalogRepository:
                 count += len(chunk)
             conn.commit()
             return count
+
+    def reset_unscanned_and_zero_face_media(self) -> int:
+        """
+        Resets face_scan_version = 0 for photos with 0 faces or missing embeddings,
+        allowing a complete, non-destructive re-scan that preserves all confirmed tags.
+        """
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE media
+                SET face_scan_version = 0
+                WHERE is_video = 0
+                  AND (
+                      face_scan_version < 2
+                      OR NOT EXISTS (
+                          SELECT 1 FROM media_people mp
+                          WHERE mp.media_id = media.id AND mp.embedding IS NOT NULL
+                      )
+                  );
+                """
+            )
+            count = cur.rowcount
+            conn.commit()
+            return max(0, count)
 
     # -------------------------------------------------------------------------
     # Non-Destructive Pixel Edit Backup & 30-Day Retention Policy

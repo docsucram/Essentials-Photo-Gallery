@@ -773,6 +773,25 @@ def read_xmp_from_file(
             )
     except Exception:
         pass
+
+    # Fallback via Pillow metadata (covers HEIC/AVIF/JXL/TIFF container-embedded XMP)
+    try:
+        from PIL import Image
+        with Image.open(p) as img:
+            xmp_raw = img.info.get("xmp") or img.info.get("XML:com.adobe.xmp")
+            if xmp_raw:
+                xmp_bytes = xmp_raw if isinstance(xmp_raw, bytes) else str(xmp_raw).encode("utf-8", "ignore")
+                if b"<x:xmpmeta" in xmp_bytes:
+                    return parse_xmp_packet_bytes(
+                        xmp_bytes,
+                        image_width=image_width,
+                        image_height=image_height,
+                        raw_width=raw_width,
+                        raw_height=raw_height,
+                        orientation=orientation,
+                    )
+    except Exception:
+        pass
     return {
         "rating": None,
         "orientation": None,

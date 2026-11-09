@@ -15,8 +15,8 @@ from typing import TYPE_CHECKING, Any, Callable, Literal
 # Ensure QtPy uses PySide6 if imported via qtawesome
 os.environ.setdefault("QT_API", "pyside6")
 
-from PySide6.QtCore import QObject, Signal
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtCore import QObject, QPointF, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 
 from src.utils.paths import get_icons_dir
 
@@ -40,6 +40,7 @@ _FLUENT_MAP: dict[str, tuple[str, str]] = {
     "about": ("ri.gallery-fill", "#0078D4"),
     "about_photo_gallery": ("ri.gallery-fill", "#0078D4"),
     "photo_gallery": ("ri.gallery-fill", "#0078D4"),
+    "qat_menu": ("ri.arrow-down-s-line", "#555555"),
     # Manage
     "delete": ("msc.trash", "#D83B01"),
     "copy": ("msc.copy", "#0078D4"),
@@ -48,14 +49,18 @@ _FLUENT_MAP: dict[str, tuple[str, str]] = {
     "cut": ("ri.scissors-cut-line", "#0078D4"),
     "paste": ("ri.clipboard-line", "#0078D4"),
     "select_all": ("msc.checklist", "#0078D4"),
-    "undo": ("msc.undo", "#0078D4"),
-    "redo": ("msc.redo", "#0078D4"),
+    "undo": ("ri.arrow-go-back-line", "#0078D4"),
+    "redo": ("ri.arrow-go-forward-line", "#0078D4"),
     "rotate_ccw": ("ri.anticlockwise-2-line", "#0078D4"),
     "rotate_cw": ("ri.clockwise-2-line", "#0078D4"),
+    "check": ("ri.check-line", "#107C41"),
+    "confirm": ("ri.check-line", "#107C41"),
+    "cross": ("ri.close-line", "#D83B01"),
+    "cancel": ("ri.close-line", "#D83B01"),
     # Find / Dates / Media
     "print": ("ri.printer-line", "#0078D4"),
-    "panoramic": ("ri.panorama-line", "#0078D4"),
-    "panorama": ("ri.panorama-line", "#0078D4"),
+    "panoramic": ("ri.landscape-line", "#0078D4"),
+    "panorama": ("ri.landscape-line", "#0078D4"),
     "collage": ("ri.layout-masonry-line", "#0078D4"),
     "photo_fuse": ("ri.camera-lens-line", "#0078D4"),
     "fuse": ("ri.camera-lens-line", "#0078D4"),
@@ -67,26 +72,35 @@ _FLUENT_MAP: dict[str, tuple[str, str]] = {
     "text_search": ("msc.search", "#0078D4"),
     "binoculars": ("msc.search", "#0078D4"),
     "edited": ("msc.edit", "#0078D4"),
-    "media_type": ("ri.folder-video-line", "#881798"),
+    "not_edited": ("msc.edit", "#888888"),
+    "not-edited": ("msc.edit", "#888888"),
+    "orientation": ("ri.aspect-ratio-line", "#0078D4"),
+    "media_type": ("ri.movie-line", "#881798"),
     "all_media": ("ri.gallery-line", "#0078D4"),
     # Tags & People
     "tag": ("msc.tag", "#0078D4"),
     "tag_add": ("ri.price-tag-3-line", "#107C41"),
+    "tag_as": ("ri.user-shared-line", "#0078D4"),
     "not_tagged": ("ri.price-tag-3-line", "#888888"),
     "tag_hierarchy": ("msc.list-tree", "#0078D4"),
     "person": ("msc.account", "#0078D4"),
     "people_tag": ("msc.account", "#0078D4"),
+    "person_none": ("ri.user-unfollow-line", "#888888"),
+    "person_question": ("ri.user-search-line", "#0078D4"),
     "batch_people": ("ri.group-line", "#0078D4"),
     "caption": ("ri.chat-new-line", "#0078D4"),
     "geotag": ("msc.globe", "#0078D4"),
     "globe": ("msc.globe", "#0078D4"),
+    "warning": ("ri.alert-line", "#FFB900"),
+    "outlier": ("ri.alert-line", "#FFB900"),
     # Ratings & Flags
-    "flag": ("msc.flag", "#D83B01"),
-    "flag_on": ("msc.flag", "#D83B01"),
-    "flag_off": ("msc.flag", "#888888"),
+    "flag": ("ri.flag-fill", "#D83B01"),
+    "flag_on": ("ri.flag-fill", "#D83B01"),
+    "flag_off": ("ri.flag-line", "#888888"),
     "pin": ("msc.pin", "#0078D4"),
     "pin_active": ("msc.pinned", "#D83B01"),
     "star": ("ri.star-fill", "#FFB900"),
+    "rate": ("ri.star-fill", "#FFB900"),
     "rating": ("ri.star-fill", "#FFB900"),
     "star_filled": ("ri.star-fill", "#FFB900"),
     "star_empty": ("ri.star-line", "#888888"),
@@ -108,6 +122,13 @@ _FLUENT_MAP: dict[str, tuple[str, str]] = {
     "fit_photos": ("ri.focus-3-line", "#0078D4"),
     "actual_size": ("ri.fullscreen-line", "#0078D4"),
     "actual_pixels": ("ri.fullscreen-line", "#0078D4"),
+    "reverse_sort": ("ri.arrow-up-down-line", "#0078D4"),
+    "detail_all": ("ri.list-check-2", "#0078D4"),
+    "detail_filename": ("msc.file", "#0078D4"),
+    "detail_filesize": ("ri.hard-drive-2-line", "#0078D4"),
+    "detail_date_taken": ("msc.calendar", "#0078D4"),
+    "detail_dimensions": ("ri.aspect-ratio-line", "#0078D4"),
+    "detail_date_modified": ("ri.time-line", "#0078D4"),
     # Photo Adjustments (Edit Tab)
     "auto_adjust": ("msc.wand", "#0078D4"),
     "crop": ("ri.crop-line", "#0078D4"),
@@ -119,7 +140,7 @@ _FLUENT_MAP: dict[str, tuple[str, str]] = {
     "highlighter": ("fa5s.highlighter", "#FFB900"),
     "arrow": ("ri.arrow-right-line", "#0078D4"),
     "rect": ("ri.checkbox-blank-line", "#0078D4"),
-    "ellipse": ("ri.circle-line", "#0078D4"),
+    "ellipse": ("ri.checkbox-blank-circle-line", "#0078D4"),
     "star_shape": ("ri.star-line", "#0078D4"),
     "blur": ("ri.blur-off-line", "#0078D4"),
     "pixelate": ("ri.grid-line", "#0078D4"),
@@ -127,13 +148,15 @@ _FLUENT_MAP: dict[str, tuple[str, str]] = {
     "text": ("ri.text", "#0078D4"),
     "swap": ("ri.arrow-left-right-line", "#0078D4"),
     "straighten": ("ri.ruler-line", "#0078D4"),
-    "noise_reduction": ("ri.sparkling-line", "#0078D4"),
+    "noise_reduction": ("ri.magic-line", "#0078D4"),
     "adjust_color": ("ri.palette-line", "#0078D4"),
     "color_adjust": ("ri.palette-line", "#0078D4"),
     "color_spectrum": ("ri.rainbow-line", "#FFB900"),
     "adjust_exposure": ("ri.sun-line", "#FFB900"),
     "exposure_adjust": ("ri.sun-line", "#FFB900"),
     "fine_tune": ("ri.equalizer-line", "#0078D4"),
+    "depth_light": ("ri.contrast-2-line", "#0078D4"),
+    "save": ("ri.save-line", "#0078D4"),
     "revert_original": ("msc.discard", "#D83B01"),
     "revert": ("msc.discard", "#D83B01"),
     "make_copy": ("ri.file-copy-line", "#0078D4"),
@@ -146,7 +169,7 @@ _FLUENT_MAP: dict[str, tuple[str, str]] = {
     "resize_photo": ("ri.aspect-ratio-line", "#0078D4"),
     "rated_higher": ("msc.arrow-up", "#0078D4"),
     "rated_lower": ("msc.arrow-down", "#0078D4"),
-    "rated_only": ("ri.equal-line", "#0078D4"),
+    "rated_only": ("ri.equalizer-line", "#0078D4"),
     "boolean_and": ("ri.add-line", "#0078D4"),
     # Create Tools & Creative UI
     "eyedropper": ("ri.sip-line", "#0078D4"),
@@ -193,6 +216,23 @@ def get_icon_theme() -> str:
     return _CURRENT_ICON_THEME
 
 
+def _render_fluent_slash_icon(color: str = "#0078D4") -> QIcon:
+    """Renders a crisp Fluent vector forward slash for boolean OR, distinctly contrasting with + (AND)."""
+    icon = QIcon()
+    for sz in (12, 14, 16, 20, 24, 32, 48):
+        pm = QPixmap(sz, sz)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(QColor(color), max(1.8, sz * 0.12), Qt.SolidLine, Qt.RoundCap)
+        p.setPen(pen)
+        s = float(sz)
+        p.drawLine(QPointF(s * 0.25, s * 0.80), QPointF(s * 0.75, s * 0.20))
+        p.end()
+        icon.addPixmap(pm)
+    return icon
+
+
 def get_icon(kind: str, size: int = 20, color_override: str | None = None) -> QIcon:
     """
     Returns a cached high-DPI QIcon for the given action/kind, tailored to the active icon theme.
@@ -212,6 +252,11 @@ def get_icon(kind: str, size: int = 20, color_override: str | None = None) -> QI
         asset_file = theme_dir / f"{kind}.svg"
     if asset_file.exists():
         icon = QIcon(str(asset_file))
+
+    # Fluent Theme custom forward slash for boolean OR
+    if icon is None and _CURRENT_ICON_THEME in ("fluent", "minimal") and kind in ("boolean_or", "slash"):
+        tint = color_override if color_override else ("#333333" if _CURRENT_ICON_THEME == "minimal" else "#0078D4")
+        icon = _render_fluent_slash_icon(tint)
 
     # Fluent Theme via QtAwesome
     if icon is None and _CURRENT_ICON_THEME in ("fluent", "minimal"):

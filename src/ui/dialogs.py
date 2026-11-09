@@ -404,8 +404,33 @@ class AppSettingsDialog(QDialog):
         self.tab_widget.setFont(QFont("Segoe UI", 9))
         self.tab_widget.setStyleSheet(
             """
+            QTabWidget::pane {
+                border: 1px solid #9EB6CE;
+                background: #FFFFFF;
+                top: -1px;
+            }
             QTabBar::tab {
-                padding: 4px 9px;
+                background: #F0F4F9;
+                border: 1px solid #9EB6CE;
+                border-top-left-radius: 3px;
+                border-top-right-radius: 3px;
+                padding: 4px 12px;
+                margin-right: 2px;
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 9pt;
+            }
+            QTabBar::tab:hover {
+                background: #E5EEF8;
+                border-color: #7DA2CE;
+            }
+            QTabBar::tab:selected {
+                background: #FFFFFF;
+                border: 1px solid #9EB6CE;
+                border-bottom: 1px solid #FFFFFF;
+                margin-bottom: -1px;
+                font-weight: 600;
+                color: #000000;
             }
             """
         )
@@ -472,6 +497,7 @@ class AppSettingsDialog(QDialog):
         # Visual Theme selector
         h_theme = QHBoxLayout()
         lbl_theme = QLabel("Visual theme:", tab_general)
+        lbl_theme.setFixedWidth(85)
         self.cmb_theme = QComboBox(tab_general)
         self.cmb_theme.addItem("Classic Aero", "wlpg_aero")
         self.cmb_theme.addItem("Modern Fluent", "modern")
@@ -485,9 +511,10 @@ class AppSettingsDialog(QDialog):
 
         # Icon Theme selector
         h_icon_theme = QHBoxLayout()
-        lbl_icon_theme = QLabel("Icon style:   ", tab_general)
+        lbl_icon_theme = QLabel("Icon style:", tab_general)
+        lbl_icon_theme.setFixedWidth(85)
         self.cmb_icon_theme = QComboBox(tab_general)
-        self.cmb_icon_theme.addItem("WLPG Classic Aero (Colourful)", "wlpg_aero")
+        self.cmb_icon_theme.addItem("Classic Aero (Colourful)", "wlpg_aero")
         self.cmb_icon_theme.addItem("Microsoft Fluent UI (Windows 11)", "fluent")
         self.cmb_icon_theme.addItem("Modern Minimalist", "minimal")
         i_idx = self.cmb_icon_theme.findData(icon_theme)
@@ -552,6 +579,7 @@ class AppSettingsDialog(QDialog):
         self.face_tab.purge_rescan_requested.connect(self._on_face_purge_rescan)
         self.face_tab.fast_rematch_requested.connect(self._on_face_fast_rematch)
         self.face_tab.heal_faces_requested.connect(self._on_face_heal_requested)
+        self.face_tab.rescan_unscanned_requested.connect(self._on_face_rescan_unscanned)
         self.tab_widget.addTab(self.face_tab, "Face Recognition")
 
         # -------------------------------------------------------------
@@ -1012,6 +1040,9 @@ class AppSettingsDialog(QDialog):
     def _on_face_fast_rematch(self) -> None:
         self.fast_rematch_requested = True
 
+    def _on_face_rescan_unscanned(self) -> None:
+        self.rescan_unscanned_requested = True
+
     def _on_apply(self) -> None:
         if hasattr(self, "face_tab") and self.face_tab:
             self.face_tab.save_settings()
@@ -1227,12 +1258,14 @@ class _ResizeWorker(QThread):
 
                     stem = src.stem
                     ext = src.suffix or ".jpg"
-                    target = self.out_dir / f"{stem}{ext}"
+                    dim_suffix = f" ({res_img.width}x{res_img.height})"
+                    base_target_stem = f"{stem}{dim_suffix}"
+                    target = self.out_dir / f"{base_target_stem}{ext}"
                     if target.exists():
                         c = 2
-                        while (self.out_dir / f"{stem} ({c}){ext}").exists():
+                        while (self.out_dir / f"{base_target_stem} ({c}){ext}").exists():
                             c += 1
-                        target = self.out_dir / f"{stem} ({c}){ext}"
+                        target = self.out_dir / f"{base_target_stem} ({c}){ext}"
 
                     if ext.lower() in (".jpg", ".jpeg"):
                         res_img.save(target, format="JPEG", quality=92)
@@ -1459,13 +1492,15 @@ class ResizePhotoDialog(QDialog):
 
                     stem = src.stem
                     ext = src.suffix or ".jpg"
-                    target = out_dir / f"{stem}{ext}"
-                    # Collision avoidance: filename (2).ext, filename (3).ext...
+                    dim_suffix = f" ({res_img.width}x{res_img.height})"
+                    base_target_stem = f"{stem}{dim_suffix}"
+                    target = out_dir / f"{base_target_stem}{ext}"
+                    # Collision avoidance: filename (576x1024) (2).ext...
                     if target.exists():
                         c = 2
-                        while (out_dir / f"{stem} ({c}){ext}").exists():
+                        while (out_dir / f"{base_target_stem} ({c}){ext}").exists():
                             c += 1
-                        target = out_dir / f"{stem} ({c}){ext}"
+                        target = out_dir / f"{base_target_stem} ({c}){ext}"
 
                     # Save preserving format / quality
                     if ext.lower() in (".jpg", ".jpeg"):

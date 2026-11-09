@@ -1758,6 +1758,15 @@ class _GeotagInput(QLineEdit):
         self._online_timer.setInterval(350)
         self._online_timer.timeout.connect(self._trigger_online_search)
 
+    def setText(self, text: str) -> None:
+        super().setText(text)
+        self.setCursorPosition(0)
+        self.setToolTip(text if text.strip() else "")
+
+    def focusOutEvent(self, event: Any) -> None:
+        super().focusOutEvent(event)
+        self.setCursorPosition(0)
+
     def enterEvent(self, event: Any) -> None:
         super().enterEvent(event)
         if bool(self.text().strip()):
@@ -2079,10 +2088,12 @@ class TagAndCaptionDock(QDockWidget):
     fine_tune_slider_released = Signal(str)
 
     # Signals for Depth & Light adjustments
-    depth_bokeh_changed = Signal(int, int, int)              # blur, focal_plane, glow
+    depth_bokeh_changed = Signal(int, int, int, int, int)    # blur, focal_plane, glow, boundary_shift, boundary_feather
     depth_relight_changed = Signal(int, int, int, int)       # near, far, warmth_near, warmth_far
     depth_haze_changed = Signal(int, int)                    # haze, haze_warmth
     depth_reset_requested = Signal()
+    copy_subject_requested = Signal()
+    remove_background_requested = Signal()
     map_location_selected = Signal(list, str, float, float)  # media_ids, label, lat, lon
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -2956,12 +2967,80 @@ class TagAndCaptionDock(QDockWidget):
         grp_bokeh.vbox.addWidget(self._make_slider_header("Specular highlight bloom", self.dl_slider_glow))
         grp_bokeh.vbox.addWidget(self.dl_slider_glow)
 
-        for s in (self.dl_slider_blur, self.dl_slider_focal, self.dl_slider_glow):
+        self.dl_slider_boundary_shift = self._make_aero_slider(-10, 10, 0)
+        grp_bokeh.vbox.addWidget(
+            self._make_slider_header("Boundary shift (shrink / grow)", self.dl_slider_boundary_shift)
+        )
+        grp_bokeh.vbox.addWidget(self.dl_slider_boundary_shift)
+
+        self.dl_slider_boundary_feather = self._make_aero_slider(0, 20, 0)
+        grp_bokeh.vbox.addWidget(
+            self._make_slider_header("Boundary feather", self.dl_slider_boundary_feather)
+        )
+        grp_bokeh.vbox.addWidget(self.dl_slider_boundary_feather)
+
+        for s in (
+            self.dl_slider_blur,
+            self.dl_slider_focal,
+            self.dl_slider_glow,
+            self.dl_slider_boundary_shift,
+            self.dl_slider_boundary_feather,
+        ):
             s.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
             s.valueChanged.connect(self._emit_depth_bokeh)
             s.sliderReleased.connect(lambda: self._on_depth_slider_released("Adjust Bokeh & Focus"))
 
         vbox.addWidget(grp_bokeh)
+
+        # Group 1b: 1-Click Subject Cutout & Background Removal
+        grp_cutout = _FineTuneGroup("Subject Cutout & Background", content)
+        cutout_row = QHBoxLayout()
+        cutout_row.setSpacing(6)
+        cutout_row.setContentsMargins(0, 2, 0, 2)
+
+        btn_style_cutout = """
+            QPushButton {
+                background: #F7FAFD;
+                border: 1px solid #B5D2ED;
+                border-radius: 3px;
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 8pt;
+                font-weight: 600;
+                padding: 2px 6px;
+            }
+            QPushButton:hover {
+                background: #E4F0FC;
+                border-color: #7BA7C9;
+            }
+            QPushButton:pressed {
+                background: #CCE4F7;
+                border-color: #3399FF;
+            }
+        """
+
+        self.btn_copy_subject = QPushButton("Copy Subject", grp_cutout)
+        self.btn_copy_subject.setFixedHeight(25)
+        self.btn_copy_subject.setCursor(Qt.PointingHandCursor)
+        self.btn_copy_subject.setToolTip(
+            "Extract the foreground subject with a transparent background and copy to clipboard"
+        )
+        self.btn_copy_subject.setStyleSheet(btn_style_cutout)
+        self.btn_copy_subject.clicked.connect(self.copy_subject_requested.emit)
+        cutout_row.addWidget(self.btn_copy_subject, 1)
+
+        self.btn_remove_background = QPushButton("Remove Background", grp_cutout)
+        self.btn_remove_background.setFixedHeight(25)
+        self.btn_remove_background.setCursor(Qt.PointingHandCursor)
+        self.btn_remove_background.setToolTip(
+            "Remove the background from this photo (save as PNG, WebP, AVIF, or JXL to keep transparency)"
+        )
+        self.btn_remove_background.setStyleSheet(btn_style_cutout)
+        self.btn_remove_background.clicked.connect(self.remove_background_requested.emit)
+        cutout_row.addWidget(self.btn_remove_background, 1)
+
+        grp_cutout.vbox.addLayout(cutout_row)
+        vbox.addWidget(grp_cutout)
 
         # Group 2: 3D Depth Relighting
         grp_relight = _FineTuneGroup("3D Depth Relighting", content)
@@ -3206,6 +3285,8 @@ class TagAndCaptionDock(QDockWidget):
                 self.dl_slider_blur.value(),
                 self.dl_slider_focal.value(),
                 self.dl_slider_glow.value(),
+                self.dl_slider_boundary_shift.value(),
+                self.dl_slider_boundary_feather.value(),
             )
         if self._pending_dl_relight:
             self._pending_dl_relight = False
@@ -3239,7 +3320,7 @@ class TagAndCaptionDock(QDockWidget):
         try:
             if recipe is None:
                 b = c = s = h = cl = t = ti = sat = dh = str_deg = sh = dn = vig = 0
-                d_blur = d_focal = d_glow = d_near = d_far = d_wn = d_wf = d_haze = d_hw = 0
+                d_blur = d_focal = d_glow = d_bshift = d_bfeather = d_near = d_far = d_wn = d_wf = d_haze = d_hw = 0
             else:
                 b = int(round(getattr(recipe, "brightness", 0.0)))
                 c = int(round(getattr(recipe, "contrast", 0.0)))
@@ -3258,6 +3339,8 @@ class TagAndCaptionDock(QDockWidget):
                 d_blur = int(round(getattr(recipe, "depth_blur", 0.0)))
                 d_focal = int(round(getattr(recipe, "focal_plane", 0.0)))
                 d_glow = int(round(getattr(recipe, "bokeh_glow", 0.0)))
+                d_bshift = int(round(getattr(recipe, "boundary_shift", 0.0)))
+                d_bfeather = int(round(getattr(recipe, "boundary_feather", 0.0)))
                 d_near = int(round(getattr(recipe, "relight_near", 0.0)))
                 d_far = int(round(getattr(recipe, "relight_far", 0.0)))
                 d_wn = int(round(getattr(recipe, "warmth_near", 0.0)))
@@ -3284,6 +3367,10 @@ class TagAndCaptionDock(QDockWidget):
                 self.dl_slider_blur.setValue(d_blur)
                 self.dl_slider_focal.setValue(d_focal)
                 self.dl_slider_glow.setValue(d_glow)
+                if hasattr(self, "dl_slider_boundary_shift"):
+                    self.dl_slider_boundary_shift.setValue(d_bshift)
+                if hasattr(self, "dl_slider_boundary_feather"):
+                    self.dl_slider_boundary_feather.setValue(d_bfeather)
                 self.dl_slider_near.setValue(d_near)
                 self.dl_slider_far.setValue(d_far)
                 self.dl_slider_warmth_near.setValue(d_wn)
@@ -3779,11 +3866,13 @@ class TagAndCaptionDock(QDockWidget):
     def _on_geotag_committed(self) -> None:
         if self._updating_ui or not self._selected_ids:
             return
+        self.txt_geotag.setCursorPosition(0)
         self.geotag_edited.emit(self.txt_geotag.text().strip())
 
     def _on_place_selected(self, place_name: str, lat: float, lon: float) -> None:
         if self._updating_ui or not self._selected_ids:
             return
+        self.txt_geotag.setCursorPosition(0)
         self.lbl_lat.setText(f"{lat:.5f}")
         self.lbl_lon.setText(f"{lon:.5f}")
         self.geotag_edited.emit(place_name)

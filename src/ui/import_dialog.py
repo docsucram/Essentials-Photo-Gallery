@@ -72,13 +72,13 @@ from PySide6.QtWidgets import (
 )
 
 from src.db.repository import CatalogRepository
-from src.imaging.image_loader import RAW_DOT_EXT_SET
+from src.imaging.image_loader import NEXTGEN_DOT_EXT_SET, RAW_DOT_EXT_SET
 from src.ui.ribbon_toolbar import make_wlpg_icon
 
 
 SUPPORTED_PHOTO_EXTS = {
-    ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp", ".ico", ".heic", ".heif"
-} | set(RAW_DOT_EXT_SET)
+    ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp", ".ico"
+} | set(RAW_DOT_EXT_SET) | set(NEXTGEN_DOT_EXT_SET)
 SUPPORTED_VIDEO_EXTS = {
     ".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v", ".flv", ".webm", ".3gp", ".ts", ".mts", ".m2ts"
 }

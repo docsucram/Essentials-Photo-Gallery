@@ -746,6 +746,44 @@ class DualDatabaseEngine:
         except Exception as exc:
             logger.warning("Error in heal_bogus_video_and_filename_dates_v1 migration: %s", exc)
 
+        # 13. Healing incomplete face scan caused by silent inference errors or XMP partial tags
+        try:
+            has_media = cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media';"
+            ).fetchone()
+            cur.execute("CREATE TABLE IF NOT EXISTS schema_flags (name TEXT PRIMARY KEY);")
+            done = cur.execute(
+                "SELECT 1 FROM schema_flags WHERE name = 'heal_incomplete_face_scans_v2';"
+            ).fetchone()
+            if has_media and not done:
+                # Reset face_scan_version to 0 for photos with no embedded faces so they get properly scanned
+                cur.execute(
+                    """
+                    UPDATE media
+                    SET face_scan_version = 0
+                    WHERE is_video = 0
+                      AND face_scan_version > 0
+                      AND NOT EXISTS (
+                          SELECT 1 FROM media_people mp
+                          WHERE mp.media_id = media.id AND mp.embedding IS NOT NULL
+                      );
+                    """
+                )
+                # Ensure videos have face_scan_version = 0 or 2 without interfering with face scans
+                cur.execute(
+                    """
+                    UPDATE media
+                    SET face_scan_version = 2
+                    WHERE is_video = 1 AND face_scan_version < 2;
+                    """
+                )
+                cur.execute(
+                    "INSERT OR IGNORE INTO schema_flags(name) VALUES ('heal_incomplete_face_scans_v2');"
+                )
+                conn.commit()
+        except Exception as exc:
+            logger.warning("Error in heal_incomplete_face_scans_v2 migration: %s", exc)
+
         conn.commit()
 
     def _migrate_thumbnails_schema(self, conn: sqlite3.Connection) -> None:

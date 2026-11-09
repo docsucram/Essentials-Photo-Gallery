@@ -22,8 +22,20 @@ datas += collect_data_files("cv2")
 datas += collect_data_files("onnxruntime")
 datas += collect_data_files("insightface")
 
+for pkg in ("pillow_heif", "pillow_jxl", "pillow_avif"):
+    try:
+        datas += collect_data_files(pkg)
+    except Exception:
+        pass
+
 binaries = []
 binaries += collect_dynamic_libs("onnxruntime")
+
+for pkg in ("pillow_heif", "pillow_jxl", "pillow_avif"):
+    try:
+        binaries += collect_dynamic_libs(pkg)
+    except Exception:
+        pass
 
 # 3. Hidden Imports
 hiddenimports = [
@@ -47,18 +59,20 @@ hiddenimports = [
     "PIL.ImageOps",
     "PIL.ExifTags",
     "rawpy",
-    "scipy",
-    "scipy.ndimage",
-    "scipy.spatial",
     "onnxruntime",
+
+    # Next-Gen Image Codecs (HEIF, AVIF, JPEG XL)
+    "pillow_heif",
+    "pillow_jxl",
+    "pillow_jxl.JpegXLImagePlugin",
+    "pillow_avif",
+    "pillow_avif.AvifImagePlugin",
     
     # InsightFace & ML Modules
     "insightface",
     "insightface.app",
     "insightface.model_zoo",
     "insightface.utils",
-    "skimage",
-    "skimage.transform",
 
     # System & Icon Utilities
     "send2trash",
@@ -68,8 +82,8 @@ hiddenimports = [
 # Collect additional submodules safely
 hiddenimports += collect_submodules("insightface.model_zoo")
 
-# 4. Exclusions (developer tooling, unused large frameworks)
-# Note: Do NOT exclude 'unittest' because numpy.testing / scipy / insightface import it at runtime.
+# 4. Exclusions (developer tooling, unused large frameworks; scipy/skimage replaced by pure NumPy/OpenCV)
+# Note: Do NOT exclude 'unittest' because numpy.testing / insightface import it at runtime.
 excludes = [
     "pytest",
     "_pytest",
@@ -78,6 +92,8 @@ excludes = [
     "jupyter",
     "matplotlib",
     "pandas",
+    "scipy",
+    "skimage",
 ]
 
 a = Analysis(

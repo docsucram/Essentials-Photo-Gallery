@@ -15,6 +15,7 @@ from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication, QToolTip, QWidget
 
 from src.db.connection import DualDatabaseEngine
+from src.imaging.image_loader import register_nextgen_codecs
 from src.ui.main_window import PhotoGalleryMainWindow
 from src.utils.paths import get_default_db_dir, get_resource_path
 from src.utils.scan_logger import (
@@ -37,6 +38,7 @@ def create_app(argv: list[str] | None = None) -> QApplication:
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+    register_nextgen_codecs()
     app = QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName("Essentials Photo Gallery")
     app.setOrganizationName("Essentials Photo Gallery")

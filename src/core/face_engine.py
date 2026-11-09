@@ -26,6 +26,8 @@ warnings.filterwarnings("ignore", category=FutureWarning, module=r"insightface.*
 warnings.filterwarnings("ignore", message=r".*AVIF support not installed.*", category=UserWarning)
 warnings.filterwarnings("ignore", message=r".*Corrupt EXIF data.*", category=UserWarning)
 
+import sys
+import types
 import cv2
 import numpy as np
 from PIL import Image, ImageOps
@@ -33,6 +35,94 @@ from PIL import Image, ImageOps
 from src.core.face_matcher import normalize_vector
 
 logger = logging.getLogger(__name__)
+
+
+class _NumPySimilarityTransform:
+    """
+    Pure-NumPy Umeyama 2D similarity transform replacing `skimage.transform.SimilarityTransform`
+    for InsightFace landmark alignment without requiring `scikit-image` or `scipy` (~120 MB).
+    """
+
+    def __init__(
+        self,
+        matrix: np.ndarray | None = None,
+        scale: float | None = None,
+        rotation: float | None = None,
+        translation: tuple[float, float] | list[float] | np.ndarray | None = None,
+    ) -> None:
+        if matrix is not None:
+            self.params = np.asarray(matrix, dtype=np.float64)
+        else:
+            s = 1.0 if scale is None else float(scale)
+            r = 0.0 if rotation is None else float(rotation)
+            if translation is None:
+                tx, ty = 0.0, 0.0
+            else:
+                tx, ty = float(translation[0]), float(translation[1])
+            c, sn = math.cos(r) * s, math.sin(r) * s
+            self.params = np.array(
+                [[c, -sn, tx], [sn, c, ty], [0.0, 0.0, 1.0]], dtype=np.float64
+            )
+
+    def estimate(self, src: np.ndarray, dst: np.ndarray) -> bool:
+        src_arr = np.asarray(src, dtype=np.float64)
+        dst_arr = np.asarray(dst, dtype=np.float64)
+        num, dim = src_arr.shape
+        src_mean = src_arr.mean(axis=0)
+        dst_mean = dst_arr.mean(axis=0)
+        src_demean = src_arr - src_mean
+        dst_demean = dst_arr - dst_mean
+        A = dst_demean.T @ src_demean / num
+        d = np.ones((dim,), dtype=np.float64)
+        if np.linalg.det(A) < 0:
+            d[dim - 1] = -1
+        T = np.eye(dim + 1, dtype=np.float64)
+        U, S, Vt = np.linalg.svd(A)
+        rank = np.linalg.matrix_rank(A)
+        if rank == 0:
+            self.params = np.nan * T
+            return False
+        elif rank == dim - 1:
+            if np.linalg.det(U) * np.linalg.det(Vt) > 0:
+                T[:dim, :dim] = U @ Vt
+            else:
+                s_val = d[dim - 1]
+                d[dim - 1] = -1
+                T[:dim, :dim] = U @ np.diag(d) @ Vt
+                d[dim - 1] = s_val
+        else:
+            T[:dim, :dim] = U @ np.diag(d) @ Vt
+        var_sum = float(src_demean.var(axis=0).sum())
+        scale = (1.0 / var_sum * float(S @ d)) if var_sum > 1e-12 else 1.0
+        T[:dim, dim] = dst_mean - scale * (T[:dim, :dim] @ src_mean.T)
+        T[:dim, :dim] *= scale
+        self.params = T
+        return True
+
+    @classmethod
+    def from_estimate(cls, src: np.ndarray, dst: np.ndarray) -> "_NumPySimilarityTransform":
+        obj = cls()
+        obj.estimate(src, dst)
+        return obj
+
+    def __add__(self, other: "_NumPySimilarityTransform") -> "_NumPySimilarityTransform":
+        return _NumPySimilarityTransform(matrix=other.params @ self.params)
+
+
+def _install_skimage_shim() -> None:
+    """Installs a lightweight pure-NumPy `skimage.transform` shim if `skimage` is not loaded."""
+    if "skimage.transform" not in sys.modules or sys.modules.get("skimage.transform") is None:
+        sk_mod = sys.modules.get("skimage")
+        if sk_mod is None:
+            sk_mod = types.ModuleType("skimage")
+            sys.modules["skimage"] = sk_mod
+        sk_trans = types.ModuleType("skimage.transform")
+        sk_trans.SimilarityTransform = _NumPySimilarityTransform  # type: ignore[attr-defined]
+        sk_mod.transform = sk_trans  # type: ignore[attr-defined]
+        sys.modules["skimage.transform"] = sk_trans
+
+
+_install_skimage_shim()
 
 
 @dataclass(slots=True)
@@ -522,7 +612,7 @@ class FaceEngine:
             except Exception as e:
                 logger.warning("InsightFace inference failed: %s", e)
                 if not (self.allow_fallback or self.backend_name == "opencv_haar"):
-                    return []
+                    raise RuntimeError(f"InsightFace inference failed: {e}") from e
 
         # 2. OpenCV Haar Cascade Fallback Pipeline (unit tests / fallback only)
         if not (self.allow_fallback or self.backend_name == "opencv_haar"):

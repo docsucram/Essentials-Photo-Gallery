@@ -50,3 +50,8 @@ build/
 dist/
 dist_installer/
 *.spec.bak
+
+# Downloaded ONNX neural model weights
+models/
+/models
+*.onnx

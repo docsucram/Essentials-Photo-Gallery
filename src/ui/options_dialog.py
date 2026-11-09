@@ -47,6 +47,7 @@ class FaceRecognitionOptionsTab(QWidget):
     purge_rescan_requested = Signal()
     fast_rematch_requested = Signal()
     heal_faces_requested = Signal()
+    rescan_unscanned_requested = Signal()
 
     def __init__(
         self,
@@ -174,7 +175,7 @@ class FaceRecognitionOptionsTab(QWidget):
         self.slider_match.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.slider_match.setTickInterval(5)
         tip_match = (
-            "Match Strictness (Name Suggestion Threshold):\n"
+            "Match Strictness (Name Matching Strictness / Suggestion Threshold):\n"
             "Controls how closely a detected face must match known people before suggesting their name.\n\n"
             "• Higher (65%–75%): Strict matching. Only suggests a name if almost certain, preventing incorrect suggestions.\n"
             "• Lower (40%–50%): Aggressive matching. Suggests names even with slight resemblance, but may confuse family members."
@@ -251,6 +252,15 @@ class FaceRecognitionOptionsTab(QWidget):
         )
         self.btn_heal_faces.clicked.connect(self._on_heal_faces_clicked)
         v_btn_layout.addWidget(self.btn_heal_faces)
+
+        self.btn_rescan_unscanned = QPushButton("Scan Unscanned & Zero-Face Photos", self)
+        self.btn_rescan_unscanned.setMinimumHeight(32)
+        self.btn_rescan_unscanned.setToolTip(
+            "Finds all photos that have no faces or missing embeddings and queues them for scanning. "
+            "All existing confirmed people and tags are completely preserved."
+        )
+        self.btn_rescan_unscanned.clicked.connect(self._on_rescan_unscanned_clicked)
+        v_btn_layout.addWidget(self.btn_rescan_unscanned)
 
         self.btn_fast_rematch = QPushButton("⚡ Recalculate Signatures & Re-Match (Fast)", self)
         self.btn_fast_rematch.setMinimumHeight(32)
@@ -380,6 +390,34 @@ class FaceRecognitionOptionsTab(QWidget):
             except Exception as e:
                 logger.exception("Re-import face boxes failed: %s", e)
                 QMessageBox.critical(self, "Error", f"Failed to re-import face boxes: {e}")
+
+    def _on_rescan_unscanned_clicked(self) -> None:
+        if not self.repo:
+            QMessageBox.warning(self, "Scan Unscanned Photos", "Database repository is unavailable.")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm Scan Photos",
+            "This will find all photos that have no faces or missing embeddings and queue them "
+            "for background face detection.\n\n"
+            "All existing confirmed people and tags are completely preserved.\n\n"
+            "Do you want to proceed?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                count = self.repo.reset_unscanned_and_zero_face_media()
+                QMessageBox.information(
+                    self,
+                    "Scan Queued",
+                    f"Successfully queued {count:,} photo(s) for background face scanning.",
+                )
+                self.rescan_unscanned_requested.emit()
+            except Exception as e:
+                logger.exception("Scan unscanned photos failed: %s", e)
+                QMessageBox.critical(self, "Error", f"Failed to queue photos: {e}")
 
 
 from src.ui.dialogs import AppSettingsDialog

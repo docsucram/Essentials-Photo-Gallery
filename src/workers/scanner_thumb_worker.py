@@ -68,18 +68,19 @@ from src.workers.xmp_sync_worker import (
 import src.workers.xmp_sync_worker as _xmp_sync_module
 import xml.etree.ElementTree as ET
 
-_HAS_HEIF = False
-try:
-    import pillow_heif
-    pillow_heif.register_heif_opener()
-    _HAS_HEIF = True
-except (ImportError, Exception):
-    pass
+from src.imaging.image_loader import (
+    AVIF_EXT_SET,
+    HEIF_EXT_SET,
+    JXL_EXT_SET,
+    NEXTGEN_EXT_SET,
+    NEXTGEN_DOT_EXT_SET,
+    RAW_EXT_SET,
+    register_nextgen_codecs,
+)
 
-from src.imaging.image_loader import RAW_EXT_SET
+register_nextgen_codecs()
 
-HEIF_EXT_SET = {"heic", "heif"} if _HAS_HEIF else set()
-IMAGE_EXT_SET = {"png", "jpg", "jpeg", "gif", "bmp", "ico", "tiff", "tif", "webp"} | set(RAW_EXT_SET) | HEIF_EXT_SET
+IMAGE_EXT_SET = {"png", "jpg", "jpeg", "gif", "bmp", "ico", "tiff", "tif", "webp"} | set(RAW_EXT_SET) | set(NEXTGEN_EXT_SET)
 VIDEO_EXT_SET = {"mp4", "avi", "mkv", "mov", "wmv", "flv", "m4v", "webm", "3gp", "ts", "mts", "m2ts"}
 ALL_MEDIA_EXT_SET = IMAGE_EXT_SET | VIDEO_EXT_SET
 IGNORED_DIR_NAMES = {
@@ -1623,9 +1624,87 @@ class ThumbnailDecodeWorker(QRunnable):
             if not self.cancel_flag.is_set:
                 self.signals.error.emit(self.media_id, str(exc))
 
+    def _decode_nextgen_thumbnail(self) -> QImage | None:
+        """Decodes next-generation formats (HEIC, HEIF, HIF, AVIF, JXL) via Pillow + LittleCMS2."""
+        try:
+            from src.imaging.image_loader import (
+                convert_icc_to_srgb,
+                is_pil_true_animation,
+                normalize_pil_bit_depth,
+            )
+
+            with Image.open(self.file_path) as pil_img:
+                disk_orient = 1
+                if not is_pil_true_animation(pil_img):
+                    try:
+                        disk_exif = pil_img.getexif()
+                        disk_orient = int(disk_exif.get(0x0112) or 1)
+                    except Exception:
+                        disk_orient = 1
+                    pil_img = ImageOps.exif_transpose(pil_img)
+                else:
+                    try:
+                        pil_img.seek(0)
+                    except Exception:
+                        pass
+                    pil_img = pil_img.copy()
+
+                pil_img = normalize_pil_bit_depth(pil_img)
+                pil_img = convert_icc_to_srgb(pil_img)
+                has_alpha = (pil_img.mode in ("RGBA", "LA", "PA")) or (
+                    pil_img.mode == "P" and "transparency" in pil_img.info
+                )
+                pil_img = pil_img.convert("RGBA" if has_alpha else "RGB")
+                pil_img.thumbnail((THUMB_MAX_DIM, THUMB_MAX_DIM), Image.Resampling.BILINEAR)
+
+                target_orient = int(self.orientation or 1)
+                orient_to_angle = {1: 0, 6: 90, 3: 180, 8: 270}
+                if target_orient != disk_orient and (self.metadata_dirty == 1 or target_orient in (3, 6, 8)):
+                    delta_angle = (
+                        orient_to_angle.get(target_orient, 0)
+                        - orient_to_angle.get(disk_orient, 0)
+                    ) % 360
+                    if delta_angle != 0:
+                        rot_method = {
+                            90: Image.Transpose.ROTATE_270,
+                            180: Image.Transpose.ROTATE_180,
+                            270: Image.Transpose.ROTATE_90,
+                        }[delta_angle]
+                        pil_img = pil_img.transpose(rot_method)
+
+                # Proactively reconcile catalog orientation if it was un-enriched default 1
+                if disk_orient != 1 and target_orient == 1 and self.metadata_dirty == 0:
+                    try:
+                        with self.engine.write_lock:
+                            conn = self.engine.catalog_conn()
+                            conn.execute(
+                                "UPDATE media SET orientation = ? WHERE id = ? AND metadata_dirty = 0;",
+                                (disk_orient, self.media_id),
+                            )
+                            conn.commit()
+                    except Exception:
+                        pass
+
+                raw_bytes = pil_img.tobytes("raw", pil_img.mode)
+                stride = (4 if pil_img.mode == "RGBA" else 3) * pil_img.width
+                fmt = (
+                    QImage.Format_RGBA8888
+                    if pil_img.mode == "RGBA"
+                    else QImage.Format_RGB888
+                )
+                return QImage(
+                    raw_bytes, pil_img.width, pil_img.height, stride, fmt
+                ).copy()
+        except Exception as e:
+            from src.utils.scan_logger import log_scan_error
+            log_scan_error("ThumbnailDecodeWorker:NextGen", self.file_path, e)
+            return None
+
     def _decode_image_thumbnail(self) -> QImage | None:
-        """Uses rawpy for RAW camera formats, and QImageReader/Pillow for standard formats."""
+        """Uses rawpy for RAW camera formats, Pillow for next-gen (HEIC/AVIF/JXL), and QImageReader/Pillow for standard formats."""
         ext = self.file_path.suffix.lstrip(".").lower()
+        if ext in NEXTGEN_EXT_SET:
+            return self._decode_nextgen_thumbnail()
         if ext in RAW_EXT_SET:
             try:
                 import rawpy

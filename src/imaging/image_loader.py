@@ -22,7 +22,56 @@ try:
 except Exception:  # pragma: no cover
     ImageCms = None  # type: ignore[assignment]
 
+_CODECS_REGISTERED = False
+
+
+def register_nextgen_codecs() -> dict[str, bool]:
+    """
+    Registers next-generation image codecs with Pillow:
+      - `pillow_heif` for HEIC, HEIF, HIF
+      - `pillow_avif` for AVIF
+      - `pillow_jxl` for JPEG XL (.jxl)
+    Returns a dict indicating the availability of each format.
+    """
+    global _CODECS_REGISTERED
+    status = {"heif": False, "avif": False, "jxl": False}
+
+    # 1. HEIF / HEIC / HIF
+    try:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+        status["heif"] = True
+    except Exception:
+        pass
+
+    # 2. AVIF
+    try:
+        import pillow_avif  # registers AVIF plugin with Pillow on import
+        status["avif"] = True
+    except Exception:
+        pass
+
+    # 3. JPEG XL (.jxl)
+    try:
+        import pillow_jxl  # registers JXL plugin with Pillow on import
+        status["jxl"] = True
+    except Exception:
+        pass
+
+    _CODECS_REGISTERED = True
+    return status
+
+
+# Automatically register on import
+register_nextgen_codecs()
+
 from src.imaging.opencv_engine import PhotoAdjustmentRecipe, _crop_largest_inscribed_rect
+
+HEIF_EXT_SET: frozenset[str] = frozenset({"heic", "heif", "hif"})
+AVIF_EXT_SET: frozenset[str] = frozenset({"avif"})
+JXL_EXT_SET: frozenset[str] = frozenset({"jxl"})
+NEXTGEN_EXT_SET: frozenset[str] = HEIF_EXT_SET | AVIF_EXT_SET | JXL_EXT_SET
+NEXTGEN_DOT_EXT_SET: frozenset[str] = frozenset(f".{ext}" for ext in NEXTGEN_EXT_SET)
 
 RAW_EXT_SET: frozenset[str] = frozenset(
     {
@@ -54,7 +103,9 @@ RAW_EXT_SET: frozenset[str] = frozenset(
     }
 )
 RAW_DOT_EXT_SET: frozenset[str] = frozenset(f".{ext}" for ext in RAW_EXT_SET)
-ALPHA_SAVE_DOT_EXT_SET: frozenset[str] = frozenset({".png", ".webp", ".tif", ".tiff", ".ico"})
+ALPHA_SAVE_DOT_EXT_SET: frozenset[str] = frozenset(
+    {".png", ".webp", ".tif", ".tiff", ".ico", ".avif", ".jxl", ".heic", ".heif"}
+)
 
 _SRGB_CMS_PROFILE: Any = None
 

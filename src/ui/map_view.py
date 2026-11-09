@@ -431,8 +431,6 @@ class MapBridge(QObject):
             else:
                 return
             self.cluster_selected.emit(mids, label)
-            self.cluster_clicked.emit(mids)
-            self.cluster_clicked_data.emit(mids, label)
         except Exception:
             pass
 
@@ -456,7 +454,21 @@ class MapBridge(QObject):
 
     @Slot(str)
     def onClusterClicked(self, cluster_json: str) -> None:
-        self.onClusterSelected(cluster_json)
+        try:
+            data = json.loads(cluster_json)
+            if isinstance(data, dict):
+                mids = [int(x) for x in data.get("media_ids", [])]
+                label = str(data.get("label", ""))
+            elif isinstance(data, list):
+                mids = [int(x) for x in data]
+                label = ""
+            else:
+                return
+            self.cluster_selected.emit(mids, label)
+            self.cluster_clicked.emit(mids)
+            self.cluster_clicked_data.emit(mids, label)
+        except Exception:
+            pass
 
     @Slot()
     def onMapBackgroundClicked(self) -> None:
@@ -978,16 +990,27 @@ class WorldMapView(QWidget):
         """Enriches cluster dictionaries with thumbnail base64 data URIs and QPixmaps."""
         if not clusters or self._thumb_repo is None:
             return
-        lead_ids = [c["media_ids"][0] for c in clusters if c.get("media_ids")]
-        if not lead_ids:
+        # Collect candidate IDs from each cluster (checking up to 20 media items per cluster)
+        all_candidate_ids: list[int] = []
+        for c in clusters:
+            mids = c.get("media_ids") or []
+            if mids:
+                all_candidate_ids.extend(mids[:20])
+
+        if not all_candidate_ids:
             return
         try:
-            blobs = self._thumb_repo.get_webp_blobs_batch(lead_ids)
+            blobs = self._thumb_repo.get_webp_blobs_batch(all_candidate_ids)
             for c in clusters:
-                if not c.get("media_ids"):
+                mids = c.get("media_ids") or []
+                if not mids:
                     continue
-                lead_id = c["media_ids"][0]
-                blob = blobs.get(lead_id)
+                # Find the first item in the cluster with an existing cached thumbnail
+                blob = None
+                for mid in mids[:20]:
+                    if mid in blobs:
+                        blob = blobs[mid]
+                        break
                 if blob:
                     b64 = base64.b64encode(blob).decode("ascii")
                     c["thumb_url"] = f"data:image/webp;base64,{b64}"

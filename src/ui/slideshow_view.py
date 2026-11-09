@@ -33,6 +33,7 @@ from PySide6.QtCore import (
     QEvent,
     QObject,
     QPoint,
+    QPointF,
     QRect,
     QRectF,
     QRunnable,
@@ -58,6 +59,7 @@ from PySide6.QtGui import (
     QPaintEvent,
     QPen,
     QPixmap,
+    QPolygonF,
     QRadialGradient,
     QShortcut,
 )
@@ -87,7 +89,27 @@ def make_slideshow_theme_icon(theme_id: str) -> QIcon:
     p.setRenderHint(QPainter.Antialiasing, True)
     rect = QRectF(1, 1, 46, 34)
 
-    if theme_id == "pan_and_zoom":
+    if theme_id in ("static", "none", "classic"):
+        p.fillRect(rect, QColor("#101820"))
+        # Clean photo frame centered on screen with vibrant landscape colors
+        p.fillRect(QRectF(8, 6, 32, 24), QColor("#2D6296"))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#5488BD"))
+        p.drawPolygon(
+            QPolygonF(
+                [
+                    QPointF(8, 25),
+                    QPointF(19, 14),
+                    QPointF(27, 21),
+                    QPointF(34, 13),
+                    QPointF(40, 25),
+                ]
+            )
+        )
+        p.setBrush(QColor("#FFE082"))
+        p.drawEllipse(13, 9, 5, 5)
+
+    elif theme_id == "pan_and_zoom":
         p.fillRect(rect, QColor("#1B3B5F"))
         p.fillRect(QRectF(4, 4, 40, 28), QColor("#2D6296"))
         p.setPen(QPen(QColor("#FFE082"), 1.8))
@@ -169,6 +191,7 @@ class SlideshowHud(QFrame):
     music_clicked = Signal()
 
     THEME_OPTIONS = [
+        ("static", "Static"),
         ("pan_and_zoom", "Pan and Zoom"),
         ("polaroid", "Polaroid"),
         ("cinematic", "Cinematic"),
@@ -492,7 +515,7 @@ class FullscreenSlideshowDialog(QDialog):
         start_index: int = 0,
         catalog_repo: CatalogRepository | None = None,
         interval_ms: int = 5000,
-        theme: str = "pan_and_zoom",
+        theme: str = "static",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent, Qt.Window | Qt.FramelessWindowHint)
@@ -1132,7 +1155,9 @@ class FullscreenSlideshowDialog(QDialog):
                 alpha = 1.0
 
             theme = self.current_theme
-            if theme in ("polaroid", "contemporary"):
+            if theme in ("static", "none", "classic"):
+                self._paint_static(painter)
+            elif theme in ("polaroid", "contemporary"):
                 self._paint_contemporary(painter, t, alpha)
             elif theme == "cinematic":
                 self._paint_cinematic(painter, t, alpha)
@@ -1147,6 +1172,20 @@ class FullscreenSlideshowDialog(QDialog):
         finally:
             if painter.isActive():
                 painter.end()
+
+    def _paint_static(self, painter: QPainter) -> None:
+        """Static: ultra fast plain switch between photos with aspect-ratio preservation and no movement/filters."""
+        painter.fillRect(self.rect(), QColor(0, 0, 0))
+        cur_pix = self._current_pixmap or self._prev_pixmap
+        if cur_pix is None or cur_pix.isNull():
+            return
+
+        rect = self.rect()
+        scaled_sz = cur_pix.size().scaled(rect.size(), Qt.KeepAspectRatio)
+        x = (rect.width() - scaled_sz.width()) // 2
+        y = (rect.height() - scaled_sz.height()) // 2
+        target_rect = QRect(x, y, scaled_sz.width(), scaled_sz.height())
+        painter.drawPixmap(target_rect, cur_pix)
 
     def _paint_pan_and_zoom(
         self,

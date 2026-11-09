@@ -354,6 +354,7 @@ class FaceDetectionWorker(QRunnable):
             JOIN folders f ON f.id = m.folder_id
             WHERE mp.state = 1
               AND m.is_missing = 0
+              AND m.is_video = 0
               AND m.face_scan_version < 2
             ORDER BY mp.id ASC;
             """
@@ -373,6 +374,7 @@ class FaceDetectionWorker(QRunnable):
             JOIN folders f ON f.id = m.folder_id
             WHERE mp.state = 1
               AND m.is_missing = 0
+              AND m.is_video = 0
               AND m.face_scan_version < 2
               AND mp.rect_w > 0.005
               AND mp.rect_h > 0.005
@@ -426,7 +428,27 @@ class FaceDetectionWorker(QRunnable):
                     self.repo.mark_face_scan_failed([mid])
                     detected_faces = []
 
-                self._verify_and_heal_image_faces(mid, fpath, orient, detected_faces)
+                unclaimed_faces = self._verify_and_heal_image_faces(mid, fpath, orient, detected_faces)
+                if unclaimed_faces:
+                    payload = [
+                        {
+                            "rect_x": df.rect_x,
+                            "rect_y": df.rect_y,
+                            "rect_w": df.rect_w,
+                            "rect_h": df.rect_h,
+                            "embedding": serialize_embedding(df.embedding),
+                            "similarity_score": None,
+                        }
+                        for df in unclaimed_faces
+                    ]
+                    created_ids = self.repo.insert_detected_faces(mid, payload)
+                    thumb_entries = [
+                        (fid, df.crop_webp)
+                        for fid, df in zip(created_ids, unclaimed_faces)
+                        if df.crop_webp
+                    ]
+                    if thumb_entries:
+                        self.thumb_repo.put_face_thumbnails_batch(thumb_entries)
 
         # Build initial person centroids from confirmed faces
         self._recompute_people_centroids()

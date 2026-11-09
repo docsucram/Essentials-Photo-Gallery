@@ -1218,6 +1218,40 @@ class PixelArrayUndoCommand(QUndoCommand):
         self.viewer._render_current_recipe()
 
 
+class _AlphaCutoutUndoCommand(QUndoCommand):
+    """Undo/Redo command for 1-click Background Removal (updates both master_np_rgb and master_alpha)."""
+
+    def __init__(
+        self,
+        viewer: SingleMediaViewer,
+        before_rgb: np.ndarray,
+        before_alpha: np.ndarray | None,
+        after_rgb: np.ndarray,
+        after_alpha: np.ndarray | None,
+        description: str = "Remove Background",
+        parent=None,
+    ) -> None:
+        super().__init__(description, parent)
+        self.viewer = viewer
+        self.before_rgb = before_rgb.copy()
+        self.before_alpha = before_alpha.copy() if before_alpha is not None else None
+        self.after_rgb = after_rgb.copy()
+        self.after_alpha = after_alpha.copy() if after_alpha is not None else None
+
+    def undo(self) -> None:
+        self.viewer.master_np_rgb = self.before_rgb.copy()
+        self.viewer.master_alpha = self.before_alpha.copy() if self.before_alpha is not None else None
+        self.viewer._update_display_proxy()
+        self.viewer._render_current_recipe()
+
+    def redo(self) -> None:
+        self.viewer.master_np_rgb = self.after_rgb.copy()
+        self.viewer.master_alpha = self.after_alpha.copy() if self.after_alpha is not None else None
+        self.viewer._update_display_proxy()
+        self.viewer._render_current_recipe()
+
+
+
 class _DraggableFloatingToolbar(QFrame):
     """Floating overlay toolbar with drag handle and viewport boundary clamping."""
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -1839,8 +1873,8 @@ class SingleMediaViewer(QWidget):
         ct_layout.addWidget(btn_crop_cancel)
         self.crop_toolbar.hide()
 
-        # 2. Spot Fix Toolbar (Shared by Retouch / Blemish & Red Eye)
-        self.spot_fix_sub_mode: Literal["retouch", "red_eye"] = "retouch"
+        # 2. Spot Fix Toolbar (Shared by Retouch / Blemish, Object Eraser & Red Eye)
+        self.spot_fix_sub_mode: Literal["retouch", "erase", "red_eye"] = "retouch"
         self.retouch_toolbar = _DraggableFloatingToolbar(self.graphics_view)
         self.retouch_toolbar.setStyleSheet(tb_style)
         rt_layout = QHBoxLayout(self.retouch_toolbar)
@@ -1852,14 +1886,7 @@ class SingleMediaViewer(QWidget):
         self.retouch_toolbar.grip_handle = grip_retouch
         rt_layout.addWidget(grip_retouch)
 
-        # Mode toggle buttons (Retouch blemish vs Red eye)
-        self.btn_spot_retouch = QPushButton("Blemish", self.retouch_toolbar)
-        self.btn_spot_retouch.setIcon(make_wlpg_icon("retouch", 16))
-        self.btn_spot_retouch.setIconSize(QSize(16, 16))
-        self.btn_spot_retouch.setCheckable(True)
-        self.btn_spot_retouch.setChecked(True)
-        self.btn_spot_retouch.setStyleSheet(
-            """
+        spot_btn_style = """
             QPushButton {
                 background: #F0F4F9;
                 border: 1px solid #70A6E8;
@@ -1874,33 +1901,34 @@ class SingleMediaViewer(QWidget):
                 border: 1px solid #3388E8;
                 color: #0E294B;
             }
-            """
-        )
+        """
+
+        # Mode toggle buttons (Blemish vs Object eraser vs Red eye)
+        self.btn_spot_retouch = QPushButton("Blemish", self.retouch_toolbar)
+        self.btn_spot_retouch.setIcon(make_wlpg_icon("retouch", 16))
+        self.btn_spot_retouch.setIconSize(QSize(16, 16))
+        self.btn_spot_retouch.setCheckable(True)
+        self.btn_spot_retouch.setChecked(True)
+        self.btn_spot_retouch.setToolTip("Heal small skin blemishes and sensor dust with frequency-separated texture transfer")
+        self.btn_spot_retouch.setStyleSheet(spot_btn_style)
         self.btn_spot_retouch.clicked.connect(lambda: self.set_spot_fix_sub_mode("retouch"))
+
+        self.btn_spot_erase = QPushButton("Object eraser", self.retouch_toolbar)
+        self.btn_spot_erase.setIcon(make_wlpg_icon("auto_adjust", 16))
+        self.btn_spot_erase.setIconSize(QSize(16, 16))
+        self.btn_spot_erase.setCheckable(True)
+        self.btn_spot_erase.setChecked(False)
+        self.btn_spot_erase.setToolTip("Erase larger unwanted objects, wires, or photobombers using LaMa AI inpainting")
+        self.btn_spot_erase.setStyleSheet(spot_btn_style)
+        self.btn_spot_erase.clicked.connect(lambda: self.set_spot_fix_sub_mode("erase"))
 
         self.btn_spot_red_eye = QPushButton("Red eye", self.retouch_toolbar)
         self.btn_spot_red_eye.setIcon(make_wlpg_icon("red_eye", 16))
         self.btn_spot_red_eye.setIconSize(QSize(16, 16))
         self.btn_spot_red_eye.setCheckable(True)
         self.btn_spot_red_eye.setChecked(False)
-        self.btn_spot_red_eye.setStyleSheet(
-            """
-            QPushButton {
-                background: #F0F4F9;
-                border: 1px solid #70A6E8;
-                border-radius: 3px;
-                padding: 2px 8px;
-                font-size: 8.5pt;
-                font-weight: bold;
-                color: #1E395B;
-            }
-            QPushButton:checked {
-                background: #CBE2F8;
-                border: 1px solid #3388E8;
-                color: #0E294B;
-            }
-            """
-        )
+        self.btn_spot_red_eye.setToolTip("Neutralize flash red-eye glare while preserving natural corneal catchlights")
+        self.btn_spot_red_eye.setStyleSheet(spot_btn_style)
         self.btn_spot_red_eye.clicked.connect(lambda: self.set_spot_fix_sub_mode("red_eye"))
 
         lbl_brush = QLabel("Size:", self.retouch_toolbar)
@@ -1916,6 +1944,7 @@ class SingleMediaViewer(QWidget):
         btn_retouch_done.clicked.connect(self._close_spot_fix_toolbar)
 
         rt_layout.addWidget(self.btn_spot_retouch)
+        rt_layout.addWidget(self.btn_spot_erase)
         rt_layout.addWidget(self.btn_spot_red_eye)
         rt_layout.addWidget(lbl_brush)
         rt_layout.addWidget(self.slider_retouch_size)
@@ -2881,13 +2910,17 @@ class SingleMediaViewer(QWidget):
         r_master = max(2, int(round(r_scene)))
         return r_scene, r_master
 
-    def set_spot_fix_sub_mode(self, mode: Literal["retouch", "red_eye"]) -> None:
-        """Switches between Blemish healing and Red Eye removal under the shared spot fix toolbar."""
+    def set_spot_fix_sub_mode(self, mode: Literal["retouch", "erase", "red_eye"]) -> None:
+        """Switches between Blemish healing, Object eraser (LaMa), and Red Eye removal under the shared spot fix toolbar."""
         self.spot_fix_sub_mode = mode
         if hasattr(self, "btn_spot_retouch"):
             self.btn_spot_retouch.blockSignals(True)
             self.btn_spot_retouch.setChecked(mode == "retouch")
             self.btn_spot_retouch.blockSignals(False)
+        if hasattr(self, "btn_spot_erase"):
+            self.btn_spot_erase.blockSignals(True)
+            self.btn_spot_erase.setChecked(mode == "erase")
+            self.btn_spot_erase.blockSignals(False)
         if hasattr(self, "btn_spot_red_eye"):
             self.btn_spot_red_eye.blockSignals(True)
             self.btn_spot_red_eye.setChecked(mode == "red_eye")
@@ -2897,6 +2930,10 @@ class SingleMediaViewer(QWidget):
             self.is_retouch_mode = True
             self.is_red_eye_mode = False
             self._show_status("Spot Fix (Blemish): Click or brush blemishes to heal with authentic texture transfer • [ / ] to resize", 5000)
+        elif mode == "erase":
+            self.is_retouch_mode = True
+            self.is_red_eye_mode = False
+            self._show_status("Spot Fix (Object Eraser): Paint over unwanted objects or people to erase with AI inpainting • [ / ] to resize", 5000)
         else:
             self.is_retouch_mode = False
             self.is_red_eye_mode = True
@@ -2941,20 +2978,30 @@ class SingleMediaViewer(QWidget):
         center = size / 2.0
         r = d / 2.0
 
-        is_red_eye = getattr(self, "spot_fix_sub_mode", "retouch") == "red_eye"
+        sub_mode = getattr(self, "spot_fix_sub_mode", "retouch")
+        is_red_eye = sub_mode == "red_eye"
+        is_erase = sub_mode == "erase"
 
         # Outer dark shadow ring for high contrast over highlights and skin
         p.setPen(QPen(QColor(0, 0, 0, 210), 2.5))
         p.setBrush(Qt.NoBrush)
         p.drawEllipse(center - r, center - r, d, d)
 
-        # Inner ring: amber/gold for retouch blemish, soft cyan/white for red eye
-        ring_color = QColor(255, 200, 100, 240) if not is_red_eye else QColor(100, 220, 255, 240)
+        # Inner ring: amber/gold for blemish, magenta/violet for object eraser, soft cyan for red eye
+        if is_red_eye:
+            ring_color = QColor(100, 220, 255, 240)
+            dot_color = QColor(255, 70, 70, 240)
+        elif is_erase:
+            ring_color = QColor(225, 110, 255, 240)
+            dot_color = QColor(240, 160, 255, 240)
+        else:
+            ring_color = QColor(255, 200, 100, 240)
+            dot_color = QColor(255, 255, 255, 240)
+
         p.setPen(QPen(ring_color, 1.2))
         p.drawEllipse(center - r, center - r, d, d)
 
-        # Precise center targeting dot (red for red-eye, white for blemish)
-        dot_color = QColor(255, 70, 70, 240) if is_red_eye else QColor(255, 255, 255, 240)
+        # Precise center targeting dot
         p.setPen(Qt.NoPen)
         p.setBrush(dot_color)
         p.drawEllipse(center - 1.5, center - 1.5, 3.0, 3.0)
@@ -2988,13 +3035,16 @@ class SingleMediaViewer(QWidget):
         self._retouch_mask = np.zeros(self.master_np_rgb.shape[:2], dtype=np.uint8)
         r_scene, r_master = self._get_effective_brush_radius()
         cv2.circle(self._retouch_mask, (mx, my), r_master, 255, -1)
+        is_erase = getattr(self, "spot_fix_sub_mode", "retouch") == "erase"
+        pen_col = QColor("#C040FF") if is_erase else QColor("#FF9900")
+        brush_col = QColor(192, 64, 255, 110) if is_erase else QColor(255, 153, 0, 110)
         c_item = self.scene.addEllipse(
             scene_pos.x() - r_scene,
             scene_pos.y() - r_scene,
             r_scene * 2,
             r_scene * 2,
-            QPen(QColor("#FF9900"), 1),
-            QBrush(QColor(255, 153, 0, 110)),
+            QPen(pen_col, 1),
+            QBrush(brush_col),
         )
         self._retouch_preview_items.append(c_item)
         self._retouch_last_master_pt = (mx, my)
@@ -3008,13 +3058,15 @@ class SingleMediaViewer(QWidget):
         if self._retouch_last_master_pt is not None:
             cv2.line(self._retouch_mask, self._retouch_last_master_pt, (mx, my), 255, thickness=r_master * 2)
         cv2.circle(self._retouch_mask, (mx, my), r_master, 255, -1)
+        is_erase = getattr(self, "spot_fix_sub_mode", "retouch") == "erase"
+        brush_col = QColor(192, 64, 255, 110) if is_erase else QColor(255, 153, 0, 110)
         c_item = self.scene.addEllipse(
             scene_pos.x() - r_scene,
             scene_pos.y() - r_scene,
             r_scene * 2,
             r_scene * 2,
             QPen(Qt.NoPen),
-            QBrush(QColor(255, 153, 0, 110)),
+            QBrush(brush_col),
         )
         self._retouch_preview_items.append(c_item)
         self._retouch_last_master_pt = (mx, my)
@@ -3032,6 +3084,20 @@ class SingleMediaViewer(QWidget):
             return
 
         before = self.master_np_rgb.copy()
+
+        # If in Object Eraser mode, use LaMa ONNX / Multi-Scale Structure-Texture Inpainting
+        if getattr(self, "spot_fix_sub_mode", "retouch") == "erase":
+            from src.imaging.creative_effects import inpaint_object_lama
+            self.master_np_rgb = inpaint_object_lama(self.master_np_rgb, mask_dilated)
+            self._update_display_proxy()
+            self._clear_retouch_overlay()
+            cmd = PixelArrayUndoCommand(self, before, self.master_np_rgb.copy(), "Erase Object")
+            self.undo_stack.push(cmd)
+            self._render_current_recipe()
+            if self.current_media_id is not None:
+                self.pixel_edit_saved.emit(self.current_media_id, "")
+            return
+
         h_full, w_full = self.master_np_rgb.shape[:2]
         _, r_master = self._get_effective_brush_radius()
 
@@ -3165,6 +3231,99 @@ class SingleMediaViewer(QWidget):
                 self.graphics_view.viewport().unsetCursor()
                 self.graphics_view.setDragMode(ImageGraphicsView.ScrollHandDrag)
 
+    @staticmethod
+    def _neutralize_red_eye_patch(
+        patch: np.ndarray,
+        in_region: np.ndarray,
+        center_yx: tuple[float, float],
+    ) -> np.ndarray | None:
+        """
+        Detects and neutralizes flash red-eye inside patch (float32 HxWx3 RGB):
+        1. Isolates the connected red pupil core closest to center_yx.
+        2. Dilates the pupil mask by 3px into the anti-aliased pupil-iris transition zone and weights by
+           continuous redness excess so no maroon/brownish outer fringe remains.
+        3. Preserves bright corneal specular catchlights (where min(G, B) > 110) while neutralizing excess red.
+        4. Smoothly shades the pupil interior with radial darkening from center to edge.
+        """
+        r = patch[:, :, 0]
+        g = patch[:, :, 1]
+        b = patch[:, :, 2]
+
+        gb_sum = g + b + 1.0
+        max_gb = np.maximum(g, b)
+        min_gb = np.minimum(g, b)
+        r_ratio = r / gb_sum
+        r_diff = r - max_gb
+
+        # Detect strong red core pixels inside the brush/selection region
+        is_red = (r > 55.0) & (r_ratio >= 1.05) & (r_diff >= 18.0) & in_region
+        if not np.any(is_red):
+            is_red = (r > 45.0) & (r_ratio >= 0.90) & (r_diff >= 14.0) & in_region
+        if not np.any(is_red):
+            return None
+
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            is_red.astype(np.uint8) * 255, connectivity=8
+        )
+        if num_labels <= 1:
+            return None
+
+        best_label = 1
+        best_dist = float("inf")
+        for lbl in range(1, num_labels):
+            area = stats[lbl, cv2.CC_STAT_AREA]
+            if area < 2:
+                continue
+            cy, cx = centroids[lbl][1], centroids[lbl][0]
+            dist = math.hypot(cy - center_yx[0], cx - center_yx[1])
+            if dist < best_dist:
+                best_dist = dist
+                best_label = lbl
+
+        pupil_core = (labels == best_label).astype(np.uint8) * 255
+        p_cy, p_cx = float(centroids[best_label][1]), float(centroids[best_label][0])
+        p_area = float(max(4, stats[best_label, cv2.CC_STAT_AREA]))
+        p_radius = max(2.0, math.sqrt(p_area / math.pi))
+
+        # Close internal specular catchlight holes so geometry covers the full pupil disc
+        k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        pupil_closed = cv2.morphologyEx(pupil_core, cv2.MORPH_CLOSE, k_close)
+
+        # Dilate by 3px into the iris transition zone to capture the maroon/brown anti-aliased fringe
+        k_dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        pupil_dilated = cv2.dilate(pupil_closed, k_dil, iterations=1)
+
+        # Continuous redness weight: 1.0 in vivid red core, smooth roll-off across maroon fringe, 0.0 on blue/green/skin
+        w_diff = np.clip((r_diff - 4.0) / 18.0, 0.0, 1.0)
+        w_ratio = np.clip((r_ratio - 0.52) / 0.38, 0.0, 1.0)
+        w_red = np.clip(w_diff * w_ratio * 1.35, 0.0, 1.0)
+
+        core_f = cv2.GaussianBlur(pupil_closed.astype(np.float32) / 255.0, (3, 3), 0.8)
+        fringe_f = cv2.GaussianBlur(pupil_dilated.astype(np.float32) / 255.0, (5, 5), 1.4) * w_red
+        alpha_2d = np.clip(np.maximum(core_f * np.maximum(w_red, 0.75), fringe_f), 0.0, 1.0)
+
+        if float(np.max(alpha_2d)) < 0.05:
+            return None
+
+        # Radial pupil shading: deepest neutral black-grey at pupil center, slightly softer at rim
+        ph, pw = patch.shape[:2]
+        yy, xx = np.ogrid[0:ph, 0:pw]
+        norm_r = np.sqrt((yy - p_cy) ** 2 + (xx - p_cx) ** 2) / max(1.5, p_radius * 1.25)
+        radial_t = np.clip(norm_r, 0.0, 1.0)
+        shade_mult = 0.22 * (1.0 - radial_t) + 0.42 * radial_t
+        dark_luma = np.clip(min_gb * shade_mult, 8.0, 34.0)
+        dark_pupil = np.stack([dark_luma, dark_luma, dark_luma * 1.03], axis=-1)
+
+        # Preserve corneal specular catchlight (glint) where G and B channels are both bright
+        glint_w = np.clip((min_gb - 110.0) / 65.0, 0.0, 1.0)[..., None]
+        glint_r = np.minimum(r, (g + b) * 0.52)
+        glint_rgb = np.stack([glint_r, g, b], axis=-1)
+
+        target_rgb = dark_pupil * (1.0 - glint_w) + glint_rgb * glint_w
+        alpha = alpha_2d[..., None]
+        new_patch = patch * (1.0 - alpha) + target_rgb * alpha
+        return np.clip(new_patch, 0.0, 255.0).astype(np.uint8)
+
     def _apply_brush_red_eye(self, scene_pos: QPointF) -> None:
         """Applies pupil detection and neutral dark replacement using the circular brush area."""
         if self.master_np_rgb is None:
@@ -3173,67 +3332,27 @@ class SingleMediaViewer(QWidget):
         mx, my = self._scene_to_master(scene_pos.x(), scene_pos.y())
         mh, mw = self.master_np_rgb.shape[:2]
 
-        x1 = max(0, mx - r_master)
-        x2 = min(mw, mx + r_master + 1)
-        y1 = max(0, my - r_master)
-        y2 = min(mh, my + r_master + 1)
+        pad_r = r_master + 4
+        x1 = max(0, mx - pad_r)
+        x2 = min(mw, mx + pad_r + 1)
+        y1 = max(0, my - pad_r)
+        y2 = min(mh, my + pad_r + 1)
         if x2 <= x1 or y2 <= y1:
             return
 
         patch = self.master_np_rgb[y1:y2, x1:x2].astype(np.float32)
-        r = patch[:, :, 0]
-        g = patch[:, :, 1]
-        b = patch[:, :, 2]
-
         grid_y, grid_x = np.ogrid[y1:y2, x1:x2]
         dist_sq = (grid_x - mx) ** 2 + (grid_y - my) ** 2
         in_circle = dist_sq <= (r_master ** 2)
 
-        gb_sum = g + b + 1.0
-        max_gb = np.maximum(g, b)
-        r_ratio = r / gb_sum
-        r_diff = r - max_gb
-
-        is_red = (r > 60.0) & (r_ratio >= 1.15) & (r_diff >= 20.0) & in_circle
-        if not np.any(is_red):
-            return
-
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-            is_red.astype(np.uint8) * 255, connectivity=8
+        updated_patch = self._neutralize_red_eye_patch(
+            patch, in_circle, (float(my - y1), float(mx - x1))
         )
-        if num_labels <= 1:
-            return
-
-        patch_center = np.array([my - y1, mx - x1], dtype=np.float32)
-        best_label = 1
-        best_dist = float("inf")
-        for lbl in range(1, num_labels):
-            area = stats[lbl, cv2.CC_STAT_AREA]
-            if area < 2:
-                continue
-            cy, cx = centroids[lbl][1], centroids[lbl][0]
-            dist = np.hypot(cy - patch_center[0], cx - patch_center[1])
-            if dist < best_dist:
-                best_dist = dist
-                best_label = lbl
-
-        pupil_mask = (labels == best_label).astype(np.uint8) * 255
-        k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        pupil_mask = cv2.morphologyEx(pupil_mask, cv2.MORPH_CLOSE, k_close)
-
-        ksize = 5 if min(patch.shape[:2]) >= 10 else 3
-        alpha = cv2.GaussianBlur(pupil_mask.astype(np.float32) / 255.0, (ksize, ksize), 1.0)
-        alpha = np.clip(alpha, 0.0, 1.0)[:, :, np.newaxis]
-
-        if np.max(alpha) < 0.05:
+        if updated_patch is None:
             return
 
         before = self.master_np_rgb.copy()
-        target_dark = np.clip(np.minimum(g, b) * 0.55, 12.0, 42.0)
-        target_dark = np.repeat(target_dark[:, :, np.newaxis], 3, axis=2)
-
-        new_patch = patch * (1.0 - alpha) + target_dark * alpha
-        self.master_np_rgb[y1:y2, x1:x2] = np.clip(new_patch, 0, 255).astype(np.uint8)
+        self.master_np_rgb[y1:y2, x1:x2] = updated_patch
 
         self._update_display_proxy()
         cmd = PixelArrayUndoCommand(self, before, self.master_np_rgb.copy(), "Fix Red Eye")
@@ -3280,66 +3399,15 @@ class SingleMediaViewer(QWidget):
             return
 
         patch = self.master_np_rgb[y1:y2, x1:x2].astype(np.float32)
-        r = patch[:, :, 0]
-        g = patch[:, :, 1]
-        b = patch[:, :, 2]
-
-        # Saliency and difference metrics to detect pupil reflection vs human skin
-        gb_sum = g + b + 1.0
-        max_gb = np.maximum(g, b)
-        r_ratio = r / gb_sum
-        r_diff = r - max_gb
-
-        # High-confidence red pupil criteria
-        is_red = (r > 70.0) & (r_ratio >= 1.25) & (r_diff >= 30.0)
-        if not np.any(is_red):
-            is_red = (r > 60.0) & (r_ratio >= 1.15) & (r_diff >= 20.0)
-
-        if not np.any(is_red):
-            return
-
-        # Connected component analysis: isolate the pupil nearest to the box center
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-            is_red.astype(np.uint8) * 255, connectivity=8
+        in_box = np.ones(patch.shape[:2], dtype=bool)
+        updated_patch = self._neutralize_red_eye_patch(
+            patch, in_box, (patch.shape[0] / 2.0, patch.shape[1] / 2.0)
         )
-        if num_labels <= 1:
-            return
-
-        box_center = np.array([patch.shape[0] / 2.0, patch.shape[1] / 2.0])
-        best_label = 1
-        best_dist = float("inf")
-        for lbl in range(1, num_labels):
-            area = stats[lbl, cv2.CC_STAT_AREA]
-            if area < 2:
-                continue
-            cy, cx = centroids[lbl][1], centroids[lbl][0]
-            dist = np.hypot(cy - box_center[0], cx - box_center[1])
-            if dist < best_dist:
-                best_dist = dist
-                best_label = lbl
-
-        pupil_mask = (labels == best_label).astype(np.uint8) * 255
-
-        # Morphological close to bridge tiny specular highlights inside the pupil
-        k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        pupil_mask = cv2.morphologyEx(pupil_mask, cv2.MORPH_CLOSE, k_close)
-
-        # Smooth feathering along pupil perimeter so surrounding iris and skin blend naturally
-        ksize = 5 if min(patch.shape[:2]) >= 10 else 3
-        alpha = cv2.GaussianBlur(pupil_mask.astype(np.float32) / 255.0, (ksize, ksize), 1.0)
-        alpha = np.clip(alpha, 0.0, 1.0)[:, :, np.newaxis]
-
-        if np.max(alpha) < 0.05:
+        if updated_patch is None:
             return
 
         before = self.master_np_rgb.copy()
-        # Natural neutral dark pupil (desaturated dark tone without any color cast)
-        target_dark = np.clip(np.minimum(g, b) * 0.55, 12.0, 42.0)
-        target_dark = np.repeat(target_dark[:, :, np.newaxis], 3, axis=2)
-
-        # Seamless blend: non-pupil skin has alpha == 0 so remains completely untouched
-        new_patch = patch * (1.0 - alpha) + target_dark * alpha
-        self.master_np_rgb[y1:y2, x1:x2] = np.clip(new_patch, 0, 255).astype(np.uint8)
+        self.master_np_rgb[y1:y2, x1:x2] = updated_patch
 
         self._update_display_proxy()
         cmd = PixelArrayUndoCommand(self, before, self.master_np_rgb.copy(), "Fix Red Eye")
@@ -4264,13 +4332,22 @@ class SingleMediaViewer(QWidget):
         self.current_recipe.white_point = float(white_point)
         self._render_current_recipe()
 
-    def set_depth_bokeh_parameters(self, blur: int, focal_plane: int, glow: int = 0) -> None:
+    def set_depth_bokeh_parameters(
+        self,
+        blur: int,
+        focal_plane: int,
+        glow: int = 0,
+        boundary_shift: int = 0,
+        boundary_feather: int = 0,
+    ) -> None:
         if self._recipe_before_slider is None:
             self._recipe_before_slider = self.current_recipe.copy()
         self._is_sliding = True
         self.current_recipe.depth_blur = float(blur)
         self.current_recipe.focal_plane = float(focal_plane)
         self.current_recipe.bokeh_glow = float(glow)
+        self.current_recipe.boundary_shift = float(boundary_shift)
+        self.current_recipe.boundary_feather = float(boundary_feather)
         self._render_current_recipe()
 
     def set_depth_relight_parameters(
@@ -4299,6 +4376,8 @@ class SingleMediaViewer(QWidget):
         new_rec.depth_blur = 0.0
         new_rec.focal_plane = 0.0
         new_rec.bokeh_glow = 0.0
+        new_rec.boundary_shift = 0.0
+        new_rec.boundary_feather = 0.0
         new_rec.relight_near = 0.0
         new_rec.relight_far = 0.0
         new_rec.warmth_near = 0.0
@@ -4310,6 +4389,82 @@ class SingleMediaViewer(QWidget):
         self.current_recipe = new_rec
         self._render_current_recipe()
         self.recipe_changed.emit(self.current_recipe)
+
+    def copy_subject_to_clipboard(self) -> bool:
+        """
+        Extracts the foreground subject with a transparent background (RGBA) using DepthAndMatteEngine
+        (respecting current boundary_shift & boundary_feather) and copies it to the system clipboard.
+        """
+        if self.master_np_rgb is None or self.current_is_video:
+            return False
+        from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QMimeData
+        from src.imaging.creative_effects import extract_subject_cutout_rgba
+        rendered_rgb = render_adjusted_image(
+            self.master_np_rgb, self.current_recipe, media_id=self.current_media_id
+        )
+        rgba, _ = extract_subject_cutout_rgba(
+            rendered_rgb,
+            boundary_shift=getattr(self.current_recipe, "boundary_shift", 0.0),
+            boundary_feather=getattr(self.current_recipe, "boundary_feather", 0.0),
+            media_id=self.current_media_id,
+        )
+        rgba_c = np.ascontiguousarray(rgba)
+        h, w = rgba_c.shape[:2]
+        qimg = QImage(rgba_c.data, w, h, 4 * w, QImage.Format_RGBA8888). convertToFormat(
+            QImage.Format_ARGB32
+        )
+        self._last_copied_subject_qimage = qimg
+
+        mime = QMimeData()
+        mime.setImageData(qimg)
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        if buf.open(QIODevice.WriteOnly):
+            qimg.save(buf, "PNG")
+            buf.close()
+            mime.setData("image/png", ba)
+            mime.setData("PNG", ba)
+        QApplication.clipboard().setMimeData(mime)
+        self._show_status("Copied subject cutout (transparent RGBA) to clipboard", 4000)
+        return True
+
+    def remove_background_cutout(self) -> bool:
+        """
+        Removes the background from the current photo in-place using DepthAndMatteEngine,
+        updating master_alpha (and edge-decontaminated master_np_rgb) with full Undo/Redo support.
+        """
+        if self.master_np_rgb is None or self.current_is_video:
+            return False
+        from src.imaging.creative_effects import extract_subject_cutout_rgba
+        before_rgb = self.master_np_rgb.copy()
+        before_alpha = self.master_alpha.copy() if self.master_alpha is not None else None
+
+        rgba, subj_alpha = extract_subject_cutout_rgba(
+            self.master_np_rgb,
+            boundary_shift=getattr(self.current_recipe, "boundary_shift", 0.0),
+            boundary_feather=getattr(self.current_recipe, "boundary_feather", 0.0),
+            media_id=self.current_media_id,
+        )
+        clean_rgb = np.ascontiguousarray(rgba[:, :, :3])
+        if before_alpha is not None and before_alpha.shape == subj_alpha.shape:
+            combined_alpha = np.minimum(before_alpha, subj_alpha)
+        else:
+            combined_alpha = subj_alpha
+
+        self.master_np_rgb = clean_rgb
+        self.master_alpha = combined_alpha
+        cmd = _AlphaCutoutUndoCommand(
+            self, before_rgb, before_alpha, clean_rgb, combined_alpha, "Remove Background"
+        )
+        self.undo_stack.push(cmd)
+        self._update_display_proxy()
+        self._render_current_recipe()
+        self.update_revert_state()
+        self._show_status(
+            "Background removed • Save as Copy (PNG, WebP, AVIF, or JXL) to keep transparency",
+            5000,
+        )
+        return True
 
     def reset_recipe(self) -> None:
         """Resets all non-crop visual adjustments and levels back to default."""
@@ -4634,13 +4789,20 @@ class SingleMediaViewer(QWidget):
         target_sfx = self.current_file_path.suffix.lower()
         save_img = build_save_pil_image(final_rendered, final_alpha, target_sfx)
 
-        save_kwargs = {"quality": 95} if target_sfx in (".jpg", ".jpeg") else {}
+        save_kwargs = {}
+        if target_sfx in (".jpg", ".jpeg"):
+            save_kwargs["quality"] = 95
+        elif target_sfx in (".webp", ".jxl", ".avif", ".heic", ".heif"):
+            save_kwargs["quality"] = 90
         try:
             with Image.open(backup_path if backup_path.exists() else self.current_file_path) as orig_pil:
                 orig_exif = orig_pil.getexif()
                 if orig_exif:
                     orig_exif[0x0112] = 1
-                    save_kwargs["exif"] = orig_exif
+                    if target_sfx == ".jxl":
+                        save_kwargs["exif"] = orig_exif.tobytes()
+                    elif target_sfx not in (".png", ".tif", ".tiff"):
+                        save_kwargs["exif"] = orig_exif
         except Exception:
             pass
         save_img.save(self.current_file_path, **save_kwargs)
@@ -4705,7 +4867,12 @@ class SingleMediaViewer(QWidget):
         stem = self.current_file_path.stem
         orig_suffix = self.current_file_path.suffix
         is_raw_source = orig_suffix.lower() in RAW_DOT_EXT_SET
-        suffix = ".jpg" if is_raw_source else orig_suffix
+        if self.master_alpha is not None and orig_suffix.lower() not in ALPHA_SAVE_DOT_EXT_SET:
+            suffix = ".png"
+        elif is_raw_source:
+            suffix = ".jpg"
+        else:
+            suffix = orig_suffix
 
         if "{stem}" in naming_pattern:
             base_pattern = naming_pattern.replace("{stem}", stem)
@@ -4716,13 +4883,14 @@ class SingleMediaViewer(QWidget):
             initial_path = str(self.current_file_path.parent / f"{base_pattern}{suffix}")
             if is_raw_source:
                 filter_str = (
-                    "JPEG (*.jpg *.jpeg);;PNG (*.png);;TIFF (*.tif *.tiff);;"
-                    "WebP (*.webp);;All Files (*.*)"
+                    "JPEG (*.jpg *.jpeg);;PNG (*.png);;WebP (*.webp);;JPEG XL (*.jxl);;"
+                    "AVIF (*.avif);;HEIF (*.heic *.heif);;TIFF (*.tif *.tiff);;All Files (*.*)"
                 )
             else:
                 filter_str = (
                     f"Images (*{suffix});;JPEG (*.jpg *.jpeg);;PNG (*.png);;"
-                    "WebP (*.webp);;TIFF (*.tif *.tiff);;All Files (*.*)"
+                    "WebP (*.webp);;JPEG XL (*.jxl);;AVIF (*.avif);;HEIF (*.heic *.heif);;"
+                    "TIFF (*.tif *.tiff);;All Files (*.*)"
                 )
             chosen, _ = QFileDialog.getSaveFileName(
                 self,
@@ -4764,14 +4932,21 @@ class SingleMediaViewer(QWidget):
         )
         cand_sfx = candidate.suffix.lower()
         save_img = build_save_pil_image(final_rendered, final_alpha, cand_sfx)
-        save_kwargs = {"quality": 95} if cand_sfx in (".jpg", ".jpeg") else {}
+        save_kwargs = {}
+        if cand_sfx in (".jpg", ".jpeg"):
+            save_kwargs["quality"] = 95
+        elif cand_sfx in (".webp", ".jxl", ".avif", ".heic", ".heif"):
+            save_kwargs["quality"] = 90
         if not is_raw_source:
             try:
                 with Image.open(self.current_file_path) as orig_pil:
                     orig_exif = orig_pil.getexif()
                     if orig_exif:
                         orig_exif[0x0112] = 1
-                        save_kwargs["exif"] = orig_exif
+                        if cand_sfx == ".jxl":
+                            save_kwargs["exif"] = orig_exif.tobytes()
+                        elif cand_sfx not in (".png", ".tif", ".tiff"):
+                            save_kwargs["exif"] = orig_exif
             except Exception:
                 pass
         save_img.save(candidate, **save_kwargs)
@@ -6615,6 +6790,12 @@ class SingleMediaViewer(QWidget):
         act_copy.setShortcut("Ctrl+C")
         if is_mw and hasattr(mw, "copy_selection_to_clipboard"):
             act_copy.triggered.connect(mw.copy_selection_to_clipboard)
+
+        if not is_vid:
+            act_copy_subj = menu.addAction("Copy subject")
+            act_copy_subj.triggered.connect(self.copy_subject_to_clipboard)
+            act_rm_bg = menu.addAction("Remove background")
+            act_rm_bg.triggered.connect(self.remove_background_cutout)
 
         act_del = menu.addAction("Delete")
         act_del.setShortcut("Del")

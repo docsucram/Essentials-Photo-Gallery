@@ -497,7 +497,9 @@ class LeftNavigationDock(QDockWidget):
         self._ratings: set[int] = set()
         self._flagged_only: bool = False
         self._edited_only: bool = False
+        self._edited_filter: int | None = None
         self._media_type: Literal["all", "image", "video", "raw"] = "all"
+        self._orientation_filter: Literal["all", "landscape", "portrait"] = "all"
         self._favourite_paths: list[str] = []
         self._location_country: str | None = None
         self._location_state: str | None = None
@@ -1890,11 +1892,23 @@ class LeftNavigationDock(QDockWidget):
 
     def set_edited_only(self, edited_only: bool) -> None:
         self._edited_only = bool(edited_only)
+        self._edited_filter = 1 if edited_only else None
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def set_edited_filter(self, edited_filter: int | None) -> None:
+        self._edited_filter = edited_filter
+        self._edited_only = (edited_filter == 1)
         self._update_summary_label()
         self.filter_changed.emit()
 
     def set_media_type(self, media_type: Literal["all", "image", "video", "raw"]) -> None:
         self._media_type = media_type
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def set_orientation_filter(self, orientation: Literal["all", "landscape", "portrait"]) -> None:
+        self._orientation_filter = orientation
         self._update_summary_label()
         self.filter_changed.emit()
 
@@ -1914,7 +1928,9 @@ class LeftNavigationDock(QDockWidget):
             self._ratings.clear()
             self._flagged_only = False
             self._edited_only = False
+            self._edited_filter = None
             self._media_type = "all"
+            self._orientation_filter = "all"
 
             self.tree.clearSelection()
             if hasattr(self, "item_untagged"):
@@ -1954,14 +1970,20 @@ class LeftNavigationDock(QDockWidget):
             parts.append(f"Ratings: {sorted(self._ratings, reverse=True)}")
         if self._flagged_only:
             parts.append("Flagged")
-        if self._edited_only:
+        if getattr(self, "_edited_filter", None) == 1 or self._edited_only:
             parts.append("Edited")
+        elif getattr(self, "_edited_filter", None) == 0:
+            parts.append("Not edited")
         if self._media_type == "image":
             parts.append("Photos only")
         elif self._media_type == "video":
             parts.append("Videos only")
         elif self._media_type == "raw":
             parts.append("RAW photos only")
+        if getattr(self, "_orientation_filter", "all") == "landscape":
+            parts.append("Landscape only")
+        elif getattr(self, "_orientation_filter", "all") == "portrait":
+            parts.append("Portrait only")
         return " | ".join(parts) if parts else "All photos and videos"
 
     def _update_summary_label(self) -> None:
@@ -1984,7 +2006,9 @@ class LeftNavigationDock(QDockWidget):
             "ratings": tuple(sorted(self._ratings)),
             "flagged_only": self._flagged_only,
             "edited_only": self._edited_only,
+            "edited_filter": getattr(self, "_edited_filter", (1 if self._edited_only else None)),
             "media_type": self._media_type,
+            "orientation_filter": getattr(self, "_orientation_filter", "all"),
         }
 
     def restore_filter_state(self, state: dict[str, Any]) -> None:
@@ -2002,8 +2026,10 @@ class LeftNavigationDock(QDockWidget):
         self._person_boolean_mode = state.get("person_boolean_mode", "OR")
         self._ratings = set(state.get("ratings", ()))
         self._flagged_only = state.get("flagged_only", False)
-        self._edited_only = state.get("edited_only", False)
+        self._edited_filter = state.get("edited_filter", (1 if state.get("edited_only", False) else None))
+        self._edited_only = (self._edited_filter == 1)
         self._media_type = state.get("media_type", "all")
+        self._orientation_filter = state.get("orientation_filter", "all")
 
         self._updating_tree = True
         try:
@@ -2089,7 +2115,9 @@ class LeftNavigationDock(QDockWidget):
             flagged_only=self._flagged_only,
             flag_filter=getattr(self, "_flag_filter", (1 if self._flagged_only else None)),
             edited_only=self._edited_only,
+            edited_filter=getattr(self, "_edited_filter", (1 if self._edited_only else None)),
             media_type=self._media_type,
+            orientation_filter=getattr(self, "_orientation_filter", "all"),
             search_text=search_text,
             bbox=bbox,
             media_ids=media_ids,

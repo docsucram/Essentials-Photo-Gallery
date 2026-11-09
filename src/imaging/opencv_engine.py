@@ -58,6 +58,8 @@ class PhotoAdjustmentRecipe:
     depth_blur: float = 0.0       # 0.0 .. 100.0 (Optical disc bokeh blur strength)
     focal_plane: float = 0.0      # 0.0 .. 100.0 (In-focus depth plane: 0=foreground, 100=background)
     bokeh_glow: float = 0.0       # 0.0 .. 100.0 (Linear-light specular highlight bloom)
+    boundary_shift: float = 0.0   # -10.0 .. +10.0 (Shrink <-> Grow subject mask boundary)
+    boundary_feather: float = 0.0 # 0.0 .. 20.0 (Soft feather radius along subject boundary)
     relight_near: float = 0.0     # -100.0 .. +100.0 (Fill light on foreground subject)
     relight_far: float = 0.0      # -100.0 .. +100.0 (Exposure shift on distant background)
     warmth_near: float = 0.0      # -100.0 .. +100.0 (CIE LAB B* warmth shift on foreground)
@@ -89,6 +91,8 @@ class PhotoAdjustmentRecipe:
             and abs(self.depth_blur) < 0.1
             and abs(self.focal_plane) < 0.1
             and abs(self.bokeh_glow) < 0.1
+            and abs(self.boundary_shift) < 0.1
+            and abs(self.boundary_feather) < 0.1
             and abs(self.relight_near) < 0.1
             and abs(self.relight_far) < 0.1
             and abs(self.warmth_near) < 0.1
@@ -121,6 +125,8 @@ class PhotoAdjustmentRecipe:
             depth_blur=self.depth_blur,
             focal_plane=self.focal_plane,
             bokeh_glow=self.bokeh_glow,
+            boundary_shift=self.boundary_shift,
+            boundary_feather=self.boundary_feather,
             relight_near=self.relight_near,
             relight_far=self.relight_far,
             warmth_near=self.warmth_near,
@@ -573,6 +579,26 @@ def render_adjusted_image(
             engine = get_depth_and_matte_engine()
             depth_map, alpha_matte, near_weight, far_weight = engine.get_depth_matte_and_weights(img, media_id=media_id)
 
+            # Apply interactive Boundary Shift (shrink/grow) and Boundary Feather to alpha_matte
+            has_boundary_adj = abs(recipe.boundary_shift) >= 0.1 or abs(recipe.boundary_feather) >= 0.1
+            if has_boundary_adj:
+                adj_matte = alpha_matte.copy()
+                if abs(recipe.boundary_shift) >= 0.1:
+                    r_px = max(1, int(round(abs(recipe.boundary_shift) * 1.5 * res_scale)))
+                    k_b = 2 * r_px + 1
+                    kern_b = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_b, k_b))
+                    if recipe.boundary_shift > 0:
+                        adj_matte = cv2.dilate(adj_matte, kern_b)
+                    else:
+                        adj_matte = cv2.erode(adj_matte, kern_b)
+                if recipe.boundary_feather >= 0.1:
+                    sigma_f = max(0.8, (recipe.boundary_feather * 0.8) * res_scale)
+                    k_f = max(3, int(round(sigma_f * 4)) | 1)
+                    adj_matte = cv2.GaussianBlur(adj_matte, (k_f, k_f), sigmaX=sigma_f, sigmaY=sigma_f)
+                alpha_matte = np.clip(adj_matte, 0.0, 1.0).astype(np.float32)
+                near_weight = np.maximum(alpha_matte, 1.0 - depth_map).astype(np.float32)
+                far_weight = (depth_map * (1.0 - alpha_matte)).astype(np.float32)
+
             # 3D Relighting & Warmth (Vectorized direct RGB for real-time 60+ FPS without RGB->LAB->RGB overhead)
             has_relight = (
                 abs(recipe.relight_near) >= 0.1
@@ -590,11 +616,12 @@ def render_adjusted_image(
                 img_f[:, :, 2] += d_light - d_warmth
                 img = np.clip(img_f, 0, 255).astype(np.uint8)
 
-            # Portrait Bokeh & Focus Defocus Blur with Specular Highlights Bloom
+            # Portrait Bokeh & Focus Defocus Blur with Normalized Convolution (Zero Foreground Color Bleed)
             if abs(recipe.depth_blur) >= 0.1:
                 focus_z = float(recipe.focal_plane) / 100.0
                 subject_protect = alpha_matte * (1.0 if focus_z < 0.25 else 0.0)
                 defocus = np.clip(np.abs(depth_map - focus_z) * (1.0 - subject_protect), 0.0, 1.0)
+                w_bg = np.clip(1.0 - subject_protect, 1e-3, 1.0).astype(np.float32)
 
                 blur_r = max(2, int(round((recipe.depth_blur / 100.0) * 28.0 * res_scale)))
                 h_img, w_img = img.shape[:2]
@@ -605,6 +632,7 @@ def render_adjusted_image(
                     bw = max(16, int(round(w_img / scale_blur)))
                     bh = max(16, int(round(h_img / scale_blur)))
                     small_img = cv2.resize(img, (bw, bh), interpolation=cv2.INTER_AREA)
+                    small_w_bg = cv2.resize(w_bg, (bw, bh), interpolation=cv2.INTER_AREA)
                     small_lin = _LUT_SRGB_TO_LIN[small_img]
                     if recipe.bokeh_glow >= 0.1:
                         lum_small = cv2.cvtColor(small_img, cv2.COLOR_RGB2GRAY)
@@ -613,7 +641,10 @@ def render_adjusted_image(
                     small_r = max(2, int(round(blur_r / scale_blur)))
                     sigma_b = max(1.0, small_r * 0.5)
                     ksize = max(3, (2 * small_r + 1) | 1)
-                    blurred_small = cv2.GaussianBlur(small_lin, (ksize, ksize), sigmaX=sigma_b, sigmaY=sigma_b)
+                    premult_small = small_lin * small_w_bg[:, :, None]
+                    blurred_premult = cv2.GaussianBlur(premult_small, (ksize, ksize), sigmaX=sigma_b, sigmaY=sigma_b)
+                    blurred_w = cv2.GaussianBlur(small_w_bg, (ksize, ksize), sigmaX=sigma_b, sigmaY=sigma_b)[:, :, None]
+                    blurred_small = blurred_premult / np.maximum(blurred_w, 1e-4)
                     indices = np.clip(blurred_small * 4095.0, 0, 4095).astype(np.int32)
                     small_srgb = _LUT_LIN_TO_SRGB[indices]
                     blurred_srgb = cv2.resize(small_srgb, (w_img, h_img), interpolation=cv2.INTER_LINEAR)
@@ -625,7 +656,10 @@ def render_adjusted_image(
                         img_lin = img_lin * (1.0 + glow_factor * (recipe.bokeh_glow / 50.0) * 2.5)
                     sigma_b = max(1.0, blur_r * 0.5)
                     ksize = max(3, (2 * blur_r + 1) | 1)
-                    blurred_lin = cv2.GaussianBlur(img_lin, (ksize, ksize), sigmaX=sigma_b, sigmaY=sigma_b)
+                    premult_lin = img_lin * w_bg[:, :, None]
+                    blurred_premult = cv2.GaussianBlur(premult_lin, (ksize, ksize), sigmaX=sigma_b, sigmaY=sigma_b)
+                    blurred_w = cv2.GaussianBlur(w_bg, (ksize, ksize), sigmaX=sigma_b, sigmaY=sigma_b)[:, :, None]
+                    blurred_lin = blurred_premult / np.maximum(blurred_w, 1e-4)
                     indices = np.clip(blurred_lin * 4095.0, 0, 4095).astype(np.int32)
                     blurred_srgb = _LUT_LIN_TO_SRGB[indices]
 

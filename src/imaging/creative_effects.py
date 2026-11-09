@@ -69,11 +69,14 @@ def guided_filter_matte(
     radius: int = 16,
     eps: float = 1e-3,
     subsample: int = 2,
+    unknown_band: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Edge-preserving Joint Guided Filter (He et al.) implemented via pure NumPy + cv2.boxFilter.
     Snaps rough or upscaled alpha masks [0..1] directly to full-resolution luminance/color edges
     eliminating blurry halo bleed. Runs in ~15ms on large images via subsampling.
+    When unknown_band is provided, guided alpha refinement is strictly restricted to unknown_band
+    pixels, preventing foreground weight propagation across distant high-contrast background lines.
     """
     if guide_bgr is None or src_mask is None:
         return src_mask
@@ -113,7 +116,84 @@ def guided_filter_matte(
         mean_b_up = mean_b
 
     q = mean_a_up * I_full + mean_b_up
-    return np.clip(q, 0.0, 1.0)
+    q = np.clip(q, 0.0, 1.0)
+    if unknown_band is not None:
+        ub = (unknown_band > 0.5) if unknown_band.dtype != bool else unknown_band
+        if ub.shape[:2] != (h, w):
+            ub = cv2.resize(ub.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST) > 0
+        res = p_full.copy()
+        res[ub] = q[ub]
+        return np.clip(res, 0.0, 1.0)
+    return q
+
+
+def refine_mask_narrow_band(
+    guide_bgr: np.ndarray,
+    src_mask: np.ndarray,
+    radius: int | None = None,
+    subsample: int = 2,
+) -> np.ndarray:
+    """
+    Restricts alpha matting strictly to the narrow boundary unknown band:
+    - Interior core (eroded) remains strictly 1.0.
+    - Exterior background (outside dilated) remains strictly 0.0.
+    - Only the narrow boundary transition band receives guided filter subpixel snapping.
+    Guarantees zero background halo bleed onto road stripes, railings, or distant objects.
+    """
+    if guide_bgr is None or src_mask is None:
+        return src_mask
+
+    h, w = guide_bgr.shape[:2]
+    mask = src_mask.astype(np.float32)
+    if mask.shape[:2] != (h, w):
+        mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    k_size = radius if radius is not None else max(5, int(min(h, w) * 0.015)) | 1
+    if k_size % 2 == 0:
+        k_size += 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size))
+
+    th_mask = (mask > 0.35).astype(np.float32)
+    dilated = cv2.dilate(th_mask, kernel)
+    eroded = cv2.erode(th_mask, kernel)
+    unknown_band = (dilated > 0.5) & (eroded < 0.5)
+
+    refined = guided_filter_matte(guide_bgr, mask, radius=k_size, eps=1e-3, subsample=subsample)
+
+    final_mask = np.zeros((h, w), dtype=np.float32)
+    final_mask[eroded > 0.5] = 1.0
+    final_mask[unknown_band] = refined[unknown_band]
+    return np.clip(final_mask, 0.0, 1.0).astype(np.float32)
+
+
+def _download_u2netp_model(dest_path: Path, timeout: float = 5.0) -> bool:
+    """Downloads lightweight u2netp.onnx (~4.5 MB) from official release with a clean timeout."""
+    import urllib.request
+    urls = [
+        "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx",
+        "https://huggingface.co/schirrmacher/u2netp/resolve/main/u2netp.onnx",
+    ]
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = dest_path.with_suffix(".tmp")
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 200:
+                    data = resp.read()
+                    if len(data) > 1_000_000:
+                        tmp_path.write_bytes(data)
+                        tmp_path.replace(dest_path)
+                        logger.info("Successfully downloaded %s (%d bytes)", dest_path.name, len(data))
+                        return True
+        except Exception as e:
+            logger.debug("Download from %s failed: %s", url, e)
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except Exception:
+                    pass
+    return False
 
 
 # =============================================================================
@@ -150,19 +230,22 @@ def estimate_subject_mask(
     face_boxes: list[tuple[int, int, int, int]] | None = None,
 ) -> np.ndarray:
     """
-    Estimates a smooth float32 mask in [0.0, 1.0] isolating the main subject(s):
+    Estimates a clean, edge-aware float32 subject alpha mask in [0.0, 1.0]:
     - Automatically detects faces via FaceEngine if face_boxes is not provided.
-    - If faces are found: builds anatomical trimap for all faces (head, shoulders, torso).
-    - If no faces are found: computes multi-scale spectral saliency & contrast map to seed GrabCut.
-    - Finishes with Joint Guided Filter alpha matting to snap mask to true image edges.
+    - If faces are found: builds anatomical trimap with extended arm envelope (5x face width)
+      and mid-frame probable background so extended limbs are never clipped.
+    - If no faces are found: saliency-informed seeding with background road stripe rejection.
+    - Background Color Rejection Gate: removes uniform road/sky patches inside probable-foreground.
+    - Edge refinement is strictly restricted to the narrow boundary band, preventing halo leakage
+      across high-contrast background stripes or fences.
     """
     if image_bgr is None or image_bgr.size == 0:
         return np.zeros((10, 10), dtype=np.float32)
 
     h, w = image_bgr.shape[:2]
 
-    # Downsample for fast GrabCut
-    scale = max(1.0, max(h, w) / 500.0)
+    # Downsample for fast GrabCut (~400px long edge)
+    scale = max(1.0, max(h, w) / 450.0)
     sw = max(10, int(w / scale))
     sh = max(10, int(h / scale))
     small_bgr = cv2.resize(image_bgr, (sw, sh), interpolation=cv2.INTER_AREA)
@@ -170,10 +253,35 @@ def estimate_subject_mask(
     if face_boxes is None:
         face_boxes = _detect_faces_for_mask(image_bgr)
 
-    gc_mask = np.full((sh, sw), cv2.GC_BGD, dtype=np.uint8)
+    # 1. Sample background color distribution from outer 4% frame border
+    lab = cv2.cvtColor(small_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    bw_border = max(1, int(sw * 0.04))
+    bh_border = max(1, int(sh * 0.04))
+    border_pixels = np.concatenate([
+        lab[0:bh_border, :, :].reshape(-1, 3),
+        lab[-bh_border:, :, :].reshape(-1, 3),
+        lab[:, 0:bw_border, :].reshape(-1, 3),
+        lab[:, -bw_border:, :].reshape(-1, 3),
+    ], axis=0)
+    bg_mean = np.mean(border_pixels, axis=0)
+    dl_bg = (lab[:, :, 0] - bg_mean[0]) * 0.6
+    da_bg = lab[:, :, 1] - bg_mean[1]
+    db_bg = lab[:, :, 2] - bg_mean[2]
+    dist_to_bg = np.sqrt(dl_bg * dl_bg + da_bg * da_bg + db_bg * db_bg)
+
+    # Gradient magnitude for silhouette detection
+    gray = cv2.cvtColor(small_bgr, cv2.COLOR_BGR2GRAY)
+    sobelx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    grad_norm = cv2.normalize(cv2.magnitude(sobelx, sobely), None, 0.0, 1.0, cv2.NORM_MINMAX)
+
+    # Initialize trimap as Probable Background everywhere
+    gc_mask = np.full((sh, sw), cv2.GC_PR_BGD, dtype=np.uint8)
+    # Definite background strictly on outer 4% frame borders
+    gc_mask[:, :bw_border] = cv2.GC_BGD
+    gc_mask[:, -bw_border:] = cv2.GC_BGD
 
     if face_boxes:
-        # Mark all detected faces in the trimap
         for fx, fy, fw, fh in face_boxes:
             s_fx = fx / scale
             s_fy = fy / scale
@@ -185,67 +293,72 @@ def estimate_subject_mask(
             rx = max(4, int(s_fw * 0.65))
             ry = max(4, int(s_fh * 0.72))
 
-            # Outer head ellipse marked as GC_PR_FGD
+            # Sky above head marked as definite background
+            sky_y = max(0, int(s_fy - s_fh * 0.4))
+            if sky_y > 0:
+                gc_mask[0:sky_y, :] = cv2.GC_BGD
+
+            # Head ellipses
             cv2.ellipse(gc_mask, (cx, cy), (int(1.15 * rx), int(1.15 * ry)), 0, 0, 360, cv2.GC_PR_FGD, -1)
-            # Inner head ellipse marked as GC_FGD
             cv2.ellipse(gc_mask, (cx, cy), (max(2, int(0.75 * rx)), max(2, int(0.75 * ry))), 0, 0, 360, cv2.GC_FGD, -1)
 
-            # Neck and torso/shoulder polygon extending down to bottom edge
+            # Neck and upper torso
             neck_y = min(sh - 1, max(0, int(s_fy + s_fh * 0.90)))
             shld_y = min(sh - 1, max(neck_y + 1, int(s_fy + s_fh * 1.45)))
+            torso_bottom = min(sh - 1, int(s_fy + s_fh * 4.0))
+
             torso_pts = np.array([
                 [int(cx - s_fw * 0.45), neck_y],
                 [int(cx + s_fw * 0.45), neck_y],
                 [int(cx + s_fw * 1.50), shld_y],
-                [int(cx + s_fw * 1.70), sh - 1],
-                [int(cx - s_fw * 1.70), sh - 1],
+                [int(cx + s_fw * 1.50), torso_bottom],
+                [int(cx - s_fw * 1.50), torso_bottom],
                 [int(cx - s_fw * 1.50), shld_y],
             ], dtype=np.int32)
             torso_pts[:, 0] = np.clip(torso_pts[:, 0], 0, sw - 1)
             torso_pts[:, 1] = np.clip(torso_pts[:, 1], 0, sh - 1)
             cv2.fillPoly(gc_mask, [torso_pts], cv2.GC_PR_FGD)
 
-            # Central spine column marked as GC_FGD
-            spine_x1 = max(0, int(cx - s_fw * 0.8))
-            spine_x2 = min(sw, int(cx + s_fw * 0.8))
+            # Central spine column marked as definite foreground
+            spine_x1 = max(0, int(cx - s_fw * 0.7))
+            spine_x2 = min(sw, int(cx + s_fw * 0.7))
             spine_y1 = min(sh - 1, max(0, int(s_fy + s_fh * 1.0)))
-            if spine_x2 > spine_x1 and spine_y1 < sh:
-                gc_mask[spine_y1:sh, spine_x1:spine_x2] = cv2.GC_FGD
+            spine_y2 = min(sh, int(s_fy + s_fh * 3.5))
+            if spine_x2 > spine_x1 and spine_y2 > spine_y1:
+                gc_mask[spine_y1:spine_y2, spine_x1:spine_x2] = cv2.GC_FGD
 
-            # Re-enforce head inner ellipse as GC_FGD
             cv2.ellipse(gc_mask, (cx, cy), (max(2, int(0.75 * rx)), max(2, int(0.75 * ry))), 0, 0, 360, cv2.GC_FGD, -1)
+
+            # Extended arm envelope (5.0x face width from y = fy + 1.15*fh to fy + 3.5*fh)
+            # Beside torso remains GC_PR_BGD (Probable Background) so arms are never cut off
+            arm_y1 = min(sh - 1, max(0, int(s_fy + s_fh * 1.15)))
+            arm_y2 = min(sh, max(arm_y1 + 1, int(s_fy + s_fh * 3.5)))
+            arm_x1 = max(bw_border, int(cx - s_fw * 2.5))
+            arm_x2 = min(sw - bw_border, int(cx + s_fw * 2.5))
+            if arm_x2 > arm_x1 and arm_y2 > arm_y1:
+                arm_reg = gc_mask[arm_y1:arm_y2, arm_x1:arm_x2]
+                gc_mask[arm_y1:arm_y2, arm_x1:arm_x2] = np.where(
+                    arm_reg == cv2.GC_FGD, cv2.GC_FGD, cv2.GC_PR_FGD
+                )
     else:
-        # Saliency-informed seed: Center-weighted color contrast against image border
-        lab = cv2.cvtColor(small_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
-        border_lab = np.concatenate([
-            lab[0, :, :], lab[-1, :, :], lab[:, 0, :], lab[:, -1, :]
-        ], axis=0)
-        bg_mean = np.mean(border_lab, axis=0)
-        dist_from_bg = np.linalg.norm(lab - bg_mean, axis=2)
+        # Saliency-informed seed: Center-weighted color contrast without geometric oval bias
+        saliency = dist_to_bg * (1.0 + grad_norm * 1.5)
+        th_fg = max(18.0, float(np.percentile(saliency, 75)))
+        th_def_fg = max(28.0, float(np.percentile(saliency, 90)))
+        cand_fg = (saliency > th_fg).astype(np.uint8)
 
-        # Spatial center Gaussian prior
-        yy, xx = np.ogrid[:sh, :sw]
-        cx, cy = sw * 0.5, sh * 0.52
-        gauss_prior = np.exp(-((xx - cx) ** 2 / (2 * (sw * 0.35) ** 2) + (yy - cy) ** 2 / (2 * (sh * 0.40) ** 2)))
-        saliency = dist_from_bg * gauss_prior
-        saliency_norm = cv2.normalize(saliency, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        # Reject wide spanning background lines (road stripes, railings, horizons)
+        num_lbls, lbls, stats, _ = cv2.connectedComponentsWithStats(cand_fg)
+        for lbl in range(1, num_lbls):
+            lx, ly, lw, lh, larea = stats[lbl]
+            touches_both = (lx <= bw_border and (lx + lw) >= sw - bw_border)
+            aspect = max(lw, lh) / max(1, min(lw, lh))
+            if touches_both or (lw > sw * 0.55 and aspect > 3.5):
+                cand_fg[lbls == lbl] = 0
 
-        # Probable foreground where saliency > threshold
-        th_fg = max(50, int(np.percentile(saliency_norm, 65)))
-        th_def_fg = max(80, int(np.percentile(saliency_norm, 85)))
-        gc_mask[saliency_norm > th_fg] = cv2.GC_PR_FGD
-        gc_mask[saliency_norm > th_def_fg] = cv2.GC_FGD
-
-        # Always ensure center core is marked
-        c_rx, c_ry = max(4, int(sw * 0.20)), max(4, int(sh * 0.25))
-        cv2.ellipse(gc_mask, (int(cx), int(cy)), (c_rx, c_ry), 0, 0, 360, cv2.GC_PR_FGD, -1)
-        cv2.ellipse(gc_mask, (int(cx), int(cy)), (max(2, int(c_rx * 0.5)), max(2, int(c_ry * 0.5))), 0, 0, 360, cv2.GC_FGD, -1)
-
-    # Borders should always remain strict background
-    gc_mask[0:max(1, int(sh * 0.02)), :] = cv2.GC_BGD
-    gc_mask[-max(1, int(sh * 0.02)):, :] = cv2.GC_BGD
-    gc_mask[:, 0:max(1, int(sw * 0.02))] = cv2.GC_BGD
-    gc_mask[:, -max(1, int(sw * 0.02)):] = cv2.GC_BGD
+        gc_mask[cand_fg > 0] = cv2.GC_PR_FGD
+        def_fg = cand_fg & (saliency > th_def_fg)
+        gc_mask[def_fg > 0] = cv2.GC_FGD
 
     # Run GrabCut
     bgd_model = np.zeros((1, 65), np.float64)
@@ -260,24 +373,32 @@ def estimate_subject_mask(
             iterCount=3,
             mode=cv2.GC_INIT_WITH_MASK,
         )
-        binary_mask = np.where((gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD), 1.0, 0.0).astype(np.float32)
     except Exception:
-        binary_mask = np.where((gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD), 1.0, 0.0).astype(np.float32)
+        pass
+
+    # Background Color Rejection Gate:
+    # Samples core foreground (GC_FGD) vs border background (GC_BGD).
+    # Discards any GC_PR_FGD pixel whose LAB color closely matches surrounding road/sky.
+    core_fg = (gc_mask == cv2.GC_FGD)
+    if np.count_nonzero(core_fg) > 5:
+        fg_mean = np.mean(lab[core_fg], axis=0)
+        dl_f = (lab[:, :, 0] - fg_mean[0]) * 0.6
+        da_f = lab[:, :, 1] - fg_mean[1]
+        db_f = lab[:, :, 2] - fg_mean[2]
+        dist_to_fg = np.sqrt(dl_f * dl_f + da_f * da_f + db_f * db_f)
+    else:
+        dist_to_fg = np.full_like(dist_to_bg, 999.0)
+
+    is_fg = (gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD)
+    is_pr_fgd = (gc_mask == cv2.GC_PR_FGD)
+    reject_bg = is_pr_fgd & (dist_to_bg < 18.0) & (dist_to_bg < dist_to_fg * 0.75) & (grad_norm < 0.20)
+    binary_mask = (is_fg & (~reject_bg)).astype(np.float32)
 
     # Upscale to full camera resolution
     full_mask = cv2.resize(binary_mask, (w, h), interpolation=cv2.INTER_LINEAR)
 
-    # Morphological open/close to eliminate isolated pinholes
-    mask_u8 = (full_mask * 255.0).astype(np.uint8)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, kernel)
-    mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kernel)
-    raw_float = mask_u8.astype(np.float32) / 255.0
-
-    # Edge-preserving Joint Guided Filter matting against high-res image
-    mat_radius = max(8, int(max(h, w) * 0.012))
-    refined_mask = guided_filter_matte(image_bgr, raw_float, radius=mat_radius, eps=1e-3, subsample=2)
-    return np.clip(refined_mask, 0.0, 1.0).astype(np.float32)
+    # Refine strictly within narrow unknown boundary band (zero leakage along background lines)
+    return refine_mask_narrow_band(image_bgr, full_mask)
 
 
 def estimate_depth_map(
@@ -639,6 +760,8 @@ class DepthAndMatteEngine:
         self._base_cache: dict[Any, tuple[np.ndarray, np.ndarray]] = {}
 
         self._init_onnx_sessions()
+        if self._matte_session is None:
+            self.ensure_depth_models(download_if_missing=True)
 
     def _find_model_file(self, filenames: list[str]) -> Path | None:
         for d in self.search_dirs:
@@ -647,6 +770,25 @@ class DepthAndMatteEngine:
                 if cand.is_file():
                     return cand
         return None
+
+    def _init_single_matte_session(self, matte_path: Path) -> bool:
+        try:
+            import onnxruntime as ort
+            providers = ort.get_available_providers()
+            prov_list = []
+            if "DmlExecutionProvider" in providers:
+                prov_list.append("DmlExecutionProvider")
+            prov_list.append("CPUExecutionProvider")
+
+            sess_opts = ort.SessionOptions()
+            sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            self._matte_session = ort.InferenceSession(str(matte_path), sess_opts, providers=prov_list)
+            self._matte_model_name = matte_path.name
+            logger.info("Matte session loaded: %s with providers %s", matte_path.name, prov_list)
+            return True
+        except Exception as ex:
+            logger.debug("Failed to initialize matte ONNX session from %s: %s", matte_path, ex)
+            return False
 
     def _init_onnx_sessions(self) -> None:
         try:
@@ -670,21 +812,39 @@ class DepthAndMatteEngine:
                 logger.info("Depth session loaded: %s with providers %s", depth_path.name, prov_list)
 
             matte_path = self._find_model_file([
-                "modnet.onnx",
                 "u2netp.onnx",
+                "modnet.onnx",
                 "rmbg-1.4.onnx",
             ])
             if matte_path:
-                sess_opts = ort.SessionOptions()
-                sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-                self._matte_session = ort.InferenceSession(str(matte_path), sess_opts, providers=prov_list)
-                self._matte_model_name = matte_path.name
-                logger.info("Matte session loaded: %s with providers %s", matte_path.name, prov_list)
+                self._init_single_matte_session(matte_path)
         except Exception as ex:
             logger.debug("ONNX session initialization skipped / fallback active: %s", ex)
 
-    def ensure_depth_models(self, download_if_missing: bool = False) -> dict[str, Any]:
-        """Checks availability of ONNX models or returns current fallback state."""
+    def ensure_depth_models(self, download_if_missing: bool = True) -> dict[str, Any]:
+        """
+        Checks availability of ONNX depth and portrait matte models.
+        If download_if_missing is True and matte model is missing, downloads
+        the lightweight ONNX human segmentation model (u2netp.onnx ~4.5 MB)
+        with a 5-second timeout and initializes onnxruntime session with
+        DmlExecutionProvider or CPUExecutionProvider.
+        """
+        if self._matte_session is None:
+            matte_path = self._find_model_file([
+                "u2netp.onnx",
+                "modnet.onnx",
+                "rmbg-1.4.onnx",
+            ])
+            if not matte_path and download_if_missing:
+                target_dest = (self.search_dirs[0] if self.search_dirs else Path("models").resolve()) / "u2netp.onnx"
+                if not target_dest.is_file():
+                    _download_u2netp_model(target_dest, timeout=5.0)
+                if target_dest.is_file():
+                    matte_path = target_dest
+
+            if matte_path and self._matte_session is None:
+                self._init_single_matte_session(matte_path)
+
         return {
             "has_depth_model": self._depth_session is not None,
             "depth_model": self._depth_model_name,
@@ -781,11 +941,18 @@ class DepthAndMatteEngine:
             try:
                 input_name = self._matte_session.get_inputs()[0].name
                 in_shape = self._matte_session.get_inputs()[0].shape
-                target_h = in_shape[2] if len(in_shape) == 4 and isinstance(in_shape[2], int) and in_shape[2] > 0 else 512
-                target_w = in_shape[3] if len(in_shape) == 4 and isinstance(in_shape[3], int) and in_shape[3] > 0 else 512
+                is_u2net = "u2net" in (self._matte_model_name or "").lower()
+                target_h = in_shape[2] if len(in_shape) == 4 and isinstance(in_shape[2], int) and in_shape[2] > 0 else (320 if is_u2net else 512)
+                target_w = in_shape[3] if len(in_shape) == 4 and isinstance(in_shape[3], int) and in_shape[3] > 0 else (320 if is_u2net else 512)
 
                 img_f = cv2.resize(comp_rgb, (target_w, target_h), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
-                blob = ((img_f - 0.5) / 0.5).transpose(2, 0, 1)[None, ...]
+                if is_u2net:
+                    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+                    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+                    blob = ((img_f - mean) / std).transpose(2, 0, 1)[None, ...].astype(np.float32)
+                else:
+                    blob = ((img_f - 0.5) / 0.5).transpose(2, 0, 1)[None, ...].astype(np.float32)
+
                 out = self._matte_session.run(None, {input_name: blob})[0]
                 out_2d = out[0, 0] if out.ndim == 4 else (out[0] if out.ndim == 3 else out)
                 m_min, m_max = float(np.min(out_2d)), float(np.max(out_2d))
@@ -793,7 +960,8 @@ class DepthAndMatteEngine:
                     norm_m = (out_2d - m_min) / (m_max - m_min)
                 else:
                     norm_m = np.zeros_like(out_2d)
-                alpha_matte = cv2.resize(norm_m, (bw, bh), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+                raw_matte = cv2.resize(norm_m, (bw, bh), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+                alpha_matte = refine_mask_narrow_band(cv2.cvtColor(comp_rgb, cv2.COLOR_RGB2BGR), raw_matte)
             except Exception as e:
                 logger.debug("ONNX matte inference error, using fallback: %s", e)
                 alpha_matte = None
@@ -1373,3 +1541,313 @@ def apply_blur_redact(
     blurred = cv2.GaussianBlur(roi, (ksize, ksize), 0)
     result[y1:y2, x1:x2] = blurred
     return result
+
+
+# =============================================================================
+# 5. 1-Click Subject Cutout & Background Removal
+# =============================================================================
+
+def apply_boundary_shift_and_feather(
+    alpha_matte: np.ndarray,
+    boundary_shift: float = 0.0,
+    boundary_feather: float = 0.0,
+) -> np.ndarray:
+    """
+    Applies morphological boundary shift (grow/shrink in [-10..+10]) and
+    Gaussian boundary feathering ([0..20]) to a float32 [0..1] alpha matte.
+    """
+    if alpha_matte is None or alpha_matte.size == 0:
+        return alpha_matte
+    h, w = alpha_matte.shape[:2]
+    res_scale = max(0.5, max(w, h) / 1000.0)
+    out = np.clip(alpha_matte.astype(np.float32), 0.0, 1.0)
+
+    if abs(boundary_shift) > 0.05:
+        shift_px = max(1, int(round(abs(boundary_shift) * 1.5 * res_scale)))
+        k_shift = shift_px * 2 + 1
+        kern_shift = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_shift, k_shift))
+        if boundary_shift > 0:
+            out = cv2.dilate(out, kern_shift)
+        else:
+            out = cv2.erode(out, kern_shift)
+
+    if boundary_feather > 0.05:
+        feather_sigma = max(0.8, float(boundary_feather) * 1.2 * res_scale)
+        k_f = int(math.ceil(feather_sigma * 3.0)) * 2 + 1
+        out = cv2.GaussianBlur(out, (k_f, k_f), feather_sigma)
+
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
+def extract_subject_cutout_rgba(
+    image_rgb: np.ndarray,
+    boundary_shift: float = 0.0,
+    boundary_feather: float = 0.0,
+    media_id: Any = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Extracts the foreground subject as an RGBA uint8 image and alpha uint8 mask:
+    - Computes high-precision subject alpha matte via DepthAndMatteEngine (U2NetP / MODNet + Guided Filter).
+    - Applies user boundary_shift and boundary_feather adjustments.
+    - Performs edge color decontamination on semi-transparent boundary pixels so background halo colors
+      do not fringe the cutout subject.
+    Returns (rgba_uint8, alpha_uint8).
+    """
+    if image_rgb is None or image_rgb.size == 0:
+        empty_rgba = np.zeros((10, 10, 4), dtype=np.uint8)
+        empty_a = np.zeros((10, 10), dtype=np.uint8)
+        return empty_rgba, empty_a
+
+    h, w = image_rgb.shape[:2]
+    engine = get_depth_and_matte_engine()
+    _, alpha_matte = engine.get_depth_and_matte(image_rgb, media_id=media_id)
+    if alpha_matte.shape[:2] != (h, w):
+        alpha_matte = cv2.resize(alpha_matte, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    alpha_matte = apply_boundary_shift_and_feather(
+        alpha_matte,
+        boundary_shift=boundary_shift,
+        boundary_feather=boundary_feather,
+    )
+
+    # Edge color decontamination: propagate pure interior foreground colors into the semi-transparent edge
+    rgb_f = image_rgb.astype(np.float32)
+    core_fg = (alpha_matte > 0.92).astype(np.float32)
+    if np.count_nonzero(core_fg) > 16:
+        k_dec = max(5, (int(min(h, w) * 0.015) // 2) * 2 + 1)
+        premult = rgb_f * core_fg[..., None]
+        blur_rgb = cv2.GaussianBlur(premult, (k_dec, k_dec), 0)
+        blur_w = cv2.GaussianBlur(core_fg, (k_dec, k_dec), 0)[..., None]
+        pure_fg_rgb = np.where(blur_w > 1e-3, blur_rgb / np.maximum(blur_w, 1e-3), rgb_f)
+        edge_band = (alpha_matte > 0.02) & (alpha_matte < 0.92)
+        decontam_weight = np.clip(1.0 - alpha_matte, 0.0, 0.85)[..., None]
+        rgb_decontam = np.where(
+            edge_band[..., None],
+            rgb_f * (1.0 - decontam_weight) + pure_fg_rgb * decontam_weight,
+            rgb_f,
+        )
+        rgb_clean = np.clip(rgb_decontam, 0.0, 255.0).astype(np.uint8)
+    else:
+        rgb_clean = image_rgb.copy()
+
+    alpha_u8 = np.clip(np.round(alpha_matte * 255.0), 0.0, 255.0).astype(np.uint8)
+    rgba = np.dstack([rgb_clean, alpha_u8])
+    return rgba, alpha_u8
+
+
+# =============================================================================
+# 6. LaMa ONNX Object Eraser & Multi-Scale Structure/Texture Inpainting
+# =============================================================================
+
+class LaMaInpaintEngine:
+    """
+    Local Neural Object Eraser & Inpainting Engine:
+    - Supports ONNX LaMa models (lama_fp32.onnx / lama_quant.onnx / lama.onnx) in models/
+      executed via onnxruntime (DirectML / CPU) on a 512x512 context ROI crop.
+    - Includes a zero-dependency Multi-Scale Structure + Exemplar Texture Synthesis fallback
+      when the ONNX model file is not present locally.
+    """
+
+    _instance: LaMaInpaintEngine | None = None
+
+    def __init__(self, models_dir: Path | str | None = None) -> None:
+        self.search_dirs: list[Path] = []
+        if models_dir is not None:
+            self.search_dirs.append(Path(models_dir))
+        self.search_dirs.append(Path("models").resolve())
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            self.search_dirs.append(Path(local_app_data) / "WindowsMediaGallery" / "models")
+        project_root = Path(__file__).resolve().parent.parent.parent
+        self.search_dirs.append(project_root / "models")
+
+        self._session: Any = None
+        self._model_name: str | None = None
+        self._init_session()
+
+    def _find_model_file(self) -> Path | None:
+        candidates = [
+            "lama_quant.onnx",
+            "lama_fp32.onnx",
+            "lama.onnx",
+            "big-lama.onnx",
+        ]
+        for d in self.search_dirs:
+            for fn in candidates:
+                p = d / fn
+                if p.is_file():
+                    return p
+        return None
+
+    def _init_session(self) -> bool:
+        model_path = self._find_model_file()
+        if not model_path:
+            return False
+        try:
+            import onnxruntime as ort
+            providers = ort.get_available_providers()
+            prov_list = []
+            if "DmlExecutionProvider" in providers:
+                prov_list.append("DmlExecutionProvider")
+            prov_list.append("CPUExecutionProvider")
+
+            sess_opts = ort.SessionOptions()
+            sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            self._session = ort.InferenceSession(str(model_path), sess_opts, providers=prov_list)
+            self._model_name = model_path.name
+            logger.info("LaMa ONNX inpaint session loaded: %s", model_path.name)
+            return True
+        except Exception as e:
+            logger.debug("LaMa ONNX session init skipped: %s", e)
+            self._session = None
+            return False
+
+    def inpaint_roi(self, roi_rgb: np.ndarray, roi_mask_u8: np.ndarray) -> np.ndarray:
+        """
+        Inpaints a cropped ROI (H, W, 3) RGB uint8 where roi_mask_u8 > 0 marks the object to erase.
+        Uses LaMa ONNX inference if loaded, otherwise runs multi-scale coarse-to-fine structure +
+        exemplar texture synthesis.
+        """
+        rh, rw = roi_rgb.shape[:2]
+        bin_mask = (roi_mask_u8 > 127).astype(np.uint8)
+        if np.count_nonzero(bin_mask) == 0:
+            return roi_rgb.copy()
+
+        # 1. Try LaMa ONNX session (512x512 context window)
+        if self._session is None:
+            self._init_session()
+
+        if self._session is not None:
+            try:
+                inputs = self._session.get_inputs()
+                in_shape = inputs[0].shape
+                target_h = in_shape[2] if len(in_shape) == 4 and isinstance(in_shape[2], int) and in_shape[2] > 0 else 512
+                target_w = in_shape[3] if len(in_shape) == 4 and isinstance(in_shape[3], int) and in_shape[3] > 0 else 512
+
+                img_512 = cv2.resize(roi_rgb, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+                mask_512 = cv2.resize(bin_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+                mask_512 = (mask_512 > 0).astype(np.float32)
+
+                img_tensor = (img_512.astype(np.float32) / 255.0).transpose(2, 0, 1)[None, ...]
+                mask_tensor = mask_512[None, None, ...]
+
+                feed = {inputs[0].name: img_tensor}
+                if len(inputs) >= 2:
+                    feed[inputs[1].name] = mask_tensor
+
+                out = self._session.run(None, feed)[0]
+                out_chw = out[0] if out.ndim == 4 else out
+                out_hwc = out_chw.transpose(1, 2, 0)
+                if float(np.max(out_hwc)) <= 1.5:
+                    out_hwc = out_hwc * 255.0
+                out_u8 = np.clip(out_hwc, 0.0, 255.0).astype(np.uint8)
+                restored = cv2.resize(out_u8, (rw, rh), interpolation=cv2.INTER_CUBIC)
+
+                feather = cv2.GaussianBlur(bin_mask.astype(np.float32), (9, 9), 2.5)[..., None]
+                blended = roi_rgb.astype(np.float32) * (1.0 - feather) + restored.astype(np.float32) * feather
+                return np.clip(blended, 0.0, 255.0).astype(np.uint8)
+            except Exception as e:
+                logger.debug("LaMa ONNX inference failed, using multi-scale fallback: %s", e)
+
+        # 2. Multi-Scale Pyramid Structure Propagation + Exemplar Texture Synthesis Fallback
+        roi_bgr = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2BGR)
+        mask_255 = bin_mask * 255
+
+        # Coarse scale (1/4 resolution) Navier-Stokes inpainting for global structure continuation
+        cw, ch = max(16, rw // 4), max(16, rh // 4)
+        small_bgr = cv2.resize(roi_bgr, (cw, ch), interpolation=cv2.INTER_AREA)
+        small_mask = cv2.resize(mask_255, (cw, ch), interpolation=cv2.INTER_NEAREST)
+        coarse_inp = cv2.inpaint(small_bgr, small_mask, inpaintRadius=7, flags=cv2.INPAINT_NS)
+
+        # Mid scale (1/2 resolution) guided by coarse structure
+        mw, mh = max(24, rw // 2), max(24, rh // 2)
+        mid_bgr = cv2.resize(roi_bgr, (mw, mh), interpolation=cv2.INTER_AREA)
+        mid_mask = cv2.resize(mask_255, (mw, mh), interpolation=cv2.INTER_NEAREST)
+        coarse_up = cv2.resize(coarse_inp, (mw, mh), interpolation=cv2.INTER_CUBIC)
+        mid_seed = np.where(mid_mask[..., None] > 0, coarse_up, mid_bgr)
+        # Inpaint transition boundary at mid scale
+        mid_edge = cv2.dilate(mid_mask, np.ones((5, 5), np.uint8)) - cv2.erode(mid_mask, np.ones((5, 5), np.uint8))
+        mid_inp = cv2.inpaint(mid_seed, mid_edge, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
+
+        # Full scale Telea + Mid-scale blend
+        fine_inp = cv2.inpaint(roi_bgr, mask_255, inpaintRadius=6, flags=cv2.INPAINT_TELEA)
+        mid_full = cv2.resize(mid_inp, (rw, rh), interpolation=cv2.INTER_CUBIC)
+
+        # Distance transform inside mask: use fine Telea near border, coarse-to-mid structure deeper inside
+        dist = cv2.distanceTransform(bin_mask, cv2.DIST_L2, 5)
+        deep_w = np.clip(dist / 12.0, 0.0, 0.75)[..., None]
+        struct_bgr = fine_inp.astype(np.float32) * (1.0 - deep_w) + mid_full.astype(np.float32) * deep_w
+
+        # Synthesize high-frequency surface texture from surrounding valid context ring
+        k_outer = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
+        k_inner = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        ring_mask = (cv2.dilate(bin_mask, k_outer) > 0) & (cv2.dilate(bin_mask, k_inner) == 0)
+        if np.count_nonzero(ring_mask) > 32:
+            blur_ctx = cv2.GaussianBlur(roi_bgr.astype(np.float32), (7, 7), 1.8)
+            hf_detail = roi_bgr.astype(np.float32) - blur_ctx
+            ring_hf = hf_detail[ring_mask]
+            rng = np.random.default_rng(seed=int(rw * 31 + rh * 17))
+            sampled_idx = rng.integers(0, len(ring_hf), size=(rh, rw))
+            synth_tex = ring_hf[sampled_idx]
+            # Smooth texture slightly so it resembles natural sensor/surface grain
+            synth_tex = cv2.GaussianBlur(synth_tex, (3, 3), 0.7)
+            struct_bgr = np.clip(struct_bgr + synth_tex * 0.65, 0.0, 255.0)
+
+        out_rgb = cv2.cvtColor(struct_bgr.astype(np.uint8), cv2.COLOR_BGR2RGB)
+        feather = cv2.GaussianBlur(bin_mask.astype(np.float32), (9, 9), 2.2)[..., None]
+        final_rgb = roi_rgb.astype(np.float32) * (1.0 - feather) + out_rgb.astype(np.float32) * feather
+        return np.clip(final_rgb, 0.0, 255.0).astype(np.uint8)
+
+
+_SHARED_LAMA_ENGINE: LaMaInpaintEngine | None = None
+
+
+def get_lama_inpaint_engine() -> LaMaInpaintEngine:
+    global _SHARED_LAMA_ENGINE
+    if _SHARED_LAMA_ENGINE is None:
+        _SHARED_LAMA_ENGINE = LaMaInpaintEngine()
+    return _SHARED_LAMA_ENGINE
+
+
+def inpaint_object_lama(
+    image_rgb: np.ndarray,
+    mask_u8: np.ndarray,
+) -> np.ndarray:
+    """
+    Erases an unwanted object marked by mask_u8 (> 0) from image_rgb (H, W, 3) uint8.
+    Automatically crops a padded bounding-box ROI around the mask for fast, high-resolution
+    local inpainting via LaMaInpaintEngine.
+    """
+    if image_rgb is None or image_rgb.size == 0 or mask_u8 is None:
+        return image_rgb
+    h, w = image_rgb.shape[:2]
+    if mask_u8.shape[:2] != (h, w):
+        mask_u8 = cv2.resize(mask_u8, (w, h), interpolation=cv2.INTER_NEAREST)
+
+    ys, xs = np.where(mask_u8 > 0)
+    if len(xs) == 0 or len(ys) == 0:
+        return image_rgb.copy()
+
+    # Dilate mask slightly to cover anti-aliased object boundary fringes
+    k_dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    dilated_mask = cv2.dilate((mask_u8 > 0).astype(np.uint8) * 255, k_dil)
+
+    x1, x2 = int(np.min(xs)), int(np.max(xs))
+    y1, y2 = int(np.min(ys)), int(np.max(ys))
+    bw, bh = x2 - x1 + 1, y2 - y1 + 1
+    pad = max(48, int(max(bw, bh) * 0.65))
+
+    cx1 = max(0, x1 - pad)
+    cy1 = max(0, y1 - pad)
+    cx2 = min(w, x2 + pad)
+    cy2 = min(h, y2 + pad)
+
+    result = image_rgb.copy()
+    roi_rgb = result[cy1:cy2, cx1:cx2]
+    roi_mask = dilated_mask[cy1:cy2, cx1:cx2]
+
+    engine = get_lama_inpaint_engine()
+    inpainted_roi = engine.inpaint_roi(roi_rgb, roi_mask)
+    result[cy1:cy2, cx1:cx2] = inpainted_roi
+    return result
+

@@ -326,6 +326,38 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         )
         p.drawPolygon(tip)
 
+    elif kind in ("not_edited", "not-edited"):
+        p.setPen(QPen(QColor("#6B5218"), 1.0))
+        p.setBrush(QColor("#F0B838"))
+        pencil = QPolygonF(
+            [
+                QPointF(s * 0.76, s * 0.18),
+                QPointF(s * 0.84, s * 0.26),
+                QPointF(s * 0.34, s * 0.76),
+                QPointF(s * 0.20, s * 0.82),
+                QPointF(s * 0.26, s * 0.68),
+            ]
+        )
+        p.drawPolygon(pencil)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#333333"))
+        tip = QPolygonF(
+            [
+                QPointF(s * 0.20, s * 0.82),
+                QPointF(s * 0.24, s * 0.73),
+                QPointF(s * 0.29, s * 0.78),
+            ]
+        )
+        p.drawPolygon(tip)
+        badge_r = s * 0.22
+        badge_cx = s * 0.38
+        badge_cy = s * 0.74
+        p.setPen(QPen(QColor("#1B4E82"), 1.0))
+        p.setBrush(QColor("#2468A8"))
+        p.drawEllipse(QPointF(badge_cx, badge_cy), badge_r, badge_r)
+        p.setPen(QPen(QColor("#FFFFFF"), max(1.2, s * 0.09), Qt.SolidLine, Qt.SquareCap))
+        p.drawLine(QPointF(badge_cx - badge_r * 0.55, badge_cy), QPointF(badge_cx + badge_r * 0.55, badge_cy))
+
     elif kind == "media_type":
         p.setPen(QPen(QColor("#2468A8"), 1.0))
         p.setBrush(QColor("#E8F1FA"))
@@ -354,6 +386,32 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
             ]
         )
         p.drawPolygon(tri)
+
+    elif kind == "orientation":
+        # Landscape frame (horizontal, behind)
+        p.setPen(QPen(QColor("#2468A8"), 1.0))
+        p.setBrush(QColor("#E8F1FA"))
+        p.drawRoundedRect(QRectF(s * 0.08, s * 0.28, s * 0.58, s * 0.44), 1.5, 1.5)
+        p.setBrush(QColor("#7DA2CE"))
+        p.setPen(Qt.NoPen)
+        p.drawPolygon(
+            QPolygonF(
+                [
+                    QPointF(s * 0.12, s * 0.66),
+                    QPointF(s * 0.26, s * 0.44),
+                    QPointF(s * 0.38, s * 0.58),
+                    QPointF(s * 0.54, s * 0.38),
+                    QPointF(s * 0.62, s * 0.66),
+                ]
+            )
+        )
+        # Portrait frame (vertical, in front)
+        p.setPen(QPen(QColor("#1A4E80"), 1.0))
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawRoundedRect(QRectF(s * 0.46, s * 0.14, s * 0.44, s * 0.66), 1.5, 1.5)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#5488BD"))
+        p.drawRoundedRect(QRectF(s * 0.52, s * 0.22, s * 0.32, s * 0.48), 1.0, 1.0)
 
     elif kind in ("tag", "tag_add"):
         path = QPainterPath()
@@ -2082,7 +2140,7 @@ def make_default_variation_base_image(w: int = 54, h: int = 38) -> np.ndarray:
 @lru_cache(maxsize=16)
 def make_effect_preview_icon(effect_name: str) -> QIcon:
     """Generates an authentic photographic thumbnail preview matching WLPG Effects gallery."""
-    img = make_default_variation_base_image(46, 64)
+    img = make_default_variation_base_image(53, 64)
     h, w = img.shape[:2]
     rec = PhotoAdjustmentRecipe(effect=effect_name)
     rendered = render_adjusted_image(img, rec)
@@ -2266,6 +2324,255 @@ class _RibbonLargeToolButton(QToolButton):
             painter.drawLine(arrow_x, arrow_y, arrow_x + 4, arrow_y)
             painter.drawLine(arrow_x + 1, arrow_y + 1, arrow_x + 3, arrow_y + 1)
             painter.drawPoint(arrow_x + 2, arrow_y + 2)
+
+
+class _RibbonSplitToolButton(QToolButton):
+    """
+    Split ribbon tool button with distinct hover highlights:
+    - Resting: transparent, NO divider line before the dropdown arrow.
+    - Hovering either subcontrol:
+      - Outer box / edge highlight wraps around both subcontrols.
+      - Vertical divider line appears between main button and dropdown arrow.
+      - Main highlight (active gradient) is ONLY over the subcontrol being hovered.
+      - The other subcontrol maintains a soft subtle base fill.
+    - Checked: checked style on main subcontrol.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("CompactRibbonSplitBtn")
+        self.setMouseTracking(True)
+        self.setPopupMode(QToolButton.MenuButtonPopup)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self._mouse_pos: QPoint = QPoint(-1, -1)
+        self._is_dark: bool = False
+        self._theme_mode: str = "aero"
+
+    def enterEvent(self, event: Any) -> None:
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event: Any) -> None:
+        self._mouse_pos = QPoint(-1, -1)
+        self.update()
+        super().leaveEvent(event)
+
+    def mouseMoveEvent(self, event: Any) -> None:
+        self._mouse_pos = event.pos()
+        self.update()
+        super().mouseMoveEvent(event)
+
+    def sizeHint(self) -> QSize:
+        sh = super().sizeHint()
+        fm = self.fontMetrics()
+        text_w = fm.horizontalAdvance(self.text()) if self.text() else 0
+        icon_w = 16 if not self.icon().isNull() else 0
+        spacing = 4 if (icon_w and text_w) else 0
+        left_pad = 4
+        right_pad = 6
+        menu_w = 14
+        calc_w = left_pad + icon_w + spacing + text_w + right_pad + menu_w
+        return QSize(max(sh.width(), calc_w, 82), 22)
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    def paintEvent(self, event: Any) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        w = self.width()
+        h = self.height()
+        r_menu_w = 13
+        x_div = max(0, w - r_menu_w)
+
+        is_hovered = self.underMouse() or (self._mouse_pos != QPoint(-1, -1) and self.rect().contains(self._mouse_pos))
+        is_down = self.isDown()
+        is_checked = self.isChecked()
+        is_dark = getattr(self, "_is_dark", False)
+        theme_mode = getattr(self, "_theme_mode", "dark" if is_dark else "aero")
+
+        mpos = self._mouse_pos
+        if is_hovered and mpos == QPoint(-1, -1):
+            mpos = self.mapFromGlobal(QCursor.pos())
+
+        hover_menu = is_hovered and (mpos.x() >= x_div)
+        hover_btn = is_hovered and (mpos.x() < x_div)
+
+        outer_rect = QRectF(0.5, 0.5, max(0.0, w - 1.0), max(0.0, h - 1.0))
+        outer_path = QPainterPath()
+        outer_path.addRoundedRect(outer_rect, 2.0, 2.0)
+
+        # 1. Backgrounds and highlights
+        if is_hovered:
+            if theme_mode == "dark":
+                base_color = QColor("#262F3D")
+                border_color = QColor("#4B5563")
+            elif theme_mode == "modern":
+                base_color = QColor("#F3F4F6")
+                border_color = QColor("#CBD5E1")
+            else:
+                base_color = QColor("#FFFDF5")
+                border_color = QColor("#D9B152")
+
+            painter.fillPath(outer_path, base_color)
+
+            if hover_btn:
+                clip_btn = QPainterPath()
+                clip_btn.addRect(QRectF(0, 0, x_div, h))
+                painter.save()
+                painter.setClipPath(outer_path.intersected(clip_btn))
+
+                if theme_mode == "dark":
+                    if is_down:
+                        b_grad = QLinearGradient(0, 0, 0, h)
+                        b_grad.setColorAt(0, QColor("#1F2937"))
+                        b_grad.setColorAt(1, QColor("#111827"))
+                    else:
+                        b_grad = QLinearGradient(0, 0, 0, h)
+                        b_grad.setColorAt(0, QColor("#374151"))
+                        b_grad.setColorAt(1, QColor("#1F2937"))
+                elif theme_mode == "modern":
+                    if is_down:
+                        b_grad = QLinearGradient(0, 0, 0, h)
+                        b_grad.setColorAt(0, QColor("#D1D5DB"))
+                        b_grad.setColorAt(1, QColor("#9CA3AF"))
+                    else:
+                        b_grad = QLinearGradient(0, 0, 0, h)
+                        b_grad.setColorAt(0, QColor("#E5E7EB"))
+                        b_grad.setColorAt(1, QColor("#D1D5DB"))
+                else:  # aero
+                    b_grad = QLinearGradient(0, 0, 0, h)
+                    if is_down:
+                        b_grad.setColorAt(0, QColor("#FCE293"))
+                        b_grad.setColorAt(1, QColor("#F7CE65"))
+                    elif is_checked:
+                        b_grad.setColorAt(0, QColor("#FDF4D7"))
+                        b_grad.setColorAt(0.5, QColor("#FEE69C"))
+                        b_grad.setColorAt(1, QColor("#FED768"))
+                    else:
+                        b_grad = QLinearGradient(0, 0, 0, h)
+                        b_grad.setColorAt(0, QColor("#FFFDF5"))
+                        b_grad.setColorAt(1, QColor("#FCE7A2"))
+
+                painter.fillRect(QRectF(0, 0, x_div, h), b_grad)
+                painter.restore()
+
+            elif hover_menu:
+                clip_menu = QPainterPath()
+                clip_menu.addRect(QRectF(x_div, 0, r_menu_w, h))
+                painter.save()
+                painter.setClipPath(outer_path.intersected(clip_menu))
+
+                if theme_mode == "dark":
+                    m_grad = QLinearGradient(0, 0, 0, h)
+                    m_grad.setColorAt(0, QColor("#374151"))
+                    m_grad.setColorAt(1, QColor("#1F2937"))
+                elif theme_mode == "modern":
+                    m_grad = QLinearGradient(0, 0, 0, h)
+                    m_grad.setColorAt(0, QColor("#E5E7EB"))
+                    m_grad.setColorAt(1, QColor("#D1D5DB"))
+                else:  # aero
+                    m_grad = QLinearGradient(0, 0, 0, h)
+                    m_grad.setColorAt(0, QColor("#FFFDF5"))
+                    m_grad.setColorAt(1, QColor("#FCE7A2"))
+
+                painter.fillRect(QRectF(x_div, 0, r_menu_w, h), m_grad)
+                painter.restore()
+
+                if is_checked:
+                    clip_left = QPainterPath()
+                    clip_left.addRect(QRectF(0, 0, x_div, h))
+                    painter.save()
+                    painter.setClipPath(outer_path.intersected(clip_left))
+                    if theme_mode == "dark":
+                        painter.fillRect(QRectF(0, 0, x_div, h), QColor("#1E3A8A"))
+                    elif theme_mode == "modern":
+                        painter.fillRect(QRectF(0, 0, x_div, h), QColor("#DBEAFE"))
+                    else:
+                        c_grad = QLinearGradient(0, 0, 0, h)
+                        c_grad.setColorAt(0, QColor("#EAF3FD"))
+                        c_grad.setColorAt(0.5, QColor("#D2E7FA"))
+                        c_grad.setColorAt(1, QColor("#BBDDF7"))
+                        painter.fillRect(QRectF(0, 0, x_div, h), c_grad)
+                    painter.restore()
+
+            # Outer boundary box wraps around both subcontrols
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(QPen(border_color, 1))
+            painter.drawPath(outer_path)
+
+            # Divider line appears ONLY on mouse over
+            painter.setRenderHint(QPainter.Antialiasing, False)
+            painter.drawLine(x_div, 1, x_div, h - 2)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+
+        elif is_checked:
+            btn_rect = QRectF(0.5, 0.5, max(0.0, x_div - 0.5), max(0.0, h - 1.0))
+            btn_path = QPainterPath()
+            btn_path.addRoundedRect(btn_rect, 2.0, 2.0)
+            if theme_mode == "dark":
+                painter.fillPath(btn_path, QColor("#1E3A8A"))
+                painter.setPen(QPen(QColor("#60A5FA"), 1))
+            elif theme_mode == "modern":
+                painter.fillPath(btn_path, QColor("#DBEAFE"))
+                painter.setPen(QPen(QColor("#3B82F6"), 1))
+            else:
+                c_grad = QLinearGradient(0, 0, 0, h)
+                c_grad.setColorAt(0, QColor("#EAF3FD"))
+                c_grad.setColorAt(0.5, QColor("#D2E7FA"))
+                c_grad.setColorAt(1, QColor("#BBDDF7"))
+                painter.fillPath(btn_path, c_grad)
+                painter.setPen(QPen(QColor("#7DA2CE"), 1))
+            painter.drawPath(btn_path)
+
+        # 2. Paint Icon
+        if not self.icon().isNull():
+            ix = 4
+            iy = (h - 16) // 2
+            mode = QIcon.Mode.Normal if self.isEnabled() else QIcon.Mode.Disabled
+            if is_hovered and self.isEnabled():
+                mode = QIcon.Mode.Active
+            state = QIcon.State.On if is_checked else QIcon.State.Off
+            self.icon().paint(painter, QRect(ix, iy, 16, 16), Qt.AlignmentFlag.AlignCenter, mode, state)
+
+        # 3. Paint Text
+        if theme_mode == "dark":
+            text_color = QColor("#F1F5F9") if self.isEnabled() else QColor("#64748B")
+        else:
+            text_color = QColor("#1E395B") if self.isEnabled() else QColor("#8E99A4")
+
+        if self.toolButtonStyle() != Qt.ToolButtonIconOnly and self.text():
+            tx = 24 if not self.icon().isNull() else 6
+            tw = max(0, x_div - tx - 2)
+            painter.setPen(text_color)
+            painter.setFont(self.font())
+            painter.drawText(QRect(tx, 0, tw, h), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.text())
+
+        # 4. Paint Dropdown Arrow (identically matching Orientation and Media type)
+        svg_file = "arrow_dropdown_mini_dark.svg" if theme_mode == "dark" else "arrow_dropdown_mini.svg"
+        svg_path = get_icons_dir() / svg_file
+        ax = w - 11
+        ay = (h - 4) // 2 + 1
+        if svg_path.exists():
+            arrow_icon = QIcon(str(svg_path))
+            arrow_icon.paint(painter, QRect(ax, ay, 7, 4))
+        else:
+            arrow_color = QColor("#F1F5F9") if theme_mode == "dark" else (QColor("#374151") if theme_mode == "modern" else QColor("#1E395B"))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(arrow_color)
+            painter.drawPolygon(
+                QPolygonF(
+                    [
+                        QPointF(ax, ay),
+                        QPointF(ax + 7, ay),
+                        QPointF(ax + 3.5, ay + 4),
+                    ]
+                )
+            )
+
+        painter.end()
 
 
 class _VariationTile(QPushButton):
@@ -2523,9 +2830,9 @@ class _RibbonEffectsGallery(QFrame):
     effect_hovered = Signal(str)
     effect_unhovered = Signal()
 
-    CARD_WIDTH = 48
+    CARD_WIDTH = 55
     CARD_HEIGHT = 66
-    CARD_STRIDE = 49
+    CARD_STRIDE = 56
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -2616,7 +2923,7 @@ class _RibbonEffectsGallery(QFrame):
             if eff_id == "none":
                 btn.setChecked(True)
             btn.setText(label)
-            btn.setIconSize(QSize(46, 64))
+            btn.setIconSize(QSize(53, 64))
             btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
             btn.setFixedSize(self.CARD_WIDTH, self.CARD_HEIGHT)
             btn.setToolTip(tip)
@@ -2651,6 +2958,18 @@ class _RibbonEffectsGallery(QFrame):
         v_ctrl.setContentsMargins(0, 0, 0, 0)
         v_ctrl.setSpacing(1)
 
+        self.btn_up = QPushButton("▲", self)
+        self.btn_up.setToolTip("Previous effects")
+        self.btn_up.clicked.connect(self._scroll_prev)
+
+        self.btn_dn = QPushButton("▼", self)
+        self.btn_dn.setToolTip("Next effects")
+        self.btn_dn.clicked.connect(self._scroll_next)
+
+        self.btn_more = QPushButton(self)
+        self.btn_more.setToolTip("Show all effects")
+        self.btn_more.clicked.connect(self._show_all_effects_menu)
+
         btn_style = """
             QPushButton {
                 border: 1px solid #D2DFEE;
@@ -2670,25 +2989,13 @@ class _RibbonEffectsGallery(QFrame):
             }
         """
 
-        def make_mini_btn(symbol: str) -> QPushButton:
-            b = QPushButton(symbol, self)
+        for b in (self.btn_up, self.btn_dn, self.btn_more):
             b.setFixedSize(14, 19)
             b.setFlat(True)
             b.setCursor(Qt.PointingHandCursor)
             b.setStyleSheet(btn_style)
-            return b
 
-        self.btn_up = make_mini_btn("▲")
-        self.btn_up.setToolTip("Previous effects")
-        self.btn_up.clicked.connect(self._scroll_prev)
-
-        self.btn_dn = make_mini_btn("▼")
-        self.btn_dn.setToolTip("Next effects")
-        self.btn_dn.clicked.connect(self._scroll_next)
-
-        self.btn_more = make_mini_btn("▾")
-        self.btn_more.setToolTip("Show all effects")
-        self.btn_more.clicked.connect(self._show_all_effects_menu)
+        self._update_more_icon(is_dark=False)
 
         v_ctrl.addWidget(self.btn_up)
         v_ctrl.addWidget(self.btn_dn)
@@ -2699,19 +3006,35 @@ class _RibbonEffectsGallery(QFrame):
         self._visible_tiles: int = len(self._effects_data)
         self.set_visible_tiles(len(self._effects_data))
 
+    def _update_more_icon(self, is_dark: bool) -> None:
+        more_pix = QPixmap(10, 10)
+        more_pix.fill(Qt.transparent)
+        mp = QPainter(more_pix)
+        mp.setRenderHint(QPainter.Antialiasing)
+        col = QColor("#94A3B8") if is_dark else QColor("#55687C")
+        mp.setPen(QPen(col, 1.2))
+        mp.drawLine(1, 2, 9, 2)
+        mp.setBrush(col)
+        tri = QPolygonF([QPointF(2, 4.5), QPointF(8, 4.5), QPointF(5, 7.5)])
+        mp.drawPolygon(tri)
+        mp.end()
+        self.btn_more.setIcon(QIcon(more_pix))
+        self.btn_more.setIconSize(QSize(10, 10))
+
     def showEvent(self, event: Any) -> None:
         super().showEvent(event)
         self._ensure_icons_loaded()
 
     def set_dark_mode(self, is_dark: bool) -> None:
         self._is_dark = bool(is_dark)
+        self._update_more_icon(is_dark)
         if is_dark:
             self.setStyleSheet(
                 """
                 QFrame#RibbonEffectsGallery {
                     background: #14171C;
                     border: 1px solid #333A45;
-                    border-radius: 3px;
+                    border-radius: 2px;
                 }
                 QToolTip {
                     background-color: #1E242C;
@@ -2727,11 +3050,10 @@ class _RibbonEffectsGallery(QFrame):
             btn_style = """
                 QPushButton {
                     border: 1px solid #333A45;
-                    border-radius: 1px;
                     background: #20242B;
-                    font-size: 6pt;
                     color: #94A3B8;
-                    padding: 0px;
+                    font-size: 7pt;
+                    padding: 0;
                 }
                 QPushButton:hover {
                     background: #2E3642;
@@ -2767,8 +3089,8 @@ class _RibbonEffectsGallery(QFrame):
                 """
                 QFrame#RibbonEffectsGallery {
                     background: #FFFFFF;
-                    border: 1px solid #C4D5E8;
-                    border-radius: 3px;
+                    border: 1px solid #ABBFD3;
+                    border-radius: 2px;
                 }
                 QToolTip {
                     background-color: #FFFFFF;
@@ -2783,16 +3105,15 @@ class _RibbonEffectsGallery(QFrame):
             )
             btn_style = """
                 QPushButton {
-                    border: 1px solid #C4D5E8;
-                    border-radius: 1px;
-                    background: #F7FAFD;
-                    font-size: 6pt;
-                    color: #5A7A9E;
-                    padding: 0px;
+                    border: 1px solid #D2DFEE;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F6F9FD, stop:1 #E2ECF7);
+                    color: #55687C;
+                    font-size: 7pt;
+                    padding: 0;
                 }
                 QPushButton:hover {
-                    background: #E4F0FC;
-                    border-color: #70A6E8;
+                    background: #CCE4F7;
+                    border-color: #7BAEDB;
                 }
                 QPushButton:disabled {
                     color: #B0C4DE;
@@ -2833,7 +3154,7 @@ class _RibbonEffectsGallery(QFrame):
             if eff_id in ("cool", "bw", "bw_contrast", "warm"):
                 continue
             btn.setIcon(make_effect_preview_icon(eff_id))
-            btn.setIconSize(QSize(46, 64))
+            btn.setIconSize(QSize(53, 64))
 
     def set_visible_tiles(self, count: int) -> None:
         self._visible_tiles = max(1, min(len(self._effects_data), count))
@@ -3008,7 +3329,7 @@ class _RibbonEffectsGallery(QFrame):
             btn = self.buttons.get(eff_id)
             if btn and not pix.isNull():
                 btn.setIcon(QIcon(pix))
-                btn.setIconSize(QSize(46, 64))
+                btn.setIconSize(QSize(53, 64))
 
 
 class _RibbonGroupBox(QFrame):
@@ -4679,10 +5000,11 @@ class _RibbonTabBar(QTabBar):
     """
     Custom QTabBar supporting Fluent UI active tab indicator:
     - In Modern Fluent theme:
-      * Normally (not hovered): indicator line is slightly less wide (centered under tab text).
-      * On mouse over: smoothly expands to full width of tab.
-      * Does not curl up on mouse over (drawn as crisp vector bar).
-      * Sits 2-3 px higher than the bottom edge so it sits slightly above the main start of the ribbon.
+      * Selected heading: thin 2.0px Fluent blue indicator bar (#0F6CBD).
+        - Normally (resting): line is centered under tab text.
+        - On mouse over: smoothly and gradually grows wider (animated ease-out).
+      * Non-selected heading: on mouse over, displays a faint grey line (#CBD5E1) indicating focus (matching Office Word / Microsoft 365 Fluent ribbon).
+      * Sits along the bottom edge of the tab.
     - In Classic Aero / Dark themes:
       * Standard native tab painting without custom indicator.
     """
@@ -4691,19 +5013,49 @@ class _RibbonTabBar(QTabBar):
         super().__init__(parent)
         self.setMouseTracking(True)
         self._hover_tab_idx: int = -1
+        self._hover_progress: float = 0.0
+        self._target_progress: float = 0.0
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(16)
+        self._anim_timer.timeout.connect(self._on_anim_tick)
+
+    def _on_anim_tick(self) -> None:
+        diff = self._target_progress - self._hover_progress
+        if abs(diff) > 0.01:
+            self._hover_progress += diff * 0.18
+            self.update()
+        else:
+            self._hover_progress = self._target_progress
+            self._anim_timer.stop()
+            self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         super().mouseMoveEvent(event)
         idx = self.tabAt(event.pos())
         if idx != self._hover_tab_idx:
             self._hover_tab_idx = idx
+            cur_idx = self.currentIndex()
+            self._target_progress = 1.0 if idx == cur_idx else 0.0
+            if not self._anim_timer.isActive():
+                self._anim_timer.start()
             self.update()
 
     def leaveEvent(self, event: QEvent) -> None:
         super().leaveEvent(event)
         if self._hover_tab_idx != -1:
             self._hover_tab_idx = -1
+            self._target_progress = 0.0
+            if not self._anim_timer.isActive():
+                self._anim_timer.start()
             self.update()
+
+    def setCurrentIndex(self, index: int) -> None:
+        super().setCurrentIndex(index)
+        self._hover_progress = 0.0
+        self._target_progress = 1.0 if self._hover_tab_idx == index else 0.0
+        if not self._anim_timer.isActive():
+            self._anim_timer.start()
+        self.update()
 
     def paintEvent(self, event: QPaintEvent) -> None:
         super().paintEvent(event)
@@ -4718,21 +5070,38 @@ class _RibbonTabBar(QTabBar):
         theme_mode = getattr(parent_ribbon, "_current_theme_mode", "wlpg_aero")
         if theme_mode == "modern":
             cur_idx = self.currentIndex()
-            if cur_idx >= 0:
+            is_dark = getattr(parent_ribbon, "_dark_mode", False)
+
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.setPen(Qt.NoPen)
+
+            # 1. Non-selected hovered headings: faint grey line indicator
+            if 0 <= self._hover_tab_idx < self.count() and self._hover_tab_idx != cur_idx:
+                h_rect = self.tabRect(self._hover_tab_idx)
+                if h_rect.isValid() and not h_rect.isEmpty():
+                    hw = max(18.0, float(h_rect.width() - 28))
+                    hx = h_rect.x() + (h_rect.width() - hw) / 2.0
+                    hy = float(h_rect.bottom() - 3)
+                    grey_color = QColor("#4B5563") if is_dark else QColor("#CBD5E1")
+                    p.setBrush(grey_color)
+                    p.drawRoundedRect(QRectF(hx, hy, hw, 2.0), 1.0, 1.0)
+
+            # 2. Selected active heading: thinner 2.0px blue line with smooth, slower expansion on mouse over
+            if 0 <= cur_idx < self.count():
                 rect = self.tabRect(cur_idx)
                 if rect.isValid() and not rect.isEmpty():
-                    is_hovered = (self._hover_tab_idx == cur_idx) or rect.contains(self.mapFromGlobal(QCursor.pos()))
-                    p = QPainter(self)
-                    p.setRenderHint(QPainter.Antialiasing, True)
-                    # Normally slightly less wide, expanding on hover
-                    w = float(rect.width() - 8) if is_hovered else max(24.0, float(rect.width() - 28))
+                    min_w = max(20.0, float(rect.width() - 32))
+                    max_w = float(rect.width() - 8)
+                    prog = max(0.0, min(1.0, self._hover_progress))
+                    w = min_w + (max_w - min_w) * prog
                     x = rect.x() + (rect.width() - w) / 2.0
-                    # Position 2-3 px higher than bottom of tab
-                    y = float(rect.bottom() - 4)
-                    p.setPen(Qt.NoPen)
-                    p.setBrush(QColor("#0F6CBD"))
-                    p.drawRoundedRect(QRectF(x, y, w, 3.0), 1.5, 1.5)
-                    p.end()
+                    y = float(rect.bottom() - 3)
+                    blue_color = QColor("#60A5FA") if is_dark else QColor("#0F6CBD")
+                    p.setBrush(blue_color)
+                    p.drawRoundedRect(QRectF(x, y, w, 2.0), 1.0, 1.0)
+
+            p.end()
 
 
 class RibbonToolbar(QWidget):
@@ -4757,6 +5126,8 @@ class RibbonToolbar(QWidget):
     flagged_filter_selected = Signal(bool)
     flag_filter_selected = Signal(object)                   # int | None: 1 = flagged, 0 = not flagged, None = all
     edited_filter_selected = Signal(bool)
+    edited_filter_mode_selected = Signal(object)            # int | None: 1 = edited, 0 = not edited, None = all
+    orientation_filter_selected = Signal(str)               # "all" | "landscape" | "portrait"
     media_type_filter_selected = Signal(str)                # "all" | "image" | "video"
     person_boolean_mode_changed = Signal(str)               # "AND" | "OR"
     people_special_filter_selected = Signal(str)            # "all_people" | "detected_untagged" | "untagged"
@@ -4800,7 +5171,7 @@ class RibbonToolbar(QWidget):
         self._responsive_large_buttons: list[QToolButton] = []
         self._responsive_secondary_buttons: list[QToolButton] = []
         self._all_themed_buttons: list[QToolButton] = []
-        self.current_slideshow_theme: str = "pan_and_zoom"
+        self.current_slideshow_theme: str = "static"
         self._slideshow_theme_actions: list[QAction] = []
         icon_provider.signals.theme_changed.connect(self.refresh_icons)
 
@@ -5457,8 +5828,13 @@ class RibbonToolbar(QWidget):
             btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             self._responsive_large_buttons.append(btn)
         else:
-            btn = QToolButton(parent)
-            btn.setObjectName("CompactRibbonToolBtn")
+            if popup_mode == QToolButton.MenuButtonPopup:
+                btn = _RibbonSplitToolButton(parent)
+                btn._theme_mode = getattr(self, "_current_theme_mode", "aero")
+                btn._is_dark = getattr(self, "_dark_mode", False)
+            else:
+                btn = QToolButton(parent)
+                btn.setObjectName("CompactRibbonToolBtn")
             btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
             btn.setIcon(make_wlpg_icon(icon_kind, 16))
             btn.setIconSize(QSize(16, 16))
@@ -5658,13 +6034,17 @@ class RibbonToolbar(QWidget):
         act_manage = menu.addAction(make_wlpg_icon("tag_hierarchy", 16), "Manage tags...")
         act_manage.triggered.connect(lambda: self.action_triggered.emit("show_tag_hierarchy"))
 
-        act_cleanup = menu.addAction(make_wlpg_icon("tag", 16), "Clean up unused tags")
+        menu_cleanup = QMenu("Clean up tags", menu)
+        menu_cleanup.setIcon(make_wlpg_icon("tag", 16))
+        menu.addMenu(menu_cleanup)
+
+        act_cleanup = menu_cleanup.addAction(make_wlpg_icon("tag", 16), "Clean up unused tags")
         act_cleanup.triggered.connect(lambda: self.action_triggered.emit("delete_unused_tags"))
 
-        act_cleanup_orphan = menu.addAction(make_wlpg_icon("tag", 16), "Clean up duplicate root tags...")
+        act_cleanup_orphan = menu_cleanup.addAction(make_wlpg_icon("tag", 16), "Clean up duplicate root tags...")
         act_cleanup_orphan.triggered.connect(lambda: self.action_triggered.emit("merge_orphan_tags"))
 
-        act_restore = menu.addAction(make_wlpg_icon("tag", 16), "Restore last cleaned tags...")
+        act_restore = menu_cleanup.addAction(make_wlpg_icon("tag", 16), "Restore last cleaned tags...")
         act_restore.triggered.connect(lambda: self.action_triggered.emit("restore_orphan_tags"))
 
         return menu
@@ -5673,7 +6053,7 @@ class RibbonToolbar(QWidget):
         self,
         text: str,
         parent: QWidget,
-        height: int = 18,
+        height: int = 21,
         icon_kind: str | None = None,
     ) -> QPushButton:
         btn = QPushButton(text, parent)
@@ -6360,13 +6740,25 @@ class RibbonToolbar(QWidget):
         act_play.triggered.connect(lambda: self.action_triggered.emit("slide_show"))
         menu.addSeparator()
 
-        header = menu.addAction("Slide show themes")
-        header.setEnabled(False)
-        font_bold = QFont("Segoe UI", 9, QFont.Bold)
-        header.setFont(font_bold)
-        menu.addSeparator()
+        header_act = QWidgetAction(menu)
+        header_lbl = QLabel("Slide show themes")
+        header_lbl.setStyleSheet(
+            """
+            QLabel {
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+                font-weight: 600;
+                color: #55687C;
+                padding: 6px 16px 3px 10px;
+                background: transparent;
+            }
+            """
+        )
+        header_act.setDefaultWidget(header_lbl)
+        menu.addAction(header_act)
 
         themes = [
+            ("static", "Static"),
             ("pan_and_zoom", "Pan and Zoom"),
             ("polaroid", "Polaroid"),
             ("cinematic", "Cinematic"),
@@ -6421,6 +6813,42 @@ class RibbonToolbar(QWidget):
         act_flagged.triggered.connect(_on_flagged)
         act_unflagged.triggered.connect(_on_unflagged)
         btn.setMenu(menu)
+
+    def _build_edited_menu(self, btn: QToolButton) -> None:
+        menu = QMenu(btn)
+        menu.setFont(QFont("Segoe UI", 9))
+        act_edited = menu.addAction(make_wlpg_icon("edited", 16), "&Edited")
+        act_not_edited = menu.addAction(make_wlpg_icon("not_edited", 16), "&Not edited")
+
+        def _on_edited():
+            btn.setChecked(True)
+            self._current_edited_filter = 1
+            btn.setToolTip("Filtering: Edited items (click to clear)")
+            self.edited_filter_mode_selected.emit(1)
+            self.edited_filter_selected.emit(True)
+
+        def _on_not_edited():
+            btn.setChecked(True)
+            self._current_edited_filter = 0
+            btn.setToolTip("Filtering: Not edited items (click to clear)")
+            self.edited_filter_mode_selected.emit(0)
+            self.edited_filter_selected.emit(False)
+
+        act_edited.triggered.connect(_on_edited)
+        act_not_edited.triggered.connect(_on_not_edited)
+        btn.setMenu(menu)
+
+    def _on_find_edited_clicked(self, checked: bool) -> None:
+        if checked:
+            self._current_edited_filter = 1
+            self.btn_find_edited.setToolTip("Filtering: Edited items (click to clear)")
+            self.edited_filter_mode_selected.emit(1)
+            self.edited_filter_selected.emit(True)
+        else:
+            self._current_edited_filter = None
+            self.btn_find_edited.setToolTip("Filter by edited items")
+            self.edited_filter_mode_selected.emit(None)
+            self.edited_filter_selected.emit(False)
 
     def minimumSizeHint(self) -> QSize:
         return QSize(350, 88)
@@ -7133,11 +7561,11 @@ class RibbonToolbar(QWidget):
         r_mode_col.setContentsMargins(0, 0, 0, 0)
         r_mode_col.setSpacing(1)
 
-        self.btn_rated_higher = self._make_mode_toggle_btn("and higher", grp_rated, height=19, icon_kind="rated_higher")
+        self.btn_rated_higher = self._make_mode_toggle_btn("and higher", grp_rated, height=21, icon_kind="rated_higher")
         self.btn_rated_higher.setToolTip("Rated this or higher")
-        self.btn_rated_lower = self._make_mode_toggle_btn("and lower", grp_rated, height=19, icon_kind="rated_lower")
+        self.btn_rated_lower = self._make_mode_toggle_btn("and lower", grp_rated, height=21, icon_kind="rated_lower")
         self.btn_rated_lower.setToolTip("Rated this or lower")
-        self.btn_rated_only = self._make_mode_toggle_btn("only", grp_rated, height=19, icon_kind="rated_only")
+        self.btn_rated_only = self._make_mode_toggle_btn("only", grp_rated, height=21, icon_kind="rated_only")
         self.btn_rated_only.setToolTip("Rated this only")
         self.btn_rated_higher.setChecked(True)
 
@@ -7182,14 +7610,27 @@ class RibbonToolbar(QWidget):
         f_col.setContentsMargins(0, 0, 0, 0)
         f_col.setSpacing(2)
 
-        self.btn_find_edited = self._make_btn("Edited", "edited", grp_file, checkable=True)
+        self.btn_find_orientation = self._make_tool_btn("Orientation", "orientation", grp_file, large=False)
+        self.btn_find_orientation.setToolTip("Filter by landscape or portrait orientation")
+        self.btn_find_orientation.setFixedHeight(22)
+        self.btn_find_orientation.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self._build_orientation_menu(self.btn_find_orientation)
+        f_col.addWidget(self.btn_find_orientation)
+
+        self.btn_find_edited = self._make_tool_btn(
+            "Edited", "edited", grp_file, large=False, popup_mode=QToolButton.MenuButtonPopup
+        )
+        self.btn_find_edited.setCheckable(True)
         self.btn_find_edited.setFixedHeight(22)
-        self.btn_find_edited.toggled.connect(self.edited_filter_selected.emit)
+        self.btn_find_edited.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self._build_edited_menu(self.btn_find_edited)
+        self.btn_find_edited.clicked.connect(self._on_find_edited_clicked)
         f_col.addWidget(self.btn_find_edited)
 
         self.btn_find_media_type = self._make_tool_btn("Media type", "media_type", grp_file, large=False)
         self.btn_find_media_type.setToolTip("Filter by photos or videos")
         self.btn_find_media_type.setFixedHeight(22)
+        self.btn_find_media_type.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self._build_media_type_menu(self.btn_find_media_type)
         f_col.addWidget(self.btn_find_media_type)
 
@@ -7197,7 +7638,11 @@ class RibbonToolbar(QWidget):
         grp_file.content_layout.addLayout(f_hbox)
         hbox.addWidget(grp_file)
 
-        self.find_file_edited_media = [self.btn_find_edited, self.btn_find_media_type]
+        self.find_file_edited_media = [
+            self.btn_find_orientation,
+            self.btn_find_edited,
+            self.btn_find_media_type,
+        ]
 
         # ---------------------------------------------------------------------
         # 5. Text search Group (Binoculars button, Ctrl+F)
@@ -7325,6 +7770,57 @@ class RibbonToolbar(QWidget):
         else:
             ratings = (val,)
         self.rating_filter_selected.emit(ratings)
+
+    def _build_orientation_menu(self, btn: QToolButton) -> None:
+        menu = QMenu(btn)
+        menu.setFont(QFont("Segoe UI", 9))
+        grp = QActionGroup(menu)
+        grp.setExclusive(True)
+
+        act_all = menu.addAction("All orientations")
+        act_all.setCheckable(True)
+        act_all.setChecked(True)
+        grp.addAction(act_all)
+
+        act_landscape = menu.addAction("Landscape")
+        act_landscape.setCheckable(True)
+        grp.addAction(act_landscape)
+
+        act_portrait = menu.addAction("Portrait")
+        act_portrait.setCheckable(True)
+        grp.addAction(act_portrait)
+
+        self._orientation_menu_actions = {
+            "all": act_all,
+            "landscape": act_landscape,
+            "portrait": act_portrait,
+        }
+
+        act_all.triggered.connect(lambda: self._on_orientation_filter_selected("all", "All orientations"))
+        act_landscape.triggered.connect(lambda: self._on_orientation_filter_selected("landscape", "Landscape"))
+        act_portrait.triggered.connect(lambda: self._on_orientation_filter_selected("portrait", "Portrait"))
+        btn.setMenu(menu)
+
+    def _on_orientation_filter_selected(self, mode: str, label: str) -> None:
+        self._current_orientation_filter = mode
+        if hasattr(self, "btn_find_orientation"):
+            if mode != "all":
+                self.btn_find_orientation.setToolTip(f"Filtering: {label} photos (click menu to change)")
+            else:
+                self.btn_find_orientation.setToolTip("Filter by landscape or portrait orientation")
+        self.orientation_filter_selected.emit(mode)
+
+    def set_orientation_filter_ui(self, mode: str) -> None:
+        self._current_orientation_filter = mode
+        actions = getattr(self, "_orientation_menu_actions", {})
+        if mode in actions:
+            actions[mode].setChecked(True)
+        if hasattr(self, "btn_find_orientation"):
+            if mode != "all":
+                label = "Landscape" if mode == "landscape" else "Portrait"
+                self.btn_find_orientation.setToolTip(f"Filtering: {label} photos (click menu to change)")
+            else:
+                self.btn_find_orientation.setToolTip("Filter by landscape or portrait orientation")
 
     def _build_media_type_menu(self, btn: QToolButton) -> None:
         menu = QMenu(btn)
@@ -7700,9 +8196,6 @@ class RibbonToolbar(QWidget):
         # ---------------------------------------------------------------------
         grp_panes = _RibbonGroupBox("Panes", page)
         self.grp_panes = grp_panes
-        p_hbox = QHBoxLayout()
-        p_hbox.setContentsMargins(0, 0, 0, 0)
-        p_hbox.setSpacing(3)
 
         self.btn_toggle_nav_pane = self._make_btn(
             "Navigation\npane", "pane_left", grp_panes, large=True, checkable=True
@@ -7713,7 +8206,7 @@ class RibbonToolbar(QWidget):
         self.btn_toggle_nav_pane.clicked.connect(
             lambda: self.action_triggered.emit("toggle_nav_pane")
         )
-        p_hbox.addWidget(self.btn_toggle_nav_pane)
+        grp_panes.content_layout.addWidget(self.btn_toggle_nav_pane)
 
         self.btn_toggle_tag_pane = self._make_btn(
             "Tag and\ncaption pane", "pane_right", grp_panes, large=True, checkable=True
@@ -7723,9 +8216,9 @@ class RibbonToolbar(QWidget):
         self.btn_toggle_tag_pane.clicked.connect(
             lambda: self.action_triggered.emit("toggle_tag_pane")
         )
-        p_hbox.addWidget(self.btn_toggle_tag_pane)
+        grp_panes.content_layout.addWidget(self.btn_toggle_tag_pane)
+        grp_panes.adjust_to_content()
 
-        grp_panes.content_layout.addLayout(p_hbox)
         hbox.addWidget(grp_panes)
 
         # ---------------------------------------------------------------------
@@ -8194,6 +8687,8 @@ class RibbonToolbar(QWidget):
                 self.grp_layout.setVisible(False)
             if hasattr(self, "btn_toggle_nav_pane"):
                 self.btn_toggle_nav_pane.setVisible(False)
+            if hasattr(self, "grp_panes"):
+                self.grp_panes.adjust_to_content()
             if hasattr(self, "slider_zoom"):
                 self.slider_zoom.setVisible(False)
             if hasattr(self, "btn_zoom_actual"):
@@ -8233,6 +8728,8 @@ class RibbonToolbar(QWidget):
                 self.grp_layout.setVisible(True)
             if hasattr(self, "btn_toggle_nav_pane"):
                 self.btn_toggle_nav_pane.setVisible(True)
+            if hasattr(self, "grp_panes"):
+                self.grp_panes.adjust_to_content()
             if hasattr(self, "slider_zoom"):
                 self.slider_zoom.setVisible(False)
             if hasattr(self, "btn_zoom_actual"):
@@ -8612,20 +9109,30 @@ class RibbonToolbar(QWidget):
                 width: 0px;
                 height: 0px;
             }
-            QToolButton::menu-button {
+            QToolButton#CompactRibbonSplitBtn {
+                background: transparent;
+                border: none;
+                padding: 0px;
+            }
+            QToolButton#CompactRibbonSplitBtn::menu-button {
                 border: none;
                 background: transparent;
-                width: 12px;
+                width: 13px;
             }
-            QToolButton::menu-arrow {
-                image: url({arrow_drop_down});
-                width: 7px;
-                height: 4px;
+            QToolButton#CompactRibbonSplitBtn::menu-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
             }
             QToolButton::menu-button {
                 border: none;
+                border-left: 1px solid transparent;
                 background: transparent;
-                width: 12px;
+                width: 14px;
+            }
+            QToolButton::menu-button:hover {
+                border-left: 1px solid #C4D5E8;
+                background: rgba(255, 255, 255, 0.45);
             }
             QToolButton::menu-arrow {
                 image: url({arrow_drop_down});
@@ -8787,6 +9294,18 @@ class RibbonToolbar(QWidget):
             if hasattr(btn, "_is_dark"):
                 btn._is_dark = False
                 btn.update()
+        for btn in getattr(self, "_responsive_secondary_buttons", []):
+            if hasattr(btn, "_is_dark"):
+                btn._is_dark = False
+            if hasattr(btn, "_theme_mode"):
+                btn._theme_mode = "modern"
+            btn.update()
+        for btn in getattr(self, "_responsive_secondary_buttons", []):
+            if hasattr(btn, "_is_dark"):
+                btn._is_dark = False
+            if hasattr(btn, "_theme_mode"):
+                btn._theme_mode = "aero"
+            btn.update()
         self._apply_file_menu_stylesheet(False)
 
     def set_dark_mode(self, is_dark: bool) -> None:
@@ -8796,6 +9315,12 @@ class RibbonToolbar(QWidget):
             if hasattr(btn, "_is_dark"):
                 btn._is_dark = self._dark_mode
                 btn.update()
+        for btn in getattr(self, "_responsive_secondary_buttons", []):
+            if hasattr(btn, "_is_dark"):
+                btn._is_dark = self._dark_mode
+            if hasattr(btn, "_theme_mode"):
+                btn._theme_mode = "dark" if self._dark_mode else "aero"
+            btn.update()
         if not self._dark_mode:
             if getattr(self, "_current_theme_mode", "wlpg_aero") == "modern":
                 self._apply_fluent_stylesheet()
@@ -9030,10 +9555,30 @@ class RibbonToolbar(QWidget):
                 width: 0px;
                 height: 0px;
             }
-            QToolButton::menu-button {
+            QToolButton#CompactRibbonSplitBtn {
+                background: transparent;
+                border: none;
+                padding: 0px;
+            }
+            QToolButton#CompactRibbonSplitBtn::menu-button {
                 border: none;
                 background: transparent;
-                width: 12px;
+                width: 13px;
+            }
+            QToolButton#CompactRibbonSplitBtn::menu-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+            }
+            QToolButton::menu-button {
+                border: none;
+                border-left: 1px solid transparent;
+                background: transparent;
+                width: 14px;
+            }
+            QToolButton::menu-button:hover {
+                border-left: 1px solid #333A45;
+                background: rgba(255, 255, 255, 0.1);
             }
             QToolButton::menu-arrow {
                 image: url({arrow_drop_down});
@@ -9192,6 +9737,10 @@ class RibbonToolbar(QWidget):
             self._apply_fluent_stylesheet()
         else:
             self.set_dark_mode(False)
+        for btn in getattr(self, "_responsive_secondary_buttons", []):
+            if hasattr(btn, "_theme_mode"):
+                btn._theme_mode = theme_name
+            btn.update()
         self.refresh_icons()
         if hasattr(self, "tab_widget") and self.tab_widget.tabBar():
             self.tab_widget.tabBar().update()
@@ -9394,8 +9943,7 @@ class RibbonToolbar(QWidget):
             }
             QPushButton#CompactRibbonBtn,
             QToolButton#CompactRibbonBtn,
-            QToolButton#CompactRibbonToolBtn,
-            QToolButton#RibbonModeToggleBtn {
+            QToolButton#CompactRibbonToolBtn {
                 background: transparent;
                 border: 1px solid transparent;
                 border-radius: 4px;
@@ -9405,9 +9953,21 @@ class RibbonToolbar(QWidget):
                 font-size: 8.5pt;
                 text-align: left;
             }
+            QPushButton#RibbonModeToggleBtn,
+            QToolButton#RibbonModeToggleBtn {
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 3px;
+                padding: 0px 4px 1px 4px;
+                color: #1F2937;
+                font-family: 'Segoe UI';
+                font-size: 8pt;
+                text-align: left;
+            }
             QPushButton#CompactRibbonBtn:hover,
             QToolButton#CompactRibbonBtn:hover,
             QToolButton#CompactRibbonToolBtn:hover,
+            QPushButton#RibbonModeToggleBtn:hover,
             QToolButton#RibbonModeToggleBtn:hover {
                 background: #E5E7EB;
                 border: 1px solid #D1D5DB;
@@ -9416,6 +9976,7 @@ class RibbonToolbar(QWidget):
             QPushButton#CompactRibbonBtn:pressed,
             QToolButton#CompactRibbonBtn:pressed,
             QToolButton#CompactRibbonToolBtn:pressed,
+            QPushButton#RibbonModeToggleBtn:pressed,
             QToolButton#RibbonModeToggleBtn:pressed {
                 background: #D1D5DB;
                 border: 1px solid #9CA3AF;
@@ -9423,14 +9984,17 @@ class RibbonToolbar(QWidget):
             QPushButton#CompactRibbonBtn:checked,
             QToolButton#CompactRibbonBtn:checked,
             QToolButton#CompactRibbonToolBtn:checked,
+            QPushButton#RibbonModeToggleBtn:checked,
             QToolButton#RibbonModeToggleBtn:checked {
                 background: #EFF6FF;
                 border: 1px solid #BFDBFE;
                 color: #0F6CBD;
+                font-weight: 600;
             }
             QPushButton#CompactRibbonBtn:checked:hover,
             QToolButton#CompactRibbonBtn:checked:hover,
             QToolButton#CompactRibbonToolBtn:checked:hover,
+            QPushButton#RibbonModeToggleBtn:checked:hover,
             QToolButton#RibbonModeToggleBtn:checked:hover {
                 background: #DBEAFE;
                 border: 1px solid #93C5FD;
@@ -9438,7 +10002,9 @@ class RibbonToolbar(QWidget):
             }
             QPushButton#CompactRibbonBtn:disabled,
             QToolButton#CompactRibbonBtn:disabled,
-            QToolButton#CompactRibbonToolBtn:disabled {
+            QToolButton#CompactRibbonToolBtn:disabled,
+            QPushButton#RibbonModeToggleBtn:disabled,
+            QToolButton#RibbonModeToggleBtn:disabled {
                 color: #9CA3AF;
             }
             QToolButton#CompactRibbonBtn[has_menu="true"],
@@ -9528,6 +10094,36 @@ class RibbonToolbar(QWidget):
                 width: 0px;
                 height: 0px;
             }
+            QToolButton#CompactRibbonSplitBtn {
+                background: transparent;
+                border: none;
+                padding: 0px;
+            }
+            QToolButton#CompactRibbonSplitBtn::menu-button {
+                border: none;
+                background: transparent;
+                width: 13px;
+            }
+            QToolButton#CompactRibbonSplitBtn::menu-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+            }
+            QToolButton::menu-button {
+                border: none;
+                border-left: 1px solid transparent;
+                background: transparent;
+                width: 14px;
+            }
+            QToolButton::menu-button:hover {
+                border-left: 1px solid #D1D5DB;
+                background: #E5E7EB;
+            }
+            QToolButton::menu-arrow {
+                image: url({arrow_drop_down});
+                width: 7px;
+                height: 4px;
+            }
             QToolButton#QATCircleBtn,
             QToolButton#QATBtn {
                 background: transparent;
@@ -9573,6 +10169,12 @@ class RibbonToolbar(QWidget):
             if hasattr(btn, "_is_dark"):
                 btn._is_dark = False
                 btn.update()
+        for btn in getattr(self, "_responsive_secondary_buttons", []):
+            if hasattr(btn, "_is_dark"):
+                btn._is_dark = False
+            if hasattr(btn, "_theme_mode"):
+                btn._theme_mode = "modern"
+            btn.update()
         self._apply_file_menu_stylesheet(False)
 
 

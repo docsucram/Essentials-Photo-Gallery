@@ -20,7 +20,7 @@ from src.core.gazetteer_data import BUILTIN_PLACES
 
 logger = logging.getLogger(__name__)
 
-# Try importing reverse_geocoder and scipy
+# Try importing reverse_geocoder and numpy (zero SciPy dependency)
 _HAS_REVERSE_GEOCODER = False
 try:
     import reverse_geocoder as _rg  # type: ignore
@@ -28,14 +28,26 @@ try:
 except Exception:
     _rg = None
 
-_HAS_SCIPY = False
+_HAS_NUMPY = False
 try:
     import numpy as np
-    from scipy.spatial import cKDTree
-    _HAS_SCIPY = True
+    _HAS_NUMPY = True
 except Exception:
-    np = None
-    cKDTree = None
+    np = None  # type: ignore
+
+
+class _NumPyCoordTree:
+    """Lightweight vectorized NumPy nearest-neighbor index replacing scipy.spatial.cKDTree."""
+
+    def __init__(self, coords: Any) -> None:
+        self.coords = np.asarray(coords, dtype=np.float64)
+
+    def query(self, pt: Sequence[float], k: int = 1) -> tuple[float, int]:
+        d_lat = self.coords[:, 0] - float(pt[0])
+        d_lon = self.coords[:, 1] - float(pt[1])
+        dist_sq = d_lat * d_lat + d_lon * d_lon
+        idx = int(np.argmin(dist_sq))
+        return float(math.sqrt(float(dist_sq[idx]))), idx
 
 
 def _normalize_admin(
@@ -161,9 +173,9 @@ def _ensure_kdtree() -> tuple[Any, list[PlaceRecord]]:
         return _KDTREE_INSTANCE, _KDTREE_RECORDS
 
     _KDTREE_RECORDS = list(_BUILTIN_RECORDS)
-    if _HAS_SCIPY:
+    if _HAS_NUMPY and np is not None:
         coords = np.array([[p.lat, p.lon] for p in _KDTREE_RECORDS], dtype=np.float64)
-        _KDTREE_INSTANCE = cKDTree(coords)
+        _KDTREE_INSTANCE = _NumPyCoordTree(coords)
     return _KDTREE_INSTANCE, _KDTREE_RECORDS
 
 
@@ -484,9 +496,9 @@ def reverse_geocode(
         except Exception:
             pass
 
-    # 3. Fast KDTree nearest neighbor on built-in places
+    # 3. Fast vectorized NumPy nearest neighbor on built-in places
     tree, records = _ensure_kdtree()
-    if tree is not None and _HAS_SCIPY:
+    if tree is not None and _HAS_NUMPY:
         dist, idx = tree.query([f_lat, f_lon], k=1)
         if 0 <= idx < len(records):
             nearest = records[idx]
