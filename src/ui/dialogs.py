@@ -1555,7 +1555,7 @@ class AboutDialog(QDialog):
         lbl_title.setStyleSheet("font-family: 'Segoe UI', sans-serif; font-size: 13pt; font-weight: bold; color: #1E395B;")
         info_vbox.addWidget(lbl_title)
 
-        lbl_ver = QLabel("Version 0.10.0 (64-bit)", self)
+        lbl_ver = QLabel("Version 0.11.0 (64-bit)", self)
         lbl_ver.setStyleSheet("font-family: 'Segoe UI', sans-serif; font-size: 8.5pt; color: #55687D;")
         info_vbox.addWidget(lbl_ver)
 

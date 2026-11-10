@@ -1390,7 +1390,7 @@ class FolderSyncWorker(QRunnable):
                     from src.utils.scan_logger import log_scan_error
                     log_scan_error("FolderSyncWorker", fpath, exc)
                     meta = {
-                        "date_taken": mtime_int,
+                        "date_taken": None,
                         "rating": 0,
                         "width": None,
                         "height": None,

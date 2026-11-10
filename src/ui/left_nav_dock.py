@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
 
 from legacy_reference.imgBrowserv13 import FavouritesMenu
 from src.db.repository import ArrangeMode, CatalogRepository, FilterQuerySpec
+from src.ui import icon_provider
 from src.ui.dialogs import TagMergeConfirmDialog
 from src.ui.ribbon_toolbar import make_person_avatar_pixmap, make_wlpg_icon
 
@@ -64,6 +65,7 @@ _NODE_PAYLOAD_ROLE = Qt.UserRole + 11
 _TAG_FILTER_STATE_ROLE = Qt.UserRole + 12  # "neutral" | "include" | "exclude"
 _OLD_NAME_ROLE = Qt.UserRole + 13
 _OLD_PATH_ROLE = Qt.UserRole + 14
+_HAS_AVATAR_ROLE = Qt.UserRole + 15
 
 
 class _LeftNavTree(QTreeWidget):
@@ -87,25 +89,45 @@ class _LeftNavTree(QTreeWidget):
         # Non-interfering child badge inside viewport (never steals WindowFromPoint during Windows OLE DoDragDrop)
         self._drag_badge = QLabel(self.viewport())
         self._drag_badge.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self._drag_badge.setStyleSheet(
-            """
-            QLabel {
-                background-color: #FFFFFF;
-                border: 1px solid #A0B8D0;
-                border-radius: 2px;
-                color: #003399;
-                font-family: 'Segoe UI';
-                font-size: 8.5pt;
-                padding: 1px 6px;
-            }
-            """
-        )
+        self._apply_drag_badge_style(False)
         self._drag_badge.hide()
 
         self._drag_expand_timer = QTimer(self)
         self._drag_expand_timer.setSingleShot(True)
         self._drag_expand_timer.setInterval(450)
         self._drag_expand_timer.timeout.connect(self._on_drag_expand_timeout)
+
+    def _apply_drag_badge_style(self, is_dark: bool = False) -> None:
+        if is_dark:
+            self._drag_badge.setStyleSheet(
+                """
+                QLabel {
+                    background-color: #1E293B;
+                    border: 1px solid #3B82F6;
+                    border-radius: 3px;
+                    color: #F8FAFC;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                    font-weight: 600;
+                    padding: 2px 8px;
+                }
+                """
+            )
+        else:
+            self._drag_badge.setStyleSheet(
+                """
+                QLabel {
+                    background-color: #FFFFFF;
+                    border: 1px solid #0078D7;
+                    border-radius: 3px;
+                    color: #003399;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                    font-weight: 600;
+                    padding: 2px 8px;
+                }
+                """
+            )
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:
@@ -268,11 +290,6 @@ class _LeftNavTree(QTreeWidget):
             if target_item is not None and self._is_valid_tag_drop_target(target_item, source_tag_id):
                 if self._drop_hover_item is not target_item:
                     self._drop_hover_item = target_item
-                    prev_block = self.blockSignals(True)
-                    try:
-                        self.setCurrentItem(target_item)
-                    finally:
-                        self.blockSignals(prev_block)
                     self.viewport().update()
                     if target_item.childCount() > 0 and not target_item.isExpanded():
                         self._drag_expand_timer.start()
@@ -288,12 +305,12 @@ class _LeftNavTree(QTreeWidget):
                 self._drag_badge.setText(f"➔ Move to {target_name}")
                 self._drag_badge.adjustSize()
                 bx = min(
-                    max(4, pos.x() + 14),
-                    max(4, self.viewport().width() - self._drag_badge.width() - 4),
+                    max(6, pos.x() + 10),
+                    max(6, self.viewport().width() - self._drag_badge.width() - 4),
                 )
-                by = max(2, pos.y() + 16)
+                by = max(2, pos.y() + 18)
                 if by + self._drag_badge.height() > self.viewport().height() - 2:
-                    by = max(2, pos.y() - self._drag_badge.height() - 6)
+                    by = max(2, pos.y() - self._drag_badge.height() - 22)
                 self._drag_badge.move(bx, by)
                 self._drag_badge.show()
                 self._drag_badge.raise_()
@@ -314,11 +331,6 @@ class _LeftNavTree(QTreeWidget):
             if item is not None:
                 if self._drop_hover_item is not item:
                     self._drop_hover_item = item
-                    prev_block = self.blockSignals(True)
-                    try:
-                        self.setCurrentItem(item)
-                    finally:
-                        self.blockSignals(prev_block)
                     self.viewport().update()
                     if item.childCount() > 0 and not item.isExpanded():
                         self._drag_expand_timer.start()
@@ -331,12 +343,12 @@ class _LeftNavTree(QTreeWidget):
                 self._drag_badge.setText(f"➔ {verb} to {folder_name}")
                 self._drag_badge.adjustSize()
                 bx = min(
-                    max(4, pos.x() + 14),
-                    max(4, self.viewport().width() - self._drag_badge.width() - 4),
+                    max(6, pos.x() + 10),
+                    max(6, self.viewport().width() - self._drag_badge.width() - 4),
                 )
-                by = max(2, pos.y() + 16)
+                by = max(2, pos.y() + 18)
                 if by + self._drag_badge.height() > self.viewport().height() - 2:
-                    by = max(2, pos.y() - self._drag_badge.height() - 6)
+                    by = max(2, pos.y() - self._drag_badge.height() - 80)
                 self._drag_badge.move(bx, by)
                 self._drag_badge.show()
                 self._drag_badge.raise_()
@@ -382,8 +394,8 @@ class _LeftNavTree(QTreeWidget):
                 return
 
         if event.mimeData().hasUrls() and target_item is not None and target_item.data(0, _NODE_TYPE_ROLE) == "folder":
-            fid = item.data(0, _NODE_PAYLOAD_ROLE)
-            fpath = item.data(0, _OLD_PATH_ROLE) or item.toolTip(0)
+            fid = target_item.data(0, _NODE_PAYLOAD_ROLE)
+            fpath = target_item.data(0, _OLD_PATH_ROLE) or target_item.toolTip(0)
             file_paths = [
                 url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()
             ]
@@ -517,6 +529,8 @@ class LeftNavigationDock(QDockWidget):
         self._tag_items: dict[int, QTreeWidgetItem] = {}
         self._person_items: dict[int, QTreeWidgetItem] = {}
         self._rating_items: dict[int, QTreeWidgetItem] = {}
+        self._person_avatar_icon_cache: dict[tuple[int, int], QIcon] = {}
+        self._current_theme_mode: str = "wlpg_aero"
         self._updating_tree: bool = False
         self._checkbox_just_changed: bool = False
 
@@ -566,9 +580,62 @@ class LeftNavigationDock(QDockWidget):
         self.setWidget(container)
         self._apply_stylesheet()
         self._init_root_sections()
+        icon_provider.signals.theme_changed.connect(self._on_icon_theme_changed)
 
     def sizeHint(self) -> QSize:
         return QSize(230, 600)
+
+    def _on_icon_theme_changed(self, _theme_name: str = "") -> None:
+        self.refresh_icons()
+
+    def apply_theme_mode(self, theme_name: str) -> None:
+        self._current_theme_mode = str(theme_name)
+        is_dark = theme_name == "dark"
+        self._dark_mode = is_dark
+        self._is_dark = is_dark
+        if is_dark:
+            self.set_dark_mode(True)
+        elif theme_name == "modern":
+            self.setStyleSheet(
+                """
+                QFrame#LeftNavContainer {
+                    background: #FAFAFA;
+                    border-right: 1px solid #E5E7EB;
+                }
+                QTreeWidget#LeftNavTree {
+                    background: #FAFAFA;
+                    border: none;
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                    color: #1F2937;
+                    outline: none;
+                }
+                QTreeWidget#LeftNavTree::item {
+                    padding: 2px 4px;
+                    border: 1px solid transparent;
+                    border-radius: 3px;
+                    color: #1F2937;
+                }
+                QTreeWidget#LeftNavTree::item:hover {
+                    background: #EFF6FF;
+                    border: 1px solid #BFDBFE;
+                }
+                QTreeWidget#LeftNavTree::item:selected {
+                    background: #DBEAFE;
+                    border: 1px solid #60A5FA;
+                    color: #1E3A8A;
+                }
+                QFrame#LeftNavFooter {
+                    background: #F3F4F6;
+                    border-top: 1px solid #E5E7EB;
+                }
+                """
+            )
+            self.tree._apply_drag_badge_style(False)
+            self._sync_tree_item_colors()
+        else:
+            self.set_dark_mode(False)
+        self.refresh_icons()
 
     def _apply_stylesheet(self) -> None:
         self.setStyleSheet(
@@ -652,6 +719,8 @@ class LeftNavigationDock(QDockWidget):
                 }
                 """
             )
+        if hasattr(self, "tree") and hasattr(self.tree, "_apply_drag_badge_style"):
+            self.tree._apply_drag_badge_style(self._dark_mode)
         self._sync_tree_item_colors()
 
     def _sync_tree_item_colors(self) -> None:
@@ -662,6 +731,83 @@ class LeftNavigationDock(QDockWidget):
             if top is not None:
                 top.setForeground(0, sec_brush)
 
+    def refresh_icons(self) -> None:
+        """Updates all tree item icons in-place when the icon theme changes in Options."""
+        try:
+            if not hasattr(self, "tree") or self.tree is None:
+                return
+            self.tree.blockSignals(True)
+        except RuntimeError:
+            return
+        try:
+            folder_icon = make_wlpg_icon("folder", 16)
+            pic_lib_icon = make_wlpg_icon("pictures_library", 16)
+            vid_lib_icon = make_wlpg_icon("videos_library", 16)
+            cal_icon = make_wlpg_icon("calendar", 16)
+            tag_icon = make_wlpg_icon("tag", 16)
+            person_icon = make_wlpg_icon("person", 16)
+            star_icon = make_wlpg_icon("star_filled", 16)
+            empty_star_icon = make_wlpg_icon("star_empty", 16)
+            places_icon = make_wlpg_icon("geotag", 16)
+
+            if hasattr(self, "root_all") and self.root_all is not None:
+                self.root_all.setIcon(0, make_wlpg_icon("all_media", 16))
+            if hasattr(self, "root_dates") and self.root_dates is not None:
+                self.root_dates.setIcon(0, cal_icon)
+            if hasattr(self, "root_people") and self.root_people is not None:
+                self.root_people.setIcon(0, person_icon)
+            if hasattr(self, "root_tags") and self.root_tags is not None:
+                self.root_tags.setIcon(0, tag_icon)
+            if hasattr(self, "root_ratings") and self.root_ratings is not None:
+                self.root_ratings.setIcon(0, star_icon)
+            if hasattr(self, "root_places") and self.root_places is not None:
+                self.root_places.setIcon(0, places_icon)
+
+            for item in self._folder_items.values():
+                fname_lower = (item.data(0, _OLD_NAME_ROLE) or item.text(0) or "").lower()
+                if "picture" in fname_lower:
+                    item.setIcon(0, pic_lib_icon)
+                elif "video" in fname_lower:
+                    item.setIcon(0, vid_lib_icon)
+                else:
+                    item.setIcon(0, folder_icon)
+
+            def _update_recursive_icons(parent_item: QTreeWidgetItem, icn: QIcon) -> None:
+                for idx in range(parent_item.childCount()):
+                    ch = parent_item.child(idx)
+                    if ch is not None:
+                        ch.setIcon(0, icn)
+                        _update_recursive_icons(ch, icn)
+
+            if hasattr(self, "root_dates") and self.root_dates is not None:
+                _update_recursive_icons(self.root_dates, cal_icon)
+
+            if hasattr(self, "item_untagged") and self.item_untagged is not None:
+                self.item_untagged.setIcon(0, tag_icon)
+            for item in self._tag_items.values():
+                item.setIcon(0, tag_icon)
+
+            for item in self._person_items.values():
+                if not item.data(0, _HAS_AVATAR_ROLE):
+                    item.setIcon(0, person_icon)
+
+            for r_val, item in self._rating_items.items():
+                item.setIcon(0, star_icon if r_val > 0 else empty_star_icon)
+
+            if hasattr(self, "root_places") and self.root_places is not None:
+                _update_recursive_icons(self.root_places, places_icon)
+        except RuntimeError:
+            return
+        finally:
+            try:
+                self.tree.blockSignals(False)
+            except RuntimeError:
+                return
+        try:
+            self.tree.viewport().update()
+        except RuntimeError:
+            pass
+
     def _init_root_sections(self) -> None:
         self.tree.blockSignals(True)
         try:
@@ -670,6 +816,7 @@ class LeftNavigationDock(QDockWidget):
             self._tag_items.clear()
             self._person_items.clear()
             self._rating_items.clear()
+            self.item_untagged = None
 
             sec_font = QFont("Segoe UI", 9, QFont.Bold)
             section_color = QBrush(QColor("#1E395B"))
@@ -924,8 +1071,14 @@ class LeftNavigationDock(QDockWidget):
                 p_item = QTreeWidgetItem([f"{pname} ({cnt})" if cnt > 0 else pname])
                 p_item.setData(0, _NODE_TYPE_ROLE, "person")
                 p_item.setData(0, _NODE_PAYLOAD_ROLE, pid)
+                p_item.setData(0, _HAS_AVATAR_ROLE, bool(blob))
                 if blob:
-                    p_item.setIcon(0, QIcon(make_person_avatar_pixmap(pname, blob, 18)))
+                    cache_key = (pid, len(blob))
+                    av_icon = self._person_avatar_icon_cache.get(cache_key)
+                    if av_icon is None:
+                        av_icon = QIcon(make_person_avatar_pixmap(pname, blob, 18))
+                        self._person_avatar_icon_cache[cache_key] = av_icon
+                    p_item.setIcon(0, av_icon)
                 else:
                     p_item.setIcon(0, person_icon)
                 if pid in self._person_ids:
@@ -1021,6 +1174,7 @@ class LeftNavigationDock(QDockWidget):
             self.root_people.setExpanded(was_people_expanded)
             if getattr(self, "_dark_mode", False):
                 self._sync_tree_item_colors()
+            self._sync_tree_selection()
         finally:
             self.tree.blockSignals(False)
             self._updating_tree = False
@@ -1048,8 +1202,14 @@ class LeftNavigationDock(QDockWidget):
                 p_item = QTreeWidgetItem([f"{pname} ({cnt})" if cnt > 0 else pname])
                 p_item.setData(0, _NODE_TYPE_ROLE, "person")
                 p_item.setData(0, _NODE_PAYLOAD_ROLE, pid)
+                p_item.setData(0, _HAS_AVATAR_ROLE, bool(blob))
                 if blob:
-                    p_item.setIcon(0, QIcon(make_person_avatar_pixmap(pname, blob, 18)))
+                    cache_key = (pid, len(blob))
+                    av_icon = self._person_avatar_icon_cache.get(cache_key)
+                    if av_icon is None:
+                        av_icon = QIcon(make_person_avatar_pixmap(pname, blob, 18))
+                        self._person_avatar_icon_cache[cache_key] = av_icon
+                    p_item.setIcon(0, av_icon)
                 else:
                     p_item.setIcon(0, person_icon)
                 if pid in self._person_ids:
@@ -1091,6 +1251,95 @@ class LeftNavigationDock(QDockWidget):
             item.setText(0, base_text)
 
     # -------------------------------------------------------------------------
+    # Visual Selection Synchronization
+    # -------------------------------------------------------------------------
+    def _sync_tree_selection(self) -> None:
+        """Synchronizes tree node visual selection (.setSelected) with internal filter state."""
+        prev_block = self.tree.blockSignals(True)
+        try:
+            self.tree.clearSelection()
+
+            # 1. Folders
+            has_folder = False
+            if self._folder_id is not None and self._folder_id in self._folder_items:
+                f_item = self._folder_items[self._folder_id]
+                self._folder_name = f_item.text(0)
+                f_item.setSelected(True)
+                self.tree.setCurrentItem(f_item)
+                p = f_item.parent()
+                while p:
+                    p.setExpanded(True)
+                    p = p.parent()
+                self.tree.scrollToItem(f_item)
+                has_folder = True
+
+            # 2. Dates
+            has_date = False
+            if not has_folder and self._date_year is not None and hasattr(self, "root_dates") and self.root_dates is not None:
+                target_payload = (self._date_year, self._date_month, self._date_day)
+
+                def find_date_item(parent_item: QTreeWidgetItem) -> QTreeWidgetItem | None:
+                    for i in range(parent_item.childCount()):
+                        child = parent_item.child(i)
+                        if child is not None:
+                            if child.data(0, _NODE_PAYLOAD_ROLE) == target_payload:
+                                return child
+                            found = find_date_item(child)
+                            if found is not None:
+                                return found
+                    return None
+
+                matched = find_date_item(self.root_dates)
+                if matched is not None:
+                    matched.setSelected(True)
+                    self.tree.setCurrentItem(matched)
+                    p = matched.parent()
+                    while p:
+                        p.setExpanded(True)
+                        p = p.parent()
+                    self.tree.scrollToItem(matched)
+                    has_date = True
+
+            # 3. Tags
+            for tid, t_item in self._tag_items.items():
+                if tid in self._include_tag_ids:
+                    t_item.setSelected(True)
+                    self._apply_tag_item_visual_state(t_item, "include")
+                elif tid in self._exclude_tag_ids:
+                    self._apply_tag_item_visual_state(t_item, "exclude")
+                else:
+                    self._apply_tag_item_visual_state(t_item, "neutral")
+
+            # 4. Untagged
+            if hasattr(self, "item_untagged") and self.item_untagged is not None:
+                self.item_untagged.setSelected(self._untagged_only)
+
+            # 5. People
+            for pid, p_item in self._person_items.items():
+                p_item.setSelected(pid in self._person_ids)
+
+            # 6. Ratings
+            for r_val, r_item in self._rating_items.items():
+                r_item.setCheckState(0, Qt.Checked if r_val in self._ratings else Qt.Unchecked)
+
+            # 7. All photos and videos (highlighted whenever no specific facet filter is active)
+            is_all_media = (
+                not has_folder
+                and not has_date
+                and not self._include_tag_ids
+                and not self._exclude_tag_ids
+                and not self._untagged_only
+                and not self._person_ids
+                and not self._ratings
+            )
+            if hasattr(self, "root_all") and self.root_all is not None:
+                self.root_all.setSelected(is_all_media)
+                if is_all_media:
+                    self.tree.setCurrentItem(self.root_all)
+        finally:
+            self.tree.blockSignals(prev_block)
+
+    # -------------------------------------------------------------------------
     # User Interaction Slots
     # -------------------------------------------------------------------------
     def _on_subfolders_toggled(self, checked: bool) -> None:
@@ -1110,6 +1359,7 @@ class LeftNavigationDock(QDockWidget):
             return
         selected = self.tree.selectedItems()
         if not selected:
+            self._sync_tree_selection()
             return
 
         tag_ids: set[int] = set()
@@ -1135,6 +1385,11 @@ class LeftNavigationDock(QDockWidget):
             elif ntype == "all_media":
                 all_media = True
 
+        if all_media and (folder_tuple is not None or date_tuple is not None or tag_ids or person_ids or untagged_sel):
+            all_media = False
+            if hasattr(self, "root_all") and self.root_all is not None:
+                self.root_all.setSelected(False)
+
         if all_media:
             self.clear_all_filters()
             return
@@ -1142,6 +1397,8 @@ class LeftNavigationDock(QDockWidget):
         changed = False
         ctrl_held = bool(QGuiApplication.keyboardModifiers() & Qt.ControlModifier)
         if folder_tuple is not None:
+            if hasattr(self, "root_all") and self.root_all is not None and self.root_all.isSelected():
+                self.root_all.setSelected(False)
             if self._folder_id != folder_tuple[0]:
                 self._folder_id, self._folder_name = folder_tuple
                 changed = True
@@ -1151,12 +1408,16 @@ class LeftNavigationDock(QDockWidget):
                 self._date_day = None
                 changed = True
         elif not ctrl_held and date_tuple is not None:
+            if hasattr(self, "root_all") and self.root_all is not None and self.root_all.isSelected():
+                self.root_all.setSelected(False)
             if self._folder_id is not None:
                 self._folder_id = None
                 self._folder_name = "All folders"
                 changed = True
 
         if date_tuple is not None:
+            if hasattr(self, "root_all") and self.root_all is not None and self.root_all.isSelected():
+                self.root_all.setSelected(False)
             y, m, d = date_tuple
             if (self._date_year, self._date_month, self._date_day) != (y, m, d):
                 self._date_year, self._date_month, self._date_day = y, m, d
@@ -1171,6 +1432,10 @@ class LeftNavigationDock(QDockWidget):
         if self._person_ids != person_ids:
             self._person_ids = person_ids
             changed = True
+
+        if tag_ids or person_ids or untagged_sel:
+            if hasattr(self, "root_all") and self.root_all is not None and self.root_all.isSelected():
+                self.root_all.setSelected(False)
 
         if changed:
             self._update_summary_label()
@@ -1194,6 +1459,7 @@ class LeftNavigationDock(QDockWidget):
             self._folder_id = None
             self._folder_name = "All folders"
             item.setExpanded(True)
+            self._sync_tree_selection()
             self._update_summary_label()
             self.filter_changed.emit()
             return
@@ -1201,6 +1467,7 @@ class LeftNavigationDock(QDockWidget):
             self._date_year = None
             self._date_month = None
             self._date_day = None
+            self._sync_tree_selection()
             self._update_summary_label()
             self.filter_changed.emit()
             return
@@ -1235,6 +1502,8 @@ class LeftNavigationDock(QDockWidget):
         if ntype == "folder":
             self._folder_id = int(payload)
             self._folder_name = item.text(0)
+            if hasattr(self, "root_all") and self.root_all is not None:
+                self.root_all.setSelected(False)
             if item.childCount() > 0:
                 item.setExpanded(True)
             self._update_summary_label()
@@ -1242,6 +1511,8 @@ class LeftNavigationDock(QDockWidget):
             return
         if ntype == "date" and isinstance(payload, tuple):
             self._date_year, self._date_month, self._date_day = payload
+            if hasattr(self, "root_all") and self.root_all is not None:
+                self.root_all.setSelected(False)
             self._update_summary_label()
             self.filter_changed.emit()
             return
@@ -1738,7 +2009,6 @@ class LeftNavigationDock(QDockWidget):
         self._folder_id = folder_id
         if folder_id is not None and folder_id in self._folder_items:
             self._folder_name = self._folder_items[folder_id].text(0)
-            self.tree.setCurrentItem(self._folder_items[folder_id])
         else:
             self._folder_name = "All folders"
         if include_subfolders is not None:
@@ -1746,6 +2016,7 @@ class LeftNavigationDock(QDockWidget):
             self.chk_subfolders.blockSignals(True)
             self.chk_subfolders.setChecked(self._include_subfolders)
             self.chk_subfolders.blockSignals(False)
+        self._sync_tree_selection()
         self._update_summary_label()
         self.filter_changed.emit()
 
@@ -1753,9 +2024,7 @@ class LeftNavigationDock(QDockWidget):
         """Removes the folder filter, searching all folders while keeping all other filters intact."""
         self._folder_id = None
         self._folder_name = "All folders"
-        curr = self.tree.currentItem()
-        if curr and any(curr is item for item in self._folder_items.values()):
-            self.tree.setCurrentItem(None)
+        self._sync_tree_selection()
         self._update_summary_label()
         self.filter_changed.emit()
 
@@ -1774,6 +2043,7 @@ class LeftNavigationDock(QDockWidget):
         self._date_year = year
         self._date_month = month
         self._date_day = day
+        self._sync_tree_selection()
         self._update_summary_label()
         self.filter_changed.emit()
 
@@ -1932,16 +2202,7 @@ class LeftNavigationDock(QDockWidget):
             self._media_type = "all"
             self._orientation_filter = "all"
 
-            self.tree.clearSelection()
-            if hasattr(self, "item_untagged"):
-                self.item_untagged.setSelected(False)
-            for t_item in self._tag_items.values():
-                t_item.setSelected(False)
-                self._apply_tag_item_visual_state(t_item, "neutral")
-            for p_item in self._person_items.values():
-                p_item.setSelected(False)
-            for r_item in self._rating_items.values():
-                r_item.setCheckState(0, Qt.Unchecked)
+            self._sync_tree_selection()
         finally:
             self._updating_tree = False
         self._update_summary_label()
@@ -2033,45 +2294,13 @@ class LeftNavigationDock(QDockWidget):
 
         self._updating_tree = True
         try:
-            # Update folder selection
-            if self._folder_id is not None and self._folder_id in self._folder_items:
-                f_item = self._folder_items[self._folder_id]
-                self._folder_name = f_item.text(0)
-                self.tree.setCurrentItem(f_item)
-                # Ensure parent folders are expanded
-                p = f_item.parent()
-                while p:
-                    p.setExpanded(True)
-                    p = p.parent()
-            else:
-                self._folder_name = "All folders"
-                if hasattr(self, "root_folders"):
-                    self.tree.setCurrentItem(self.root_folders)
+            self._sync_tree_selection()
 
             # Update subfolders checkbox
             if hasattr(self, "chk_subfolders"):
                 self.chk_subfolders.blockSignals(True)
                 self.chk_subfolders.setChecked(self._include_subfolders)
                 self.chk_subfolders.blockSignals(False)
-
-            # Update tag checkboxes/visual states
-            if hasattr(self, "item_untagged"):
-                self.item_untagged.setSelected(self._untagged_only)
-            for tid, t_item in self._tag_items.items():
-                if tid in self._include_tag_ids:
-                    self._apply_tag_item_visual_state(t_item, "include")
-                elif tid in self._exclude_tag_ids:
-                    self._apply_tag_item_visual_state(t_item, "exclude")
-                else:
-                    self._apply_tag_item_visual_state(t_item, "neutral")
-
-            # Update person items
-            for pid, p_item in self._person_items.items():
-                p_item.setSelected(pid in self._person_ids)
-
-            # Update rating items
-            for r_val, r_item in self._rating_items.items():
-                r_item.setCheckState(0, Qt.Checked if r_val in self._ratings else Qt.Unchecked)
         finally:
             self._updating_tree = False
 

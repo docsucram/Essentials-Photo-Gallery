@@ -742,11 +742,30 @@ class DepthAndMatteEngine:
         if models_dir is not None:
             self.search_dirs.append(Path(models_dir))
 
-        # Local workspace models/
+        # 1. Bundled models/ (PyInstaller sys._MEIPASS / models, or repo / models)
+        try:
+            from src.utils.paths import get_bundle_dir
+            bundle_models = get_bundle_dir() / "models"
+            if bundle_models not in self.search_dirs:
+                self.search_dirs.append(bundle_models)
+        except Exception:
+            pass
+
+        # 2. User AppData models/ (%LOCALAPPDATA%/PhotoGallery/models)
+        try:
+            from src.utils.paths import get_app_data_dir
+            app_data_models = get_app_data_dir() / "models"
+            if app_data_models not in self.search_dirs:
+                self.search_dirs.append(app_data_models)
+        except Exception:
+            pass
+
+        # 3. Local workspace models/
         self.search_dirs.append(Path("models").resolve())
         # AppData models/
         local_app_data = os.environ.get("LOCALAPPDATA")
         if local_app_data:
+            self.search_dirs.append(Path(local_app_data) / "PhotoGallery" / "models")
             self.search_dirs.append(Path(local_app_data) / "WindowsMediaGallery" / "models")
         # Relative to project root
         project_root = Path(__file__).resolve().parent.parent.parent
@@ -836,7 +855,13 @@ class DepthAndMatteEngine:
                 "rmbg-1.4.onnx",
             ])
             if not matte_path and download_if_missing:
-                target_dest = (self.search_dirs[0] if self.search_dirs else Path("models").resolve()) / "u2netp.onnx"
+                try:
+                    from src.utils.paths import get_app_data_dir
+                    target_dir = get_app_data_dir() / "models"
+                except Exception:
+                    target_dir = Path("models").resolve()
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target_dest = target_dir / "u2netp.onnx"
                 if not target_dest.is_file():
                     _download_u2netp_model(target_dest, timeout=5.0)
                 if target_dest.is_file():
@@ -1654,9 +1679,29 @@ class LaMaInpaintEngine:
         self.search_dirs: list[Path] = []
         if models_dir is not None:
             self.search_dirs.append(Path(models_dir))
+
+        # 1. Bundled models/ (PyInstaller sys._MEIPASS / models, or repo / models)
+        try:
+            from src.utils.paths import get_bundle_dir
+            bundle_models = get_bundle_dir() / "models"
+            if bundle_models not in self.search_dirs:
+                self.search_dirs.append(bundle_models)
+        except Exception:
+            pass
+
+        # 2. User AppData models/ (%LOCALAPPDATA%/PhotoGallery/models)
+        try:
+            from src.utils.paths import get_app_data_dir
+            app_data_models = get_app_data_dir() / "models"
+            if app_data_models not in self.search_dirs:
+                self.search_dirs.append(app_data_models)
+        except Exception:
+            pass
+
         self.search_dirs.append(Path("models").resolve())
         local_app_data = os.environ.get("LOCALAPPDATA")
         if local_app_data:
+            self.search_dirs.append(Path(local_app_data) / "PhotoGallery" / "models")
             self.search_dirs.append(Path(local_app_data) / "WindowsMediaGallery" / "models")
         project_root = Path(__file__).resolve().parent.parent.parent
         self.search_dirs.append(project_root / "models")
@@ -1749,53 +1794,74 @@ class LaMaInpaintEngine:
             except Exception as e:
                 logger.debug("LaMa ONNX inference failed, using multi-scale fallback: %s", e)
 
-        # 2. Multi-Scale Pyramid Structure Propagation + Exemplar Texture Synthesis Fallback
-        roi_bgr = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2BGR)
-        mask_255 = bin_mask * 255
+        # 2. High-Fidelity Frequency Separation + Coherent 2D Spatial Texture Transfer Fallback
+        pts_y, pts_x = np.where(bin_mask > 0)
+        bw = int(np.max(pts_x) - np.min(pts_x)) + 1
+        bh = int(np.max(pts_y) - np.min(pts_y)) + 1
 
-        # Coarse scale (1/4 resolution) Navier-Stokes inpainting for global structure continuation
-        cw, ch = max(16, rw // 4), max(16, rh // 4)
-        small_bgr = cv2.resize(roi_bgr, (cw, ch), interpolation=cv2.INTER_AREA)
-        small_mask = cv2.resize(mask_255, (cw, ch), interpolation=cv2.INTER_NEAREST)
-        coarse_inp = cv2.inpaint(small_bgr, small_mask, inpaintRadius=7, flags=cv2.INPAINT_NS)
+        # 2a. Reconstruct smooth base illumination and color via Telea inpainting directly on unmasked borders
+        inpaint_r = max(3, min(15, int(max(bw, bh) * 0.15)))
+        low_inp = cv2.inpaint(
+            roi_rgb,
+            (bin_mask * 255).astype(np.uint8),
+            inpaintRadius=inpaint_r,
+            flags=cv2.INPAINT_TELEA,
+        )
 
-        # Mid scale (1/2 resolution) guided by coarse structure
-        mw, mh = max(24, rw // 2), max(24, rh // 2)
-        mid_bgr = cv2.resize(roi_bgr, (mw, mh), interpolation=cv2.INTER_AREA)
-        mid_mask = cv2.resize(mask_255, (mw, mh), interpolation=cv2.INTER_NEAREST)
-        coarse_up = cv2.resize(coarse_inp, (mw, mh), interpolation=cv2.INTER_CUBIC)
-        mid_seed = np.where(mid_mask[..., None] > 0, coarse_up, mid_bgr)
-        # Inpaint transition boundary at mid scale
-        mid_edge = cv2.dilate(mid_mask, np.ones((5, 5), np.uint8)) - cv2.erode(mid_mask, np.ones((5, 5), np.uint8))
-        mid_inp = cv2.inpaint(mid_seed, mid_edge, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
+        # 2b. High frequencies (authentic gravel, asphalt grain, skin pores, fabric weave)
+        sigma = max(2.5, min(8.0, float(max(bw, bh)) / 6.0))
+        k = int(2 * round(2 * sigma) + 1)
+        roi_high = roi_rgb.astype(np.float32) - cv2.GaussianBlur(roi_rgb, (k, k), sigma).astype(np.float32)
+        roi_high[bin_mask > 0] = 0.0
 
-        # Full scale Telea + Mid-scale blend
-        fine_inp = cv2.inpaint(roi_bgr, mask_255, inpaintRadius=6, flags=cv2.INPAINT_TELEA)
-        mid_full = cv2.resize(mid_inp, (rw, rh), interpolation=cv2.INTER_CUBIC)
+        # 2c. Donor ring around the erase boundary to harvest authentic surface texture
+        ring_r = max(11, int(max(bw, bh) * 0.45))
+        outer_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ring_r * 2 + 1, ring_r * 2 + 1))
+        donor_ring = (cv2.dilate(bin_mask, outer_k) > 0) & (bin_mask == 0)
 
-        # Distance transform inside mask: use fine Telea near border, coarse-to-mid structure deeper inside
-        dist = cv2.distanceTransform(bin_mask, cv2.DIST_L2, 5)
-        deep_w = np.clip(dist / 12.0, 0.0, 0.75)[..., None]
-        struct_bgr = fine_inp.astype(np.float32) * (1.0 - deep_w) + mid_full.astype(np.float32) * deep_w
+        # 2d. Coherent multi-directional 2D affine donor shifts (preserves pebble, pore, fabric structure)
+        shift_x = max(10, int(bw * 1.15))
+        shift_y = max(10, int(bh * 1.15))
+        shifts = [
+            (0, shift_x), (0, -shift_x), (shift_y, 0), (-shift_y, 0),
+            (shift_y, shift_x), (-shift_y, -shift_x), (shift_y, -shift_x), (-shift_y, shift_x),
+        ]
+        valid_shifts = []
+        for dy, dx in shifts:
+            M = np.float32([[1, 0, dx], [0, 1, dy]])
+            sm = cv2.warpAffine(bin_mask, M, (rw, rh), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            if np.count_nonzero((sm > 0) & (bin_mask > 0)) == 0:
+                sh = cv2.warpAffine(roi_high, M, (rw, rh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+                valid_shifts.append(sh)
 
-        # Synthesize high-frequency surface texture from surrounding valid context ring
-        k_outer = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
-        k_inner = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        ring_mask = (cv2.dilate(bin_mask, k_outer) > 0) & (cv2.dilate(bin_mask, k_inner) == 0)
-        if np.count_nonzero(ring_mask) > 32:
-            blur_ctx = cv2.GaussianBlur(roi_bgr.astype(np.float32), (7, 7), 1.8)
-            hf_detail = roi_bgr.astype(np.float32) - blur_ctx
-            ring_hf = hf_detail[ring_mask]
-            rng = np.random.default_rng(seed=int(rw * 31 + rh * 17))
-            sampled_idx = rng.integers(0, len(ring_hf), size=(rh, rw))
-            synth_tex = ring_hf[sampled_idx]
-            # Smooth texture slightly so it resembles natural sensor/surface grain
-            synth_tex = cv2.GaussianBlur(synth_tex, (3, 3), 0.7)
-            struct_bgr = np.clip(struct_bgr + synth_tex * 0.65, 0.0, 255.0)
+        if valid_shifts:
+            trans_high = np.mean(valid_shifts, axis=0)
+            d_std = float(np.std(roi_high[donor_ring]))
+            t_std = float(np.std(trans_high[bin_mask > 0]))
+            if t_std > 0.05 and d_std > 0.1:
+                trans_high = trans_high * (d_std / t_std)
+        else:
+            # Fallback for large centered objects: tile 2D spatial patches from donor perimeter
+            trans_high = np.zeros_like(roi_high)
+            patch_sz = max(12, min(36, min(rw, rh) // 6))
+            ys, xs = np.where(donor_ring)
+            if len(ys) > 20:
+                rng = np.random.default_rng(seed=int(rw * 31 + rh * 17))
+                step = max(4, patch_sz - 4)
+                for py in range(0, rh, step):
+                    for px in range(0, rw, step):
+                        sub_mask = bin_mask[py:min(rh, py + patch_sz), px:min(rw, px + patch_sz)]
+                        if np.any(sub_mask):
+                            idx = rng.integers(0, len(ys))
+                            sy = max(0, min(rh - patch_sz, ys[idx] - patch_sz // 2))
+                            sx = max(0, min(rw - patch_sz, xs[idx] - patch_sz // 2))
+                            patch = roi_high[sy:sy + patch_sz, sx:sx + patch_sz]
+                            ph, pw = patch.shape[:2]
+                            trans_high[py:py + ph, px:px + pw] = patch
 
-        out_rgb = cv2.cvtColor(struct_bgr.astype(np.uint8), cv2.COLOR_BGR2RGB)
-        feather = cv2.GaussianBlur(bin_mask.astype(np.float32), (9, 9), 2.2)[..., None]
-        final_rgb = roi_rgb.astype(np.float32) * (1.0 - feather) + out_rgb.astype(np.float32) * feather
+        restored = np.clip(low_inp.astype(np.float32) + trans_high, 0.0, 255.0).astype(np.uint8)
+        feather = cv2.GaussianBlur(bin_mask.astype(np.float32), (5, 5), 1.2)[..., None]
+        final_rgb = roi_rgb.astype(np.float32) * (1.0 - feather) + restored.astype(np.float32) * feather
         return np.clip(final_rgb, 0.0, 255.0).astype(np.uint8)
 
 
@@ -1829,7 +1895,7 @@ def inpaint_object_lama(
         return image_rgb.copy()
 
     # Dilate mask slightly to cover anti-aliased object boundary fringes
-    k_dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    k_dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     dilated_mask = cv2.dilate((mask_u8 > 0).astype(np.uint8) * 255, k_dil)
 
     x1, x2 = int(np.min(xs)), int(np.max(xs))

@@ -2094,6 +2094,7 @@ class TagAndCaptionDock(QDockWidget):
     depth_reset_requested = Signal()
     copy_subject_requested = Signal()
     remove_background_requested = Signal()
+    mask_preview_toggled = Signal(bool)                      # live ruby mask overlay
     map_location_selected = Signal(list, str, float, float)  # media_ids, label, lat, lon
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -2953,7 +2954,131 @@ class TagAndCaptionDock(QDockWidget):
         vbox.setContentsMargins(6, 2, 6, 8)
         vbox.setSpacing(6)
 
-        # Group 1: Portrait Bokeh & Focus
+        # -------------------------------------------------------------
+        # Group 1: Subject Mask & Cutout (Foundational mask for Cutout, Bokeh, Light & Haze)
+        # -------------------------------------------------------------
+        grp_cutout = _FineTuneGroup("Subject Mask & Cutout", content)
+
+        # Top row: Primary 1-Click Action Buttons with authentic icons
+        cutout_row = QHBoxLayout()
+        cutout_row.setSpacing(6)
+        cutout_row.setContentsMargins(0, 2, 0, 4)
+
+        btn_style_cutout = """
+            QPushButton {
+                background: #F7FAFD;
+                border: 1px solid #B5D2ED;
+                border-radius: 3px;
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 8pt;
+                font-weight: 600;
+                padding: 3px 6px;
+                text-align: left;
+            }
+            QPushButton:hover {
+                background: #E4F0FC;
+                border-color: #7BA7C9;
+            }
+            QPushButton:pressed {
+                background: #CCE4F7;
+                border-color: #3399FF;
+            }
+        """
+
+        self.btn_copy_subject = QPushButton("Copy Subject", grp_cutout)
+        self.btn_copy_subject.setIcon(make_wlpg_icon("copy_subject", 16))
+        self.btn_copy_subject.setIconSize(QSize(16, 16))
+        self.btn_copy_subject.setFixedHeight(28)
+        self.btn_copy_subject.setCursor(Qt.PointingHandCursor)
+        self.btn_copy_subject.setToolTip(
+            "Extract the foreground subject with a transparent background (RGBA) and copy to clipboard"
+        )
+        self.btn_copy_subject.setStyleSheet(btn_style_cutout)
+        self.btn_copy_subject.clicked.connect(self.copy_subject_requested.emit)
+        cutout_row.addWidget(self.btn_copy_subject, 1)
+
+        self.btn_remove_background = QPushButton("Remove Background", grp_cutout)
+        self.btn_remove_background.setIcon(make_wlpg_icon("remove_background", 16))
+        self.btn_remove_background.setIconSize(QSize(16, 16))
+        self.btn_remove_background.setFixedHeight(28)
+        self.btn_remove_background.setCursor(Qt.PointingHandCursor)
+        self.btn_remove_background.setToolTip(
+            "Remove the background from this photo (save as PNG, WebP, AVIF, or JXL to keep transparency)"
+        )
+        self.btn_remove_background.setStyleSheet(btn_style_cutout)
+        self.btn_remove_background.clicked.connect(self.remove_background_requested.emit)
+        cutout_row.addWidget(self.btn_remove_background, 1)
+
+        grp_cutout.vbox.addLayout(cutout_row)
+
+        # Boundary Shift & Feather Controls (affects subject cutout, bokeh, light & haze)
+        self.dl_slider_boundary_shift = self._make_aero_slider(-20, 20, 0)
+        grp_cutout.vbox.addWidget(
+            self._make_slider_header("Boundary shift (shrink / grow)", self.dl_slider_boundary_shift)
+        )
+        grp_cutout.vbox.addWidget(self.dl_slider_boundary_shift)
+
+        self.dl_slider_boundary_feather = self._make_aero_slider(0, 20, 0)
+        grp_cutout.vbox.addWidget(
+            self._make_slider_header("Boundary feather", self.dl_slider_boundary_feather)
+        )
+        grp_cutout.vbox.addWidget(self.dl_slider_boundary_feather)
+
+        # Live Mask Preview checkbox button
+        mask_row = QHBoxLayout()
+        mask_row.setContentsMargins(0, 2, 0, 0)
+        self.btn_toggle_mask_preview = QPushButton("Preview Subject Mask", grp_cutout)
+        self.btn_toggle_mask_preview.setCheckable(True)
+        self.btn_toggle_mask_preview.setFixedHeight(22)
+        self.btn_toggle_mask_preview.setCursor(Qt.PointingHandCursor)
+        self.btn_toggle_mask_preview.setToolTip(
+            "Show semi-transparent ruby mask overlay to verify edge alignment"
+        )
+        self.btn_toggle_mask_preview.setStyleSheet(
+            """
+            QPushButton {
+                background: #F7FAFD;
+                border: 1px solid #C8D6E5;
+                border-radius: 2px;
+                color: #5A7A9E;
+                font-family: 'Segoe UI';
+                font-size: 7.5pt;
+                font-weight: 600;
+                padding: 1px 6px;
+            }
+            QPushButton:hover {
+                background: #EBF3FB;
+                color: #0066CC;
+            }
+            QPushButton:checked {
+                background: #FFE8E8;
+                border-color: #D9534F;
+                color: #C9302C;
+            }
+            """
+        )
+        self.btn_toggle_mask_preview.toggled.connect(self.mask_preview_toggled.emit)
+        mask_row.addWidget(self.btn_toggle_mask_preview)
+        mask_row.addStretch(1)
+        grp_cutout.vbox.addLayout(mask_row)
+
+        for s in (self.dl_slider_boundary_shift, self.dl_slider_boundary_feather):
+            s.sliderPressed.connect(lambda: (
+                self.fine_tune_slider_pressed.emit(),
+                self.mask_preview_toggled.emit(True) if not self.btn_toggle_mask_preview.isChecked() else None
+            ))
+            s.valueChanged.connect(self._emit_depth_bokeh)
+            s.sliderReleased.connect(lambda: (
+                self._on_depth_slider_released("Adjust Boundary"),
+                self.mask_preview_toggled.emit(False) if not self.btn_toggle_mask_preview.isChecked() else None
+            ))
+
+        vbox.addWidget(grp_cutout)
+
+        # -------------------------------------------------------------
+        # Group 2: Portrait Bokeh & Focus
+        # -------------------------------------------------------------
         grp_bokeh = _FineTuneGroup("Portrait Bokeh & Focus", content)
         self.dl_slider_blur = self._make_aero_slider(0, 100, 0)
         grp_bokeh.vbox.addWidget(self._make_slider_header("Bokeh blur strength", self.dl_slider_blur))
@@ -2967,82 +3092,16 @@ class TagAndCaptionDock(QDockWidget):
         grp_bokeh.vbox.addWidget(self._make_slider_header("Specular highlight bloom", self.dl_slider_glow))
         grp_bokeh.vbox.addWidget(self.dl_slider_glow)
 
-        self.dl_slider_boundary_shift = self._make_aero_slider(-10, 10, 0)
-        grp_bokeh.vbox.addWidget(
-            self._make_slider_header("Boundary shift (shrink / grow)", self.dl_slider_boundary_shift)
-        )
-        grp_bokeh.vbox.addWidget(self.dl_slider_boundary_shift)
-
-        self.dl_slider_boundary_feather = self._make_aero_slider(0, 20, 0)
-        grp_bokeh.vbox.addWidget(
-            self._make_slider_header("Boundary feather", self.dl_slider_boundary_feather)
-        )
-        grp_bokeh.vbox.addWidget(self.dl_slider_boundary_feather)
-
-        for s in (
-            self.dl_slider_blur,
-            self.dl_slider_focal,
-            self.dl_slider_glow,
-            self.dl_slider_boundary_shift,
-            self.dl_slider_boundary_feather,
-        ):
+        for s in (self.dl_slider_blur, self.dl_slider_focal, self.dl_slider_glow):
             s.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
             s.valueChanged.connect(self._emit_depth_bokeh)
             s.sliderReleased.connect(lambda: self._on_depth_slider_released("Adjust Bokeh & Focus"))
 
         vbox.addWidget(grp_bokeh)
 
-        # Group 1b: 1-Click Subject Cutout & Background Removal
-        grp_cutout = _FineTuneGroup("Subject Cutout & Background", content)
-        cutout_row = QHBoxLayout()
-        cutout_row.setSpacing(6)
-        cutout_row.setContentsMargins(0, 2, 0, 2)
-
-        btn_style_cutout = """
-            QPushButton {
-                background: #F7FAFD;
-                border: 1px solid #B5D2ED;
-                border-radius: 3px;
-                color: #1E395B;
-                font-family: 'Segoe UI';
-                font-size: 8pt;
-                font-weight: 600;
-                padding: 2px 6px;
-            }
-            QPushButton:hover {
-                background: #E4F0FC;
-                border-color: #7BA7C9;
-            }
-            QPushButton:pressed {
-                background: #CCE4F7;
-                border-color: #3399FF;
-            }
-        """
-
-        self.btn_copy_subject = QPushButton("Copy Subject", grp_cutout)
-        self.btn_copy_subject.setFixedHeight(25)
-        self.btn_copy_subject.setCursor(Qt.PointingHandCursor)
-        self.btn_copy_subject.setToolTip(
-            "Extract the foreground subject with a transparent background and copy to clipboard"
-        )
-        self.btn_copy_subject.setStyleSheet(btn_style_cutout)
-        self.btn_copy_subject.clicked.connect(self.copy_subject_requested.emit)
-        cutout_row.addWidget(self.btn_copy_subject, 1)
-
-        self.btn_remove_background = QPushButton("Remove Background", grp_cutout)
-        self.btn_remove_background.setFixedHeight(25)
-        self.btn_remove_background.setCursor(Qt.PointingHandCursor)
-        self.btn_remove_background.setToolTip(
-            "Remove the background from this photo (save as PNG, WebP, AVIF, or JXL to keep transparency)"
-        )
-        self.btn_remove_background.setStyleSheet(btn_style_cutout)
-        self.btn_remove_background.clicked.connect(self.remove_background_requested.emit)
-        cutout_row.addWidget(self.btn_remove_background, 1)
-
-        grp_cutout.vbox.addLayout(cutout_row)
-        vbox.addWidget(grp_cutout)
-
-        # Group 2: 3D Depth Relighting
+        # -------------------------------------------------------------
+        # Group 3: 3D Depth Relighting
+        # -------------------------------------------------------------
         grp_relight = _FineTuneGroup("3D Depth Relighting", content)
         self.dl_slider_near = self._make_aero_slider(-100, 100, 0)
         grp_relight.vbox.addWidget(self._make_slider_header("Near subject light", self.dl_slider_near))
@@ -3067,7 +3126,9 @@ class TagAndCaptionDock(QDockWidget):
 
         vbox.addWidget(grp_relight)
 
-        # Group 3: Atmospheric Depth Haze
+        # -------------------------------------------------------------
+        # Group 4: Atmospheric Depth Haze
+        # -------------------------------------------------------------
         grp_haze = _FineTuneGroup("Atmospheric Depth Haze", content)
         self.dl_slider_haze = self._make_aero_slider(0, 100, 0)
         grp_haze.vbox.addWidget(self._make_slider_header("Atmospheric haze / mist", self.dl_slider_haze))

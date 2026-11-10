@@ -141,3 +141,8 @@ All future ideas follow the core design philosophy of **Essentials Photo Gallery
   - High-efficiency `.jxl` export in **Save as Copy** and **Save Adjustments to Disk** with serialized EXIF preservation.
   - **PyInstaller Packaging:** Includes dynamic libraries, data files, and hidden imports for `pillow_jxl` in `photogallery.spec`.
 
+
+8. Per Folder options - private folders, choose what folders to face scan, OCR scan, etc. 
+
+9. Social media post tools - for insta, facebook etc.  
+

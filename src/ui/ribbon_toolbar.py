@@ -846,6 +846,59 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawLine(QPointF(s * 0.50, s * 0.74), QPointF(s * 0.30, s * 0.88))
         p.drawLine(QPointF(s * 0.50, s * 0.74), QPointF(s * 0.70, s * 0.88))
 
+    elif kind == "copy_subject":
+        # Silhouette of a foreground person with a clean duplicate copy card and blue clipboard/copy badge
+        p.setPen(QPen(QColor("#7BA2CE"), 1.0))
+        p.setBrush(QColor("#F0F4FA"))
+        p.drawRoundedRect(QRectF(s * 0.28, s * 0.12, s * 0.58, s * 0.62), 2.0, 2.0)
+        # Front card containing subject silhouette
+        p.setPen(QPen(QColor("#0066CC"), 1.2))
+        p.setBrush(QColor("#FFFFFF"))
+        card_r = QRectF(s * 0.12, s * 0.24, s * 0.58, s * 0.64)
+        p.drawRoundedRect(card_r, 2.0, 2.0)
+        # Stylized person silhouette in blue
+        head_cx, head_cy, head_r = card_r.center().x(), card_r.top() + card_r.height() * 0.28, card_r.width() * 0.18
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#0066CC"))
+        p.drawEllipse(QPointF(head_cx, head_cy), head_r, head_r)
+        # Shoulders
+        body_path = QPainterPath()
+        body_path.moveTo(head_cx - head_r * 1.5, card_r.bottom() - 2.0)
+        body_path.quadTo(head_cx, head_cy + head_r * 0.8, head_cx + head_r * 1.5, card_r.bottom() - 2.0)
+        body_path.closeSubpath()
+        p.drawPath(body_path)
+
+    elif kind == "remove_background":
+        # Checkerboard transparency grid on right side + solid cutout silhouette on left
+        grid_r = QRectF(s * 0.12, s * 0.12, s * 0.76, s * 0.76)
+        p.setPen(QPen(QColor("#9EADC0"), 1.0))
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawRoundedRect(grid_r, 2.5, 2.5)
+        p.setClipRect(grid_r)
+        # Draw checkerboard pattern
+        cell = s * 0.19
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#DDE5EE"))
+        for row in range(4):
+            for col in range(4):
+                if (row + col) % 2 == 1:
+                    p.drawRect(QRectF(grid_r.left() + col * cell, grid_r.top() + row * cell, cell, cell))
+        # Draw subject cutout silhouette overlay
+        scx, scy = grid_r.center().x() - s * 0.04, grid_r.top() + grid_r.height() * 0.30
+        sr = s * 0.16
+        p.setBrush(QColor("#1E395B"))
+        p.drawEllipse(QPointF(scx, scy), sr, sr)
+        sb = QPainterPath()
+        sb.moveTo(scx - sr * 1.6, grid_r.bottom())
+        sb.quadTo(scx, scy + sr * 0.85, scx + sr * 1.6, grid_r.bottom())
+        sb.closeSubpath()
+        p.drawPath(sb)
+        # Magic wand / erase spark on top-right
+        p.setClipping(False)
+        p.setPen(QPen(QColor("#D9534F"), 1.5, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.76, s * 0.20), QPointF(s * 0.86, s * 0.10))
+        p.drawLine(QPointF(s * 0.86, s * 0.20), QPointF(s * 0.76, s * 0.10))
+
     elif kind in ("detail_all", "all_details"):
         p.setPen(QPen(QColor("#6A85A0"), 1.0))
         p.setBrush(QColor("#FFFFFF"))

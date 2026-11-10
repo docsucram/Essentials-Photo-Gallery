@@ -196,7 +196,7 @@ def _sync_new_subfolder_tree(
                                 "ext": ext,
                                 "size": size_int,
                                 "mtime": mtime_int,
-                                "date_taken": mtime_int,
+                                "date_taken": None,
                                 "is_video": is_vid,
                             }
                         )
@@ -271,13 +271,13 @@ class DeltaSyncWorker(QRunnable):
             if self.cancel_flag.is_set:
                 return
 
-            # 2. Load existing media in this folder: filename_lower -> (id, mtime, size)
+            # 2. Load existing media in this folder: filename_lower -> (id, mtime, size, width)
             existing_rows = conn.execute(
-                "SELECT id, filename, mtime, size FROM media WHERE folder_id = ?;",
+                "SELECT id, filename, mtime, size, width FROM media WHERE folder_id = ?;",
                 (folder_id,),
             ).fetchall()
-            existing_map: dict[str, tuple[int, int, int]] = {
-                str(r["filename"]).lower(): (int(r["id"]), int(r["mtime"] or 0), int(r["size"] or 0))
+            existing_map: dict[str, tuple[int, int, int, Any]] = {
+                str(r["filename"]).lower(): (int(r["id"]), int(r["mtime"] or 0), int(r["size"] or 0), r["width"])
                 for r in existing_rows
             }
 
@@ -326,8 +326,8 @@ class DeltaSyncWorker(QRunnable):
 
             # 5. Detect Renamed, Added and Modified Files
             missing_files: dict[str, tuple[int, int, int]] = {
-                fname_l: (mid, mtime, size)
-                for fname_l, (mid, mtime, size) in existing_map.items()
+                fname_l: (val[0], val[1], val[2])
+                for fname_l, val in existing_map.items()
                 if fname_l not in disk_entries
             }
 
@@ -376,20 +376,21 @@ class DeltaSyncWorker(QRunnable):
                             "ext": ext,
                             "size": size_int,
                             "mtime": mtime_int,
-                            "date_taken": mtime_int,
+                            "date_taken": None,
                             "is_video": is_vid,
                         }
                     )
                     to_update_enrich.append((0, Path(entry.path), bool(is_vid), mtime_int))
                     added_count += 1
                 else:
-                    mid, prev_mtime, prev_size = existing_map[fname_l]
-                    if prev_mtime != mtime_int or prev_size != size_int:
+                    mid, prev_mtime, prev_size, prev_width = existing_map[fname_l]
+                    if prev_mtime != mtime_int or prev_size != size_int or prev_width is None:
                         # Prevent self-triggered watcher loop
-                        if is_recently_written(entry.path, size=size_int, mtime=mtime_int, window_secs=5.0):
+                        if prev_width is not None and is_recently_written(entry.path, size=size_int, mtime=mtime_int, window_secs=5.0):
                             continue
                         to_update_enrich.append((mid, Path(entry.path), bool(is_vid), mtime_int))
-                        thumb_repo.invalidate([mid])
+                        if prev_mtime != mtime_int or prev_size != size_int:
+                            thumb_repo.invalidate([mid])
                         modified_count += 1
 
             # Delete remaining missing files that were not matched as renames
@@ -556,6 +557,25 @@ class StartupReconciliationWorker(QRunnable):
                         folders_changed += 1
                 except OSError:
                     pass
+
+            # 4. Check all folders containing un-enriched media (where width IS NULL from interrupted scans)
+            unenriched_folders = conn.execute(
+                """
+                SELECT DISTINCT f.path
+                FROM media m
+                JOIN folders f ON f.id = m.folder_id
+                WHERE m.width IS NULL
+                ORDER BY f.path ASC;
+                """
+            ).fetchall()
+            for f_row in unenriched_folders:
+                if self.cancel_flag.is_set:
+                    return
+                u_path = f_row["path"]
+                if os.path.exists(u_path) and os.path.isdir(u_path):
+                    worker = DeltaSyncWorker(self.engine, u_path, cancel_flag=self.cancel_flag)
+                    worker.run()
+                    folders_changed += 1
 
             if not self.cancel_flag.is_set:
                 self.signals.reconciliation_completed.emit(

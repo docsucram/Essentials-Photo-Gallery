@@ -2204,7 +2204,7 @@ class SingleMediaViewer(QWidget):
             self._proxy_scale = 1.0
             return
         h, w = self.master_np_rgb.shape[:2]
-        max_dim = 1920
+        max_dim = 1280
         if max(h, w) > max_dim:
             self._proxy_scale = max_dim / float(max(h, w))
             pw = max(1, int(round(w * self._proxy_scale)))
@@ -2444,6 +2444,28 @@ class SingleMediaViewer(QWidget):
                 if self.display_proxy_alpha is not None
                 else None
             )
+            # Apply ruby mask overlay if currently previewing subject boundary
+            if getattr(self, "_mask_overlay_preview", False):
+                try:
+                    from src.imaging.creative_effects import (
+                        get_depth_and_matte_engine,
+                        apply_boundary_shift_and_feather,
+                    )
+                    engine = get_depth_and_matte_engine()
+                    _, alpha_matte = engine.get_depth_and_matte(rendered_np, media_id=self.current_media_id)
+                    if alpha_matte is not None:
+                        alpha_matte = apply_boundary_shift_and_feather(
+                            alpha_matte,
+                            boundary_shift=getattr(self.current_recipe, "boundary_shift", 0.0),
+                            boundary_feather=getattr(self.current_recipe, "boundary_feather", 0.0),
+                        )
+                        bg_mask = (1.0 - np.clip(alpha_matte, 0.0, 1.0))[:, :, None]
+                        overlay_color = np.array([220.0, 20.0, 60.0], dtype=np.float32)
+                        blended = rendered_np.astype(np.float32) * (1.0 - bg_mask * 0.45) + overlay_color * (bg_mask * 0.45)
+                        rendered_np = np.clip(blended, 0.0, 255.0).astype(np.uint8)
+                except Exception:
+                    pass
+
             pix = self._build_pixmap_from_rgb_and_alpha(rendered_np, proxy_alpha)
             target_w = int(round(w / self._proxy_scale))
             target_h = int(round(h / self._proxy_scale))
@@ -2465,6 +2487,28 @@ class SingleMediaViewer(QWidget):
             if self.master_alpha is not None
             else None
         )
+        # Apply ruby mask overlay if currently previewing subject boundary
+        if getattr(self, "_mask_overlay_preview", False):
+            try:
+                from src.imaging.creative_effects import (
+                    get_depth_and_matte_engine,
+                    apply_boundary_shift_and_feather,
+                )
+                engine = get_depth_and_matte_engine()
+                _, alpha_matte = engine.get_depth_and_matte(rendered_np, media_id=self.current_media_id)
+                if alpha_matte is not None:
+                    alpha_matte = apply_boundary_shift_and_feather(
+                        alpha_matte,
+                        boundary_shift=getattr(self.current_recipe, "boundary_shift", 0.0),
+                        boundary_feather=getattr(self.current_recipe, "boundary_feather", 0.0),
+                    )
+                    bg_mask = (1.0 - np.clip(alpha_matte, 0.0, 1.0))[:, :, None]
+                    overlay_color = np.array([220.0, 20.0, 60.0], dtype=np.float32)
+                    blended = rendered_np.astype(np.float32) * (1.0 - bg_mask * 0.45) + overlay_color * (bg_mask * 0.45)
+                    rendered_np = np.clip(blended, 0.0, 255.0).astype(np.uint8)
+            except Exception:
+                pass
+
         pix = self._build_pixmap_from_rgb_and_alpha(rendered_np, rendered_alpha)
         self._adjusted_pixmap = pix
         self.pixmap_item.setPixmap(pix)
@@ -2608,6 +2652,12 @@ class SingleMediaViewer(QWidget):
                     item.setVisible(False)
         self._sync_animation_playback()
 
+    def _dismiss_depth_light_pane_if_active(self) -> None:
+        mw = self.window()
+        if hasattr(mw, "right_tag_dock") and hasattr(mw.right_tag_dock, "current_mode"):
+            if mw.right_tag_dock.current_mode() in ("depth_light", "fine_tune"):
+                mw.right_tag_dock.set_mode("info")
+
     def set_crop_mode(self, enabled: bool) -> None:
         self.is_crop_mode = bool(enabled)
         if hasattr(self, "scene") and hasattr(self.scene, "set_crop_mode"):
@@ -2618,6 +2668,7 @@ class SingleMediaViewer(QWidget):
         self.btn_crop_apply.setEnabled(self.is_crop_mode)
 
         if self.is_crop_mode:
+            self._dismiss_depth_light_pane_if_active()
             self._crop_pre_existing_rect = self.current_recipe.crop_rect
             self._crop_committed = False
 
@@ -2944,6 +2995,7 @@ class SingleMediaViewer(QWidget):
     def set_retouch_mode(self, enabled: bool) -> None:
         self.is_retouch_mode = bool(enabled)
         if self.is_retouch_mode:
+            self._dismiss_depth_light_pane_if_active()
             self.stop_face_tagging_mode()
             self.set_crop_mode(False)
             self.set_markup_mode(False)
@@ -3205,6 +3257,7 @@ class SingleMediaViewer(QWidget):
     def set_red_eye_mode(self, enabled: bool) -> None:
         self.is_red_eye_mode = bool(enabled)
         if self.is_red_eye_mode:
+            self._dismiss_depth_light_pane_if_active()
             self.stop_face_tagging_mode()
             self.set_crop_mode(False)
             self.set_markup_mode(False)
@@ -3286,37 +3339,38 @@ class SingleMediaViewer(QWidget):
         p_radius = max(2.0, math.sqrt(p_area / math.pi))
 
         # Close internal specular catchlight holes so geometry covers the full pupil disc
-        k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         pupil_closed = cv2.morphologyEx(pupil_core, cv2.MORPH_CLOSE, k_close)
 
-        # Dilate by 3px into the iris transition zone to capture the maroon/brown anti-aliased fringe
-        k_dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        # Precise 1px dilation into the iris transition zone to capture the maroon fringe without swallowing the iris
+        k_dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         pupil_dilated = cv2.dilate(pupil_closed, k_dil, iterations=1)
 
         # Continuous redness weight: 1.0 in vivid red core, smooth roll-off across maroon fringe, 0.0 on blue/green/skin
-        w_diff = np.clip((r_diff - 4.0) / 18.0, 0.0, 1.0)
-        w_ratio = np.clip((r_ratio - 0.52) / 0.38, 0.0, 1.0)
+        w_diff = np.clip((r_diff - 4.0) / 16.0, 0.0, 1.0)
+        w_ratio = np.clip((r_ratio - 0.52) / 0.35, 0.0, 1.0)
         w_red = np.clip(w_diff * w_ratio * 1.35, 0.0, 1.0)
 
-        core_f = cv2.GaussianBlur(pupil_closed.astype(np.float32) / 255.0, (3, 3), 0.8)
-        fringe_f = cv2.GaussianBlur(pupil_dilated.astype(np.float32) / 255.0, (5, 5), 1.4) * w_red
+        core_f = cv2.GaussianBlur(pupil_closed.astype(np.float32) / 255.0, (3, 3), 0.7)
+        fringe_f = cv2.GaussianBlur(pupil_dilated.astype(np.float32) / 255.0, (3, 3), 1.0) * w_red
         alpha_2d = np.clip(np.maximum(core_f * np.maximum(w_red, 0.75), fringe_f), 0.0, 1.0)
 
         if float(np.max(alpha_2d)) < 0.05:
             return None
 
-        # Radial pupil shading: deepest neutral black-grey at pupil center, slightly softer at rim
+        # Radial pupil shading: authentic photographic pupil depth, avoiding pitch-black void
         ph, pw = patch.shape[:2]
         yy, xx = np.ogrid[0:ph, 0:pw]
         norm_r = np.sqrt((yy - p_cy) ** 2 + (xx - p_cx) ** 2) / max(1.5, p_radius * 1.25)
         radial_t = np.clip(norm_r, 0.0, 1.0)
-        shade_mult = 0.22 * (1.0 - radial_t) + 0.42 * radial_t
-        dark_luma = np.clip(min_gb * shade_mult, 8.0, 34.0)
-        dark_pupil = np.stack([dark_luma, dark_luma, dark_luma * 1.03], axis=-1)
+        gb_mean = (g + b) * 0.5
+        shade_factor = 0.40 * (1.0 - radial_t) + 0.60 * radial_t
+        pupil_luma = np.clip(gb_mean * shade_factor, 20.0, 58.0)
+        dark_pupil = np.stack([pupil_luma, pupil_luma, pupil_luma * 1.02], axis=-1)
 
-        # Preserve corneal specular catchlight (glint) where G and B channels are both bright
-        glint_w = np.clip((min_gb - 110.0) / 65.0, 0.0, 1.0)[..., None]
-        glint_r = np.minimum(r, (g + b) * 0.52)
+        # Preserve corneal specular catchlight (glint) where G and B channels are bright
+        glint_w = np.clip((gb_mean - 75.0) / 45.0, 0.0, 1.0)[..., None]
+        glint_r = np.minimum(r, gb_mean)
         glint_rgb = np.stack([glint_r, g, b], axis=-1)
 
         target_rgb = dark_pupil * (1.0 - glint_w) + glint_rgb * glint_w
@@ -3422,6 +3476,7 @@ class SingleMediaViewer(QWidget):
     def set_markup_mode(self, enabled: bool) -> None:
         self.is_markup_mode = bool(enabled)
         if self.is_markup_mode:
+            self._dismiss_depth_light_pane_if_active()
             self._session_markup_command_count = 0
             self._markup_session_start_master = self.master_np_rgb.copy() if self.master_np_rgb is not None else None
             self._markup_session_start_undo_idx = self.undo_stack.index() if hasattr(self, "undo_stack") else 0
@@ -3744,12 +3799,15 @@ class SingleMediaViewer(QWidget):
         view_scale = self.graphics_view.transform().m11()
         if abs(view_scale) < 1e-4:
             view_scale = 1.0
-        screen_pad_x = max(6, int(round(12.0 * view_scale)))
-        screen_pad_y = max(4, int(round(8.0 * view_scale)))
+        screen_pad_x = max(8, int(round(12.0 * view_scale)))
+        screen_pad_y = max(4, int(round(6.0 * view_scale)))
+        font = inp.font()
+        fm = QFontMetrics(font)
+        line_h = fm.lineSpacing()
         doc = inp.document()
         doc.setTextWidth(-1)
-        w = max(130, int(math.ceil(doc.idealWidth())) + 2 * screen_pad_x + 12)
-        h = max(32, int(math.ceil(doc.size().height())) + 2 * screen_pad_y + 6)
+        w = max(200, int(math.ceil(doc.idealWidth())) + 2 * screen_pad_x + 24)
+        h = max(line_h + 2 * screen_pad_y + 12, int(math.ceil(doc.size().height())) + 2 * screen_pad_y + 10)
         inp.resize(w, h)
 
     def _commit_single_markup_element(self, el: MarkupElement, desc: str = "Markup") -> None:
@@ -3872,8 +3930,8 @@ class SingleMediaViewer(QWidget):
 
             master_font_pt = max(10, int(round(width * 2.2)))
             screen_font_pt = max(9, int(round(master_font_pt * view_scale)))
-            screen_pad_x = max(6, int(round(12.0 * view_scale)))
-            screen_pad_y = max(4, int(round(8.0 * view_scale)))
+            screen_pad_x = max(8, int(round(12.0 * view_scale)))
+            screen_pad_y = max(4, int(round(6.0 * view_scale)))
             sec_col = getattr(self.markup_toolbar, "secondary_color", QColor(20, 25, 35))
             if sec_col.alpha() == 0:
                 bg_qss = "background: transparent; border: 1.5px dashed rgba(56, 144, 240, 200);"
@@ -3895,6 +3953,15 @@ class SingleMediaViewer(QWidget):
                     super().keyPressEvent(e)
 
             inp = _InlineTextEdit(self.graphics_view.viewport())
+            inp_font = QFont("Segoe UI", screen_font_pt)
+            if is_bold:
+                inp_font.setBold(True)
+            if is_italic:
+                inp_font.setItalic(True)
+            inp.setFont(inp_font)
+            fm = QFontMetrics(inp_font)
+            line_h = fm.lineSpacing()
+
             inp.setPlaceholderText("Type text note (Enter to commit, Shift+Enter for newline)...")
             inp.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             inp.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -3913,7 +3980,9 @@ class SingleMediaViewer(QWidget):
                 }}
             """)
             inp.move(max(4, vp_pt.x()), max(4, vp_pt.y()))
-            inp.resize(160, max(32, screen_font_pt + 2 * screen_pad_y + 8))
+            init_w = max(240, fm.horizontalAdvance("Type text note...") + 2 * screen_pad_x + 36)
+            init_h = max(38, line_h + 2 * screen_pad_y + 12)
+            inp.resize(init_w, init_h)
             inp.textChanged.connect(self._adjust_inline_text_size)
             inp.returnPressed.connect(self._commit_inline_text)
             inp.show()
@@ -4279,6 +4348,28 @@ class SingleMediaViewer(QWidget):
             if self.master_alpha is not None
             else None
         )
+        # Apply ruby mask overlay if currently previewing subject boundary
+        if getattr(self, "_mask_overlay_preview", False):
+            try:
+                from src.imaging.creative_effects import (
+                    get_depth_and_matte_engine,
+                    apply_boundary_shift_and_feather,
+                )
+                engine = get_depth_and_matte_engine()
+                _, alpha_matte = engine.get_depth_and_matte(rendered_np, media_id=self.current_media_id)
+                if alpha_matte is not None:
+                    alpha_matte = apply_boundary_shift_and_feather(
+                        alpha_matte,
+                        boundary_shift=getattr(self.current_recipe, "boundary_shift", 0.0),
+                        boundary_feather=getattr(self.current_recipe, "boundary_feather", 0.0),
+                    )
+                    bg_mask = (1.0 - np.clip(alpha_matte, 0.0, 1.0))[:, :, None]
+                    overlay_color = np.array([220.0, 20.0, 60.0], dtype=np.float32)
+                    blended = rendered_np.astype(np.float32) * (1.0 - bg_mask * 0.45) + overlay_color * (bg_mask * 0.45)
+                    rendered_np = np.clip(blended, 0.0, 255.0).astype(np.uint8)
+            except Exception:
+                pass
+
         pix = self._build_pixmap_from_rgb_and_alpha(rendered_np, rendered_alpha)
         self._adjusted_pixmap = pix
         self.pixmap_item.setPixmap(pix)
@@ -4348,6 +4439,11 @@ class SingleMediaViewer(QWidget):
         self.current_recipe.bokeh_glow = float(glow)
         self.current_recipe.boundary_shift = float(boundary_shift)
         self.current_recipe.boundary_feather = float(boundary_feather)
+        self._render_current_recipe()
+
+    def set_mask_overlay_preview(self, enabled: bool) -> None:
+        """Toggles a semi-transparent ruby mask overlay over background pixels to visualize boundary adjustments."""
+        self._mask_overlay_preview = bool(enabled)
         self._render_current_recipe()
 
     def set_depth_relight_parameters(
@@ -4569,10 +4665,16 @@ class SingleMediaViewer(QWidget):
         self.pixel_edit_saved.emit()
 
     def set_straighten(self, angle_deg: float) -> None:
+        if self._recipe_before_slider is None:
+            self._recipe_before_slider = self.current_recipe.copy()
+        self._is_sliding = True
         self.current_recipe.straighten_deg = float(angle_deg)
         self._render_current_recipe()
 
     def set_detail(self, sharpen: int, denoise: int) -> None:
+        if self._recipe_before_slider is None:
+            self._recipe_before_slider = self.current_recipe.copy()
+        self._is_sliding = True
         self.current_recipe.sharpen = float(sharpen)
         self.current_recipe.denoise = float(denoise)
         self._render_current_recipe()

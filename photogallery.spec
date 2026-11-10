@@ -16,6 +16,8 @@ datas = [
     (str(project_root / "resources"), "resources"),
     (str(project_root / "db" / "schema.sql"), "db"),
 ]
+if (project_root / "models").exists():
+    datas.append((str(project_root / "models"), "models"))
 
 # 2. Collect library data files & binaries
 datas += collect_data_files("cv2")
@@ -81,6 +83,7 @@ hiddenimports = [
 
 # Collect additional submodules safely
 hiddenimports += collect_submodules("insightface.model_zoo")
+hiddenimports += collect_submodules("onnxruntime")
 
 # 4. Exclusions (developer tooling, unused large frameworks; scipy/skimage replaced by pure NumPy/OpenCV)
 # Note: Do NOT exclude 'unittest' because numpy.testing / insightface import it at runtime.

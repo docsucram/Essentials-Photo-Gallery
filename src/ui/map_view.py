@@ -147,6 +147,13 @@ def generate_leaflet_html(
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   html, body, #map {{ margin: 0; padding: 0; width: 100%; height: 100%; background: #EBF3FA; font-family: 'Segoe UI', -apple-system, sans-serif; }}
+  .leaflet-tile-container img {{
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
+  }}
+  .leaflet-fade-anim .leaflet-tile {{
+    will-change: opacity, transform;
+  }}
   .leaflet-cluster-pin {{
     background: transparent;
     border: none;
@@ -240,18 +247,34 @@ def generate_leaflet_html(
   const tileLayers = {{
     'clean': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{{z}}/{{y}}/{{x}}', {{
       maxZoom: 19,
+      maxNativeZoom: 17,
+      keepBuffer: 4,
+      updateWhenZooming: false,
+      updateWhenIdle: false,
       attribution: 'Tiles &copy; Esri &mdash; Sources: Esri, DeLorme, NAVTEQ, USGS, Intermap, iPC, NRCAN, Esri Japan, METI, Esri China (Hong Kong), Esri (Thailand), TomTom'
     }}),
     'street': L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
       maxZoom: 19,
+      maxNativeZoom: 19,
+      keepBuffer: 4,
+      updateWhenZooming: false,
+      updateWhenIdle: false,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
     }}),
     'satellite': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}', {{
       maxZoom: 19,
+      maxNativeZoom: 17,
+      keepBuffer: 4,
+      updateWhenZooming: false,
+      updateWhenIdle: false,
       attribution: 'Tiles &copy; Esri'
     }}),
     'terrain': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{{z}}/{{y}}/{{x}}', {{
       maxZoom: 19,
+      maxNativeZoom: 17,
+      keepBuffer: 4,
+      updateWhenZooming: false,
+      updateWhenIdle: false,
       attribution: 'Tiles &copy; Esri &mdash; Sources: USGS, Esri, TCI, DeLorme, METI, NRCAN, GEBCO, NOAA, increment P Corp.'
     }})
   }};
@@ -268,18 +291,47 @@ def generate_leaflet_html(
 
   function flyToLocation(lat, lon, zoom) {{
     if (!map) return;
+    map.invalidateSize(false);
     isInternalMove = true;
     map.flyTo([lat, lon], zoom || 13, {{ duration: 1.0 }});
+    setTimeout(function() {{ isInternalMove = false; }}, 1100);
   }}
 
   function fitMapBounds(min_lat, max_lat, min_lon, max_lon) {{
-    if (!map) return;
+    if (!map) {{
+      window.pendingFitBounds = [min_lat, max_lat, min_lon, max_lon];
+      return;
+    }}
+    map.invalidateSize(false);
+    const sz = map.getSize();
+    if (!sz || sz.x < 64 || sz.y < 64) {{
+      window.pendingFitBounds = [min_lat, max_lat, min_lon, max_lon];
+      setTimeout(function() {{
+        if (window.pendingFitBounds) {{
+          const b = window.pendingFitBounds;
+          fitMapBounds(b[0], b[1], b[2], b[3]);
+        }}
+      }}, 60);
+      return;
+    }}
+    window.pendingFitBounds = null;
     isInternalMove = true;
-    map.fitBounds([[min_lat, min_lon], [max_lat, max_lon]], {{ padding: [30, 30], maxZoom: 15 }});
+    map.fitBounds([[min_lat, min_lon], [max_lat, max_lon]], {{ padding: [30, 30], maxZoom: 14, animate: false }});
+    setTimeout(function() {{ isInternalMove = false; }}, 100);
   }}
 
   function setMapBounds(min_lat, max_lat, min_lon, max_lon) {{
     fitMapBounds(min_lat, max_lat, min_lon, max_lon);
+  }}
+
+  function invalidateMapSize() {{
+    if (map) {{
+      map.invalidateSize(false);
+      if (window.pendingFitBounds) {{
+        const b = window.pendingFitBounds;
+        fitMapBounds(b[0], b[1], b[2], b[3]);
+      }}
+    }}
   }}
 
   function initMap() {{
@@ -290,12 +342,33 @@ def generate_leaflet_html(
     map = L.map('map', {{
       zoomControl: true,
       minZoom: 2,
-      maxZoom: 19
+      maxZoom: 19,
+      zoomAnimation: true,
+      fadeAnimation: true,
+      markerZoomAnimation: true,
+      wheelDebounceTime: 60,
+      wheelPxPerZoomLevel: 80
     }}).setView([25.0, 0.0], 2);
 
     switchBaseLayer('clean');
 
     clusterLayer = L.layerGroup().addTo(map);
+
+    if (typeof ResizeObserver !== 'undefined') {{
+      const mapEl = document.getElementById('map');
+      if (mapEl) {{
+        const ro = new ResizeObserver(function() {{
+          if (map) {{
+            map.invalidateSize(false);
+            if (window.pendingFitBounds) {{
+              const b = window.pendingFitBounds;
+              fitMapBounds(b[0], b[1], b[2], b[3]);
+            }}
+          }}
+        }});
+        ro.observe(mapEl);
+      }}
+    }}
 
     map.on('click', function(e) {{
       if (window.qtBridge && typeof window.qtBridge.onMapBackgroundClicked === 'function') {{
@@ -304,6 +377,12 @@ def generate_leaflet_html(
     }});
 
     let boundsTimer = null;
+    map.on('zoomstart', function() {{
+      if (boundsTimer) {{
+        clearTimeout(boundsTimer);
+        boundsTimer = null;
+      }}
+    }});
     map.on('moveend', function() {{
       if (isInternalMove) {{
         isInternalMove = false;
@@ -315,7 +394,7 @@ def generate_leaflet_html(
           const b = map.getBounds();
           window.qtBridge.onBoundsChanged(b.getSouth(), b.getNorth(), b.getWest(), b.getEast());
         }}
-      }}, 150);
+      }}, 200);
     }});
 
     if (window.pendingClusters) {{
@@ -325,74 +404,80 @@ def generate_leaflet_html(
   }}
 
   function updateClusters(clustersData) {{
-    if (!clusterLayer) {{
+    if (!map) {{
       window.pendingClusters = clustersData;
       return;
     }}
-    clusterLayer.clearLayers();
     const clusters = (typeof clustersData === 'string') ? JSON.parse(clustersData) : clustersData;
-    if (!clusters || !clusters.length) return;
+    const newLayer = L.layerGroup();
+    if (clusters && clusters.length) {{
+      clusters.forEach(c => {{
+        const count = c.count || 1;
+        const hasThumb = Boolean(c.thumb_url);
+        const radius = Math.min(32, Math.max(16, 15 + Math.pow(count, 0.35) * 2.5));
+        const size = radius * 2;
+        let innerHtml = '';
+        if (hasThumb) {{
+          innerHtml = `<div class="map-cluster-pin-container" style="position:relative;width:${{size}}px;height:${{size}}px;cursor:pointer;">` +
+            `<div style="width:${{size}}px;height:${{size}}px;border-radius:50%;overflow:hidden;border:2.5px solid #ffffff;box-shadow:0 3px 8px rgba(0,0,0,0.45);background:#0066CC;">` +
+              `<img src="${{c.thumb_url}}" style="width:100%;height:100%;object-fit:cover;display:block;" onerror="this.style.display='none'"/>` +
+            `</div>` +
+            (count > 1 ? `<div class="map-pin-badge">${{count}}</div>` : '') +
+          `</div>`;
+        }} else {{
+          innerHtml = `<div style="width:${{size}}px;height:${{size}}px;line-height:${{size}}px;border-radius:50%;background:#0066CC;color:#ffffff;border:2px solid #ffffff;text-align:center;font-weight:bold;font-size:11px;box-shadow:0 2px 6px rgba(0,0,0,0.35);cursor:pointer;">${{count}}</div>`;
+        }}
+        const icon = L.divIcon({{
+          className: 'leaflet-cluster-pin',
+          html: innerHtml,
+          iconSize: [size, size],
+          iconAnchor: [radius, radius]
+        }});
+        const marker = L.marker([c.lat, c.lon], {{ icon: icon }});
+        const label = c.label || `${{c.lat.toFixed(2)}}°, ${{c.lon.toFixed(2)}}°`;
+        const clusterPayload = JSON.stringify({{ media_ids: c.media_ids || [], label: label, count: count }});
 
-    clusters.forEach(c => {{
-      const count = c.count || 1;
-      const hasThumb = Boolean(c.thumb_url);
-      const radius = Math.min(32, Math.max(16, 15 + Math.pow(count, 0.35) * 2.5));
-      const size = radius * 2;
-      let innerHtml = '';
-      if (hasThumb) {{
-        innerHtml = `<div class="map-cluster-pin-container" style="position:relative;width:${{size}}px;height:${{size}}px;cursor:pointer;">` +
-          `<div style="width:${{size}}px;height:${{size}}px;border-radius:50%;overflow:hidden;border:2.5px solid #ffffff;box-shadow:0 3px 8px rgba(0,0,0,0.45);background:#0066CC;">` +
-            `<img src="${{c.thumb_url}}" style="width:100%;height:100%;object-fit:cover;display:block;" onerror="this.style.display='none'"/>` +
+        const imgTag = hasThumb ? `<img src="${{c.thumb_url}}" class="cluster-popup-thumb"/>` : '';
+        const actionText = (count === 1) ? 'View Photo' : `Show all ${{count}} photos in gallery`;
+        const popupHtml = `<div class="cluster-popup-card">` +
+          imgTag +
+          `<div class="cluster-popup-body">` +
+            `<div class="cluster-popup-title">📍 ${{label}}</div>` +
+            `<div class="cluster-popup-count">${{count}} ${{count === 1 ? 'item' : 'items'}}</div>` +
+            `<button id="btn-cluster-open" class="cluster-popup-btn">${{actionText}}</button>` +
           `</div>` +
-          (count > 1 ? `<div class="map-pin-badge">${{count}}</div>` : '') +
         `</div>`;
-      }} else {{
-        innerHtml = `<div style="width:${{size}}px;height:${{size}}px;line-height:${{size}}px;border-radius:50%;background:#0066CC;color:#ffffff;border:2px solid #ffffff;text-align:center;font-weight:bold;font-size:11px;box-shadow:0 2px 6px rgba(0,0,0,0.35);cursor:pointer;">${{count}}</div>`;
-      }}
-      const icon = L.divIcon({{
-        className: 'leaflet-cluster-pin',
-        html: innerHtml,
-        iconSize: [size, size],
-        iconAnchor: [radius, radius]
-      }});
-      const marker = L.marker([c.lat, c.lon], {{ icon: icon }}).addTo(clusterLayer);
-      const label = c.label || `${{c.lat.toFixed(2)}}°, ${{c.lon.toFixed(2)}}°`;
-      const clusterPayload = JSON.stringify({{ media_ids: c.media_ids || [], label: label, count: count }});
 
-      const imgTag = hasThumb ? `<img src="${{c.thumb_url}}" class="cluster-popup-thumb"/>` : '';
-      const actionText = (count === 1) ? 'View Photo' : `Show all ${{count}} photos in gallery`;
-      const popupHtml = `<div class="cluster-popup-card">` +
-        imgTag +
-        `<div class="cluster-popup-body">` +
-          `<div class="cluster-popup-title">📍 ${{label}}</div>` +
-          `<div class="cluster-popup-count">${{count}} ${{count === 1 ? 'item' : 'items'}}</div>` +
-          `<button id="btn-cluster-open" class="cluster-popup-btn">${{actionText}}</button>` +
-        `</div>` +
-      `</div>`;
-
-      marker.bindPopup(popupHtml, {{ maxWidth: 240, minWidth: 180 }});
-      marker.on('popupopen', function() {{
-        const btn = document.getElementById('btn-cluster-open');
-        if (btn) {{
-          btn.onclick = function() {{
-            if (window.qtBridge) {{
-              window.qtBridge.onClusterOpenRequested(clusterPayload);
-            }}
-          }};
-        }}
+        marker.bindPopup(popupHtml, {{ maxWidth: 240, minWidth: 180 }});
+        marker.on('popupopen', function() {{
+          const btn = document.getElementById('btn-cluster-open');
+          if (btn) {{
+            btn.onclick = function() {{
+              if (window.qtBridge) {{
+                window.qtBridge.onClusterOpenRequested(clusterPayload);
+              }}
+            }};
+          }}
+        }});
+        marker.on('click', () => {{
+          if (window.qtBridge) {{
+            window.qtBridge.onClusterSelected(clusterPayload);
+          }}
+        }});
+        marker.on('dblclick', function(e) {{
+          L.DomEvent.stopPropagation(e);
+          if (map) {{
+            map.setView([c.lat, c.lon], Math.min(18, map.getZoom() + 3));
+          }}
+        }});
+        newLayer.addLayer(marker);
       }});
-      marker.on('click', () => {{
-        if (window.qtBridge) {{
-          window.qtBridge.onClusterSelected(clusterPayload);
-        }}
-      }});
-      marker.on('dblclick', function(e) {{
-        L.DomEvent.stopPropagation(e);
-        if (map) {{
-          map.setView([c.lat, c.lon], Math.min(18, map.getZoom() + 3));
-        }}
-      }});
-    }});
+    }}
+    newLayer.addTo(map);
+    if (clusterLayer && map.hasLayer(clusterLayer)) {{
+      map.removeLayer(clusterLayer);
+    }}
+    clusterLayer = newLayer;
   }}
 
   document.addEventListener('DOMContentLoaded', function() {{
@@ -810,6 +895,7 @@ class WorldMapView(QWidget):
         self._thumb_repo: Any = None
         self._web_loaded: bool = False
         self._current_style: str = "clean"
+        self._pending_fit_bounds: tuple[float, float, float, float] | None = None
 
         vbox = QVBoxLayout(self)
         vbox.setContentsMargins(0, 0, 0, 0)
@@ -951,6 +1037,7 @@ class WorldMapView(QWidget):
                 self.channel.registerObject("mapBridge", self.bridge)
 
                 self.web_view = QWebEngineView(self.map_stack)
+                self.web_view.page().setBackgroundColor(QColor("#AAD3DF"))
                 self.web_view.page().setWebChannel(self.channel)
                 self.web_view.loadFinished.connect(self._on_web_load_finished)
 
@@ -1047,12 +1134,25 @@ class WorldMapView(QWidget):
                     f"updateClusters({_clusters_to_json(self._current_clusters)});"
                 )
 
+    def showEvent(self, event: Any) -> None:
+        super().showEvent(event)
+        if self._web_loaded and self.web_view is not None:
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(60, lambda: self.web_view.page().runJavaScript("if (typeof map !== 'undefined' && map) { map.invalidateSize(); }"))
+
     def _on_web_load_finished(self, ok: bool) -> None:
         self._web_loaded = ok
-        if ok and self._current_clusters and self.web_view is not None:
-            self.web_view.page().runJavaScript(
-                f"updateClusters({_clusters_to_json(self._current_clusters)});"
-            )
+        if ok and self.web_view is not None:
+            if self._pending_fit_bounds is not None:
+                min_la, max_la, min_lo, max_lo = self._pending_fit_bounds
+                self._pending_fit_bounds = None
+                self.web_view.page().runJavaScript(
+                    f"fitMapBounds({min_la}, {max_la}, {min_lo}, {max_lo});"
+                )
+            if self._current_clusters:
+                self.web_view.page().runJavaScript(
+                    f"updateClusters({_clusters_to_json(self._current_clusters)});"
+                )
 
     def _on_web_bounds_changed(
         self, min_lat: float, max_lat: float, min_lon: float, max_lon: float
@@ -1136,8 +1236,10 @@ class WorldMapView(QWidget):
                 max_la = min(85.0, max_la + lat_pad)
                 min_lo = max(-180.0, min_lo - lon_pad)
                 max_lo = min(180.0, max_lo + lon_pad)
+                self._pending_fit_bounds = (min_la, max_la, min_lo, max_lo)
                 self.set_viewport_bbox(min_la, max_la, min_lo, max_lo)
                 if self._web_loaded and self.web_view is not None:
+                    self._pending_fit_bounds = None
                     self.web_view.page().runJavaScript(
                         f"fitMapBounds({min_la}, {max_la}, {min_lo}, {max_lo});"
                     )

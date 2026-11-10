@@ -58,7 +58,7 @@ class PhotoAdjustmentRecipe:
     depth_blur: float = 0.0       # 0.0 .. 100.0 (Optical disc bokeh blur strength)
     focal_plane: float = 0.0      # 0.0 .. 100.0 (In-focus depth plane: 0=foreground, 100=background)
     bokeh_glow: float = 0.0       # 0.0 .. 100.0 (Linear-light specular highlight bloom)
-    boundary_shift: float = 0.0   # -10.0 .. +10.0 (Shrink <-> Grow subject mask boundary)
+    boundary_shift: float = 0.0   # -20.0 .. +20.0 (Shrink <-> Grow subject mask boundary)
     boundary_feather: float = 0.0 # 0.0 .. 20.0 (Soft feather radius along subject boundary)
     relight_near: float = 0.0     # -100.0 .. +100.0 (Fill light on foreground subject)
     relight_far: float = 0.0      # -100.0 .. +100.0 (Exposure shift on distant background)
@@ -416,10 +416,17 @@ def render_adjusted_image(
     # 4. Unified CIE LAB Pass (executed only if LAB adjustments or non-baked contrast active)
     has_lab = has_lab_except_contrast or (has_contrast and not bake_contrast_in_lut)
     if has_lab:
-        lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB).astype(np.float32)
-        L = lab[:, :, 0]
-        A = lab[:, :, 1]
-        B = lab[:, :, 2]
+        has_ab = (
+            abs(recipe.temperature) >= 0.1
+            or abs(recipe.tint) >= 0.1
+            or abs(recipe.saturation) >= 0.1
+            or bool(recipe.selective_points)
+        )
+        lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+        L = lab[:, :, 0].astype(np.float32)
+        if has_ab:
+            A = lab[:, :, 1].astype(np.float32)
+            B = lab[:, :, 2].astype(np.float32)
         h_i, w_i = L.shape
 
         # Base / Detail decomposition if Shadows, Highlights, or Clarity active (4x hierarchical acceleration)
@@ -550,10 +557,11 @@ def render_adjusted_image(
             d_soft = np.sign(d) * np.maximum(0.0, np.abs(d) - 3.0)
             L = np.clip(L + (recipe.sharpen / 100.0) * 1.5 * d_soft, 0.0, 255.0)
 
-        lab[:, :, 0] = L
-        lab[:, :, 1] = A
-        lab[:, :, 2] = B
-        img = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB)
+        lab[:, :, 0] = np.clip(L + 0.5, 0.0, 255.0).astype(np.uint8)
+        if has_ab:
+            lab[:, :, 1] = np.clip(A + 0.5, 0.0, 255.0).astype(np.uint8)
+            lab[:, :, 2] = np.clip(B + 0.5, 0.0, 255.0).astype(np.uint8)
+        img = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
 
     # 5. Photographic Effects Preset with Intensity Blend
     if recipe.effect not in ("none", "", None):
@@ -572,6 +580,8 @@ def render_adjusted_image(
         or abs(recipe.warmth_near) >= 0.1
         or abs(recipe.warmth_far) >= 0.1
         or abs(recipe.depth_haze) >= 0.1
+        or abs(recipe.boundary_shift) >= 0.1
+        or abs(recipe.boundary_feather) >= 0.1
     )
     if has_depth_and_light:
         try:
@@ -669,25 +679,56 @@ def render_adjusted_image(
                 f_base += (f_blur - f_base) * blend_w
                 img = np.clip(f_base, 0.0, 255.0).astype(np.uint8)
 
-            # Atmospheric Depth Haze / Fog (Fast vectorized difference blend)
+            # Atmospheric Depth Haze / Fog (Luminar-style optical scattering, soft veiling & horizon depth layering)
             if abs(recipe.depth_haze) >= 0.1:
-                beta = (recipe.depth_haze / 100.0) * 3.5
-                haze_trans = 1.0 - np.exp(-beta * (depth_map ** 2))
-                haze_factor = np.clip(haze_trans * (1.0 - alpha_matte * 0.85), 0.0, 1.0)[:, :, None]
-
+                h_img, w_img = img.shape[:2]
+                amount = np.clip(recipe.depth_haze / 100.0, 0.0, 1.0)
+                
+                # 1. Distance-based optical transmission with smooth exponential extinction
+                beta = 1.8 * amount
+                haze_distance_trans = 1.0 - np.exp(-beta * (depth_map ** 1.6))
+                
+                # 2. Natural vertical / altitude falloff (haze settles gently along ground/horizon plane)
+                y_coords = np.linspace(0.0, 1.0, h_img, dtype=np.float32)[:, None]
+                vertical_falloff = 0.55 + 0.45 * (y_coords ** 0.8)
+                
+                # Composite haze transmission factor protecting the segmented foreground subject
+                haze_factor = np.clip(
+                    haze_distance_trans * vertical_falloff * (1.0 - alpha_matte * 0.92),
+                    0.0,
+                    0.75 * amount,
+                )[:, :, None]
+                
+                # 3. Atmospheric Airlight with forward Mie scattering bloom:
+                # Downsample background to compute a wide, soft optical scatter bloom from scene light sources
+                scale_haze = max(1.0, max(h_img, w_img) / 480.0)
+                sh_haze = max(16, int(round(h_img / scale_haze)))
+                sw_haze = max(16, int(round(w_img / scale_haze)))
+                small_scene = cv2.resize(img, (sw_haze, sh_haze), interpolation=cv2.INTER_AREA)
+                
+                # Wide Gaussian scatter kernel
+                sigma_scatter = max(3.0, 18.0 / scale_haze)
+                scatter_bloom = cv2.GaussianBlur(small_scene, (0, 0), sigmaX=sigma_scatter, sigmaY=sigma_scatter)
+                scatter_full = cv2.resize(scatter_bloom, (w_img, h_img), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+                
+                # 4. Color temperature & tint of the atmospheric mist
                 w_h = recipe.depth_haze_warmth / 100.0
                 if w_h >= 0:
-                    mist_r = 230.0 + w_h * 25.0
-                    mist_g = 235.0 - w_h * 5.0
-                    mist_b = 240.0 - w_h * 60.0
+                    base_mist = np.array([215.0 + w_h * 35.0, 222.0 + w_h * 8.0, 235.0 - w_h * 45.0], dtype=np.float32)
                 else:
-                    mist_r = 230.0 + w_h * 40.0
-                    mist_g = 235.0 - w_h * 20.0
-                    mist_b = 240.0 - w_h * 15.0
-                mist_color = np.array([mist_r, mist_g, mist_b], dtype=np.float32)
-
-                diff_haze = mist_color - img.astype(np.float32)
-                img = np.clip(img.astype(np.float32) + diff_haze * haze_factor, 0, 255).astype(np.uint8)
+                    base_mist = np.array([215.0 + w_h * 45.0, 222.0 + w_h * 15.0, 235.0 - w_h * 15.0], dtype=np.float32)
+                
+                # Synthesize airlight: 60% ambient mist color + 40% forward-scattered scene luminance
+                airlight = 0.58 * base_mist[None, None, :] + 0.42 * scatter_full
+                
+                # 5. Photographic Veiling Blend (Soft-knee screen blend preserving highlight contrast,
+                # lifting milky shadow toe without blowing out into opaque flat white)
+                img_f = img.astype(np.float32)
+                # Distance-based slight chroma desaturation in deep mist for photographic realism
+                gray_f = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY).astype(np.float32)[:, :, None]
+                desat_img = img_f * 0.75 + gray_f * 0.25
+                veiled = desat_img * (1.0 - haze_factor * 0.55) + airlight * haze_factor
+                img = np.clip(veiled, 0.0, 255.0).astype(np.uint8)
         except Exception as ex:
             logger.debug("Depth and light processing failed: %s", ex)
 

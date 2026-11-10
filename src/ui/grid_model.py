@@ -361,6 +361,80 @@ class CatalogListModel(QAbstractListModel):
                 ]
         return []
 
+    def collapse_all_groups(self, collapse: bool = True) -> None:
+        if not self._groups:
+            return
+        self.beginResetModel()
+        for g in self._groups:
+            g.collapsed = collapse
+        self._rebuild_virtual_row_offsets()
+        self.endResetModel()
+
+    def get_scroll_indicator_info(self, scroll_y: int) -> tuple[str, str]:
+        """
+        Returns (group_title, item_date_time_str) for the topmost visible item/group at scroll_y.
+        """
+        if not self._groups or self._total_vrows == 0 or not self._records:
+            return ("", "")
+
+        if self._group_y_ends:
+            g_idx = bisect.bisect_right(self._group_y_ends, max(0, scroll_y))
+            if g_idx >= len(self._groups):
+                g_idx = len(self._groups) - 1
+            g = self._groups[g_idx]
+        else:
+            g = self._groups[0]
+
+        group_title = str(g.group_key or "")
+
+        rec: MediaItemRecord | None = None
+        if g.record_count > 0:
+            if self._layout_mode == "mosaic":
+                raw = self._mosaic_raw
+                for vrow in range(g.vrow_items_start, g.vrow_end):
+                    mt = raw.get(vrow)
+                    if mt is not None and (mt[1] + mt[3]) >= scroll_y:
+                        rec_off = vrow - g.vrow_items_start
+                        if 0 <= rec_off < g.record_count:
+                            rec = self._records[g.record_start + rec_off]
+                        break
+                if rec is None and g.record_count > 0:
+                    rec = self._records[g.record_start]
+            else:
+                cols = max(1, self._column_count)
+                row_stride = max(1, self._cell_height + self._spacing)
+                r = max(0, (scroll_y - g.y_items_start) // row_stride)
+                off = min(g.record_count - 1, max(0, r * cols))
+                rec = self._records[g.record_start + off]
+
+        item_str = ""
+        if rec is not None:
+            ts = rec.date_taken if rec.date_taken else rec.mtime
+            if ts:
+                try:
+                    import datetime
+                    if isinstance(ts, (int, float)):
+                        dt = datetime.datetime.fromtimestamp(ts)
+                        item_str = dt.strftime("%d/%m/%Y %H:%M")
+                    elif hasattr(ts, "strftime"):
+                        item_str = ts.strftime("%d/%m/%Y %H:%M")
+                    elif isinstance(ts, str):
+                        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y:%m:%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+                            try:
+                                dt = datetime.datetime.strptime(ts[:19], fmt)
+                                item_str = dt.strftime("%d/%m/%Y %H:%M")
+                                break
+                            except ValueError:
+                                pass
+                        if not item_str:
+                            item_str = str(ts)
+                except Exception:
+                    item_str = str(rec.filename or "")
+            else:
+                item_str = str(rec.filename or "")
+
+        return (group_title, item_str)
+
     def set_selected_media_ids(self, media_ids: Sequence[int]) -> None:
         self._selected_ids = set(media_ids)
         self._group_selected_counts.clear()

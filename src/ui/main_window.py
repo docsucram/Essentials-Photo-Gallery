@@ -334,24 +334,44 @@ class _MoveFilesUndoCommand(QUndoCommand):
                 time.sleep(0.04 * (attempt + 1))
 
     def redo(self) -> None:
+        if not self.moves:
+            return
+        media_ids = [int(m["media_id"]) for m in self.moves]
+        backup_map: dict[int, str | None] = {}
+        try:
+            conn = self.main_win.engine.catalog_conn()
+            q_marks = ",".join("?" for _ in media_ids)
+            rows = conn.execute(
+                f"SELECT id, original_backup_path FROM media WHERE id IN ({q_marks});",
+                media_ids,
+            ).fetchall()
+            for r in rows:
+                backup_map[int(r["id"])] = r["original_backup_path"]
+        except Exception:
+            pass
+
+        db_batch_moves: list[tuple[int, int, str | None, str | None]] = []
+        touched_dirs: set[str] = set()
+
         for m in self.moves:
-            flag = self.main_win._active_thumb_flags.pop(m["media_id"], None)
+            mid = int(m["media_id"])
+            flag = self.main_win._active_thumb_flags.pop(mid, None)
             if flag is not None:
                 flag.set()
             src = m["src_path"]
             dst = m["dst_path"]
+            touched_dirs.add(os.path.dirname(src))
+            touched_dirs.add(os.path.dirname(dst))
             if os.path.exists(src):
                 self._safe_move(src, dst)
-            self.main_win.catalog_repo.move_media_folder(
-                m["media_id"], m["dst_folder_id"], m["dst_filename"]
-            )
-            detail = self.main_win.catalog_repo.get_media_detail(m["media_id"])
-            backup_path = detail.get("original_backup_path")
+
+            backup_path = backup_map.get(mid)
             if not backup_path or not os.path.exists(backup_path):
                 disk_b = Path(src).parent / ".OriginalFiles" / Path(src).name
                 if disk_b.exists():
                     backup_path = str(disk_b)
 
+            new_backup_str: str | None = None
             if backup_path and os.path.exists(backup_path):
                 dst_backup_dir = Path(os.path.dirname(dst)) / ".OriginalFiles"
                 dst_backup = dst_backup_dir / Path(backup_path).name
@@ -359,10 +379,7 @@ class _MoveFilesUndoCommand(QUndoCommand):
                     self._safe_move(backup_path, str(dst_backup))
                     m["prev_backup_path"] = backup_path
                     m["curr_backup_path"] = str(dst_backup)
-                    with self.main_win.engine.write_lock:
-                        conn = self.main_win.engine.catalog_conn()
-                        conn.execute("UPDATE media SET original_backup_path = ? WHERE id = ?;", (str(dst_backup), m["media_id"]))
-                        conn.commit()
+                    new_backup_str = str(dst_backup)
                 except OSError:
                     pass
 
@@ -379,34 +396,42 @@ class _MoveFilesUndoCommand(QUndoCommand):
                         pass
                     break
 
-            self.main_win._media_meta_lookup.pop(m["media_id"], None)
+            db_batch_moves.append((mid, int(m["dst_folder_id"]), str(m["dst_filename"]), new_backup_str))
+            self.main_win._media_meta_lookup.pop(mid, None)
             self.main_win.catalog_model.update_items_metadata(
-                [m["media_id"]], filename=m["dst_filename"]
+                [mid], filename=m["dst_filename"]
             )
-        self.main_win.refresh_navigation_and_autocomplete()
+
+        self.main_win.catalog_repo.move_media_folder_batch(db_batch_moves)
+        self._sync_moved_folder_mtimes(touched_dirs)
+        self.main_win._folder_path_cache.clear()
         self.main_win.rebuild_and_run_query()
 
     def undo(self) -> None:
+        if not self.moves:
+            return
+        db_batch_moves: list[tuple[int, int, str | None, str | None]] = []
+        touched_dirs: set[str] = set()
+
         for m in self.moves:
-            flag = self.main_win._active_thumb_flags.pop(m["media_id"], None)
+            mid = int(m["media_id"])
+            flag = self.main_win._active_thumb_flags.pop(mid, None)
             if flag is not None:
                 flag.set()
             src = m["dst_path"]
             dst = m["src_path"]
+            touched_dirs.add(os.path.dirname(src))
+            touched_dirs.add(os.path.dirname(dst))
             if os.path.exists(src):
                 self._safe_move(src, dst)
-            self.main_win.catalog_repo.move_media_folder(
-                m["media_id"], m["src_folder_id"], m["src_filename"]
-            )
+
             curr_b = m.get("curr_backup_path")
             prev_b = m.get("prev_backup_path")
+            restored_backup_str: str | None = None
             if curr_b and prev_b and os.path.exists(curr_b):
                 try:
                     self._safe_move(curr_b, prev_b)
-                    with self.main_win.engine.write_lock:
-                        conn = self.main_win.engine.catalog_conn()
-                        conn.execute("UPDATE media SET original_backup_path = ? WHERE id = ?;", (prev_b, m["media_id"]))
-                        conn.commit()
+                    restored_backup_str = prev_b
                 except OSError:
                     pass
 
@@ -417,12 +442,44 @@ class _MoveFilesUndoCommand(QUndoCommand):
                     self._safe_move(curr_xmp, prev_xmp)
                 except OSError:
                     pass
-            self.main_win._media_meta_lookup.pop(m["media_id"], None)
+
+            db_batch_moves.append((mid, int(m["src_folder_id"]), str(m["src_filename"]), restored_backup_str))
+            self.main_win._media_meta_lookup.pop(mid, None)
             self.main_win.catalog_model.update_items_metadata(
-                [m["media_id"]], filename=m["src_filename"]
+                [mid], filename=m["src_filename"]
             )
-        self.main_win.refresh_navigation_and_autocomplete()
+
+        self.main_win.catalog_repo.move_media_folder_batch(db_batch_moves)
+        self._sync_moved_folder_mtimes(touched_dirs)
+        self.main_win._folder_path_cache.clear()
         self.main_win.rebuild_and_run_query()
+
+    def _sync_moved_folder_mtimes(self, touched_dirs: set[str]) -> None:
+        """Updates folder mtimes in catalog.db and clears pending FolderWatcher triggers so internal moves don't trigger redundant disk rescans."""
+        try:
+            watcher = getattr(self.main_win, "folder_watcher", None)
+            with self.main_win.engine.write_lock:
+                conn = self.main_win.engine.catalog_conn()
+                for dpath in touched_dirs:
+                    if not dpath:
+                        continue
+                    try:
+                        p = Path(dpath).resolve()
+                        if p.exists():
+                            st = p.stat()
+                            posix_p = p.as_posix().rstrip("/")
+                            conn.execute(
+                                "UPDATE folders SET mtime = ? WHERE RTRIM(REPLACE(LOWER(path), '\\', '/'), '/') = LOWER(?);",
+                                (float(st.st_mtime), posix_p),
+                            )
+                        if watcher is not None and hasattr(watcher, "_pending_changed_paths"):
+                            watcher._pending_changed_paths.discard(str(p))
+                            watcher._pending_changed_paths.discard(dpath)
+                    except OSError:
+                        pass
+                conn.commit()
+        except Exception:
+            pass
 
 
 class _AvatarBackfillSignals(QObject):
@@ -565,17 +622,17 @@ class _FramelessResizeFilter(QObject):
         on_top = y <= m
         on_bottom = y >= h - m
 
-        edges = 0
+        edges = Qt.Edge(0)
         if on_top:
-            edges |= int(Qt.TopEdge)
+            edges |= Qt.Edge.TopEdge
         elif on_bottom:
-            edges |= int(Qt.BottomEdge)
+            edges |= Qt.Edge.BottomEdge
         if on_left:
-            edges |= int(Qt.LeftEdge)
+            edges |= Qt.Edge.LeftEdge
         elif on_right:
-            edges |= int(Qt.RightEdge)
+            edges |= Qt.Edge.RightEdge
 
-        return Qt.Edge(edges) if edges else None
+        return edges if edges else None
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         t = event.type()
@@ -728,6 +785,16 @@ class PhotoGalleryMainWindow(QMainWindow):
         # ---------------------------------------------------------------------
         # Build UI Hierarchy
         # ---------------------------------------------------------------------
+        # Pre-initialize Qt Quick RHI backing surface before window is shown so
+        # creating QWebEngineView later in WorldMapView never recreates the native HWND
+        if "PYTEST_CURRENT_TEST" not in os.environ and os.environ.get("QT_QPA_PLATFORM") != "offscreen":
+            try:
+                from PySide6.QtQuickWidgets import QQuickWidget
+                self._rhi_surface_anchor = QQuickWidget(self)
+                self._rhi_surface_anchor.setFixedSize(0, 0)
+            except Exception:
+                pass
+
         # 1. Top Ribbon Toolbar spanning the full top width of the window
         self.ribbon = RibbonToolbar(self)
         self.setMenuWidget(self.ribbon)
@@ -1135,7 +1202,10 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.ribbon.action_triggered.connect(self.dispatch_ribbon_action)
         self.ribbon.layout_mode_changed.connect(self._on_layout_mode_changed)
         self.ribbon.zoom_size_changed.connect(self._on_ribbon_zoom_changed)
+        if hasattr(self.ribbon, "tab_widget"):
+            self.ribbon.tab_widget.currentChanged.connect(self._on_ribbon_tab_changed)
         self.central_stack.currentChanged.connect(lambda _: self._update_status_grid_button())
+        icon_provider.signals.theme_changed.connect(self._on_icon_theme_changed)
 
         # Authentic WLPG Find & Home Tab Filter Signal Connections
         self.ribbon.date_filter_selected.connect(self._on_date_filter_selected)
@@ -1220,6 +1290,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.grid_view.viewport_range_changed.connect(self.enqueue_visible_thumbnails)
         self.grid_view.selection_ids_changed.connect(self.on_grid_selection_changed)
         self.grid_view.media_activated.connect(self.open_single_viewer)
+        self.grid_view.thumbnail_size_changed.connect(self._on_grid_thumbnail_size_changed)
 
         # Right Tag & Caption / Fine-Tune Dock
         self.right_tag_dock.rating_edited.connect(self.apply_rating_to_selection)
@@ -1323,6 +1394,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         )
         self.right_tag_dock.remove_background_requested.connect(
             self.media_viewer.remove_background_cutout
+        )
+        self.right_tag_dock.mask_preview_toggled.connect(
+            self.media_viewer.set_mask_overlay_preview
         )
 
         # Keyboard shortcuts: Ctrl+I, Ctrl+F, Ctrl+N, Ctrl+T, Undo/Redo, Navigation, Select All, Cut/Copy/Paste
@@ -1607,7 +1681,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                             "ext": ext.lower().lstrip("."),
                             "size": int(st.st_size),
                             "mtime": int(st.st_mtime),
-                            "date_taken": int(st.st_mtime),
+                            "date_taken": None,
                         }
                     )
                     copied_count += 1
@@ -1631,23 +1705,53 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         moves: list[dict[str, Any]] = []
         external_count = 0
+
+        # Build fast O(1) normalized folder path -> (folder_id, raw_path) map
+        # so looking up dropped files uses the SQLite (folder_id, filename) index instead of a full-table scan.
+        folder_lookup: dict[str, tuple[int, str]] = {}
+        for f in self.catalog_repo.get_folders():
+            fid = int(f["id"])
+            f_raw = str(f["path"])
+            norm_key = f_raw.replace("\\", "/").rstrip("/").lower()
+            folder_lookup[norm_key] = (fid, f_raw)
+
+        conn = self.catalog_repo.engine.catalog_conn()
         for fpath in file_paths:
             p = Path(fpath)
             if not p.exists():
                 continue
-            parent_posix = p.parent.as_posix().rstrip("/")
+            parent_posix = p.parent.as_posix().rstrip("/").lower()
             fname = p.name
 
-            conn = self.catalog_repo.engine.catalog_conn()
-            row = conn.execute(
-                """
-                SELECT m.id, m.folder_id, m.filename, f.path AS folder_path
-                FROM media m
-                JOIN folders f ON f.id = m.folder_id
-                WHERE RTRIM(REPLACE(LOWER(f.path), '\\', '/'), '/') = LOWER(?) AND LOWER(m.filename) = LOWER(?);
-                """,
-                (parent_posix, fname),
-            ).fetchone()
+            row = None
+            folder_match = folder_lookup.get(parent_posix)
+            if folder_match is not None:
+                matched_fid, matched_fpath = folder_match
+                row_m = conn.execute(
+                    """
+                    SELECT id, folder_id, filename
+                    FROM media
+                    WHERE folder_id = ? AND filename = ? COLLATE NOCASE;
+                    """,
+                    (matched_fid, fname),
+                ).fetchone()
+                if row_m is not None:
+                    row = {
+                        "id": row_m["id"],
+                        "folder_id": row_m["folder_id"],
+                        "filename": row_m["filename"],
+                        "folder_path": matched_fpath,
+                    }
+            else:
+                row = conn.execute(
+                    """
+                    SELECT m.id, m.folder_id, m.filename, f.path AS folder_path
+                    FROM media m
+                    JOIN folders f ON f.id = m.folder_id
+                    WHERE RTRIM(REPLACE(LOWER(f.path), '\\', '/'), '/') = ? AND LOWER(m.filename) = LOWER(?);
+                    """,
+                    (parent_posix, fname),
+                ).fetchone()
 
             if row is None:
                 # File dragged from external Explorer or other folder not yet indexed!
@@ -3957,7 +4061,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         if hasattr(self.ribbon, "lbl_app_title"):
             self.ribbon.lbl_app_title.setText("Essentials Photo Gallery")
 
-        if self.right_tag_dock.current_mode() == "fine_tune":
+        if self.right_tag_dock.current_mode() in ("fine_tune", "depth_light"):
             self.right_tag_dock.set_mode("info")
 
         if hasattr(self.ribbon, "btn_toggle_tag_pane"):
@@ -4009,6 +4113,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             mv.fit_to_photos()
         else:
             mv.refresh_current_viewport()
+        if getattr(mv, "_web_loaded", False) and getattr(mv, "web_view", None) is not None:
+            QTimer.singleShot(60, lambda: mv.web_view.page().runJavaScript("if (typeof map !== 'undefined' && map) { map.invalidateSize(); }"))
         total = sum(c.get("count", 0) for c in mv.current_clusters)
         self.right_tag_dock.set_total_view_count(total)
         self.right_tag_dock.set_map_clusters(mv.current_clusters)
@@ -6056,13 +6162,21 @@ class PhotoGalleryMainWindow(QMainWindow):
         def _apply_dlg_settings() -> None:
             self.retention_days = dlg.retention_days()
             new_theme = dlg.selected_theme()
+            new_icon_theme = dlg.selected_icon_theme()
+            theme_or_icons_changed = (new_theme != self.current_theme)
             if new_theme != self.current_theme:
                 self.apply_theme(new_theme)
 
-            new_icon_theme = dlg.selected_icon_theme()
-            if new_icon_theme != getattr(self, "current_icon_theme", "wlpg_aero"):
+            if self.current_icon_theme != new_icon_theme or icon_provider.get_icon_theme() != new_icon_theme:
                 self.current_icon_theme = new_icon_theme
                 icon_provider.set_icon_theme(new_icon_theme)
+                theme_or_icons_changed = True
+
+            self._on_icon_theme_changed(new_icon_theme)
+            if theme_or_icons_changed:
+                self.refresh_navigation_and_autocomplete()
+            elif hasattr(self, "left_nav_dock") and self.left_nav_dock is not None:
+                self.left_nav_dock.refresh_icons()
 
             self.toggle_pause_write_back(dlg.pause_write_back_enabled())
 
@@ -6634,10 +6748,28 @@ class PhotoGalleryMainWindow(QMainWindow):
         if target is not None:
             self.open_single_viewer(target)
 
+    def _on_ribbon_tab_changed(self, index: int) -> None:
+        if not hasattr(self.ribbon, "tab_widget") or not hasattr(self, "right_tag_dock"):
+            return
+        cur_tab = self.ribbon.tab_widget.widget(index)
+        if cur_tab != getattr(self.ribbon, "tab_edit", None):
+            if self.right_tag_dock.current_mode() in ("depth_light", "fine_tune"):
+                self.right_tag_dock.set_mode("info")
+
     def _on_layout_mode_changed(self, mode: str) -> None:
         self.grid_view.set_layout_mode(mode)
         if self.central_stack.currentWidget() != self.grid_view:
             self.show_grid_view()
+
+    def _on_grid_thumbnail_size_changed(self, size_px: int) -> None:
+        if hasattr(self, "slider_status_zoom"):
+            self.slider_status_zoom.blockSignals(True)
+            self.slider_status_zoom.setValue(size_px)
+            self.slider_status_zoom.blockSignals(False)
+        if hasattr(self, "ribbon") and hasattr(self.ribbon, "slider_zoom"):
+            self.ribbon.slider_zoom.blockSignals(True)
+            self.ribbon.slider_zoom.setValue(size_px)
+            self.ribbon.slider_zoom.blockSignals(False)
 
     def _on_ribbon_zoom_changed(self, size_px: int) -> None:
         self.slider_status_zoom.blockSignals(True)
@@ -6932,6 +7064,32 @@ class PhotoGalleryMainWindow(QMainWindow):
             rec = self.media_viewer.current_recipe.copy()
             rec.effect = eff_id
             self.media_viewer.preview_recipe(rec)
+
+    def _on_icon_theme_changed(self, _theme_name: str = "") -> None:
+        """Refreshes status bar and right dock icons when the icon theme changes in Options."""
+        if hasattr(self, "btn_status_prev"):
+            self.btn_status_prev.setIcon(make_wlpg_icon("prev_media", 18))
+        if hasattr(self, "btn_status_next"):
+            self.btn_status_next.setIcon(make_wlpg_icon("next_media", 18))
+        if hasattr(self, "btn_status_rot_ccw"):
+            self.btn_status_rot_ccw.setIcon(make_wlpg_icon("rotate_ccw", 18))
+        if hasattr(self, "btn_status_rot_cw"):
+            self.btn_status_rot_cw.setIcon(make_wlpg_icon("rotate_cw", 18))
+        if hasattr(self, "btn_status_delete"):
+            self.btn_status_delete.setIcon(make_wlpg_icon("delete", 16))
+        if hasattr(self, "btn_status_slideshow"):
+            self.btn_status_slideshow.setIcon(make_wlpg_icon("slideshow", 18))
+        if hasattr(self, "btn_status_zoom_out"):
+            self.btn_status_zoom_out.setIcon(make_wlpg_icon("zoom_out", 18))
+        if hasattr(self, "btn_status_zoom_in"):
+            self.btn_status_zoom_in.setIcon(make_wlpg_icon("zoom_in", 18))
+        self._update_status_grid_button()
+        self._update_status_zoom_toggle_button()
+        if hasattr(self, "right_tag_dock") and self.right_tag_dock is not None:
+            if hasattr(self.right_tag_dock, "btn_copy_subject"):
+                self.right_tag_dock.btn_copy_subject.setIcon(make_wlpg_icon("copy_subject", 16))
+            if hasattr(self.right_tag_dock, "btn_remove_bg"):
+                self.right_tag_dock.btn_remove_bg.setIcon(make_wlpg_icon("remove_background", 16))
 
     # -------------------------------------------------------------------------
     # Theme Application, Keyboard Shortcuts & Clean Shutdown

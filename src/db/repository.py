@@ -1517,6 +1517,43 @@ class CatalogRepository:
                 )
             conn.commit()
 
+    def move_media_folder_batch(
+        self,
+        moves: Sequence[tuple[int, int, str | None, str | None]],
+    ) -> None:
+        """
+        Batch-moves multiple media records to new folders in a single SQLite transaction.
+        Each tuple is (media_id, new_folder_id, new_filename, new_backup_path).
+        """
+        if not moves:
+            return
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            for media_id, new_folder_id, new_filename, new_backup_path in moves:
+                if new_filename and new_backup_path is not None:
+                    ext = Path(new_filename).suffix.lstrip(".").lower()
+                    conn.execute(
+                        "UPDATE media SET folder_id = ?, filename = ?, ext = ?, original_backup_path = ?, metadata_dirty = 1 WHERE id = ?;",
+                        (new_folder_id, new_filename, ext, new_backup_path, media_id),
+                    )
+                elif new_filename:
+                    ext = Path(new_filename).suffix.lstrip(".").lower()
+                    conn.execute(
+                        "UPDATE media SET folder_id = ?, filename = ?, ext = ?, metadata_dirty = 1 WHERE id = ?;",
+                        (new_folder_id, new_filename, ext, media_id),
+                    )
+                elif new_backup_path is not None:
+                    conn.execute(
+                        "UPDATE media SET folder_id = ?, original_backup_path = ?, metadata_dirty = 1 WHERE id = ?;",
+                        (new_folder_id, new_backup_path, media_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE media SET folder_id = ?, metadata_dirty = 1 WHERE id = ?;",
+                        (new_folder_id, media_id),
+                    )
+            conn.commit()
+
 
     def rotate_lossless(
         self,

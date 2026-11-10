@@ -62,6 +62,9 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QFileIconProvider,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QGridLayout,
     QLabel,
     QLineEdit,
     QListView,
@@ -69,6 +72,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QStyle,
     QStyledItemDelegate,
+    QStyleOptionSlider,
     QStyleOptionViewItem,
     QToolTip,
     QVBoxLayout,
@@ -1288,6 +1292,101 @@ class EmptyStateWidget(QWidget):
         self.raise_()
 
 
+class _ScrollGroupIndicator(QFrame):
+    """
+    Floating indicator showing current group name and topmost visible item date/time,
+    replicating the Windows Live Photo Gallery scroll position tooltip badge.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ScrollGroupIndicator")
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setFocusPolicy(Qt.NoFocus)
+
+        layout = QGridLayout(self)
+        layout.setContentsMargins(10, 6, 12, 6)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(2)
+
+        self.lbl_grp_hdr = QLabel("Group:", self)
+        self.lbl_grp_hdr.setObjectName("ScrollHeaderLabel")
+        self.lbl_item_hdr = QLabel("Item:", self)
+        self.lbl_item_hdr.setObjectName("ScrollHeaderLabel")
+
+        self.lbl_group_val = QLabel("", self)
+        self.lbl_group_val.setObjectName("ScrollValLabel")
+        self.lbl_item_val = QLabel("", self)
+        self.lbl_item_val.setObjectName("ScrollValLabel")
+
+        layout.addWidget(self.lbl_grp_hdr, 0, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        layout.addWidget(self.lbl_group_val, 0, 1, Qt.AlignLeft | Qt.AlignVCenter)
+        layout.addWidget(self.lbl_item_hdr, 1, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        layout.addWidget(self.lbl_item_val, 1, 1, Qt.AlignLeft | Qt.AlignVCenter)
+
+        self._dark_mode = False
+        self._apply_theme()
+
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(8)
+        shadow.setOffset(1, 2)
+        shadow.setColor(QColor(0, 0, 0, 70))
+        self.setGraphicsEffect(shadow)
+
+    def set_dark_mode(self, is_dark: bool) -> None:
+        self._dark_mode = bool(is_dark)
+        self._apply_theme()
+
+    def _apply_theme(self) -> None:
+        if self._dark_mode:
+            self.setStyleSheet("""
+                QFrame#ScrollGroupIndicator {
+                    background-color: #2D2D2D;
+                    border: 1px solid #555555;
+                    border-radius: 3px;
+                }
+                QLabel#ScrollHeaderLabel {
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 9pt;
+                    color: #A0A0A0;
+                }
+                QLabel#ScrollValLabel {
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 9pt;
+                    color: #FFFFFF;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QFrame#ScrollGroupIndicator {
+                    background-color: #FFFFFF;
+                    border: 1px solid #C0C0C0;
+                    border-radius: 3px;
+                }
+                QLabel#ScrollHeaderLabel {
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 9pt;
+                    color: #4A4A4A;
+                }
+                QLabel#ScrollValLabel {
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 9pt;
+                    color: #1A1A1A;
+                }
+            """)
+
+    def set_info(self, group_name: str, item_str: str) -> None:
+        self.lbl_group_val.setText(group_name)
+        if item_str:
+            self.lbl_item_val.setText(item_str)
+            self.lbl_item_hdr.setVisible(True)
+            self.lbl_item_val.setVisible(True)
+        else:
+            self.lbl_item_hdr.setVisible(False)
+            self.lbl_item_val.setVisible(False)
+        self.adjustSize()
+
+
 class ThumbnailGridView(QListView):
     """
     Virtualized 2D Canvas View backed by CatalogListModel's O(G) geometry engine.
@@ -1299,6 +1398,7 @@ class ThumbnailGridView(QListView):
     selection_ids_changed = Signal(list, int)     # selected_media_ids, lead_media_id (-1 if none)
     media_activated = Signal(int)                 # media_id on double-click or Enter
     try_search_all_requested = Signal()           # user clicked 'Try searching all photos and videos'
+    thumbnail_size_changed = Signal(int)          # emitted when thumbnail size changes (e.g. Ctrl+wheel)
     _active_drag_button: Qt.MouseButton = Qt.LeftButton
 
     def __init__(
@@ -1322,6 +1422,13 @@ class ThumbnailGridView(QListView):
         self.scope_bar: SearchScopeBar | None = None
         self.empty_state_overlay = EmptyStateWidget(self.viewport())
         self.empty_state_overlay.search_all_clicked.connect(self.try_search_all_requested.emit)
+
+        self._scroll_indicator = _ScrollGroupIndicator(self.viewport())
+        self._scroll_indicator.hide()
+        self._scroll_indicator_timer = QTimer(self)
+        self._scroll_indicator_timer.setSingleShot(True)
+        self._scroll_indicator_timer.setInterval(1200)
+        self._scroll_indicator_timer.timeout.connect(self._scroll_indicator.hide)
 
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
@@ -1543,11 +1650,58 @@ class ThumbnailGridView(QListView):
     def _on_scroll_value_changed(self, _val: int) -> None:
         self.viewport().update()
         self._scroll_debounce.start()
+        self._update_scroll_indicator()
+
+    def _update_scroll_indicator(self) -> None:
+        if self.catalog_model is None or self.catalog_model.rowCount() == 0:
+            if hasattr(self, "_scroll_indicator") and self._scroll_indicator.isVisible():
+                self._scroll_indicator.hide()
+            return
+
+        sb = self.verticalScrollBar()
+        if sb is None or not sb.isVisible() or sb.maximum() <= sb.minimum():
+            if hasattr(self, "_scroll_indicator") and self._scroll_indicator.isVisible():
+                self._scroll_indicator.hide()
+            return
+
+        scroll_y = sb.value()
+        group_title, item_info = self.catalog_model.get_scroll_indicator_info(scroll_y)
+        if not group_title:
+            if hasattr(self, "_scroll_indicator") and self._scroll_indicator.isVisible():
+                self._scroll_indicator.hide()
+            return
+
+        self._scroll_indicator.set_info(group_title, item_info)
+        ind_w = self._scroll_indicator.width()
+        ind_h = self._scroll_indicator.height()
+        ind_x = max(4, self.viewport().width() - ind_w - 4)
+
+        opt = QStyleOptionSlider()
+        sb.initStyleOption(opt)
+        thumb_rect = sb.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSlider, sb)
+        if thumb_rect.isValid() and thumb_rect.height() > 0:
+            thumb_pt = sb.mapToGlobal(thumb_rect.center())
+            vp_pt = self.viewport().mapFromGlobal(thumb_pt)
+            thumb_y = vp_pt.y()
+        else:
+            span = max(1, sb.maximum() - sb.minimum())
+            ratio = (scroll_y - sb.minimum()) / span
+            thumb_y = int(ratio * (self.viewport().height() - 40)) + 20
+
+        ind_y = max(4, min(thumb_y - ind_h // 2, self.viewport().height() - ind_h - 4))
+        self._scroll_indicator.move(ind_x, ind_y)
+        self._scroll_indicator.show()
+        self._scroll_indicator.raise_()
+        self._scroll_indicator_timer.start(1200)
 
     def set_thumbnail_size(self, size_px: int) -> None:
-        self._thumb_size = max(64, min(512, int(size_px)))
+        new_size = max(72, min(320, int(size_px)))
+        if getattr(self, "_thumb_size", None) == new_size:
+            return
+        self._thumb_size = new_size
         self._sync_metrics_and_scrollbar()
         self._scroll_debounce.start()
+        self.thumbnail_size_changed.emit(self._thumb_size)
 
     def set_layout_mode(self, mode: Literal["wlpg_grid", "mosaic"]) -> None:
         if self.catalog_model is None or self.card_delegate is None:
@@ -1627,6 +1781,8 @@ class ThumbnailGridView(QListView):
             self.scope_bar.set_dark_mode(self._dark_mode)
         if hasattr(self, "person_header_bar") and self.person_header_bar is not None and hasattr(self.person_header_bar, "set_dark_mode"):
             self.person_header_bar.set_dark_mode(self._dark_mode)
+        if hasattr(self, "_scroll_indicator") and self._scroll_indicator is not None:
+            self._scroll_indicator.set_dark_mode(self._dark_mode)
         self.viewport().update()
 
     def paintEvent(self, event: QPaintEvent) -> None:
@@ -2025,12 +2181,13 @@ class ThumbnailGridView(QListView):
         drag = QDrag(self)
         drag.setMimeData(mime_data)
 
-        # Build authentic WLPG / Windows Explorer ghost drag card
+        # Build authentic WLPG / Windows Explorer ghost drag card positioned above the cursor
+        # so the cursor tip and target folder 'Move to ...' badge remain completely unobstructed.
         thumb_scaled = preview_pixmap.scaled(
-            84, 84, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            68, 68, Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
-        card_w = max(96, thumb_scaled.width() + 14)
-        card_h = max(96, thumb_scaled.height() + 14)
+        card_w = max(76, thumb_scaled.width() + 12)
+        card_h = max(76, thumb_scaled.height() + 12)
 
         ghost_card = QPixmap(card_w, card_h)
         ghost_card.fill(Qt.transparent)
@@ -2069,7 +2226,7 @@ class ThumbnailGridView(QListView):
         gp.end()
 
         drag.setPixmap(ghost_card)
-        drag.setHotSpot(QPoint(card_w // 2, card_h // 2))
+        drag.setHotSpot(QPoint(card_w // 2, card_h - 4))
 
         self._drag_start_pos = None
         self._pending_single_select = None
@@ -2080,18 +2237,39 @@ class ThumbnailGridView(QListView):
             ThumbnailGridView._active_drag_button = Qt.LeftButton
             self._last_drag_end_time = time.monotonic()
 
-        # Reconcile if files were moved externally (e.g. dropped into external Windows Explorer)
+        # Reconcile if files were moved externally (e.g. dropped into external Windows Explorer).
+        # Note: if files were dropped onto a folder in our own LeftNavigationDock, catalog.db has
+        # ALREADY been updated to point to the new folder path, so check the current catalog path
+        # before treating a missing pre-drag path as an external deletion!
         if repo and dragged_id_paths:
-            missing_ids = [
+            gone_from_old = [
                 mid for mid, fpath in dragged_id_paths if not os.path.exists(fpath)
             ]
-            if missing_ids:
+            if gone_from_old:
                 try:
-                    repo.delete_media(missing_ids)
-                    if hasattr(main_win, "refresh_navigation_and_autocomplete"):
-                        main_win.refresh_navigation_and_autocomplete()
-                    if hasattr(main_win, "rebuild_and_run_query"):
-                        main_win.rebuild_and_run_query()
+                    conn = repo.engine.catalog_conn()
+                    q_marks = ",".join("?" for _ in gone_from_old)
+                    cur_rows = conn.execute(
+                        f"""
+                        SELECT m.id, m.filename, f.path AS folder_path
+                        FROM media m
+                        JOIN folders f ON f.id = m.folder_id
+                        WHERE m.id IN ({q_marks});
+                        """,
+                        gone_from_old,
+                    ).fetchall()
+                    still_valid_ids = {
+                        int(r["id"])
+                        for r in cur_rows
+                        if os.path.exists(os.path.join(str(r["folder_path"]), str(r["filename"])))
+                    }
+                    missing_ids = [mid for mid in gone_from_old if mid not in still_valid_ids]
+                    if missing_ids:
+                        repo.delete_media(missing_ids)
+                        if hasattr(main_win, "refresh_navigation_and_autocomplete"):
+                            main_win.refresh_navigation_and_autocomplete()
+                        if hasattr(main_win, "rebuild_and_run_query"):
+                            main_win.rebuild_and_run_query()
                 except Exception:
                     pass
 
@@ -2375,6 +2553,9 @@ class ThumbnailGridView(QListView):
             is_video = bool(idx.data(CatalogRoles.IsVideoRole))
             if mid is not None:
                 self._show_card_context_menu(event.globalPos(), mid, is_video=is_video)
+        elif idx.isValid() and idx.data(CatalogRoles.IsGroupHeaderRole):
+            gkey = str(idx.data(CatalogRoles.GroupKeyRole) or "")
+            self._show_background_context_menu(event.globalPos(), group_key=gkey)
         else:
             self._show_background_context_menu(event.globalPos())
 
@@ -2684,10 +2865,55 @@ class ThumbnailGridView(QListView):
             menu.exec(global_pos)
         return menu
 
-    def _show_background_context_menu(self, global_pos: QPoint) -> QMenu:
-        """Authentic WLPG Grid Background context menu (media_1792184659466_75e45dcd.png)."""
+    def _on_toggle_group_action(self, group_key: str) -> None:
+        if self.catalog_model is not None:
+            self.catalog_model.toggle_group_collapsed(group_key)
+            self._sync_metrics_and_scrollbar()
+            self.viewport().update()
+
+    def collapse_all_groups(self, collapse: bool = True) -> None:
+        if self.catalog_model is not None:
+            self.catalog_model.collapse_all_groups(collapse)
+            self._sync_metrics_and_scrollbar()
+            self.viewport().update()
+
+    def select_group_items(self, group_key: str) -> None:
+        if self.catalog_model is None:
+            return
+        if self.catalog_model.is_group_collapsed(group_key):
+            self.catalog_model.toggle_group_collapsed(group_key)
+            self._sync_metrics_and_scrollbar()
+        mids = self.catalog_model.media_ids_for_group(group_key)
+        if mids:
+            self.set_selected_media_ids(mids)
+
+    def _show_background_context_menu(
+        self, global_pos: QPoint, group_key: str | None = None
+    ) -> QMenu:
+        """Authentic WLPG Grid Background & Group Header context menu (media_1792184659466_75e45dcd.png)."""
         menu = QMenu(self)
         menu.setFont(QFont("Segoe UI", 9))
+
+        # Group-specific actions on top when right-clicked on a group header
+        if group_key and self.catalog_model is not None:
+            is_collapsed = self.catalog_model.is_group_collapsed(group_key)
+            act_toggle = menu.addAction("Expand Group" if is_collapsed else "Collapse Group")
+            act_toggle.triggered.connect(lambda: self._on_toggle_group_action(group_key))
+
+            all_collapsed = (
+                all(g.collapsed for g in self.catalog_model._groups)
+                if self.catalog_model._groups
+                else False
+            )
+            act_collapse_all = menu.addAction(
+                "Expand all groups" if all_collapsed else "Collapse all groups"
+            )
+            act_collapse_all.triggered.connect(lambda: self.collapse_all_groups(not all_collapsed))
+
+            act_select_group = menu.addAction("Select All Group Items")
+            act_select_group.triggered.connect(lambda: self.select_group_items(group_key))
+
+            menu.addSeparator()
 
         main_win = self.window()
         is_mw = hasattr(main_win, "rebuild_and_run_query")
