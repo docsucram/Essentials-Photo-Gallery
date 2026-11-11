@@ -12,8 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import numpy as np
-from PySide6.QtCore import QObject, QPoint, QRect, QRunnable, QSize, Qt, QThreadPool, Signal
+from PySide6.QtCore import QObject, QPoint, QRect, QRunnable, QSettings, QSize, Qt, QThreadPool, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -47,12 +46,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.core.face_matcher import (
-    FaceVectorMatcher,
-    deserialize_embedding,
-    normalize_vector,
-    serialize_embedding,
-)
 from src.db.connection import DualDatabaseEngine
 from src.db.repository import CatalogRepository, ThumbnailRepository
 from src.ui.person_header_bar import _AutoPopupLineEdit, make_circular_avatar
@@ -757,17 +750,36 @@ class _UnnamedClusterSignals(QObject):
 
 
 class _UnnamedClusterWorker(QRunnable):
-    """Background worker that computes unnamed face clusters without blocking GUI."""
+    """Background worker that computes unnamed face clusters and representative crops off the GUI thread."""
 
-    def __init__(self, repo: CatalogRepository, gen_id: int, signals: _UnnamedClusterSignals) -> None:
+    def __init__(
+        self,
+        repo: CatalogRepository,
+        gen_id: int,
+        signals: _UnnamedClusterSignals,
+        thumb_repo: ThumbnailRepository | None = None,
+        min_confidence: float = 0.52,
+    ) -> None:
         super().__init__()
         self.repo = repo
         self.gen_id = gen_id
         self.signals = signals
+        self.thumb_repo = thumb_repo
+        self.min_confidence = float(min_confidence)
 
     def run(self) -> None:
         try:
-            clusters = self.repo.get_unnamed_face_clusters()
+            clusters = self.repo.get_unnamed_face_clusters(min_confidence=self.min_confidence)
+            if clusters and self.thumb_repo is not None:
+                rep_fids = [
+                    int(c["representative_face_id"])
+                    for c in clusters
+                    if c.get("representative_face_id")
+                ]
+                thumbs = self.thumb_repo.get_face_thumbnails_batch(rep_fids) if rep_fids else {}
+                for c in clusters:
+                    rep_fid = c.get("representative_face_id")
+                    c["thumb_blob"] = thumbs.get(int(rep_fid)) if rep_fid else None
             self.signals.clusters_ready.emit(self.gen_id, clusters)
         except Exception:
             pass
@@ -1029,9 +1041,13 @@ class PeopleDirectoryView(QWidget):
     # -------------------------------------------------------------------------
     # Directory Data Refresh & Rendering
     # -------------------------------------------------------------------------
-    def refresh_directory(self) -> None:
-        """Fetches named people immediately (<80ms) and computes unnamed people in background."""
-        self._all_named_people = self.repo.get_named_people_directory_data()
+    def refresh_directory(self, recluster_unnamed: bool = True) -> None:
+        """Fetches named people immediately (<60ms) and computes unnamed clusters in background."""
+        try:
+            min_conf = float(QSettings("PhotoGallery64", "PhotoGallery64").value("face_match_threshold", 0.52))
+        except Exception:
+            min_conf = 0.52
+        self._all_named_people = self.repo.get_named_people_directory_data(min_confidence=min_conf)
 
         total_cnt = len(self._all_named_people)
         self.lbl_total_count.setText(f"({total_cnt:,})")
@@ -1085,149 +1101,205 @@ class PeopleDirectoryView(QWidget):
                 """
             )
 
-        self._render_grids()
+        # Update Section 1 immediately; Section 2 either stays as-is or updates once worker finishes
+        self._render_named_grid()
+        if not recluster_unnamed:
+            self._render_unnamed_grid()
+        self._update_empty_state()
 
-        # Compute unnamed face clusters asynchronously to prevent GUI pause
-        self._cluster_gen_id += 1
-        worker = _UnnamedClusterWorker(self.repo, self._cluster_gen_id, self._cluster_signals)
-        QThreadPool.globalInstance().start(worker)
+        if recluster_unnamed:
+            self._cluster_gen_id += 1
+            worker = _UnnamedClusterWorker(
+                self.repo,
+                self._cluster_gen_id,
+                self._cluster_signals,
+                thumb_repo=self.thumb_repo,
+                min_confidence=min_conf,
+            )
+            QThreadPool.globalInstance().start(worker)
 
     def _on_unnamed_clusters_ready(self, gen_id: int, clusters: list[dict[str, Any]]) -> None:
         if gen_id != self._cluster_gen_id:
             return
         self._all_unnamed_clusters = clusters
-        self._render_grids()
+        self._render_unnamed_grid()
+        self._update_empty_state()
 
     def reload_directory(self) -> None:
         """Alias for refresh_directory."""
         self.refresh_directory()
 
-    def _render_grids(self) -> None:
-        search_filter = self.txt_search.text().strip().lower()
-
-        # Clear grids
-        self._clear_layout(self.grid_named)
-        self._clear_layout(self.grid_unnamed)
-
-        # 1. Populate Named People
-        filtered_named = [
-            p for p in self._all_named_people
-            if not search_filter or search_filter in p["name"].lower()
-        ]
-        self.lbl_sec1_title.setText(f"Named People ({len(filtered_named)})")
-        self.sec1_container.setVisible(bool(filtered_named))
-
+    def _calc_cols(self) -> int:
         # Dynamic column calculation (card width 162 + spacing 12 = 174)
         # Always subtract 10px to account for vertical scrollbar and prevent horizontal scrollbar triggering
         vw = self.scroll_area.viewport().width() if self.scroll_area.viewport().width() > 100 else self.width()
         avail_w = max(200, vw - 10)
-        cols = max(2, (avail_w - 40) // 174)
+        return max(2, (avail_w - 40) // 174)
 
-        for idx, p in enumerate(filtered_named):
-            card = _NamedPersonCard(
-                person_id=p["id"],
-                name=p["name"],
-                photo_count=p["photo_count"],
-                suggestion_count=p["suggestion_count"],
-                thumb_blob=p["thumbnail_blob"],
-                parent=self.sec1_container,
-            )
-            if getattr(self, "_is_dark", False):
-                card.setStyleSheet(
-                    """
-                    #NamedPersonCard {
-                        background-color: transparent;
-                        border: 1px solid transparent;
-                        border-radius: 12px;
-                    }
-                    #NamedPersonCard:hover {
-                        background-color: #242A36;
-                    }
-                    """
-                )
-                card.lbl_name.setStyleSheet("color: #E2E8F0;")
-                card.lbl_count.setStyleSheet("color: #94A3B8;")
-            card.clicked.connect(self.person_selected.emit)
-            card.rename_requested.connect(self._on_rename_person)
-            card.merge_requested.connect(self._on_merge_person)
-            card.review_requested.connect(self._on_review_person)
-            card.cover_requested.connect(self._on_set_cover_face)
-            row = idx // cols
-            col = idx % cols
-            self.grid_named.addWidget(card, row, col)
+    def _update_empty_state(self) -> None:
+        search_filter = self.txt_search.text().strip().lower()
+        has_named = any(
+            not search_filter or search_filter in p["name"].lower()
+            for p in self._all_named_people
+        )
+        has_any = bool(has_named or (self._all_unnamed_clusters and not search_filter))
+        self.lbl_empty.setVisible(not has_any)
 
-        # Enforce exact column width alignment across both grids
-        for c in range(cols):
-            self.grid_named.setColumnMinimumWidth(c, _NamedPersonCard.CARD_WIDTH)
+    def _render_grids(self) -> None:
+        self._render_named_grid()
+        self._render_unnamed_grid()
+        self._update_empty_state()
 
-        # 2. Populate Unnamed People
-        self.sec2_container.setVisible(bool(self._all_unnamed_clusters) and not search_filter)
-        if self._all_unnamed_clusters and not search_filter:
-            self.lbl_sec2_title.setText(f"People to Name ({len(self._all_unnamed_clusters)})")
-            existing_names = [p["name"] for p in self._all_named_people if p.get("name")]
-            for idx, c in enumerate(self._all_unnamed_clusters):
-                rep_fid = c.get("representative_face_id")
-                thumb_blob = self.thumb_repo.get_face_thumbnail(rep_fid) if rep_fid else None
-                card_names = list(existing_names)
-                sugg_nm = c.get("suggested_person_name")
-                if sugg_nm and sugg_nm in card_names:
-                    card_names.remove(sugg_nm)
-                    card_names.insert(0, sugg_nm)
-                elif sugg_nm:
-                    card_names.insert(0, sugg_nm)
+    def _render_named_grid(self) -> None:
+        search_filter = self.txt_search.text().strip().lower()
+        cols = self._calc_cols()
+        self._last_rendered_cols = cols
 
-                card_u = _UnnamedPersonCard(
-                    cluster_name=c["cluster_name"],
-                    face_ids=c["face_ids"],
-                    face_count=c["face_count"],
-                    thumb_blob=thumb_blob,
-                    existing_names=card_names,
-                    parent=self.sec2_container,
+        self.sec1_container.setUpdatesEnabled(False)
+        try:
+            self._clear_layout(self.grid_named)
+
+            filtered_named = [
+                p for p in self._all_named_people
+                if not search_filter or search_filter in p["name"].lower()
+            ]
+            self.lbl_sec1_title.setText(f"Named People ({len(filtered_named)})")
+            self.sec1_container.setVisible(bool(filtered_named))
+
+            for idx, p in enumerate(filtered_named):
+                card = _NamedPersonCard(
+                    person_id=p["id"],
+                    name=p["name"],
+                    photo_count=p["photo_count"],
+                    suggestion_count=p["suggestion_count"],
+                    thumb_blob=p["thumbnail_blob"],
+                    parent=self.sec1_container,
                 )
                 if getattr(self, "_is_dark", False):
-                    card_u.setStyleSheet(
+                    card.setStyleSheet(
                         """
-                        #UnnamedPersonCard {
+                        #NamedPersonCard {
                             background-color: transparent;
                             border: 1px solid transparent;
                             border-radius: 12px;
                         }
-                        #UnnamedPersonCard:hover {
+                        #NamedPersonCard:hover {
                             background-color: #242A36;
                         }
                         """
                     )
-                    card_u.txt_name.setStyleSheet(
-                        """
-                        QLineEdit {
-                            border: 1px solid #333A45;
-                            border-radius: 11px;
-                            padding: 2px 6px;
-                            background-color: #14171B;
-                            color: #E2E8F0;
-                        }
-                        QLineEdit:hover {
-                            border-color: #475569;
-                        }
-                        QLineEdit:focus {
-                            border-color: #3B82F6;
-                            background-color: #1B1E24;
-                            font-weight: bold;
-                        }
-                        """
-                    )
-                card_u.clicked.connect(lambda fids, tb: self.unnamed_selected.emit(fids, tb))
-                card_u.named.connect(self._on_name_cluster)
-                card_u.ignore_requested.connect(self._on_ignore_cluster_faces)
+                    card.lbl_name.setStyleSheet("color: #E2E8F0;")
+                    card.lbl_count.setStyleSheet("color: #94A3B8;")
+                card.clicked.connect(self.person_selected.emit)
+                card.rename_requested.connect(self._on_rename_person)
+                card.merge_requested.connect(self._on_merge_person)
+                card.review_requested.connect(self._on_review_person)
+                card.cover_requested.connect(self._on_set_cover_face)
                 row = idx // cols
                 col = idx % cols
-                self.grid_unnamed.addWidget(card_u, row, col)
+                self.grid_named.addWidget(card, row, col)
 
+            # Enforce exact column width alignment across both grids
             for c in range(cols):
-                self.grid_unnamed.setColumnMinimumWidth(c, _UnnamedPersonCard.CARD_WIDTH)
+                self.grid_named.setColumnMinimumWidth(c, _NamedPersonCard.CARD_WIDTH)
+        finally:
+            self.sec1_container.setUpdatesEnabled(True)
 
-        has_any = bool(filtered_named or (self._all_unnamed_clusters and not search_filter))
-        self.lbl_empty.setVisible(not has_any)
+    def _render_unnamed_grid(self) -> None:
+        search_filter = self.txt_search.text().strip().lower()
+        cols = self._calc_cols()
+        self._last_rendered_cols = cols
+
+        self.sec2_container.setUpdatesEnabled(False)
+        try:
+            self._clear_layout(self.grid_unnamed)
+
+            self.sec2_container.setVisible(bool(self._all_unnamed_clusters) and not search_filter)
+            if self._all_unnamed_clusters and not search_filter:
+                self.lbl_sec2_title.setText(f"People to Name ({len(self._all_unnamed_clusters)})")
+                existing_names = [p["name"] for p in self._all_named_people if p.get("name")]
+
+                # Batch-fetch any missing representative blobs once instead of querying per-card
+                missing_rep_fids = [
+                    int(c["representative_face_id"])
+                    for c in self._all_unnamed_clusters
+                    if c.get("representative_face_id") and "thumb_blob" not in c and self.thumb_repo
+                ]
+                fallback_thumbs = (
+                    self.thumb_repo.get_face_thumbnails_batch(missing_rep_fids)
+                    if missing_rep_fids and self.thumb_repo
+                    else {}
+                )
+
+                for idx, c in enumerate(self._all_unnamed_clusters):
+                    rep_fid = c.get("representative_face_id")
+                    if "thumb_blob" in c:
+                        thumb_blob = c["thumb_blob"]
+                    elif rep_fid:
+                        thumb_blob = fallback_thumbs.get(int(rep_fid))
+                        c["thumb_blob"] = thumb_blob
+                    else:
+                        thumb_blob = None
+
+                    card_names = list(existing_names)
+                    sugg_nm = c.get("suggested_person_name")
+                    if sugg_nm and sugg_nm in card_names:
+                        card_names.remove(sugg_nm)
+                        card_names.insert(0, sugg_nm)
+                    elif sugg_nm:
+                        card_names.insert(0, sugg_nm)
+
+                    card_u = _UnnamedPersonCard(
+                        cluster_name=c["cluster_name"],
+                        face_ids=c["face_ids"],
+                        face_count=c["face_count"],
+                        thumb_blob=thumb_blob,
+                        existing_names=card_names,
+                        parent=self.sec2_container,
+                    )
+                    if getattr(self, "_is_dark", False):
+                        card_u.setStyleSheet(
+                            """
+                            #UnnamedPersonCard {
+                                background-color: transparent;
+                                border: 1px solid transparent;
+                                border-radius: 12px;
+                            }
+                            #UnnamedPersonCard:hover {
+                                background-color: #242A36;
+                            }
+                            """
+                        )
+                        card_u.txt_name.setStyleSheet(
+                            """
+                            QLineEdit {
+                                border: 1px solid #333A45;
+                                border-radius: 11px;
+                                padding: 2px 6px;
+                                background-color: #14171B;
+                                color: #E2E8F0;
+                            }
+                            QLineEdit:hover {
+                                border-color: #475569;
+                            }
+                            QLineEdit:focus {
+                                border-color: #3B82F6;
+                                background-color: #1B1E24;
+                                font-weight: bold;
+                            }
+                            """
+                        )
+                    card_u.clicked.connect(lambda fids, tb: self.unnamed_selected.emit(fids, tb))
+                    card_u.named.connect(self._on_name_cluster)
+                    card_u.ignore_requested.connect(self._on_ignore_cluster_faces)
+                    row = idx // cols
+                    col = idx % cols
+                    self.grid_unnamed.addWidget(card_u, row, col)
+
+                for c in range(cols):
+                    self.grid_unnamed.setColumnMinimumWidth(c, _UnnamedPersonCard.CARD_WIDTH)
+        finally:
+            self.sec2_container.setUpdatesEnabled(True)
 
     def _clear_layout(self, layout: QGridLayout) -> None:
         while layout.count() > 0:
@@ -1240,7 +1312,8 @@ class PeopleDirectoryView(QWidget):
 
     def resizeEvent(self, event: Any) -> None:
         super().resizeEvent(event)
-        self._render_grids()
+        if self._calc_cols() != getattr(self, "_last_rendered_cols", -1):
+            self._render_grids()
 
     def set_dark_mode(self, is_dark: bool) -> None:
         """Applies Dark Studio or standard light styling to PeopleDirectoryView."""
@@ -1343,26 +1416,7 @@ class PeopleDirectoryView(QWidget):
         self.repo.confirm_faces(face_ids, p_id)
 
         # Update centroid / sub-centroids
-        try:
-            conn = self.repo.engine.catalog_conn()
-            all_emb_rows = conn.execute(
-                "SELECT embedding FROM media_people WHERE person_id = ? AND state = 1 AND embedding IS NOT NULL;",
-                (p_id,),
-            ).fetchall()
-            if all_emb_rows:
-                all_vectors = [
-                    deserialize_embedding(bytes(r["embedding"]))
-                    for r in all_emb_rows
-                    if r["embedding"] and len(bytes(r["embedding"])) >= 2048
-                ]
-                if all_vectors:
-                    if len(all_vectors) >= 10:
-                        sub_c = FaceVectorMatcher.compute_sub_centroids(np.stack(all_vectors, axis=0), max_k=5)
-                    else:
-                        sub_c = normalize_vector(np.mean(np.stack(all_vectors, axis=0), axis=0, keepdims=True))
-                    self.repo.update_person_centroid(p_id, serialize_embedding(sub_c))
-        except Exception:
-            pass
+        self.repo.recalculate_person_centroid(p_id)
 
         # Set cover face if person has none
         try:
@@ -1373,12 +1427,32 @@ class PeopleDirectoryView(QWidget):
         except Exception:
             pass
 
-        self.refresh_directory()
+        self._prune_unnamed_cluster_faces(face_ids)
+        self.refresh_directory(recluster_unnamed=False)
         self.directory_updated.emit()
+
+    def _prune_unnamed_cluster_faces(self, face_ids: list[int]) -> None:
+        """Removes confirmed/ignored face_ids from cached unnamed clusters in memory."""
+        if not face_ids or not self._all_unnamed_clusters:
+            return
+        fid_set = set(face_ids)
+        updated: list[dict[str, Any]] = []
+        for c in self._all_unnamed_clusters:
+            remaining = [fid for fid in c["face_ids"] if fid not in fid_set]
+            if len(remaining) >= 3:
+                c_copy = dict(c)
+                c_copy["face_ids"] = remaining
+                c_copy["face_count"] = len(remaining)
+                if c_copy.get("representative_face_id") in fid_set:
+                    c_copy["representative_face_id"] = remaining[0]
+                    c_copy.pop("thumb_blob", None)
+                updated.append(c_copy)
+        self._all_unnamed_clusters = updated
 
     def _on_ignore_cluster_faces(self, face_ids: list[int]) -> None:
         self.repo.ignore_face(face_ids)
-        self.refresh_directory()
+        self._prune_unnamed_cluster_faces(face_ids)
+        self.refresh_directory(recluster_unnamed=False)
         self.directory_updated.emit()
 
     def _on_rename_person(self, person_id: int, current_name: str) -> None:
@@ -1389,7 +1463,7 @@ class PeopleDirectoryView(QWidget):
         if ok and new_name.strip() and new_name.strip() != current_name:
             try:
                 self.repo.rename_person(person_id, new_name.strip())
-                self.refresh_directory()
+                self.refresh_directory(recluster_unnamed=False)
                 self.directory_updated.emit()
             except Exception as e:
                 QMessageBox.warning(self, "Rename Failed", f"Could not rename person: {e}")
@@ -1417,7 +1491,7 @@ class PeopleDirectoryView(QWidget):
                 new_name = dlg.target_person_name()
                 try:
                     self.repo.rename_person(person_id, new_name)
-                    self.refresh_directory()
+                    self.refresh_directory(recluster_unnamed=False)
                     self.directory_updated.emit()
                 except Exception as e:
                     QMessageBox.warning(self, "Rename Failed", f"Could not rename person: {e}")
@@ -1426,7 +1500,7 @@ class PeopleDirectoryView(QWidget):
                 if dst_id is not None:
                     try:
                         self.repo.merge_people(person_id, dst_id)
-                        self.refresh_directory()
+                        self.refresh_directory(recluster_unnamed=False)
                         self.directory_updated.emit()
                     except Exception as e:
                         QMessageBox.warning(self, "Merge Failed", f"Could not merge people: {e}")

@@ -137,10 +137,12 @@ class FaceVectorMatcher:
         # Multi-centroid clustering using cv2.kmeans (K-Means++)
         try:
             import cv2
+            # Uniformly stride very large sets so k-means++ stays fast (<30ms) while preserving diversity
+            arr_kmeans = arr[::max(1, n_samples // 1000)] if n_samples > 1000 else arr
             criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
             flags = cv2.KMEANS_PP_CENTERS
             _compactness, labels, centers = cv2.kmeans(
-                arr, target_k, None, criteria, 10, flags
+                arr_kmeans, target_k, None, criteria, 10, flags
             )
             counts = np.bincount(labels.flatten(), minlength=target_k)
             order = np.argsort(-counts)

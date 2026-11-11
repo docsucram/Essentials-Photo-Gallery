@@ -125,6 +125,53 @@ def _install_skimage_shim() -> None:
 _install_skimage_shim()
 
 
+def _ensure_insightface_frozen_objects() -> None:
+    """
+    Ensures `insightface.data.get_object` locates bundled `.pkl` files such as
+    `meanshape_68.pkl` under frozen PyInstaller bundles whether placed at
+    `_MEIPASS/objects/` or `_MEIPASS/insightface/data/objects/`.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass:
+        return
+    try:
+        import insightface.data.pickle_object as _po  # type: ignore[import-not-found]
+    except Exception:
+        return
+
+    if getattr(_po.get_object, "_pg_frozen_patched", False):
+        return
+
+    orig_get_object = _po.get_object
+
+    def _get_object_with_fallback(name: str):
+        obj = orig_get_object(name)
+        if obj is not None:
+            return obj
+        fname = name if str(name).endswith(".pkl") else f"{name}.pkl"
+        fallback_path = Path(meipass) / "insightface" / "data" / "objects" / fname
+        if fallback_path.is_file():
+            import pickle
+            with fallback_path.open("rb") as f:
+                return pickle.load(f)
+        return None
+
+    _get_object_with_fallback._pg_frozen_patched = True  # type: ignore[attr-defined]
+    _po.get_object = _get_object_with_fallback
+    try:
+        import insightface.data as _idata  # type: ignore[import-not-found]
+        _idata.get_object = _get_object_with_fallback
+    except Exception:
+        pass
+    try:
+        import insightface.model_zoo.landmark as _lmk  # type: ignore[import-not-found]
+        _lmk.get_object = _get_object_with_fallback
+    except Exception:
+        pass
+
+
 @dataclass(slots=True)
 class DetectedFace:
     """Represents a detected face with normalized coordinates, confidence score, and embedding."""
@@ -251,6 +298,7 @@ class FaceEngine:
     def _init_backend(self) -> None:
         """Initializes primary InsightFace backend or falls back to OpenCV Haar cascade only if allow_fallback=True."""
         if self.backend_name in ("auto", "insightface"):
+            _ensure_insightface_frozen_objects()
             for model_name in ("buffalo_l", "buffalo_s"):
                 try:
                     import insightface  # type: ignore[import-not-found]

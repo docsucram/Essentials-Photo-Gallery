@@ -98,6 +98,12 @@ CREATE INDEX IF NOT EXISTS idx_media_is_video
 CREATE INDEX IF NOT EXISTS idx_media_location
     ON media(location_name) WHERE location_name IS NOT NULL;
 
+CREATE INDEX IF NOT EXISTS idx_media_places
+    ON media(location_country, location_state, location_city) WHERE location_country IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_media_camera
+    ON media(camera_model, camera_make);
+
 CREATE INDEX IF NOT EXISTS idx_media_flag_partial
     ON media(flag, date_taken DESC) WHERE flag = 1;
 
@@ -221,6 +227,61 @@ CREATE VIRTUAL TABLE IF NOT EXISTS media_rtree USING rtree(
     max_lat,
     min_lon,
     max_lon
+);
+
+-- ----------------------------------------------------------------------------
+-- 5b. Cached Nominatim Places & Geocoding Store
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS saved_places (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                TEXT    NOT NULL,
+    admin2              TEXT,
+    admin1              TEXT,
+    country             TEXT,
+    cc                  TEXT,
+    lat                 REAL    NOT NULL,
+    lon                 REAL    NOT NULL,
+    formatted_address   TEXT    NOT NULL,
+    source              TEXT    DEFAULT 'nominatim',
+    created_at          REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_saved_places_name
+    ON saved_places(name COLLATE NOCASE);
+
+CREATE INDEX IF NOT EXISTS idx_saved_places_formatted
+    ON saved_places(formatted_address COLLATE NOCASE);
+
+-- ----------------------------------------------------------------------------
+-- 5c. Static Albums & 17-Dimension Boolean Smart Albums
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS albums (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT    NOT NULL UNIQUE,
+    description     TEXT    DEFAULT '',
+    cover_media_id  INTEGER,
+    created_at      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS album_items (
+    album_id        INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+    media_id        INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+    sort_order      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (album_id, media_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_album_items_media
+    ON album_items(media_id);
+
+CREATE TABLE IF NOT EXISTS smart_albums (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT    NOT NULL UNIQUE,
+    rules_json      TEXT    NOT NULL,
+    created_at      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS schema_flags (
+    name            TEXT    PRIMARY KEY
 );
 
 -- ----------------------------------------------------------------------------

@@ -395,10 +395,19 @@ class FaceDetectionWorker(QRunnable):
                     media_groups.setdefault(mid, []).append(dict(r))
 
         if media_groups:
+            # Ensure any confirmed embeddings from previous runs immediately yield centroids + suggestions
+            if not self._is_cancelled():
+                self._recompute_people_centroids(only_missing_centroids=True, emit_signal=False)
+                self._run_stage3_match()
+
             total_stage1 = len(media_groups)
             self.signals.status_message.emit(
-                f"Stage 1: Verifying and healing confirmed faces in {total_stage1} photos..."
+                f"Stage 1/2: Verifying existing face tags in {total_stage1:,} photos..."
             )
+
+            touched_pids: set[int] = set()
+            batch_new_unassigned = 0
+            early_flush = min(20, self.batch_size)
 
             for idx, (mid, m_items) in enumerate(media_groups.items()):
                 if self._is_cancelled():
@@ -411,6 +420,10 @@ class FaceDetectionWorker(QRunnable):
                 if not fpath.exists():
                     continue
 
+                for it in m_items:
+                    if it.get("person_id") is not None:
+                        touched_pids.add(int(it["person_id"]))
+
                 orient = int(first["orientation"] or 1)
                 try:
                     detected_faces = self.face_engine.detect_and_embed(
@@ -420,13 +433,13 @@ class FaceDetectionWorker(QRunnable):
                 except OSError as exc:
                     logger.debug("Stage 1: skipping unreadable/unsupported image %s: %s", fpath, exc)
                     self.repo.mark_face_scan_failed([mid])
-                    detected_faces = []
+                    continue
                 except Exception as exc:
                     logger.warning("Stage 1: face detection failed for %s: %s", fpath, exc)
                     from src.utils.scan_logger import log_scan_error
                     log_scan_error("FaceDetectionWorker (Stage 1)", fpath, exc)
                     self.repo.mark_face_scan_failed([mid])
-                    detected_faces = []
+                    continue
 
                 unclaimed_faces = self._verify_and_heal_image_faces(mid, fpath, orient, detected_faces)
                 if unclaimed_faces:
@@ -442,6 +455,7 @@ class FaceDetectionWorker(QRunnable):
                         for df in unclaimed_faces
                     ]
                     created_ids = self.repo.insert_detected_faces(mid, payload)
+                    batch_new_unassigned += len(created_ids)
                     thumb_entries = [
                         (fid, df.crop_webp)
                         for fid, df in zip(created_ids, unclaimed_faces)
@@ -450,8 +464,26 @@ class FaceDetectionWorker(QRunnable):
                     if thumb_entries:
                         self.thumb_repo.put_face_thumbnails_batch(thumb_entries)
 
-        # Build initial person centroids from confirmed faces
-        self._recompute_people_centroids()
+                processed_n = idx + 1
+                if (processed_n == early_flush or processed_n % self.batch_size == 0) and (
+                    touched_pids or batch_new_unassigned > 0
+                ):
+                    if touched_pids:
+                        self._recompute_people_centroids(person_ids=touched_pids, emit_signal=False)
+                        touched_pids.clear()
+                    matched_changed = self._run_stage3_match()
+                    if batch_new_unassigned > 0 and not matched_changed:
+                        self.signals.suggestions_updated.emit()
+                    batch_new_unassigned = 0
+
+            # Flush any remaining touched people centroids at the end of Stage 1
+            if touched_pids:
+                self._recompute_people_centroids(person_ids=touched_pids, emit_signal=True)
+            elif batch_new_unassigned > 0:
+                self.signals.suggestions_updated.emit()
+        else:
+            # Build initial person centroids from confirmed faces if needed
+            self._recompute_people_centroids()
 
     def _delete_overlapping_unassigned(
         self, conn: Any, media_id: int, d_box: tuple[float, float, float, float]
@@ -581,11 +613,13 @@ class FaceDetectionWorker(QRunnable):
                 best_d_idx = -1
                 if c_blob:
                     try:
-                        c_vec = deserialize_embedding(c_blob)
+                        c_mat = deserialize_embedding(c_blob, allow_multi=True)
+                        if c_mat.ndim == 1:
+                            c_mat = c_mat.reshape(1, -1)
                         for d_idx, d in enumerate(detected_faces):
                             if d_idx in claimed_d_indices:
                                 continue
-                            sim = float(np.dot(c_vec, d.embedding))
+                            sim = float(np.max(c_mat @ d.embedding))
                             if sim > best_sim:
                                 best_sim = sim
                                 best_d_idx = d_idx
@@ -717,37 +751,87 @@ class FaceDetectionWorker(QRunnable):
             d for idx, d in enumerate(detected_faces) if idx not in claimed_d_indices
         ]
 
-    def _recompute_people_centroids(self) -> None:
-        """Recomputes L2-normalized centroid embeddings for people with confirmed faces."""
+    def _recompute_people_centroids(
+        self,
+        person_ids: Sequence[int] | None = None,
+        only_missing_centroids: bool = False,
+        emit_signal: bool = True,
+    ) -> int:
+        """
+        Recomputes L2-normalized centroid / multi-era sub-centroid embeddings for people
+        with confirmed faces (state = 1). Commits updates in a single batch transaction.
+        """
         conn = self.engine.catalog_conn()
-        people_rows = conn.execute(
-            """
-            SELECT DISTINCT person_id
-            FROM media_people
-            WHERE state = 1 AND person_id IS NOT NULL AND embedding IS NOT NULL;
-            """
-        ).fetchall()
+        if person_ids is not None:
+            target_pids = {int(pid) for pid in person_ids}
+            # Also include any person with confirmed embeddings who lacks a stored centroid
+            missing_rows = conn.execute(
+                """
+                SELECT DISTINCT mp.person_id
+                FROM media_people mp
+                JOIN people p ON p.id = mp.person_id
+                WHERE mp.state = 1 AND mp.person_id IS NOT NULL
+                  AND mp.embedding IS NOT NULL AND p.centroid_embedding IS NULL;
+                """
+            ).fetchall()
+            target_pids.update(int(r["person_id"]) for r in missing_rows)
+            sorted_pids = sorted(target_pids)
+        elif only_missing_centroids:
+            people_rows = conn.execute(
+                """
+                SELECT DISTINCT mp.person_id
+                FROM media_people mp
+                JOIN people p ON p.id = mp.person_id
+                WHERE mp.state = 1 AND mp.person_id IS NOT NULL
+                  AND mp.embedding IS NOT NULL AND p.centroid_embedding IS NULL;
+                """
+            ).fetchall()
+            sorted_pids = [int(r["person_id"]) for r in people_rows]
+        else:
+            people_rows = conn.execute(
+                """
+                SELECT DISTINCT person_id
+                FROM media_people
+                WHERE state = 1 AND person_id IS NOT NULL AND embedding IS NOT NULL;
+                """
+            ).fetchall()
+            sorted_pids = [int(r["person_id"]) for r in people_rows]
 
-        if not people_rows:
-            return
+        if not sorted_pids:
+            return 0
 
-        for p_row in people_rows:
+        updates: list[tuple[bytes, int]] = []
+        for pid in sorted_pids:
             if self._is_cancelled():
-                return
-            pid = int(p_row["person_id"])
+                return len(updates)
             emb_rows = conn.execute(
                 "SELECT embedding FROM media_people WHERE person_id = ? AND state = 1 AND embedding IS NOT NULL;",
                 (pid,),
             ).fetchall()
 
             if emb_rows:
-                vectors = [deserialize_embedding(bytes(r["embedding"])) for r in emb_rows if r["embedding"]]
+                vectors = [
+                    deserialize_embedding(bytes(r["embedding"]))
+                    for r in emb_rows
+                    if r["embedding"] and len(bytes(r["embedding"])) >= 2048
+                ]
                 if vectors:
-                    mean_vec = np.mean(np.stack(vectors, axis=0), axis=0)
-                    centroid = normalize_vector(mean_vec)
-                    self.repo.update_person_centroid(pid, serialize_embedding(centroid))
+                    if len(vectors) >= 10:
+                        sub_c = FaceVectorMatcher.compute_sub_centroids(np.stack(vectors, axis=0), max_k=5)
+                    else:
+                        sub_c = normalize_vector(np.mean(np.stack(vectors, axis=0), axis=0, keepdims=True))
+                    updates.append((serialize_embedding(sub_c), pid))
 
-        self.signals.suggestions_updated.emit()
+        if updates:
+            with self.engine.write_lock:
+                conn.executemany(
+                    "UPDATE people SET centroid_embedding = ? WHERE id = ?;",
+                    updates,
+                )
+                conn.commit()
+            if emit_signal:
+                self.signals.suggestions_updated.emit()
+        return len(updates)
 
     # -------------------------------------------------------------------------
     # Stage 2: Background Face Scanning
@@ -759,24 +843,31 @@ class FaceDetectionWorker(QRunnable):
         and runs Stage 3 matching after each batch.
         """
         conn = self.engine.catalog_conn()
-        count_row = conn.execute(
+        counts_row = conn.execute(
             """
-            SELECT COUNT(*) AS cnt
+            SELECT
+                COUNT(*) AS total_library,
+                SUM(CASE WHEN face_scan_version < ? THEN 1 ELSE 0 END) AS remaining
             FROM media
-            WHERE is_missing = 0 AND is_video = 0 AND face_scan_version >= 0 AND face_scan_version < ?;
+            WHERE is_missing = 0 AND is_video = 0 AND face_scan_version >= 0;
             """,
             (TARGET_FACE_SCAN_VERSION,),
         ).fetchone()
-        total_to_process = int(count_row["cnt"]) if count_row else 0
+        total_library = int(counts_row["total_library"] or 0) if counts_row else 0
+        total_to_process = int(counts_row["remaining"] or 0) if counts_row else 0
 
         if total_to_process == 0:
             return 0
 
+        already_scanned = max(0, total_library - total_to_process)
+        progress_total = max(total_library, total_to_process)
         processed = 0
         total_faces_detected = 0
 
-        self.signals.status_message.emit(f"Scanning {total_to_process} photos for faces...")
-        self.signals.batch_progressed.emit(0, total_to_process)
+        self.signals.status_message.emit(
+            f"Stage 2/2: Finding people in {total_to_process:,} remaining photos ({already_scanned:,}/{progress_total:,} overall)..."
+        )
+        self.signals.batch_progressed.emit(already_scanned, progress_total)
 
         while not self._is_cancelled():
             batch_rows = conn.execute(
@@ -794,6 +885,7 @@ class FaceDetectionWorker(QRunnable):
             if not batch_rows:
                 break
 
+            batch_new_unassigned = 0
             for r in batch_rows:
                 if self._is_cancelled():
                     break
@@ -847,6 +939,7 @@ class FaceDetectionWorker(QRunnable):
                     ]
                     created_ids = self.repo.insert_detected_faces(mid, payload)
                     total_faces_detected += len(unclaimed_faces)
+                    batch_new_unassigned += len(created_ids)
 
                     # Save face crop thumbnails
                     thumb_entries = [
@@ -860,32 +953,35 @@ class FaceDetectionWorker(QRunnable):
                 # Mark media face scan complete
                 self.repo.update_face_scan_version([mid], version=TARGET_FACE_SCAN_VERSION)
                 processed += 1
-                self.signals.batch_progressed.emit(processed, total_to_process)
+                self.signals.batch_progressed.emit(already_scanned + processed, progress_total)
 
                 if self.throttle_ms > 0:
                     time.sleep(self.throttle_ms / 1000.0)
 
-            # Run Stage 3 matching pass after each batch
-            self._run_stage3_match()
+            # Run Stage 3 matching pass after each batch; emit update only when view data changed
+            matched_changed = self._run_stage3_match()
+            if batch_new_unassigned > 0 and not matched_changed:
+                self.signals.suggestions_updated.emit()
 
         return total_faces_detected
 
     # -------------------------------------------------------------------------
     # Stage 3: Vectorized Face Matching
     # -------------------------------------------------------------------------
-    def _run_stage3_match(self) -> None:
+    def _run_stage3_match(self) -> bool:
         """
         Runs high-speed matrix cosine similarity between unassigned face detections
         (state = 0) and all person centroids using FaceVectorMatcher.
         Stores top candidate matches and similarity scores.
+        Returns True if any suggested_person_id or score actually changed.
         """
         centroids = self.repo.get_people_centroids()
         if not centroids:
-            return
+            return False
 
         unassigned = self.repo.get_unassigned_face_embeddings(limit=None)
         if not unassigned:
-            return
+            return False
 
         rejected_pairs = self.repo.get_rejected_face_pairs()
 
@@ -895,6 +991,13 @@ class FaceDetectionWorker(QRunnable):
             for pid in person_ids
         }
 
+        existing_map = {
+            int(u["id"]): (
+                int(u["suggested_person_id"]) if u.get("suggested_person_id") is not None else None,
+                float(u["similarity_score"]) if u.get("similarity_score") is not None else None,
+            )
+            for u in unassigned
+        }
         face_ids = [int(u["id"]) for u in unassigned]
         face_matrix = np.stack(
             [deserialize_embedding(bytes(u["embedding"])) for u in unassigned],
@@ -914,12 +1017,17 @@ class FaceDetectionWorker(QRunnable):
         )
 
         if suggestions:
-            update_payload = [
-                (s.face_id, s.person_id, s.score)
-                for s in suggestions
-            ]
-            self.repo.update_suggested_matches(update_payload)
-            self.signals.suggestions_updated.emit()
+            update_payload = []
+            for s in suggestions:
+                prev_pid, prev_score = existing_map.get(s.face_id, (None, None))
+                score_changed = prev_score is None or abs(float(s.score) - prev_score) > 1e-4
+                if prev_pid != s.person_id or score_changed:
+                    update_payload.append((s.face_id, s.person_id, s.score))
+            if update_payload:
+                self.repo.update_suggested_matches(update_payload)
+                self.signals.suggestions_updated.emit()
+                return True
+        return False
 
     def _reset_scan_versions(self) -> None:
         """Resets face_scan_version to 0 for all non-video media to force a complete re-scan."""

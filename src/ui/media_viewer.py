@@ -4911,7 +4911,15 @@ class SingleMediaViewer(QWidget):
         self.current_orientation = 1
         if hasattr(self, "catalog_repo") and self.catalog_repo and self.current_media_id is not None:
             try:
-                self.catalog_repo.update_media_metadata(int(self.current_media_id), orientation=1)
+                st = self.current_file_path.stat()
+                self.catalog_repo.update_media_metadata(
+                    int(self.current_media_id),
+                    orientation=1,
+                    width=int(save_img.width),
+                    height=int(save_img.height),
+                    mtime=int(st.st_mtime),
+                    size=int(st.st_size),
+                )
             except Exception:
                 pass
 
@@ -5348,15 +5356,16 @@ class SingleMediaViewer(QWidget):
         else:
             bpath = None
 
-        # Determine pristine camera/disk EXIF orientation from the file being restored
+        # Determine pristine camera/disk EXIF orientation & file dimensions from the file being restored
         target_fpath = bpath if (bpath is not None and bpath.exists()) else self.current_file_path
-        disk_orient = getattr(self, "current_orientation", 1)
+        disk_orient = 1
+        restored_dims: tuple[int, int] | None = None
         if target_fpath is not None and target_fpath.exists():
             try:
                 with Image.open(target_fpath) as f_img:
                     exif_val = f_img.getexif().get(0x0112)
-                    if exif_val:
-                        disk_orient = int(exif_val)
+                    disk_orient = int(exif_val or 1)
+                    restored_dims = (int(f_img.width), int(f_img.height))
             except Exception:
                 pass
 
@@ -5368,7 +5377,15 @@ class SingleMediaViewer(QWidget):
                 pass
             if hasattr(self, "catalog_repo") and self.catalog_repo and self.current_media_id is not None:
                 try:
-                    self.catalog_repo.update_media_metadata(int(self.current_media_id), orientation=disk_orient)
+                    st = self.current_file_path.stat()
+                    self.catalog_repo.update_media_metadata(
+                        int(self.current_media_id),
+                        orientation=disk_orient,
+                        width=restored_dims[0] if restored_dims else None,
+                        height=restored_dims[1] if restored_dims else None,
+                        mtime=int(st.st_mtime),
+                        size=int(st.st_size),
+                    )
                 except Exception:
                     pass
             self.load_media(self.current_media_id, self.current_file_path, is_video=False, orientation=disk_orient)
@@ -5376,7 +5393,15 @@ class SingleMediaViewer(QWidget):
             if self.current_file_path is not None and self.current_file_path.exists():
                 if hasattr(self, "catalog_repo") and self.catalog_repo and self.current_media_id is not None:
                     try:
-                        self.catalog_repo.update_media_metadata(int(self.current_media_id), orientation=disk_orient)
+                        st = self.current_file_path.stat()
+                        self.catalog_repo.update_media_metadata(
+                            int(self.current_media_id),
+                            orientation=disk_orient,
+                            width=restored_dims[0] if restored_dims else None,
+                            height=restored_dims[1] if restored_dims else None,
+                            mtime=int(st.st_mtime),
+                            size=int(st.st_size),
+                        )
                     except Exception:
                         pass
                 self.load_media(self.current_media_id, self.current_file_path, is_video=False, orientation=disk_orient)

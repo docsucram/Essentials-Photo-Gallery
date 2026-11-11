@@ -1370,6 +1370,7 @@ class BatchPeopleView(QWidget):
         self._current_view_mode: str = "suggestions"
         self._scan_current: int = 0
         self._scan_total: int = 0
+        self._last_render_signature: Any = None
 
         # Debounce timer to prevent multiple rapid re-clustering passes
         self._refresh_timer = QTimer(self)
@@ -1840,112 +1841,72 @@ class BatchPeopleView(QWidget):
             unnamed_cnt = len([r for r in grouped[None] if not r.is_confirmed])
             picker_data.append((None, "Unnamed", unnamed_cnt, None))
 
-        self.avatar_strip.populate(picker_data, mode=mode)
-
-        # Clear existing section widgets
-        for sec in self._sections.values():
-            sec.deleteLater()
-        self._sections.clear()
-
-        # 1. Populate Named Person Sections
-        named_grouped = {pid: recs for pid, recs in grouped.items() if pid is not None}
-        for pid, records in named_grouped.items():
-            if self._filter_person_id is not None:
-                target_pid = None if self._filter_person_id == -1 else self._filter_person_id
-                if pid != target_pid:
-                    continue
-
-            p_name = person_names.get(pid, "Unnamed")
-            conf_cnt = confirmed_counts.get(pid, 0)
-
-            sec = _PersonGroupSectionWidget(
-                person_id=pid,
-                person_name=p_name,
-                confirmed_count=conf_cnt,
-                records=records,
-                thumb_repo=self.thumb_repo,
-                pixmap_cache=self.pixmap_cache,
-                parent=self.scroll_content,
-            )
-            sec.confirm_all_requested.connect(self._on_section_confirm_all)
-            sec.confirm_faces_requested.connect(self._on_section_confirm_faces)
-            sec.reject_faces_requested.connect(self._on_section_reject_faces)
-            sec.not_a_face_requested.connect(self._on_section_not_a_face)
-            sec.ignore_faces_requested.connect(self._on_section_ignore_faces)
-            sec.tag_as_requested.connect(self._on_section_tag_as)
-            sec.rename_merge_requested.connect(self._on_rename_merge_person)
-            sec.open_media_requested.connect(self.open_media_requested.emit)
-            sec.preview_requested.connect(self._open_quick_preview)
-            sec.list_view.selectionModel().selectionChanged.connect(lambda *args: self._on_selection_changed())
-
-            idx = max(0, self.scroll_layout.count() - 1)
-            self.scroll_layout.insertWidget(idx, sec)
-            sec.show()
-            self._sections[pid] = sec
-
-        # 2. Cluster and Populate Unnamed Face Sections
-        unnamed_records = grouped.get(None, [])
-        if unnamed_records and (self._filter_person_id is None or self._filter_person_id == -1):
-            unnamed_fids = [r.face_id for r in unnamed_records]
-            fid_to_rec = {r.face_id: r for r in unnamed_records}
-            valid_fids: list[int] = []
-            emb_list: list[np.ndarray] = []
-
-            for chunk_start in range(0, len(unnamed_fids), 500):
-                chunk = unnamed_fids[chunk_start : chunk_start + 500]
-                rows = conn.execute(
-                    f"SELECT id, embedding FROM media_people WHERE id IN ({','.join('?' for _ in chunk)}) AND embedding IS NOT NULL;",
-                    chunk,
-                ).fetchall()
-                for row in rows:
-                    raw_emb = bytes(row["embedding"]) if row["embedding"] else None
-                    if raw_emb and len(raw_emb) >= 2048:
-                        valid_fids.append(int(row["id"]))
-                        emb_list.append(deserialize_embedding(raw_emb))
-
-            unnamed_sections: list[tuple[str, list[FaceCardRecord]]] = []
-            if len(valid_fids) >= 3 and len(emb_list) >= 3:
-                clusters = FaceVectorMatcher.cluster_unnamed_faces(
-                    valid_fids, np.stack(emb_list, axis=0), sim_threshold=0.58, min_cluster_size=4
+        inc_no_face = (
+            getattr(self, "chk_include_no_face", None) is not None
+            and self.chk_include_no_face.isChecked()
+        )
+        render_sig = (
+            mode,
+            self._filter_person_id,
+            bool(getattr(self, "_show_tagged_faces", False)),
+            bool(inc_no_face),
+            tuple(sorted(person_names.items())),
+            tuple(sorted(confirmed_counts.items())),
+            tuple(
+                (
+                    r.face_id,
+                    r.suggested_person_id,
+                    round(r.confidence, 3),
+                    r.is_confirmed,
+                    r.outlier_reason,
+                    r.is_boxless_match,
                 )
-                assigned_unnamed_fids = set()
-                # Sort clusters by face count (largest first) and keep top 20 significant clusters
-                sorted_clusters = sorted(
-                    [(k, v) for k, v in clusters.items() if k != "Other Unnamed Faces"],
-                    key=lambda x: len(x[1]),
-                    reverse=True,
-                )
-                for idx, (_, c_fids) in enumerate(sorted_clusters[:20], 1):
-                    c_recs = [fid_to_rec[fid] for fid in c_fids if fid in fid_to_rec]
-                    assigned_unnamed_fids.update(c_fids)
-                    if c_recs:
-                        unnamed_sections.append((f"Unknown Person #{idx}", c_recs))
+                for r in self._all_records
+            ),
+        )
+        if render_sig == getattr(self, "_last_render_signature", None):
+            self._update_empty_state_label()
+            return
+        self._last_render_signature = render_sig
 
-                remaining_fids = [fid for fid in unnamed_fids if fid not in assigned_unnamed_fids]
-                if remaining_fids:
-                    rem_recs = [fid_to_rec[fid] for fid in remaining_fids]
-                    unnamed_sections.append(("Other Unnamed Faces", rem_recs))
-            else:
-                unnamed_sections.append(("Other Unnamed Faces", unnamed_records))
+        v_scroll = self.scroll_area.verticalScrollBar().value() if hasattr(self, "scroll_area") else 0
+        self.scroll_content.setUpdatesEnabled(False)
+        try:
+            self.avatar_strip.populate(picker_data, mode=mode)
 
-            for cluster_name, records in unnamed_sections:
-                sec_key = None if cluster_name in ("Unnamed Faces", "Other Unnamed Faces") else cluster_name
+            # Clear existing section widgets (hide first to avoid visual flash before deleteLater)
+            for sec in self._sections.values():
+                sec.hide()
+                sec.deleteLater()
+            self._sections.clear()
+
+            # 1. Populate Named Person Sections
+            named_grouped = {pid: recs for pid, recs in grouped.items() if pid is not None}
+            for pid, records in named_grouped.items():
+                if self._filter_person_id is not None:
+                    target_pid = None if self._filter_person_id == -1 else self._filter_person_id
+                    if pid != target_pid:
+                        continue
+
+                p_name = person_names.get(pid, "Unnamed")
+                conf_cnt = confirmed_counts.get(pid, 0)
+
                 sec = _PersonGroupSectionWidget(
-                    person_id=None,
-                    person_name=cluster_name,
-                    confirmed_count=0,
+                    person_id=pid,
+                    person_name=p_name,
+                    confirmed_count=conf_cnt,
                     records=records,
                     thumb_repo=self.thumb_repo,
                     pixmap_cache=self.pixmap_cache,
                     parent=self.scroll_content,
                 )
-                sec.name_cluster_requested.connect(self._on_section_name_cluster)
                 sec.confirm_all_requested.connect(self._on_section_confirm_all)
                 sec.confirm_faces_requested.connect(self._on_section_confirm_faces)
                 sec.reject_faces_requested.connect(self._on_section_reject_faces)
                 sec.not_a_face_requested.connect(self._on_section_not_a_face)
                 sec.ignore_faces_requested.connect(self._on_section_ignore_faces)
                 sec.tag_as_requested.connect(self._on_section_tag_as)
+                sec.rename_merge_requested.connect(self._on_rename_merge_person)
                 sec.open_media_requested.connect(self.open_media_requested.emit)
                 sec.preview_requested.connect(self._open_quick_preview)
                 sec.list_view.selectionModel().selectionChanged.connect(lambda *args: self._on_selection_changed())
@@ -1953,9 +1914,85 @@ class BatchPeopleView(QWidget):
                 idx = max(0, self.scroll_layout.count() - 1)
                 self.scroll_layout.insertWidget(idx, sec)
                 sec.show()
-                self._sections[sec_key] = sec
+                self._sections[pid] = sec
 
-        self._update_empty_state_label()
+            # 2. Cluster and Populate Unnamed Face Sections
+            unnamed_records = grouped.get(None, [])
+            if unnamed_records and (self._filter_person_id is None or self._filter_person_id == -1):
+                unnamed_fids = [r.face_id for r in unnamed_records]
+                fid_to_rec = {r.face_id: r for r in unnamed_records}
+                valid_fids: list[int] = []
+                emb_list: list[np.ndarray] = []
+
+                for chunk_start in range(0, len(unnamed_fids), 500):
+                    chunk = unnamed_fids[chunk_start : chunk_start + 500]
+                    rows = conn.execute(
+                        f"SELECT id, embedding FROM media_people WHERE id IN ({','.join('?' for _ in chunk)}) AND embedding IS NOT NULL;",
+                        chunk,
+                    ).fetchall()
+                    for row in rows:
+                        raw_emb = bytes(row["embedding"]) if row["embedding"] else None
+                        if raw_emb and len(raw_emb) >= 2048:
+                            valid_fids.append(int(row["id"]))
+                            emb_list.append(deserialize_embedding(raw_emb))
+
+                unnamed_sections: list[tuple[str, list[FaceCardRecord]]] = []
+                if len(valid_fids) >= 3 and len(emb_list) >= 3:
+                    clusters = FaceVectorMatcher.cluster_unnamed_faces(
+                        valid_fids, np.stack(emb_list, axis=0), sim_threshold=0.58, min_cluster_size=4
+                    )
+                    assigned_unnamed_fids = set()
+                    # Sort clusters by face count (largest first) and keep top 20 significant clusters
+                    sorted_clusters = sorted(
+                        [(k, v) for k, v in clusters.items() if k != "Other Unnamed Faces"],
+                        key=lambda x: len(x[1]),
+                        reverse=True,
+                    )
+                    for idx, (_, c_fids) in enumerate(sorted_clusters[:20], 1):
+                        c_recs = [fid_to_rec[fid] for fid in c_fids if fid in fid_to_rec]
+                        assigned_unnamed_fids.update(c_fids)
+                        if c_recs:
+                            unnamed_sections.append((f"Unknown Person #{idx}", c_recs))
+
+                    remaining_fids = [fid for fid in unnamed_fids if fid not in assigned_unnamed_fids]
+                    if remaining_fids:
+                        rem_recs = [fid_to_rec[fid] for fid in remaining_fids]
+                        unnamed_sections.append(("Other Unnamed Faces", rem_recs))
+                else:
+                    unnamed_sections.append(("Other Unnamed Faces", unnamed_records))
+
+                for cluster_name, records in unnamed_sections:
+                    sec_key = None if cluster_name in ("Unnamed Faces", "Other Unnamed Faces") else cluster_name
+                    sec = _PersonGroupSectionWidget(
+                        person_id=None,
+                        person_name=cluster_name,
+                        confirmed_count=0,
+                        records=records,
+                        thumb_repo=self.thumb_repo,
+                        pixmap_cache=self.pixmap_cache,
+                        parent=self.scroll_content,
+                    )
+                    sec.name_cluster_requested.connect(self._on_section_name_cluster)
+                    sec.confirm_all_requested.connect(self._on_section_confirm_all)
+                    sec.confirm_faces_requested.connect(self._on_section_confirm_faces)
+                    sec.reject_faces_requested.connect(self._on_section_reject_faces)
+                    sec.not_a_face_requested.connect(self._on_section_not_a_face)
+                    sec.ignore_faces_requested.connect(self._on_section_ignore_faces)
+                    sec.tag_as_requested.connect(self._on_section_tag_as)
+                    sec.open_media_requested.connect(self.open_media_requested.emit)
+                    sec.preview_requested.connect(self._open_quick_preview)
+                    sec.list_view.selectionModel().selectionChanged.connect(lambda *args: self._on_selection_changed())
+
+                    idx = max(0, self.scroll_layout.count() - 1)
+                    self.scroll_layout.insertWidget(idx, sec)
+                    sec.show()
+                    self._sections[sec_key] = sec
+
+            self._update_empty_state_label()
+        finally:
+            self.scroll_content.setUpdatesEnabled(True)
+        if v_scroll > 0 and hasattr(self, "scroll_area"):
+            self.scroll_area.verticalScrollBar().setValue(v_scroll)
 
     def _on_avatar_strip_filtered(self, person_id: int | None) -> None:
         """Filters section visibility when a chip is clicked on the avatar strip."""
@@ -2337,6 +2374,7 @@ class BatchPeopleView(QWidget):
 
     def _remove_faces_from_view(self, face_ids: set[int]) -> None:
         """Removes the given face_ids from all sections and prunes empty sections."""
+        self._last_render_signature = None
         for pid in list(self._sections.keys()):
             sec = self._sections[pid]
             remaining = sec.remove_face_ids(face_ids)

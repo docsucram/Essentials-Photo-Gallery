@@ -93,6 +93,7 @@ from src.ui.grid_model import CatalogListModel
 from src.ui.grid_view import MediaCardDelegate, ThumbnailGridView
 from src.ui.left_nav_dock import LeftNavigationDock
 from src.ui.map_view import WorldMapView
+from src.ui.smart_album_dialog import SmartAlbumDialog
 from src.ui.media_viewer import SingleMediaViewer
 from src.ui.people_directory_view import PeopleDirectoryView
 from src.utils.paths import get_icons_dir, get_themes_dir
@@ -735,7 +736,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.current_icon_theme: str = "wlpg_aero"
         self._scanner_status_text: str = "Scanning: Idle"
         self._face_status_text: str = "Faces: Idle"
+        self._face_phase: str = "idle"
         self._face_crop_status_text: str = ""
+        self._status_msg_seq: int = 0
         self._face_crop_cancel = CancellationFlag()
 
         # Undo / Redo Command Stack
@@ -847,9 +850,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.batch_people_view = BatchPeopleView(self.engine, self.central_stack)
         self.batch_people_view.faces_confirmed.connect(self._on_batch_faces_confirmed)
         self.batch_people_view.faces_rejected.connect(self._on_batch_faces_rejected)
-        self.batch_people_view.person_renamed.connect(
-            lambda pid, name: self.refresh_navigation_and_autocomplete()
-        )
+        self.batch_people_view.faces_ignored.connect(self._on_batch_faces_ignored)
+        self.batch_people_view.person_renamed.connect(self._on_batch_person_renamed)
         self.batch_people_view.back_to_gallery_requested.connect(self.close_batch_people_view)
         self.batch_people_view.open_media_requested.connect(self.open_single_viewer)
         self.batch_people_view.card_selection_changed.connect(self._on_batch_card_selection_changed)
@@ -861,7 +863,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.people_directory_view.person_selected.connect(self._on_directory_person_selected)
         self.people_directory_view.unnamed_selected.connect(self._on_directory_unnamed_selected)
         self.people_directory_view.review_suggestions_requested.connect(self.open_batch_people_view)
-        self.people_directory_view.directory_updated.connect(self.refresh_navigation_and_autocomplete)
+        self.people_directory_view.directory_updated.connect(self.refresh_people_navigation_and_autocomplete)
         self.person_header_bar.unnamed_person_named.connect(self._on_unnamed_person_named)
         self.central_stack.addWidget(self.people_directory_view)
 
@@ -1192,6 +1194,16 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.left_nav_dock.files_dropped_on_folder.connect(self._on_files_dropped_on_folder)
         self.left_nav_dock.tag_hierarchy_changed.connect(self.refresh_navigation_and_autocomplete)
         self.left_nav_dock.place_selected.connect(self._on_place_selected)
+        self.left_nav_dock.new_album_requested.connect(self._on_new_album_requested)
+        self.left_nav_dock.rename_album_requested.connect(self._on_rename_album_requested)
+        self.left_nav_dock.delete_album_requested.connect(self._on_delete_album_requested)
+        self.left_nav_dock.new_smart_album_requested.connect(self._on_new_smart_album_requested)
+        self.left_nav_dock.edit_smart_album_requested.connect(self._on_edit_smart_album_requested)
+        self.left_nav_dock.rename_smart_album_requested.connect(self._on_rename_smart_album_requested)
+        self.left_nav_dock.delete_smart_album_requested.connect(self._on_delete_smart_album_requested)
+        self.left_nav_dock.save_filter_as_smart_album_requested.connect(
+            self._on_save_filter_as_smart_album_requested
+        )
 
         # Top Ribbon Toolbar
         self.ribbon.arrange_changed.connect(self.on_arrange_changed)
@@ -1264,6 +1276,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.scope_bar.media_type_clear_requested.connect(
             lambda: self.left_nav_dock.set_media_type(None)
         )
+        self.scope_bar.orientation_clear_requested.connect(
+            lambda: self.left_nav_dock.set_orientation_filter("all")
+        )
 
         # Quick Access Toolbar & Navigation History Signals
         self.ribbon.back_requested.connect(self.navigate_history_back)
@@ -1273,6 +1288,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.ribbon.qat_thumbnails_clicked.connect(self.trigger_thumbnail_view)
         self.ribbon.qat_map_clicked.connect(self.show_map_view)
         self.ribbon.qat_people_clicked.connect(self.open_people_directory_view)
+        if hasattr(self.ribbon, "map_location_chosen"):
+            self.ribbon.map_location_chosen.connect(self._on_ribbon_map_location_chosen)
+        if hasattr(self.ribbon, "map_location_search_requested"):
+            self.ribbon.map_location_search_requested.connect(self._on_ribbon_map_location_search)
+        if hasattr(self.ribbon, "map_filters_changed"):
+            self.ribbon.map_filters_changed.connect(self._on_ribbon_map_filters_changed)
         self.ribbon.filter_month_selected.connect(
             lambda m: self._on_date_filter_selected(None, m if m > 0 else None, None)
         )
@@ -1327,10 +1348,11 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.right_tag_dock.filename_committed.connect(self.on_selection_filename_committed)
         self.right_tag_dock.date_taken_edited.connect(self.on_selection_date_taken_edited)
         self.right_tag_dock.author_committed.connect(self.on_selection_author_committed)
+        self.left_nav_dock.visibilityChanged.connect(
+            lambda vis: self._sync_nav_pane_buttons(vis)
+        )
         self.right_tag_dock.visibilityChanged.connect(
-            lambda vis: self.ribbon.btn_toggle_tag_pane.setChecked(vis)
-            if hasattr(self.ribbon, "btn_toggle_tag_pane")
-            else None
+            lambda vis: self._sync_tag_pane_buttons(vis)
         )
 
         # Fine-Tune Sliders -> SingleMediaViewer
@@ -1972,7 +1994,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         worker.signals.suggestions_updated.connect(self.on_face_suggestions_updated)
         worker.signals.worker_finished.connect(self.on_face_worker_finished)
         self._face_worker = worker
-        self._face_status_text = "Faces: Scanning..."
+        self._face_phase = "init"
+        self._face_status_text = "Faces: Starting face scan..."
         self._update_worker_monitor()
         self.face_pool.start(worker)
 
@@ -1984,24 +2007,32 @@ class PhotoGalleryMainWindow(QMainWindow):
         """Updates status text when FaceDetectionWorker transitions between stages."""
         if self._face_worker is not None:
             clean_msg = message
-            if "Stage 1:" in message:
-                clean_msg = "Verifying face tags..."
+            if "Stage 1" in message:
+                self._face_phase = "verify"
+                clean_msg = "Verifying face tags (1/2)..."
+            elif "Stage 2" in message or "Scanning" in message:
+                self._face_phase = "scan"
+                clean_msg = "Finding people (2/2)..."
             elif "Stage 3:" in message:
+                self._face_phase = "match"
                 clean_msg = "Computing face clusters..."
             elif "Stage 4:" in message:
+                self._face_phase = "match"
                 clean_msg = "Grouping face suggestions..."
             self._face_status_text = f"Faces: {clean_msg}"
             self._update_worker_monitor()
 
     def on_face_batch_progressed(self, current: int, total: int) -> None:
         """Updates status bar and BatchPeopleView when face scanning makes progress."""
+        phase = getattr(self, "_face_phase", "scan")
+        phase_label = "Verifying face tags (1/2)" if phase == "verify" else "Finding people (2/2)"
         if total > 0 and current <= total:
             pct = int((current / total) * 100)
-            self._face_status_text = f"Faces: {current:,}/{total:,} ({pct}%)"
+            self._face_status_text = f"Faces: {phase_label}: {current:,}/{total:,} ({pct}%)"
         elif total > 0:
-            self._face_status_text = f"Faces: {current:,}/{total:,}"
+            self._face_status_text = f"Faces: {phase_label}: {current:,}/{total:,}"
         elif self._face_worker is not None:
-            self._face_status_text = "Faces: Scanning..."
+            self._face_status_text = f"Faces: {phase_label}..."
         else:
             self._face_status_text = "Faces: Idle"
         if hasattr(self, "batch_people_view"):
@@ -2021,6 +2052,7 @@ class PhotoGalleryMainWindow(QMainWindow):
     def on_face_worker_finished(self, total_faces: int) -> None:
         """Cleans up active worker reference and updates status bar and BatchPeopleView."""
         self._face_worker = None
+        self._face_phase = "idle"
         self._face_status_text = "Faces: Idle"
         self._update_worker_monitor()
         if hasattr(self, "batch_people_view"):
@@ -2028,7 +2060,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             if self.central_stack.currentWidget() == self.batch_people_view:
                 self.batch_people_view.refresh_suggestions(debounce=True)
         if total_faces > 0:
-            self.statusBar().showMessage(f"✓ Face scan complete: {total_faces} faces found", 4000)
+            self.statusBar().showMessage(f"✓ Face scan complete: {total_faces:,} face(s) found", 4000)
             self.refresh_navigation_and_autocomplete()
 
     # -------------------------------------------------------------------------
@@ -2089,9 +2121,11 @@ class PhotoGalleryMainWindow(QMainWindow):
             pass
 
     def refresh_navigation_and_autocomplete(self) -> None:
-        self.left_nav_dock.refresh_trees(self.catalog_repo)
         people = self.catalog_repo.get_people_list()
         tags = self.catalog_repo.get_tag_tree()
+        self.left_nav_dock.refresh_trees(
+            self.catalog_repo, preloaded_people=people, preloaded_tags=tags
+        )
         all_tag_paths = [str(t["full_path"]) for t in tags]
         canon_by_lower = {p.lower(): p for p in all_tag_paths}
         mru_valid: list[str] = []
@@ -2117,6 +2151,17 @@ class PhotoGalleryMainWindow(QMainWindow):
             recent_tags=mru_valid[:12],
         )
 
+    def refresh_people_navigation_and_autocomplete(self) -> None:
+        """Fast people-only navigation and autocomplete refresh (avoids full tree rebuild)."""
+        if hasattr(self.left_nav_dock, "refresh_people_only"):
+            people = self.left_nav_dock.refresh_people_only(self.catalog_repo)
+        else:
+            people = self.catalog_repo.get_people_list()
+            self.left_nav_dock.refresh_trees(self.catalog_repo, preloaded_people=people)
+        self.ribbon.populate_face_carousel(people)
+        if hasattr(self.right_tag_dock, "_people_model"):
+            self.right_tag_dock._people_model.setStringList([str(p["name"]) for p in people])
+
     def _on_ribbon_tag_filter(self, tag_id: int | None, mode: str) -> None:
         if tag_id is None:
             if mode in ("AND", "OR"):
@@ -2136,12 +2181,17 @@ class PhotoGalleryMainWindow(QMainWindow):
         state = self.left_nav_dock.current_filter_state()
         m_type = str(state.get("media_type") or "").lower().strip()
         has_media_filter = bool(m_type and m_type not in ("all", "none"))
+        o_filt = str(state.get("orientation_filter") or "").lower().strip()
+        has_orientation_filter = bool(o_filt and o_filt not in ("all", "none"))
         return bool(
-            state.get("person_ids")
+            state.get("album_id") is not None
+            or state.get("smart_album_id") is not None
+            or state.get("person_ids")
             or state.get("include_tag_ids")
             or state.get("ratings")
             or state.get("flagged_only")
             or has_media_filter
+            or has_orientation_filter
             or state.get("date_year") is not None
             or state.get("date_month") is not None
             or self._search_text
@@ -2152,13 +2202,19 @@ class PhotoGalleryMainWindow(QMainWindow):
             or self._search_scope_bar_explicitly_opened
         )
 
-    def _update_scope_bar_visibility(self) -> None:
-        state = self.left_nav_dock.current_filter_state()
+    def _active_scope_label(self, state: dict[str, Any]) -> str | None:
+        if state.get("album_id") is not None:
+            return f"Album: {state.get('album_name') or state.get('album_id')}"
+        if state.get("smart_album_id") is not None:
+            return f"Smart Album: {state.get('smart_album_name') or state.get('smart_album_id')}"
         folder_name = self.left_nav_dock.selected_folder_name()
         if folder_name:
-            self.scope_bar.set_scope_label(f"Folder: {folder_name}")
-        else:
-            self.scope_bar.set_scope_label(None)
+            return f"Folder: {folder_name}"
+        return None
+
+    def _update_scope_bar_visibility(self) -> None:
+        state = self.left_nav_dock.current_filter_state()
+        self.scope_bar.set_scope_label(self._active_scope_label(state))
 
         self.scope_bar.update_active_filter_chips(
             state,
@@ -2368,9 +2424,17 @@ class PhotoGalleryMainWindow(QMainWindow):
                 loc_label = state.get("location_label", "")
                 self._active_map_media_ids = list(mids)
                 self._active_map_location_label = loc_label
+                filt = state.get("filter")
+                if isinstance(filt, dict):
+                    self.left_nav_dock.restore_filter_state(filt)
+                    selected_pids = filt.get("person_ids", ())
+                    self.grid_view.set_person_header(selected_pids[0] if len(selected_pids) == 1 else None)
+                    if len(selected_pids) != 1:
+                        self.card_delegate.set_face_crop_person_id(None)
                 if self.central_stack.currentWidget() != self.grid_view:
                     self.central_stack.setCurrentWidget(self.grid_view)
                     self.ribbon.set_active_mode("grid")
+                self._update_scope_bar_visibility()
                 self.rebuild_and_run_query()
             elif view == "grid_map_bbox":
                 if hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
@@ -2380,9 +2444,17 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self._active_bbox = bbox
                 self._active_map_media_ids = None
                 self._active_map_location_label = loc_label
+                filt = state.get("filter")
+                if isinstance(filt, dict):
+                    self.left_nav_dock.restore_filter_state(filt)
+                    selected_pids = filt.get("person_ids", ())
+                    self.grid_view.set_person_header(selected_pids[0] if len(selected_pids) == 1 else None)
+                    if len(selected_pids) != 1:
+                        self.card_delegate.set_face_crop_person_id(None)
                 if self.central_stack.currentWidget() != self.grid_view:
                     self.central_stack.setCurrentWidget(self.grid_view)
                     self.ribbon.set_active_mode("grid")
+                self._update_scope_bar_visibility()
                 self.rebuild_and_run_query()
             else:
                 # Standard grid view (view == "grid" or legacy filter dict)
@@ -2414,8 +2486,8 @@ class PhotoGalleryMainWindow(QMainWindow):
 
     def _on_nav_filter_changed(self) -> None:
         self._active_bbox = None
-        folder_name = self.left_nav_dock.selected_folder_name()
-        scope_desc = f"Folder: {folder_name}" if folder_name else ""
+        state = self.left_nav_dock.current_filter_state()
+        scope_desc = self._active_scope_label(state) or ""
         self.scope_bar.set_scope_label(scope_desc)
         self.ribbon.set_scope_label(scope_desc or "All photos and videos")
         self._update_scope_bar_visibility()
@@ -2468,6 +2540,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.grid_view.set_person_header(None)
             self.card_delegate.set_face_crop_person_id(None)
             self.central_stack.setCurrentWidget(self.people_directory_view)
+            self.ribbon.set_active_mode("people")
             self.people_directory_view.refresh_directory()
             self.scope_bar.set_scope_label("People directory")
             self.ribbon.set_scope_label("People")
@@ -2545,7 +2618,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._face_crop_status_text = ""
             self.card_delegate.set_face_crop_person_id(None)
             self._update_worker_monitor()
-        self.grid_view.viewport().update()
+        self.grid_view._sync_metrics_and_scrollbar()
 
     def _on_face_crop_ready(self, media_id: int, person_id: int, webp_blob: bytes) -> None:
         """Stores preloaded face crop pixmap into delegate cache and refreshes view."""
@@ -2986,14 +3059,18 @@ class PhotoGalleryMainWindow(QMainWindow):
     def on_inline_rating_changed(self, media_id: int, rating: int) -> None:
         cmd = _RatingUndoCommand(self, [media_id], rating)
         self.undo_stack.push(cmd)
+        lbl = f"{rating} star{'s' if rating != 1 else ''}" if rating > 0 else "Unrated"
+        self.show_status_message(f"✓ Rated item: {lbl}", 3000)
 
     def on_inline_flag_changed(self, media_id: int, new_flag: int) -> None:
         cmd = _FlagUndoCommand(self, [media_id], new_flag)
         self.undo_stack.push(cmd)
+        self.show_status_message("✓ Flagged item" if new_flag else "✓ Unflagged item", 3000)
 
     def on_inline_caption_changed(self, media_id: int, new_caption: str) -> None:
         cmd = _CaptionUndoCommand(self, [media_id], new_caption)
         self.undo_stack.push(cmd)
+        self.show_status_message("✓ Updated caption", 3000)
 
     def _on_rating_shortcut(self, rating: int) -> None:
         focused = QApplication.focusWidget()
@@ -3027,6 +3104,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             return
         cmd = _RatingUndoCommand(self, target_ids, rating)
         self.undo_stack.push(cmd)
+        lbl = f"{rating} star{'s' if rating != 1 else ''}" if rating > 0 else "Unrated"
+        self.show_status_message(f"✓ Rated {len(target_ids)} item(s): {lbl}", 3000)
 
     def apply_flag_to_selection(self, flag: int) -> None:
         target_ids = self.get_active_target_ids()
@@ -3034,6 +3113,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             return
         cmd = _FlagUndoCommand(self, target_ids, flag)
         self.undo_stack.push(cmd)
+        self.show_status_message(f"✓ {'Flagged' if flag else 'Unflagged'} {len(target_ids)} item(s)", 3000)
 
     def apply_caption_to_selection(self, caption: str) -> None:
         target_ids = self.get_active_target_ids()
@@ -3041,6 +3121,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             return
         cmd = _CaptionUndoCommand(self, target_ids, caption)
         self.undo_stack.push(cmd)
+        self.show_status_message(f"✓ Updated caption on {len(target_ids)} item(s)", 3000)
 
     def apply_geotag_to_selection(self, location_name: str) -> None:
         target_ids = self.get_active_target_ids()
@@ -3049,6 +3130,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         lat, lon, loc_label = resolve_location_query(location_name)
         cmd = _GeotagUndoCommand(self, target_ids, lat, lon, loc_label)
         self.undo_stack.push(cmd)
+        self.show_status_message(f"✓ Tagged location '{loc_label}' on {len(target_ids)} item(s)", 3500)
 
     def on_selection_tag_added(self, tag_path: str) -> None:
         target_ids = self.get_active_target_ids()
@@ -3074,6 +3156,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.rebuild_and_run_query(preserve_selection=True)
         summary = self.catalog_repo.get_selection_summary(target_ids)
         self.right_tag_dock.bind_selection(target_ids, summary)
+        self.show_status_message(f"✓ Added tag '{canon_path}' to {len(target_ids)} item(s)", 3000)
 
     def on_selection_tag_removed(self, tag_id: int) -> None:
         target_ids = self.get_active_target_ids()
@@ -3089,6 +3172,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.rebuild_and_run_query(preserve_selection=True)
         summary = self.catalog_repo.get_selection_summary(target_ids)
         self.right_tag_dock.bind_selection(target_ids, summary)
+        self.show_status_message(f"✓ Removed tag from {len(target_ids)} item(s)", 3000)
 
     def on_selection_tag_assign_to_all(self, tag_id: int) -> None:
         target_ids = self.get_active_target_ids()
@@ -3107,6 +3191,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.rebuild_and_run_query(preserve_selection=True)
         summary = self.catalog_repo.get_selection_summary(target_ids)
         self.right_tag_dock.bind_selection(target_ids, summary)
+        tag_lbl = f"'{canon_path}'" if canon_path else "tag"
+        self.show_status_message(f"✓ Applied {tag_lbl} to {len(target_ids)} item(s)", 3000)
 
     def on_selection_person_added(self, person_name: str) -> None:
         target_ids = (
@@ -3133,6 +3219,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.media_viewer.render_face_regions(detail.get("people", []))
         if getattr(self, "find_people_enabled", True):
             self.start_face_detection()
+        self.show_status_message(f"✓ Tagged '{person_name.strip()}' in {len(target_ids)} item(s)", 3000)
 
     def on_selection_person_removed(self, person_id: int) -> None:
         target_ids = (
@@ -3219,6 +3306,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.lbl_sync_status.setText("✓ Linked person to face box")
         if getattr(self, "find_people_enabled", True):
             self.start_face_detection()
+        self.show_status_message(f"✓ Tagged '{person_name.strip()}' in {len(target_ids)} item(s)", 3000)
 
     def _on_dock_person_hovered(self, person_id: int, is_hovered: bool) -> None:
         if self.central_stack.currentWidget() == self.media_viewer:
@@ -3280,6 +3368,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.media_viewer.render_face_regions(detail.get("people", []))
         if getattr(self, "find_people_enabled", True):
             self.start_face_detection()
+        self.show_status_message(f"✓ Tagged '{person_name.strip()}' in {len(target_ids)} item(s)", 3000)
 
     def _on_dock_person_confirm_requested(self, person_id: int, face_id: int) -> None:
         target_ids = (
@@ -3319,6 +3408,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.lbl_sync_status.setText("✓ Confirmed face suggestion")
         if getattr(self, "find_people_enabled", True):
             self.start_face_detection()
+        self.show_status_message(f"✓ Tagged '{person_name.strip()}' in {len(target_ids)} item(s)", 3000)
 
     def _on_dock_person_reject_suggestion_requested(self, person_id: int, face_id: int) -> None:
         target_ids = (
@@ -3382,6 +3472,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.lbl_sync_status.setText(f"✓ Assigned face to '{person_name}'")
         if getattr(self, "find_people_enabled", True):
             self.start_face_detection()
+        self.show_status_message(f"✓ Tagged '{person_name.strip()}' in {len(target_ids)} item(s)", 3000)
 
     def _on_dismiss_face_requested(self, face_id: int) -> None:
         target_ids = (
@@ -3794,6 +3885,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.right_tag_dock.bind_selection(target_ids, summary)
         if getattr(self, "find_people_enabled", True):
             self.start_face_detection()
+        self.show_status_message(f"✓ Tagged '{person_name.strip()}' in {len(target_ids)} item(s)", 3000)
 
     # -------------------------------------------------------------------------
     # Relative 'Change Time Taken' Dialog Integration
@@ -4097,10 +4189,54 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._map_view.cluster_open_requested.connect(self._on_map_cluster_clicked_data)
             self._map_view.map_background_clicked.connect(self._on_map_bg_clicked)
             self._map_view.bbox_changed.connect(self._on_map_bbox_changed)
+            self._map_view.map_stats_Changed.connect(self._on_map_stats_changed)
             self._map_view.open_media_requested.connect(self.open_single_viewer)
             self.right_tag_dock.map_location_selected.connect(self._on_dock_map_location_selected)
             self.central_stack.addWidget(self._map_view)
         return self._map_view
+
+    def _sync_nav_pane_buttons(self, visible: bool) -> None:
+        if hasattr(self.ribbon, "btn_toggle_nav_pane"):
+            self.ribbon.btn_toggle_nav_pane.setChecked(bool(visible))
+        if hasattr(self.ribbon, "btn_map_nav_pane"):
+            self.ribbon.btn_map_nav_pane.setChecked(bool(visible))
+
+    def _sync_tag_pane_buttons(self, visible: bool) -> None:
+        if hasattr(self.ribbon, "btn_toggle_tag_pane"):
+            self.ribbon.btn_toggle_tag_pane.setChecked(bool(visible))
+        if hasattr(self.ribbon, "btn_map_tag_pane"):
+            self.ribbon.btn_map_tag_pane.setChecked(bool(visible))
+
+    def _on_map_stats_changed(
+        self, geotagged_count: int, cluster_count: int, _total_items: int
+    ) -> None:
+        if (
+            self._map_view is not None
+            and self.central_stack.currentWidget() == self._map_view
+            and hasattr(self, "lbl_status_counts")
+        ):
+            suffix = " (filtered)" if self._map_view.has_active_map_filters() else ""
+            self.lbl_status_counts.setText(
+                f"{geotagged_count:,} geotagged items in {cluster_count:,} clusters{suffix}"
+            )
+
+    def _on_ribbon_map_filters_changed(
+        self, year: int | None, person_id: int | None, min_rating: int | None
+    ) -> None:
+        mv = self._ensure_map_view()
+        mv.set_map_filters(year=year, person_id=person_id, min_rating=min_rating, fit=False)
+        total = sum(c.get("count", 0) for c in mv.current_clusters)
+        self._on_map_stats_changed(total, len(mv.current_clusters), total)
+        self.right_tag_dock.set_total_view_count(total)
+        self.right_tag_dock.set_map_clusters(mv.current_clusters)
+
+    def _on_ribbon_map_location_chosen(self, lat: float, lon: float, _label: str) -> None:
+        mv = self._ensure_map_view()
+        mv.fly_to(lat, lon, zoom=13)
+
+    def _on_ribbon_map_location_search(self, query: str) -> None:
+        mv = self._ensure_map_view()
+        mv.fly_to_place(query, zoom=13)
 
     def show_map_view(self) -> None:
         mv = self._ensure_map_view()
@@ -4108,6 +4244,24 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.ribbon.set_active_mode("map")
         self.left_nav_dock.hide()
         self.right_tag_dock.hide()
+        if hasattr(self.ribbon, "sync_map_pane_buttons"):
+            self.ribbon.sync_map_pane_buttons(
+                self.left_nav_dock.isVisible(), self.right_tag_dock.isVisible()
+            )
+        if hasattr(self.ribbon, "sync_map_style_button"):
+            self.ribbon.sync_map_style_button(mv.map_style)
+        if hasattr(self.ribbon, "populate_map_filters") and hasattr(self, "catalog_repo"):
+            try:
+                years = self.catalog_repo.get_geotagged_years()
+            except Exception:
+                years = []
+            try:
+                people = self.catalog_repo.get_people_list()
+            except Exception:
+                people = []
+            self.ribbon.populate_map_filters(years, people)
+        if hasattr(self.ribbon, "set_map_filter_ui"):
+            self.ribbon.set_map_filter_ui(*mv.active_map_filters)
         if not getattr(self, "_map_view_initialized", False):
             self._map_view_initialized = True
             mv.fit_to_photos()
@@ -4116,6 +4270,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         if getattr(mv, "_web_loaded", False) and getattr(mv, "web_view", None) is not None:
             QTimer.singleShot(60, lambda: mv.web_view.page().runJavaScript("if (typeof map !== 'undefined' && map) { map.invalidateSize(); }"))
         total = sum(c.get("count", 0) for c in mv.current_clusters)
+        self._on_map_stats_changed(total, len(mv.current_clusters), total)
         self.right_tag_dock.set_total_view_count(total)
         self.right_tag_dock.set_map_clusters(mv.current_clusters)
         if not self._is_navigating_history:
@@ -4126,6 +4281,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         if self.central_stack.currentWidget() == self.batch_people_view and person_id is None:
             self.close_batch_people_view()
             return
+        self._batch_people_modified = False
         self.central_stack.setCurrentWidget(self.batch_people_view)
         if hasattr(self, "ribbon"):
             self.ribbon.set_active_mode("batch_people")
@@ -4169,8 +4325,10 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.right_tag_dock.show()
         self.right_tag_dock.setVisible(True)
         self.right_tag_dock.set_view_mode("grid")
-        self.refresh_navigation_and_autocomplete()
-        self.rebuild_and_run_query()
+        if getattr(self, "_batch_people_modified", False):
+            self._batch_people_modified = False
+            self.refresh_people_navigation_and_autocomplete()
+            self.rebuild_and_run_query()
         self.lbl_sync_status.setText("✓ Returned to gallery")
         if not self._is_navigating_history:
             filt = self.current_filter.to_dict() if hasattr(self, "current_filter") and self.current_filter else {}
@@ -4178,8 +4336,9 @@ class PhotoGalleryMainWindow(QMainWindow):
 
     def _on_batch_faces_confirmed(self, face_ids: list[int], person_id: int) -> None:
         """Slot called when faces are confirmed in BatchPeopleView."""
-        self.refresh_navigation_and_autocomplete()
-        if hasattr(self, "people_directory_view"):
+        self._batch_people_modified = True
+        self.refresh_people_navigation_and_autocomplete()
+        if hasattr(self, "people_directory_view") and self.central_stack.currentWidget() == self.people_directory_view:
             self.people_directory_view.refresh_directory()
         if hasattr(self, "grid_view") and getattr(self.grid_view, "person_header_bar", None) is not None:
             if self.grid_view.person_header_bar.isVisible() and self.grid_view.person_header_bar.current_person_id == person_id:
@@ -4187,10 +4346,21 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.lbl_sync_status.setText(f"✓ Confirmed {len(face_ids)} face(s)")
         if getattr(self, "find_people_enabled", True):
             self.start_face_detection()
+        self.show_status_message(f"✓ Tagged '{person_name.strip()}' in {len(target_ids)} item(s)", 3000)
 
     def _on_batch_faces_rejected(self, face_ids: list[int]) -> None:
         """Slot called when faces are rejected in BatchPeopleView."""
+        self._batch_people_modified = True
         self.lbl_sync_status.setText(f"Rejected {len(face_ids)} face suggestion(s)")
+
+    def _on_batch_faces_ignored(self, face_ids: list[int]) -> None:
+        """Slot called when faces are hidden/ignored in BatchPeopleView."""
+        self._batch_people_modified = True
+
+    def _on_batch_person_renamed(self, person_id: int, new_name: str) -> None:
+        """Slot called when a person is renamed or merged in BatchPeopleView."""
+        self._batch_people_modified = True
+        self.refresh_people_navigation_and_autocomplete()
 
     def _on_batch_card_selection_changed(self, mode: str, swap_name: str | None, person_name: str | None) -> None:
         """Updates ribbon batch actions dynamically when card selection or mode changes."""
@@ -4240,6 +4410,31 @@ class PhotoGalleryMainWindow(QMainWindow):
             )
         return ok
 
+    def _apply_active_map_filters_to_grid(self) -> bool:
+        """Carry active Map Ribbon filters (year, person, rating) into Grid and SearchScopeBar."""
+        mv = self._map_view
+        if mv is None or not mv.has_active_map_filters():
+            return False
+        year, person_id, min_rating = mv.active_map_filters
+        ratings: tuple[int, ...] = ()
+        if min_rating == 0:
+            ratings = (0,)
+        elif min_rating is not None:
+            ratings = tuple(range(min_rating, 6))
+        if hasattr(self, "left_nav_dock") and self.left_nav_dock is not None:
+            self.left_nav_dock.restore_filter_state(
+                {
+                    "date_year": year,
+                    "person_ids": (person_id,) if person_id is not None else (),
+                    "ratings": ratings,
+                }
+            )
+        if hasattr(self, "grid_view") and self.grid_view is not None:
+            self.grid_view.set_person_header(person_id)
+        if person_id is None and hasattr(self, "card_delegate") and self.card_delegate is not None:
+            self.card_delegate.set_face_crop_person_id(None)
+        return True
+
     def on_map_bbox_filter_requested(
         self, min_lat: float, max_lat: float, min_lon: float, max_lon: float
     ) -> None:
@@ -4249,13 +4444,17 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.ribbon.set_scope_label(
             f"Map Area ({min_lat:.1f}°..{max_lat:.1f}°, {min_lon:.1f}°..{max_lon:.1f}°)"
         )
+        has_map_filters = self._apply_active_map_filters_to_grid()
         self.show_grid_view()
+        if has_map_filters:
+            self._update_scope_bar_visibility()
         self.rebuild_and_run_query()
         if not self._is_navigating_history:
             self._push_nav_state({
                 "view": "grid_map_bbox",
                 "bbox": self._active_bbox,
                 "location_label": self._active_map_location_label,
+                "filter": self.left_nav_dock.current_filter_state(),
             })
 
     def _on_map_cluster_selected(self, media_ids: list[int], label: str = "") -> None:
@@ -4340,7 +4539,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                     float(p["lat"]), float(p["lon"]), zoom=13 if city else 7
                 )
             else:
-                self._map_view.search_box.setText(target_name)
+                if hasattr(self.ribbon, "map_search_box"):
+                    self.ribbon.map_search_box.setText(target_name)
         else:
             self._search_text = target_name
             if hasattr(self, "search_box") and self.search_box is not None:
@@ -4362,6 +4562,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._active_date_filter = None
         self._active_rating_filter = 0
         self._active_flag_filter = False
+        has_map_filters = self._apply_active_map_filters_to_grid()
 
         self._active_map_media_ids = list(media_ids)
         self._active_bbox = None
@@ -4374,12 +4575,15 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._active_map_location_label = display_label
         self.ribbon.set_scope_label(display_label)
         self.show_grid_view()
+        if has_map_filters:
+            self._update_scope_bar_visibility()
         self.rebuild_and_run_query()
         if not self._is_navigating_history:
             self._push_nav_state({
                 "view": "grid_map_selection",
                 "media_ids": list(media_ids),
                 "location_label": display_label,
+                "filter": self.left_nav_dock.current_filter_state(),
             })
 
     def _on_analyze_noise_requested(self) -> None:
@@ -4479,13 +4683,39 @@ class PhotoGalleryMainWindow(QMainWindow):
         label = effect_name.replace("_", " ").title()
         self._batch_apply_image_adjustment(media_ids, f"Effect ({label})", _adjust)
 
+    def _refresh_media_after_pixel_change(self, media_id: int) -> None:
+        """Invalidate stale thumbnail caches and sync catalog_model with updated disk/DB orientation & dimensions."""
+        mid = int(media_id)
+        flag = self._active_thumb_flags.pop(mid, None)
+        if flag is not None:
+            flag.set()
+        self.thumb_repo.invalidate([mid])
+        if mid in self.pixmap_cache:
+            del self.pixmap_cache[mid]
+        self._media_meta_lookup.pop(mid, None)
+        if hasattr(self, "_failed_thumb_ids"):
+            self._failed_thumb_ids.discard(mid)
+        if hasattr(self, "catalog_model") and self.catalog_model is not None:
+            try:
+                detail = self.catalog_repo.get_media_detail(mid)
+                if detail:
+                    self.catalog_model.update_items_metadata(
+                        [mid],
+                        orientation=int(detail.get("orientation") or 1),
+                        width=int(detail.get("width") or 0),
+                        height=int(detail.get("height") or 0),
+                        mtime=int(detail.get("mtime") or 0),
+                        size=int(detail.get("size") or 0),
+                    )
+            except Exception:
+                pass
+        self._update_revert_button_state()
+
     def _on_pixel_edit_saved(self, media_id: int, backup_path: str) -> None:
         self.catalog_repo.record_pixel_edit_backup(media_id, backup_path)
-        self.thumb_repo.invalidate([media_id])
-        if media_id in self.pixmap_cache:
-            del self.pixmap_cache[media_id]
-        self._media_meta_lookup.pop(media_id, None)
-        self._update_revert_button_state()
+        self._refresh_media_after_pixel_change(media_id)
+        fname = Path(backup_path).name if backup_path else "file"
+        self.show_status_message(f"✓ Saved changes to '{fname}'", 4000)
 
     def _on_pixel_edit_saved_as_copy(self, original_media_id: int, new_path: str) -> None:
         p = Path(new_path)
@@ -4521,20 +4751,21 @@ class PhotoGalleryMainWindow(QMainWindow):
                     self.setWindowTitle(f"{self.media_viewer.current_file_path.name} - Essentials Photo Gallery")
 
         self._update_revert_button_state()
+        self.show_status_message(f"✓ Saved copy '{p.name}'", 4000)
 
     def _on_pixel_edit_reverted(self, media_id: int) -> None:
         self.catalog_repo.clear_pixel_edit_backup(media_id)
-        self.thumb_repo.invalidate([media_id])
-        if media_id in self.pixmap_cache:
-            del self.pixmap_cache[media_id]
-        self._media_meta_lookup.pop(media_id, None)
-        self._update_revert_button_state()
+        self._refresh_media_after_pixel_change(media_id)
 
         # Restore original face boxes from the restored original file
+        reverted_name = "file"
         try:
             detail = self.catalog_repo.get_media_detail(media_id)
+            if detail and detail.get("filename"):
+                reverted_name = str(detail["filename"])
             fpath = Path(detail.get("file_path", ""))
             if fpath.exists():
+                reverted_name = fpath.name
                 meta = extract_media_metadata(fpath, is_video=bool(detail.get("is_video")))
                 self.catalog_repo.restore_original_faces(media_id, meta.get("people", []))
         except Exception:
@@ -4549,6 +4780,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.media_viewer.render_face_regions(updated_detail.get("people", []))
             except Exception:
                 pass
+        self.show_status_message(f"✓ Reverted '{reverted_name}' to original", 4000)
 
     # -------------------------------------------------------------------------
     # Ribbon & Status Bar Actions (Rotate, Delete, Fix, Options, Face Rescan)
@@ -4726,6 +4958,8 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         self.rebuild_and_run_query()
         self.grid_view.viewport().update()
+        rot_dir = "clockwise" if clockwise else "counter-clockwise"
+        self.show_status_message(f"✓ Rotated {len(target_ids)} item(s) {rot_dir}", 3000)
 
     def select_all_items(self) -> None:
         """Selects all items currently displayed in the thumbnail grid."""
@@ -4886,6 +5120,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             send2trash = None
 
         deleted_count = 0
+        last_deleted_name = ""
         conn = self.engine.catalog_conn()
         for mid in list(target_ids):
             try:
@@ -4928,6 +5163,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                     conn.execute("DELETE FROM media WHERE id = ?;", (mid,))
                     conn.commit()
                 deleted_count += 1
+                last_deleted_name = str(detail["filename"])
             except Exception:
                 pass
 
@@ -4951,6 +5187,12 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.open_single_viewer(next_id)
             else:
                 self.show_grid_view()
+        if deleted_count == 1 and last_deleted_name:
+            self.show_status_message(f"✓ Moved '{last_deleted_name}' to Recycle Bin", 4000)
+        elif deleted_count > 1:
+            self.show_status_message(f"✓ Moved {deleted_count:,} items to Recycle Bin", 4000)
+        elif target_ids:
+            self.show_status_message("⚠ Could not delete selected item(s)", 4000)
         return deleted_count
 
     def set_desktop_background_for_media(self, media_id: int) -> bool:
@@ -5132,7 +5374,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.catalog_repo.rename_media(mid, new_fname)
                 self._media_meta_lookup.pop(mid, None)
                 self.rebuild_and_run_query()
-                self.lbl_sync_status.setText(f"✓ Renamed file to '{new_fname}'")
+                self.show_status_message(f"✓ Renamed file to '{new_fname}'", 4000)
             except Exception as e:
                 QMessageBox.warning(self, "Rename Error", f"Could not rename file: {e}")
         else:
@@ -5160,7 +5402,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 except Exception:
                     pass
             self.rebuild_and_run_query()
-            self.lbl_sync_status.setText(f"✓ Renamed {renamed} file(s)")
+            self.show_status_message(f"✓ Renamed {renamed} file(s)", 4000)
 
     def open_resize_dialog(self) -> ResizePhotoDialog | None:
         """Opens authentic WLPG Resize dialog for selected image photos."""
@@ -5184,7 +5426,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             out_dirs = {p.parent for p in dlg.generated_files}
             for d in out_dirs:
                 self.scan_folder(d, include_subfolders=False)
-            self.lbl_sync_status.setText(f"✓ Resized and saved {len(dlg.generated_files)} photo(s)")
+            self.show_status_message(f"✓ Resized and saved {len(dlg.generated_files)} photo(s)", 4000)
         return dlg
 
     def make_copy_of_selection(self, prompt_dialog: bool = True) -> list[Path]:
@@ -5328,11 +5570,11 @@ class PhotoGalleryMainWindow(QMainWindow):
             else:
                 self._select_file_in_grid(new_file)
 
-            self.lbl_sync_status.setText(f"✓ Created copy: {new_file.name}")
+            self.show_status_message(f"✓ Created copy: {new_file.name}", 4000)
             return [new_file]
 
         except Exception as e:
-            self.lbl_sync_status.setText(f"⚠ Copy error: {e}")
+            self.show_status_message(f"⚠ Copy error: {e}", 4000)
             return []
 
     def toggle_right_pane(
@@ -5368,10 +5610,10 @@ class PhotoGalleryMainWindow(QMainWindow):
                         0,
                         lambda: get_depth_and_matte_engine().get_depth_and_matte(proxy, media_id=mid),
                     )
-        if hasattr(self.ribbon, "btn_toggle_tag_pane"):
-            self.ribbon.btn_toggle_tag_pane.setChecked(not self.right_tag_dock.isHidden())
+        is_open = not self.right_tag_dock.isHidden()
+        self._sync_tag_pane_buttons(is_open)
         if hasattr(self.ribbon, "btn_edit_tag_caption"):
-            self.ribbon.btn_edit_tag_caption.setChecked(not self.right_tag_dock.isHidden())
+            self.ribbon.btn_edit_tag_caption.setChecked(is_open)
 
     def toggle_navigation_pane(self) -> None:
         """Toggles the left navigation pane visibility (Ctrl+N)."""
@@ -5575,14 +5817,18 @@ class PhotoGalleryMainWindow(QMainWindow):
             if new_vis:
                 self.left_nav_dock.show()
                 self.resizeDocks([self.left_nav_dock], [230], Qt.Horizontal)
-            if hasattr(self.ribbon, "btn_toggle_nav_pane"):
-                self.ribbon.btn_toggle_nav_pane.setChecked(new_vis)
+            self._sync_nav_pane_buttons(new_vis)
         elif action_id == "toggle_immersive":
             self.toggle_immersive_viewer_mode()
         elif action_id == "show_tag_hierarchy":
             self.open_tag_hierarchy_dialog()
         elif action_id in ("show_thumbnails_view", "show_grid_view"):
             self.trigger_thumbnail_view()
+        elif action_id == "toggle_people_directory":
+            if hasattr(self, "people_directory_view") and self.central_stack.currentWidget() == self.people_directory_view:
+                self.show_grid_view()
+            else:
+                self.open_people_directory_view()
         elif action_id == "toggle_map_view":
             if hasattr(self, "duplicate_finder_view") and self.central_stack.currentWidget() == self.duplicate_finder_view:
                 self.show_grid_view()
@@ -5591,6 +5837,23 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.show_grid_view()
             else:
                 self.show_map_view()
+        elif action_id == "map_style_light":
+            mv = self._ensure_map_view()
+            mv.set_map_style("clean")
+        elif action_id == "map_style_street":
+            mv = self._ensure_map_view()
+            mv.set_map_style("street")
+        elif action_id == "map_style_satellite":
+            mv = self._ensure_map_view()
+            mv.set_map_style("satellite")
+        elif action_id == "map_fit_photos":
+            mv = self._ensure_map_view()
+            mv.fit_to_photos()
+        elif action_id == "map_view_area_in_grid":
+            mv = self._ensure_map_view()
+            mv.view_area_in_grid()
+        elif action_id == "close_map":
+            self.show_grid_view()
         elif action_id in ("geotag", "open_map"):
             self.toggle_right_pane("info")
             if hasattr(self.right_tag_dock, "txt_add_geotag"):
@@ -6004,9 +6267,9 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.scan_folder(out_file.parent, include_subfolders=False)
             self.rebuild_and_run_query()
             self._select_file_in_grid(out_file)
-            self.lbl_sync_status.setText(f"✓ Created {tool_name}: {out_file.name}")
+            self.show_status_message(f"✓ Created {tool_name}: {out_file.name}", 4000)
         else:
-            self.lbl_sync_status.setText(f"✓ Saved {tool_name} to: {out_file.name}")
+            self.show_status_message(f"✓ Saved {tool_name} to: {out_file.name}", 4000)
 
     def open_panorama_dialog(self) -> None:
         """Launches the Microsoft ICE-Style Panorama Stitcher."""
@@ -6145,6 +6408,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             show_tags=getattr(self.left_nav_dock, "_show_tags", True),
             show_people=getattr(self.left_nav_dock, "_show_people", True),
             show_ratings=getattr(self.left_nav_dock, "_show_ratings", True),
+            show_places=getattr(self.left_nav_dock, "_show_places", True),
             find_people_enabled=getattr(self, "find_people_enabled", True),
             tooltip_previews=getattr(self, "tooltip_previews", True),
             jpeg_quality=getattr(self, "jpeg_quality", 83),
@@ -6185,11 +6449,13 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.nav_show_tags = dlg.show_tags()
             self.nav_show_people = dlg.show_people()
             self.nav_show_ratings = dlg.show_ratings()
+            self.nav_show_places = dlg.show_places()
             self.left_nav_dock.set_navigation_sections_visibility(
                 show_dates=self.nav_show_dates,
                 show_tags=self.nav_show_tags,
                 show_people=self.nav_show_people,
                 show_ratings=self.nav_show_ratings,
+                show_places=self.nav_show_places,
             )
 
             old_find_people = getattr(self, "find_people_enabled", True)
@@ -6214,6 +6480,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             settings.setValue("nav_show_tags", self.nav_show_tags)
             settings.setValue("nav_show_people", self.nav_show_people)
             settings.setValue("nav_show_ratings", self.nav_show_ratings)
+            settings.setValue("nav_show_places", self.nav_show_places)
             settings.setValue("find_people_enabled", self.find_people_enabled)
             settings.setValue("tooltip_previews", self.tooltip_previews)
             settings.setValue("jpeg_quality", self.jpeg_quality)
@@ -6572,9 +6839,11 @@ class PhotoGalleryMainWindow(QMainWindow):
         is_crops = bool(getattr(self, "_face_crop_status_text", ""))
         crop_detail = f"👤 Face Crops: {self._face_crop_status_text}" if is_crops else "👤 Face Crops: Idle"
 
+        scan_summary = self._scanner_status_text.removeprefix("Scanning: ")
+        face_summary = self._face_status_text.removeprefix("Faces: ")
         detailed_tooltip = (
-            f"📁 {self._scanner_status_text}\n"
-            f"👤 {self._face_status_text}\n"
+            f"📁 Indexing: {scan_summary}\n"
+            f"👤 Face Detection: {face_summary}\n"
             f"{crop_detail}\n"
             f"{thumb_detail}\n"
             f"{sync_detail}\n\n"
@@ -6592,13 +6861,13 @@ class PhotoGalleryMainWindow(QMainWindow):
             summary_text = "Workers Paused"
             style = "color: #D9822B; font-weight: bold; font-size: 8.5pt;"
         elif is_scanning:
-            summary_text = self._scanner_status_text.replace("Scanning: ", "Indexing: ")
+            summary_text = f"Indexing: {scan_summary}"
             style = "color: #0066CC; font-size: 8.5pt;"
         elif is_faces:
             if "Idle" not in self._face_status_text:
-                summary_text = self._face_status_text.replace("Faces: ", "Finding people: ")
+                summary_text = face_summary
             else:
-                summary_text = "Finding people: Scanning..."
+                summary_text = "Finding people: Starting..."
             style = "color: #0066CC; font-size: 8.5pt;"
         elif is_crops:
             summary_text = self._face_crop_status_text
@@ -6620,8 +6889,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                 f"QLabel {{ {style} padding: 1px 4px; border-radius: 3px; }} QLabel:hover {{ background: #E5F1FC; }}"
             )
 
-    def _show_worker_details_menu(self, event: Any = None) -> None:
-        """Presents a clean detailed popup menu of background queues and worker statuses."""
+    def _build_worker_details_menu(self) -> tuple[QMenu, dict[str, QAction]]:
+        """Builds the Background Tasks popup menu and returns `(menu, actions)`."""
         menu = QMenu(self)
         menu.setStyleSheet(
             """
@@ -6634,6 +6903,11 @@ class PhotoGalleryMainWindow(QMainWindow):
             }
             QMenu::item {
                 padding: 4px 20px 4px 10px;
+            }
+            QMenu::item:selected {
+                background-color: #E5F1FC;
+                color: #0F6CBD;
+                border-radius: 3px;
             }
             QMenu::item:disabled {
                 color: #2B3E50;
@@ -6651,11 +6925,15 @@ class PhotoGalleryMainWindow(QMainWindow):
         header.setEnabled(False)
         menu.addSeparator()
 
-        act_scan = menu.addAction(f"📁 Indexing: {self._scanner_status_text}")
+        scan_state_label = self._scanner_status_text.removeprefix("Scanning: ")
+        act_scan = menu.addAction(f"📁 Indexing: {scan_state_label}")
         act_scan.setEnabled(False)
 
-        act_face = menu.addAction(f"👤 Face Detection: {self._face_status_text}")
-        act_face.setEnabled(False)
+        face_state_label = self._face_status_text.removeprefix("Faces: ")
+        if not getattr(self, "find_people_enabled", True) and face_state_label == "Idle":
+            face_state_label = "Off"
+        act_face = menu.addAction(f"👤 Face Detection: {face_state_label} (Options...)")
+        act_face.triggered.connect(lambda: self._open_settings_dialog(initial_tab="general"))
 
         try:
             dirty_count = self.catalog_repo.count_dirty_media()
@@ -6668,8 +6946,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             sync_info = f"Writing changes ({dirty_count:,} pending)"
         else:
             sync_info = "Up to date"
-        act_sync = menu.addAction(f"💾 Write to files: {sync_info}")
-        act_sync.setEnabled(False)
+        act_sync = menu.addAction(f"💾 Write to files: {sync_info} (Options...)")
+        act_sync.triggered.connect(lambda: self._open_settings_dialog(initial_tab="general"))
 
         menu.addSeparator()
 
@@ -6685,19 +6963,35 @@ class PhotoGalleryMainWindow(QMainWindow):
             act_toggle = menu.addAction("⏸ Pause All Background Tasks")
             act_toggle.triggered.connect(self.toggle_pause_all_workers)
 
+        actions = {
+            "scan": act_scan,
+            "face": act_face,
+            "write": act_sync,
+            "toggle_write": act_toggle_wb,
+            "toggle_all": act_toggle,
+        }
+        self._last_worker_menu = menu
+        self._last_worker_menu_actions = actions
+        return menu, actions
+
+    def _show_worker_details_menu(self, event: Any = None) -> None:
+        """Presents a clean detailed popup menu of background queues and worker statuses."""
+        menu, _ = self._build_worker_details_menu()
         pos = self.lbl_worker_monitor.mapToGlobal(QPoint(0, -menu.sizeHint().height() - 4))
         menu.exec(pos)
 
     def show_status_message(self, message: str = "", timeout_ms: int = 4000) -> None:
         """Displays transient notifications in lbl_sync_status without hiding item counts or worker controls."""
         if hasattr(self, "lbl_sync_status"):
+            seq = getattr(self, "_status_msg_seq", 0) + 1
+            self._status_msg_seq = seq
             self.lbl_sync_status.setText(message)
             if hasattr(self, "sep_status_msg"):
                 self.sep_status_msg.setVisible(bool(message and message.strip()))
             if timeout_ms > 0 and message:
                 QTimer.singleShot(
                     timeout_ms,
-                    lambda: self.show_status_message("") if getattr(self, "lbl_sync_status", None) and self.lbl_sync_status.text() == message else None,
+                    lambda s=seq: self.show_status_message("", 0) if getattr(self, "_status_msg_seq", 0) == s else None,
                 )
 
     def _update_revert_button_state(self) -> None:
@@ -7616,6 +7910,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             settings.setValue("nav_show_tags", getattr(self.left_nav_dock, "_show_tags", True))
             settings.setValue("nav_show_people", getattr(self.left_nav_dock, "_show_people", True))
             settings.setValue("nav_show_ratings", getattr(self.left_nav_dock, "_show_ratings", True))
+            settings.setValue("nav_show_places", getattr(self.left_nav_dock, "_show_places", True))
             settings.setValue("find_people_enabled", getattr(self, "find_people_enabled", False))
             settings.setValue("tooltip_previews", getattr(self, "tooltip_previews", True))
             settings.setValue("jpeg_quality", getattr(self, "jpeg_quality", 83))
@@ -7641,6 +7936,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                     "nav_show_tags": getattr(self.left_nav_dock, "_show_tags", True),
                     "nav_show_people": getattr(self.left_nav_dock, "_show_people", True),
                     "nav_show_ratings": getattr(self.left_nav_dock, "_show_ratings", True),
+                    "nav_show_places": getattr(self.left_nav_dock, "_show_places", True),
                     "find_people_enabled": getattr(self, "find_people_enabled", False),
                     "tooltip_previews": getattr(self, "tooltip_previews", True),
                     "jpeg_quality": getattr(self, "jpeg_quality", 83),
@@ -7745,6 +8041,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.nav_show_tags = _to_bool(_get_val("nav_show_tags", True), True)
             self.nav_show_people = _to_bool(_get_val("nav_show_people", True), True)
             self.nav_show_ratings = _to_bool(_get_val("nav_show_ratings", True), True)
+            self.nav_show_places = _to_bool(_get_val("nav_show_places", True), True)
             self.find_people_enabled = _to_bool(_get_val("find_people_enabled", False), False)
             self.tooltip_previews = _to_bool(_get_val("tooltip_previews", True), True)
             self.jpeg_quality = int(_get_val("jpeg_quality", 83))
@@ -7762,6 +8059,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 show_tags=self.nav_show_tags,
                 show_people=self.nav_show_people,
                 show_ratings=self.nav_show_ratings,
+                show_places=self.nav_show_places,
             )
 
             saved_theme = _get_val("theme", "wlpg_aero")
@@ -7911,8 +8209,21 @@ class PhotoGalleryMainWindow(QMainWindow):
                     return True
         return super().eventFilter(watched, event)
 
-    def showEvent(self, event) -> None:
+    def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
+        try:
+            import ctypes
+            class MARGINS(ctypes.Structure):
+                _fields_ = [
+                    ("cxLeftWidth", ctypes.c_int),
+                    ("cxRightWidth", ctypes.c_int),
+                    ("cyTopHeight", ctypes.c_int),
+                    ("cyBottomHeight", ctypes.c_int),
+                ]
+            m = MARGINS(1, 1, 1, 1)
+            ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(int(self.winId()), ctypes.byref(m))
+        except Exception:
+            pass
         if not getattr(self, "_initial_show_done", False):
             self._initial_show_done = True
             if self.central_stack.currentWidget() == self.media_viewer:
@@ -7934,21 +8245,256 @@ class PhotoGalleryMainWindow(QMainWindow):
             ):
                 QTimer.singleShot(400, self.start_face_detection)
 
-    def showEvent(self, event: QShowEvent) -> None:
-        super().showEvent(event)
+    # -------------------------------------------------------------------------
+    # Static Albums & Smart Albums
+    # -------------------------------------------------------------------------
+    def _refresh_albums_ui(self) -> None:
+        if hasattr(self, "left_nav_dock"):
+            self.left_nav_dock.refresh_albums_only(self.catalog_repo)
+
+    def add_media_to_album(self, album_id: int, media_ids: Sequence[int]) -> int:
+        """Add ``media_ids`` into Static Album ``album_id`` and refresh UI."""
+        mids = [int(m) for m in media_ids]
+        if not mids:
+            return 0
+        added = self.catalog_repo.add_media_to_album(int(album_id), mids)
+        self._refresh_albums_ui()
+        if hasattr(self, "show_status_message"):
+            self.show_status_message(f"Added {len(mids)} item(s) to album.")
+        return added
+
+    def create_album_from_media(self, media_ids: Sequence[int]) -> int | None:
+        """Prompt for an Album name, create it, and add ``media_ids`` to it."""
+        mids = [int(m) for m in media_ids]
+        name, ok = QInputDialog.getText(self, "New Album", "Album name:")
+        if not ok or not name.strip():
+            return None
         try:
-            import ctypes
-            class MARGINS(ctypes.Structure):
-                _fields_ = [
-                    ("cxLeftWidth", ctypes.c_int),
-                    ("cxRightWidth", ctypes.c_int),
-                    ("cyTopHeight", ctypes.c_int),
-                    ("cyBottomHeight", ctypes.c_int),
-                ]
-            m = MARGINS(1, 1, 1, 1)
-            ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(int(self.winId()), ctypes.byref(m))
+            aid = self.catalog_repo.create_album(name.strip())
+        except Exception as exc:
+            QMessageBox.warning(self, "New Album", f"Could not create album: {exc}")
+            return None
+        if mids:
+            self.catalog_repo.add_media_to_album(aid, mids)
+        self._refresh_albums_ui()
+        if hasattr(self, "show_status_message"):
+            self.show_status_message(f"Created album '{name.strip()}' with {len(mids)} item(s).")
+        return aid
+
+    def remove_media_from_album(self, album_id: int, media_ids: Sequence[int]) -> int:
+        """Remove ``media_ids`` from Static Album ``album_id`` (non-destructive)."""
+        mids = [int(m) for m in media_ids]
+        if not mids:
+            return 0
+        removed = self.catalog_repo.remove_media_from_album(int(album_id), mids)
+        self._refresh_albums_ui()
+        if self.left_nav_dock.active_album_id() == int(album_id):
+            self.rebuild_and_run_query()
+        if hasattr(self, "show_status_message"):
+            self.show_status_message(f"Removed {removed} item(s) from album.")
+        return removed
+
+    def _on_new_album_requested(self) -> None:
+        selected = self.grid_view.selected_media_ids() if hasattr(self, "grid_view") else []
+        self.create_album_from_media(selected)
+
+    def _on_rename_album_requested(self, album_id: int, current_name: str) -> None:
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Album", "Album name:", text=current_name
+        )
+        if not ok or not new_name.strip() or new_name.strip() == current_name:
+            return
+        try:
+            self.catalog_repo.rename_album(int(album_id), new_name.strip())
+        except Exception as exc:
+            QMessageBox.warning(self, "Rename Album", f"Could not rename album: {exc}")
+            return
+        if self.left_nav_dock.active_album_id() == int(album_id):
+            self.left_nav_dock._album_name = new_name.strip()
+            self._update_scope_bar_visibility()
+        self._refresh_albums_ui()
+
+    def _on_delete_album_requested(self, album_id: int, current_name: str) -> None:
+        resp = QMessageBox.question(
+            self,
+            "Delete Album",
+            f"Delete album '{current_name}'?\n\nPhotos inside will remain in your gallery.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+        was_active = self.left_nav_dock.active_album_id() == int(album_id)
+        self.catalog_repo.delete_album(int(album_id))
+        if was_active:
+            self.left_nav_dock.clear_all_filters()
+        self._refresh_albums_ui()
+
+    def _on_new_smart_album_requested(
+        self, initial_name: str = "", initial_rules: dict[str, Any] | None = None
+    ) -> None:
+        dlg = SmartAlbumDialog(
+            self.catalog_repo,
+            initial_name=initial_name,
+            initial_rules=initial_rules,
+            title="New Smart Album",
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            sid = self.catalog_repo.create_smart_album(dlg.get_name(), dlg.get_rules_dict())
+        except Exception as exc:
+            QMessageBox.warning(self, "New Smart Album", f"Could not create Smart Album: {exc}")
+            return
+        self._refresh_albums_ui()
+        self.left_nav_dock._select_smart_album_scope(sid, dlg.get_name())
+
+    def _on_edit_smart_album_requested(self, smart_album_id: int) -> None:
+        row = self.catalog_repo.get_smart_album(int(smart_album_id))
+        if not row:
+            return
+        try:
+            parsed_rules = json.loads(row.get("rules_json") or "{}")
         except Exception:
-            pass
+            parsed_rules = {"match_mode": "all", "rules": []}
+        dlg = SmartAlbumDialog(
+            self.catalog_repo,
+            initial_name=str(row.get("name") or ""),
+            initial_rules=parsed_rules,
+            title="Edit Smart Album Rules",
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            self.catalog_repo.update_smart_album(
+                int(smart_album_id), name=dlg.get_name(), rules=dlg.get_rules_dict()
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Edit Smart Album", f"Could not update Smart Album: {exc}")
+            return
+        if self.left_nav_dock.current_filter_state().get("smart_album_id") == int(smart_album_id):
+            self.left_nav_dock._smart_album_name = dlg.get_name()
+            self._update_scope_bar_visibility()
+            self.rebuild_and_run_query()
+        self._refresh_albums_ui()
+
+    def _on_rename_smart_album_requested(self, smart_album_id: int, current_name: str) -> None:
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Smart Album", "Smart Album name:", text=current_name
+        )
+        if not ok or not new_name.strip() or new_name.strip() == current_name:
+            return
+        try:
+            self.catalog_repo.update_smart_album(int(smart_album_id), name=new_name.strip())
+        except Exception as exc:
+            QMessageBox.warning(self, "Rename Smart Album", f"Could not rename Smart Album: {exc}")
+            return
+        if self.left_nav_dock.current_filter_state().get("smart_album_id") == int(smart_album_id):
+            self.left_nav_dock._smart_album_name = new_name.strip()
+            self._update_scope_bar_visibility()
+        self._refresh_albums_ui()
+
+    def _on_delete_smart_album_requested(self, smart_album_id: int, current_name: str) -> None:
+        resp = QMessageBox.question(
+            self,
+            "Delete Smart Album",
+            f"Delete Smart Album '{current_name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+        was_active = (
+            self.left_nav_dock.current_filter_state().get("smart_album_id") == int(smart_album_id)
+        )
+        self.catalog_repo.delete_smart_album(int(smart_album_id))
+        if was_active:
+            self.left_nav_dock.clear_all_filters()
+        self._refresh_albums_ui()
+
+    def _build_rules_dict_from_current_filter(self) -> dict[str, Any]:
+        """Convert active LeftNavDock + search bar facets into a Smart Album rule tree."""
+        state = self.left_nav_dock.current_filter_state()
+        rules: list[dict[str, Any]] = []
+
+        if state.get("folder_id") is not None:
+            rules.append({"field": "folder", "op": "in_folder", "value": int(state["folder_id"])})
+        if state.get("date_year") is not None:
+            yr = int(state["date_year"])
+            mo = state.get("date_month")
+            dy = state.get("date_day")
+            if mo is not None and dy is not None:
+                rules.append(
+                    {"field": "date_taken", "op": "eq", "value": f"{yr:04d}-{int(mo):02d}-{int(dy):02d}"}
+                )
+            else:
+                rules.append({"field": "year", "op": "eq", "value": str(yr)})
+                if mo is not None:
+                    rules.append({"field": "month", "op": "eq", "value": str(int(mo))})
+        elif state.get("date_month") is not None:
+            rules.append({"field": "month", "op": "eq", "value": str(int(state["date_month"]))})
+
+        people_lookup = {
+            int(p["id"]): str(p.get("name") or "")
+            for p in self.catalog_repo.get_people_list()
+        }
+        for pid in state.get("person_ids") or ():
+            pname = people_lookup.get(int(pid), "").strip()
+            rules.append({"field": "people", "op": "includes", "value": pname or int(pid)})
+
+        tag_lookup = {
+            int(t["id"]): str(t.get("full_path") or t.get("name") or "")
+            for t in self.catalog_repo.get_tag_tree()
+        }
+        for tid in state.get("include_tag_ids") or ():
+            tname = tag_lookup.get(int(tid))
+            if tname:
+                rules.append({"field": "tag", "op": "includes", "value": tname})
+        for tid in state.get("exclude_tag_ids") or ():
+            tname = tag_lookup.get(int(tid))
+            if tname:
+                rules.append({"field": "tag", "op": "excludes", "value": tname})
+        if state.get("untagged_only"):
+            rules.append({"field": "tag", "op": "is_empty", "value": ""})
+
+        ratings = sorted(state.get("ratings") or ())
+        if len(ratings) == 1:
+            rules.append({"field": "rating", "op": "eq", "value": int(ratings[0])})
+        elif ratings:
+            rules.append({"field": "rating", "op": "gte", "value": int(min(ratings))})
+
+        if state.get("flagged_only"):
+            rules.append({"field": "flag", "op": "is_flagged", "value": ""})
+
+        m_type = str(state.get("media_type") or "").lower()
+        if m_type == "image":
+            rules.append({"field": "media_type", "op": "is", "value": "photo"})
+        elif m_type in ("video", "raw"):
+            rules.append({"field": "media_type", "op": "is", "value": m_type})
+
+        o_filt = str(state.get("orientation_filter") or "").lower()
+        if o_filt in ("landscape", "portrait", "square"):
+            rules.append({"field": "orientation", "op": "is", "value": o_filt})
+
+        if getattr(self, "_search_text", "").strip():
+            rules.append(
+                {"field": "caption_filename", "op": "contains", "value": self._search_text.strip()}
+            )
+        if getattr(self, "_active_map_location_label", None):
+            rules.append(
+                {
+                    "field": "place",
+                    "op": "contains",
+                    "value": str(self._active_map_location_label),
+                }
+            )
+        return {"match_mode": "all", "rules": rules}
+
+    def _on_save_filter_as_smart_album_requested(self) -> None:
+        rules_dict = self._build_rules_dict_from_current_filter()
+        self._on_new_smart_album_requested(initial_name="", initial_rules=rules_dict)
 
     def changeEvent(self, event: QEvent) -> None:
         super().changeEvent(event)

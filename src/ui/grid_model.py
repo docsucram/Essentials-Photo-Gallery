@@ -70,6 +70,8 @@ class _GroupSpan:
     y_header: int = 0
     y_items_start: int = 0
     y_end: int = 0
+    first_row_height: int = 0
+    row_y_offsets: list[int] | None = None
 
 
 class _LazyMosaicRectMap:
@@ -131,6 +133,7 @@ class CatalogListModel(QAbstractListModel):
     GRID_MARGIN_X = 12
     GRID_MARGIN_TOP = 18
     SECTION_BOTTOM_GAP = 10
+    DYNAMIC_ALL_ROWS_THRESHOLD = 25_000
 
     def __init__(
         self, pixmap_cache: LruCache, parent: QObject | None = None
@@ -151,6 +154,8 @@ class CatalogListModel(QAbstractListModel):
         self._cell_height: int = 204
         self._spacing: int = 8
         self._column_count: int = 4
+        self._chrome_height: int | None = None
+        self._uniform_row_heights: bool = False
         self._layout_mode: Literal["wlpg_grid", "mosaic"] = "wlpg_grid"
 
         self._selected_ids: set[int] = set()
@@ -236,10 +241,71 @@ class CatalogListModel(QAbstractListModel):
         self._rebuild_virtual_row_offsets()
         self.endResetModel()
 
-    def _rebuild_virtual_row_offsets(self) -> None:
+    def _effective_chrome_height(self) -> int:
+        if self._chrome_height is not None:
+            return max(0, min(self._cell_height - 24, self._chrome_height))
+        return max(0, min(self._cell_height - 24, (self._cell_height - self._cell_width) + 14))
+
+    @staticmethod
+    def _compute_slice_row_height(
+        records: list[MediaItemRecord],
+        start_idx: int,
+        end_idx: int,
+        img_w: int,
+        img_max_h: int,
+        min_img_h: int,
+        chrome_h: int,
+    ) -> int:
+        max_h = min_img_h
+        for idx in range(start_idx, end_idx):
+            rec = records[idx]
+            w = rec.width
+            h = rec.height
+            if w > 0 and h > 0:
+                if w * img_max_h >= img_w * h:
+                    sh = (h * img_w + w - 1) // w
+                    if sh > max_h:
+                        max_h = sh
+                else:
+                    return img_max_h + chrome_h
+            else:
+                return img_max_h + chrome_h
+        if max_h > img_max_h:
+            max_h = img_max_h
+        return max_h + chrome_h
+
+    def _compute_group_row_offsets(
+        self,
+        g: _GroupSpan,
+        cols: int,
+        img_w: int,
+        img_max_h: int,
+        min_img_h: int,
+        chrome_h: int,
+        spacing: int,
+    ) -> list[int]:
+        """Computes cumulative per-visual-row Y offsets for one non-collapsed group."""
+        offsets: list[int] = [0]
+        rel_y = 0
+        records = self._records
+        rec_start = g.record_start
+        rec_end = rec_start + g.record_count
+        compute_h = self._compute_slice_row_height
+
+        for row_rec_idx in range(rec_start, rec_end, cols):
+            row_end_idx = min(rec_end, row_rec_idx + cols)
+            row_h = compute_h(records, row_rec_idx, row_end_idx, img_w, img_max_h, min_img_h, chrome_h)
+            rel_y += row_h + spacing
+            offsets.append(rel_y)
+        return offsets
+
+    def _rebuild_virtual_row_offsets(self, recompute_rows: bool = True) -> None:
         """
-        Computes O(G) virtual row offsets and O(G) exact Y-pixel spans.
-        Every group has 1 header row (when headers enabled) + record_count item rows.
+        Computes O(G) virtual row offsets and exact Y-pixel spans.
+        In 'wlpg_grid' mode:
+        - For <= DYNAMIC_ALL_ROWS_THRESHOLD items, computes exact per-visual-row dynamic heights.
+        - For massive catalogs (> DYNAMIC_ALL_ROWS_THRESHOLD), computes O(G) dynamic first-row
+          height per group so group headings stay tight while keeping set_records < 50ms.
         """
         self._group_starts.clear()
         self._group_y_ends.clear()
@@ -251,6 +317,16 @@ class CatalogListModel(QAbstractListModel):
 
         cols = max(1, self._column_count)
         row_stride = self._cell_height + self._spacing
+        use_dynamic = (not self._uniform_row_heights) and (self._layout_mode == "wlpg_grid")
+        use_full_rows = use_dynamic and (len(self._records) <= self.DYNAMIC_ALL_ROWS_THRESHOLD)
+        if use_dynamic:
+            img_w = max(24, self._cell_width - 24)
+            chrome_h = self._effective_chrome_height()
+            img_max_h = max(24, self._cell_height - chrome_h)
+            min_img_h = min(img_max_h, max(36, int(img_max_h * 0.35)))
+        else:
+            img_w = chrome_h = img_max_h = min_img_h = 0
+
         curr_vrow = 0
         y_cursor = self.GRID_MARGIN_TOP
 
@@ -270,9 +346,41 @@ class CatalogListModel(QAbstractListModel):
 
             if not g.collapsed and g.record_count > 0:
                 curr_vrow += g.record_count
-                num_item_rows = (g.record_count + cols - 1) // cols
-                y_cursor += num_item_rows * row_stride + self.SECTION_BOTTOM_GAP
+                if use_full_rows:
+                    if recompute_rows or g.row_y_offsets is None:
+                        g.row_y_offsets = self._compute_group_row_offsets(
+                            g, cols, img_w, img_max_h, min_img_h, chrome_h, self._spacing
+                        )
+                    g.first_row_height = g.row_y_offsets[1] - self._spacing
+                    y_cursor += g.row_y_offsets[-1] + self.SECTION_BOTTOM_GAP
+                elif use_dynamic:
+                    g.row_y_offsets = None
+                    if recompute_rows or g.first_row_height <= 0:
+                        g.first_row_height = self._compute_slice_row_height(
+                            self._records,
+                            g.record_start,
+                            min(g.record_start + g.record_count, g.record_start + cols),
+                            img_w,
+                            img_max_h,
+                            min_img_h,
+                            chrome_h,
+                        )
+                    num_item_rows = (g.record_count + cols - 1) // cols
+                    y_cursor += (
+                        (g.first_row_height + self._spacing)
+                        + max(0, num_item_rows - 1) * row_stride
+                        + self.SECTION_BOTTOM_GAP
+                    )
+                else:
+                    g.row_y_offsets = None
+                    g.first_row_height = self._cell_height
+                    num_item_rows = (g.record_count + cols - 1) // cols
+                    y_cursor += num_item_rows * row_stride + self.SECTION_BOTTOM_GAP
             else:
+                if not use_full_rows:
+                    g.row_y_offsets = None
+                if not use_dynamic:
+                    g.first_row_height = self._cell_height
                 y_cursor += 4
 
             g.vrow_end = curr_vrow
@@ -295,30 +403,42 @@ class CatalogListModel(QAbstractListModel):
         cell_width: int,
         cell_height: int,
         spacing: int = 8,
+        chrome_height: int | None = None,
+        uniform_row_heights: bool = False,
     ) -> None:
-        """Updates viewport width and cell size, recomputing column count and O(G) Y-offsets."""
+        """Updates viewport width and cell size, recomputing column count and Y-offsets."""
         vw = max(200, int(viewport_width))
         cw = max(64, int(cell_width))
         ch = max(64, int(cell_height))
         sp = max(2, int(spacing))
+        eff_chrome = None if chrome_height is None else max(0, int(chrome_height))
+        uni = bool(uniform_row_heights)
         avail_w = max(cw, vw - (self.GRID_MARGIN_X * 2))
         new_cols = max(1, (avail_w + sp) // (cw + sp))
 
         if (
-            vw == self._viewport_width
-            and cw == self._cell_width
+            cw == self._cell_width
             and ch == self._cell_height
             and sp == self._spacing
             and new_cols == self._column_count
+            and eff_chrome == self._chrome_height
+            and uni == self._uniform_row_heights
         ):
-            return
+            if vw == self._viewport_width:
+                return
+            if self._layout_mode == "wlpg_grid":
+                # Pure viewport resize that keeps column_count identical doesn't alter row Y-offsets.
+                self._viewport_width = vw
+                return
 
         self._viewport_width = vw
         self._cell_width = cw
         self._cell_height = ch
         self._spacing = sp
         self._column_count = new_cols
-        self._rebuild_virtual_row_offsets()
+        self._chrome_height = eff_chrome
+        self._uniform_row_heights = uni
+        self._rebuild_virtual_row_offsets(recompute_rows=True)
 
     def set_column_count(self, columns: int) -> None:
         new_cols = max(1, int(columns))
@@ -342,7 +462,7 @@ class CatalogListModel(QAbstractListModel):
             if g.group_key == group_key:
                 self.beginResetModel()
                 g.collapsed = not g.collapsed
-                self._rebuild_virtual_row_offsets()
+                self._rebuild_virtual_row_offsets(recompute_rows=False)
                 self.endResetModel()
                 return
 
@@ -367,7 +487,7 @@ class CatalogListModel(QAbstractListModel):
         self.beginResetModel()
         for g in self._groups:
             g.collapsed = collapse
-        self._rebuild_virtual_row_offsets()
+        self._rebuild_virtual_row_offsets(recompute_rows=False)
         self.endResetModel()
 
     def get_scroll_indicator_info(self, scroll_y: int) -> tuple[str, str]:
@@ -402,8 +522,16 @@ class CatalogListModel(QAbstractListModel):
                     rec = self._records[g.record_start]
             else:
                 cols = max(1, self._column_count)
-                row_stride = max(1, self._cell_height + self._spacing)
-                r = max(0, (scroll_y - g.y_items_start) // row_stride)
+                offsets = g.row_y_offsets
+                if offsets is not None and len(offsets) > 1:
+                    rel_y = max(0, scroll_y - g.y_items_start)
+                    r = max(0, min(len(offsets) - 2, bisect.bisect_right(offsets, rel_y) - 1))
+                else:
+                    row_stride = max(1, self._cell_height + self._spacing)
+                    first_h = g.first_row_height if g.first_row_height > 0 else self._cell_height
+                    first_stride = first_h + self._spacing
+                    rel_y = max(0, scroll_y - g.y_items_start)
+                    r = 0 if rel_y < first_stride else (1 + (rel_y - first_stride) // row_stride)
                 off = min(g.record_count - 1, max(0, r * cols))
                 rec = self._records[g.record_start + off]
 
@@ -535,7 +663,15 @@ class CatalogListModel(QAbstractListModel):
         r = item_offset // cols
         c = item_offset % cols
         x = self.GRID_MARGIN_X + c * (self._cell_width + self._spacing)
-        y = g.y_items_start + r * (self._cell_height + self._spacing)
+        offsets = g.row_y_offsets
+        if offsets is not None and r + 1 < len(offsets):
+            y = g.y_items_start + offsets[r]
+            row_h = offsets[r + 1] - offsets[r] - self._spacing
+            return QRect(x, y, self._cell_width, row_h)
+        first_h = g.first_row_height if g.first_row_height > 0 else self._cell_height
+        if r == 0:
+            return QRect(x, g.y_items_start, self._cell_width, first_h)
+        y = g.y_items_start + first_h + self._spacing + (r - 1) * (self._cell_height + self._spacing)
         return QRect(x, y, self._cell_width, self._cell_height)
 
     def vrow_at_pos(self, pos: QPoint) -> int:
@@ -587,11 +723,31 @@ class CatalogListModel(QAbstractListModel):
         if rel_x < 0:
             return -1
 
-        r = rel_y // row_stride
+        offsets = g.row_y_offsets
+        if offsets is not None:
+            r = bisect.bisect_right(offsets, rel_y) - 1
+            if r < 0 or r + 1 >= len(offsets):
+                return -1
+            row_h = offsets[r + 1] - offsets[r] - self._spacing
+            if (rel_y - offsets[r]) > row_h:
+                return -1
+        else:
+            first_h = g.first_row_height if g.first_row_height > 0 else self._cell_height
+            first_stride = first_h + self._spacing
+            if rel_y < first_stride:
+                if rel_y > first_h:
+                    return -1
+                r = 0
+            else:
+                rem_y = rel_y - first_stride
+                if (rem_y % row_stride) > self._cell_height:
+                    return -1
+                r = 1 + (rem_y // row_stride)
+
         c = rel_x // col_stride
         if c >= cols:
             return -1
-        if (rel_y % row_stride) > self._cell_height or (rel_x % col_stride) > self._cell_width:
+        if (rel_x % col_stride) > self._cell_width:
             return -1
 
         item_offset = r * cols + c
@@ -645,8 +801,30 @@ class CatalogListModel(QAbstractListModel):
                 continue
 
             total_item_rows = (g.record_count + cols - 1) // cols
-            first_r = max(0, (top_y - g.y_items_start) // row_stride)
-            last_r = min(total_item_rows - 1, (bottom_y - g.y_items_start) // row_stride)
+            offsets = g.row_y_offsets
+            if offsets is not None:
+                rel_top = top_y - g.y_items_start
+                rel_bot = bottom_y - g.y_items_start
+                first_r = max(0, bisect.bisect_right(offsets, rel_top) - 1)
+                last_r = min(total_item_rows - 1, bisect.bisect_right(offsets, rel_bot) - 1)
+                if first_r <= last_r and first_r + 1 < len(offsets):
+                    if (offsets[first_r + 1] - self._spacing) < rel_top:
+                        first_r += 1
+            else:
+                first_h = g.first_row_height if g.first_row_height > 0 else self._cell_height
+                first_stride = first_h + self._spacing
+                rel_top = top_y - g.y_items_start
+                rel_bot = bottom_y - g.y_items_start
+                if rel_top < first_stride:
+                    first_r = 0
+                else:
+                    first_r = 1 + (rel_top - first_stride) // row_stride
+                if rel_bot < 0:
+                    last_r = -1
+                elif rel_bot < first_stride:
+                    last_r = 0
+                else:
+                    last_r = min(total_item_rows - 1, 1 + (rel_bot - first_stride) // row_stride)
 
             if first_r <= last_r:
                 start_offset = first_r * cols

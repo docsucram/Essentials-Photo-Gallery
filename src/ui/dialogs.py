@@ -354,6 +354,7 @@ class AppSettingsDialog(QDialog):
         show_tags: bool = True,
         show_people: bool = True,
         show_ratings: bool = True,
+        show_places: bool = True,
         find_people_enabled: bool = False,
         tooltip_previews: bool = True,
         jpeg_quality: int = 83,
@@ -486,6 +487,10 @@ class AppSettingsDialog(QDialog):
         self.chk_show_ratings = QCheckBox("Show Ratings", tab_general)
         self.chk_show_ratings.setChecked(show_ratings)
         nav_grid.addWidget(self.chk_show_ratings, 1, 1)
+
+        self.chk_show_places = QCheckBox("Show Places", tab_general)
+        self.chk_show_places.setChecked(show_places)
+        nav_grid.addWidget(self.chk_show_places, 2, 0)
 
         v_gen.addLayout(nav_grid)
 
@@ -1175,6 +1180,9 @@ class AppSettingsDialog(QDialog):
 
     def show_ratings(self) -> bool:
         return self.chk_show_ratings.isChecked()
+
+    def show_places(self) -> bool:
+        return self.chk_show_places.isChecked()
 
     def tooltip_previews_enabled(self) -> bool:
         return True

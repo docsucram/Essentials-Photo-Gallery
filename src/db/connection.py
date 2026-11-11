@@ -6,10 +6,12 @@ Manages thread-local WAL connections, PRAGMA tuning, and schema initialization.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import re
 import sqlite3
 import threading
+import time
 from collections.abc import Generator
 from pathlib import Path
 
@@ -783,6 +785,126 @@ class DualDatabaseEngine:
                 conn.commit()
         except Exception as exc:
             logger.warning("Error in heal_incomplete_face_scans_v2 migration: %s", exc)
+
+        # 14. Heal face scans poisoned by frozen InsightFace meanshape_68 lookup or Stage 1 error fallthrough
+        try:
+            has_media = cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media';"
+            ).fetchone()
+            cur.execute("CREATE TABLE IF NOT EXISTS schema_flags (name TEXT PRIMARY KEY);")
+            done = cur.execute(
+                "SELECT 1 FROM schema_flags WHERE name = 'heal_frozen_meanshape_face_scans_v3';"
+            ).fetchone()
+            if has_media and not done:
+                cur.execute(
+                    """
+                    UPDATE media
+                    SET face_scan_version = 0
+                    WHERE is_video = 0
+                      AND (
+                          face_scan_version = -1
+                          OR (
+                              face_scan_version > 0
+                              AND EXISTS (
+                                  SELECT 1 FROM media_people mp
+                                  WHERE mp.media_id = media.id
+                                    AND mp.state = 1
+                                    AND mp.embedding IS NULL
+                              )
+                          )
+                      );
+                    """
+                )
+                cur.execute(
+                    "INSERT OR IGNORE INTO schema_flags(name) VALUES ('heal_frozen_meanshape_face_scans_v3');"
+                )
+                conn.commit()
+        except Exception as exc:
+            logger.warning("Error in heal_frozen_meanshape_face_scans_v3 migration: %s", exc)
+
+        # 15. Camera EXIF Make/Model columns + Static & Smart Albums schema
+        try:
+            media_cols = {r[1] for r in cur.execute("PRAGMA table_info(media);").fetchall()}
+            if media_cols:
+                if "camera_make" not in media_cols:
+                    cur.execute("ALTER TABLE media ADD COLUMN camera_make TEXT DEFAULT '';")
+                if "camera_model" not in media_cols:
+                    cur.execute("ALTER TABLE media ADD COLUMN camera_model TEXT DEFAULT '';")
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_media_camera ON media(camera_model, camera_make);"
+                )
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS albums (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT DEFAULT '',
+                    cover_media_id INTEGER,
+                    created_at INTEGER NOT NULL
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS album_items (
+                    album_id INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+                    media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (album_id, media_id)
+                );
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_album_items_media ON album_items(media_id);"
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS smart_albums (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    rules_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                """
+            )
+
+            smart_count_row = cur.execute("SELECT COUNT(*) FROM smart_albums;").fetchone()
+            if smart_count_row and int(smart_count_row[0]) == 0:
+                now_ts = int(time.time())
+                builtin_smart_albums = [
+                    (
+                        "On This Day",
+                        json.dumps({
+                            "match_mode": "all",
+                            "rules": [{"field": "on_this_day", "op": "is", "value": ""}],
+                        }),
+                    ),
+                    (
+                        "4+ Star & Flagged Favorites",
+                        json.dumps({
+                            "match_mode": "all",
+                            "rules": [
+                                {"field": "rating", "op": "gte", "value": 4},
+                                {"field": "flag", "op": "is_flagged", "value": ""},
+                            ],
+                        }),
+                    ),
+                    (
+                        "All Videos",
+                        json.dumps({
+                            "match_mode": "all",
+                            "rules": [{"field": "media_type", "op": "is", "value": "video"}],
+                        }),
+                    ),
+                ]
+                for s_name, s_json in builtin_smart_albums:
+                    cur.execute(
+                        "INSERT OR IGNORE INTO smart_albums (name, rules_json, created_at) VALUES (?, ?, ?);",
+                        (s_name, s_json, now_ts),
+                    )
+        except Exception as exc:
+            logger.warning("Error in albums/smart_albums migration: %s", exc)
 
         conn.commit()
 

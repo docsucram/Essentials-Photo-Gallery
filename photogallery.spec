@@ -24,6 +24,16 @@ datas += collect_data_files("cv2")
 datas += collect_data_files("onnxruntime")
 datas += collect_data_files("insightface")
 
+# InsightFace's pickle_object.get_object() checks sys._MEIPASS/objects/ in frozen builds
+# instead of insightface/data/objects/. Ship objects/ at the bundle root too.
+try:
+    import insightface as _insightface_pkg
+    _insight_objects_dir = Path(_insightface_pkg.__file__).resolve().parent / "data" / "objects"
+    if _insight_objects_dir.is_dir():
+        datas.append((str(_insight_objects_dir), "objects"))
+except Exception:
+    pass
+
 for pkg in ("pillow_heif", "pillow_jxl", "pillow_avif"):
     try:
         datas += collect_data_files(pkg)

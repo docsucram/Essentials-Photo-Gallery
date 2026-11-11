@@ -482,6 +482,14 @@ class LeftNavigationDock(QDockWidget):
     people_directory_requested = Signal()
     tag_hierarchy_changed = Signal()
     place_selected = Signal(str, str, str)  # country, state, city
+    new_album_requested = Signal()
+    rename_album_requested = Signal(int, str)
+    delete_album_requested = Signal(int, str)
+    new_smart_album_requested = Signal()
+    edit_smart_album_requested = Signal(int)
+    rename_smart_album_requested = Signal(int, str)
+    delete_smart_album_requested = Signal(int, str)
+    save_filter_as_smart_album_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Navigation", parent)
@@ -516,6 +524,11 @@ class LeftNavigationDock(QDockWidget):
         self._location_country: str | None = None
         self._location_state: str | None = None
         self._location_city: str | None = None
+        self._album_id: int | None = None
+        self._album_name: str = ""
+        self._smart_album_id: int | None = None
+        self._smart_album_name: str = ""
+        self._smart_album_rules: str | None = None
 
         # Section visibility state (Options dialog)
         self._show_dates: bool = True
@@ -525,6 +538,8 @@ class LeftNavigationDock(QDockWidget):
         self._show_places: bool = True
 
         # Fast lookup maps for tree items
+        self._album_items: dict[int, QTreeWidgetItem] = {}
+        self._smart_album_items: dict[int, QTreeWidgetItem] = {}
         self._folder_items: dict[int, QTreeWidgetItem] = {}
         self._tag_items: dict[int, QTreeWidgetItem] = {}
         self._person_items: dict[int, QTreeWidgetItem] = {}
@@ -812,6 +827,8 @@ class LeftNavigationDock(QDockWidget):
         self.tree.blockSignals(True)
         try:
             self.tree.clear()
+            self._album_items.clear()
+            self._smart_album_items.clear()
             self._folder_items.clear()
             self._tag_items.clear()
             self._person_items.clear()
@@ -820,6 +837,28 @@ class LeftNavigationDock(QDockWidget):
 
             sec_font = QFont("Segoe UI", 9, QFont.Bold)
             section_color = QBrush(QColor("#1E395B"))
+
+            # 0. Albums (Static Albums + Dynamic Smart Albums)
+            self.root_albums = QTreeWidgetItem(self.tree, ["Albums"])
+            self.root_albums.setData(0, _NODE_TYPE_ROLE, "section_albums")
+            self.root_albums.setIcon(0, make_wlpg_icon("pictures_library", 16))
+            self.root_albums.setFont(0, sec_font)
+            self.root_albums.setForeground(0, section_color)
+            self.root_albums.setExpanded(True)
+
+            self.root_my_albums = QTreeWidgetItem(self.root_albums, ["My Albums"])
+            self.root_my_albums.setData(0, _NODE_TYPE_ROLE, "section_my_albums")
+            self.root_my_albums.setIcon(0, make_wlpg_icon("folder", 16))
+            self.root_my_albums.setFont(0, sec_font)
+            self.root_my_albums.setForeground(0, section_color)
+            self.root_my_albums.setExpanded(True)
+
+            self.root_smart_albums = QTreeWidgetItem(self.root_albums, ["Smart Albums"])
+            self.root_smart_albums.setData(0, _NODE_TYPE_ROLE, "section_smart_albums")
+            self.root_smart_albums.setIcon(0, make_wlpg_icon("star_filled", 16))
+            self.root_smart_albums.setFont(0, sec_font)
+            self.root_smart_albums.setForeground(0, section_color)
+            self.root_smart_albums.setExpanded(True)
 
             # 1. All photos and videos (Top-level folder root - matches WLPG screenshot)
             self.root_all = QTreeWidgetItem(self.tree, ["All photos and videos"])
@@ -890,12 +929,14 @@ class LeftNavigationDock(QDockWidget):
         show_tags: bool = True,
         show_people: bool = True,
         show_ratings: bool = True,
+        show_places: bool = True,
     ) -> None:
         """Shows or hides top-level navigation sections per Photo Gallery Options dialog."""
         self._show_dates = bool(show_dates)
         self._show_tags = bool(show_tags)
         self._show_people = bool(show_people)
         self._show_ratings = bool(show_ratings)
+        self._show_places = bool(show_places)
         if hasattr(self, "root_dates"):
             self.root_dates.setHidden(not self._show_dates)
         if hasattr(self, "root_tags"):
@@ -904,9 +945,11 @@ class LeftNavigationDock(QDockWidget):
             self.root_people.setHidden(not self._show_people)
         if hasattr(self, "root_ratings"):
             self.root_ratings.setHidden(not self._show_ratings)
+        if hasattr(self, "root_places"):
+            self.root_places.setHidden(not self._show_places)
 
     def set_section_visible(self, section_name: str, visible: bool) -> None:
-        """Toggles visibility of an individual section by name ('dates', 'tags', 'people', 'ratings')."""
+        """Toggles visibility of an individual section by name ('dates', 'tags', 'people', 'ratings', 'places')."""
         sec = section_name.lower()
         if "date" in sec:
             self._show_dates = bool(visible)
@@ -924,23 +967,43 @@ class LeftNavigationDock(QDockWidget):
             self._show_ratings = bool(visible)
             if hasattr(self, "root_ratings"):
                 self.root_ratings.setHidden(not self._show_ratings)
+        elif "place" in sec:
+            self._show_places = bool(visible)
+            if hasattr(self, "root_places"):
+                self.root_places.setHidden(not self._show_places)
 
     # -------------------------------------------------------------------------
     # Populate / Refresh from CatalogRepository
     # -------------------------------------------------------------------------
-    def refresh_trees(self, repo: CatalogRepository) -> None:
+    def refresh_trees(
+        self,
+        repo: CatalogRepository,
+        preloaded_people: list[dict[str, Any]] | None = None,
+        preloaded_tags: list[dict[str, Any]] | None = None,
+    ) -> None:
         """Populates Folders, Date Taken, Descriptive Tags, People, and Ratings from catalog.db."""
         self._repo = repo
         self._updating_tree = True
         self.tree.blockSignals(True)
+        self.tree.setUpdatesEnabled(False)
         try:
             had_existing_folders = bool(self._folder_items)
             was_people_expanded = self.root_people.isExpanded() if hasattr(self, "root_people") else False
+            was_albums_expanded = self.root_albums.isExpanded() if hasattr(self, "root_albums") else True
+            was_my_albums_expanded = self.root_my_albums.isExpanded() if hasattr(self, "root_my_albums") else True
+            was_smart_albums_expanded = (
+                self.root_smart_albums.isExpanded() if hasattr(self, "root_smart_albums") else True
+            )
             expanded_folder_ids = {
                 fid for fid, itm in self._folder_items.items() if itm.isExpanded()
             }
             self._init_root_sections()
             self.tree.blockSignals(True)
+
+            self._populate_albums_section(repo)
+            self.root_albums.setExpanded(was_albums_expanded)
+            self.root_my_albums.setExpanded(was_my_albums_expanded)
+            self.root_smart_albums.setExpanded(was_smart_albums_expanded)
 
             folder_icon = make_wlpg_icon("folder", 16)
             cal_icon = make_wlpg_icon("calendar", 16)
@@ -1031,7 +1094,7 @@ class LeftNavigationDock(QDockWidget):
                 self.item_untagged.setSelected(True)
             self.root_tags.addChild(self.item_untagged)
 
-            tag_rows = repo.get_tag_tree()
+            tag_rows = preloaded_tags if preloaded_tags is not None else repo.get_tag_tree()
             for t in tag_rows:
                 tid = int(t["id"])
                 tname = str(t["name"])
@@ -1062,7 +1125,7 @@ class LeftNavigationDock(QDockWidget):
                     self._apply_tag_item_visual_state(t_item, "exclude")
 
             # 4. Populate People nodes (with real face avatar icon when available)
-            people_rows = repo.get_people_list()
+            people_rows = preloaded_people if preloaded_people is not None else repo.get_people_list()
             for p in people_rows:
                 pid = int(p["id"])
                 pname = str(p["name"])
@@ -1177,18 +1240,20 @@ class LeftNavigationDock(QDockWidget):
             self._sync_tree_selection()
         finally:
             self.tree.blockSignals(False)
+            self.tree.setUpdatesEnabled(True)
             self._updating_tree = False
         self._update_summary_label()
 
     def refresh_people_only(self, repo: CatalogRepository) -> list[dict[str, Any]]:
-        """Refreshes only the People section in <1ms without rebuilding Folders, Dates, Tags, or Ratings."""
+        """Refreshes only the People section without rebuilding Folders, Dates, Tags, or Ratings."""
         self._repo = repo
         people_rows = repo.get_people_list()
         if not hasattr(self, "root_people") or self.root_people is None:
-            self.refresh_trees(repo)
+            self.refresh_trees(repo, preloaded_people=people_rows)
             return people_rows
         self._updating_tree = True
         self.tree.blockSignals(True)
+        self.tree.setUpdatesEnabled(False)
         try:
             was_expanded = self.root_people.isExpanded()
             self.root_people.takeChildren()
@@ -1219,8 +1284,74 @@ class LeftNavigationDock(QDockWidget):
             self.root_people.setExpanded(was_expanded)
         finally:
             self.tree.blockSignals(False)
+            self.tree.setUpdatesEnabled(True)
             self._updating_tree = False
         return people_rows
+
+    def _populate_albums_section(self, repo: CatalogRepository) -> None:
+        """Populate My Albums and Smart Albums child items under ``root_albums``."""
+        if not hasattr(self, "root_my_albums") or not hasattr(self, "root_smart_albums"):
+            return
+        while self.root_my_albums.childCount():
+            self.root_my_albums.takeChild(0)
+        while self.root_smart_albums.childCount():
+            self.root_smart_albums.takeChild(0)
+        self._album_items.clear()
+        self._smart_album_items.clear()
+
+        album_icon = make_wlpg_icon("pictures_library", 16)
+        smart_icon = make_wlpg_icon("star_filled", 16)
+
+        try:
+            static_albums = repo.get_albums_with_counts()
+        except Exception:
+            static_albums = []
+        for alb in static_albums:
+            aid = int(alb["id"])
+            name = str(alb["name"])
+            cnt = int(alb.get("item_count", 0))
+            item = QTreeWidgetItem([f"{name} ({cnt})"])
+            item.setData(0, _NODE_TYPE_ROLE, "album")
+            item.setData(0, _NODE_PAYLOAD_ROLE, (aid, name))
+            item.setIcon(0, album_icon)
+            if alb.get("description"):
+                item.setToolTip(0, str(alb["description"]))
+            self.root_my_albums.addChild(item)
+            self._album_items[aid] = item
+
+        try:
+            smart_albums = repo.get_smart_albums_with_counts()
+        except Exception:
+            smart_albums = []
+        for salb in smart_albums:
+            sid = int(salb["id"])
+            name = str(salb["name"])
+            cnt = int(salb.get("item_count", 0))
+            item = QTreeWidgetItem([f"{name} ({cnt})"])
+            item.setData(0, _NODE_TYPE_ROLE, "smart_album")
+            item.setData(0, _NODE_PAYLOAD_ROLE, (sid, name))
+            item.setIcon(0, smart_icon)
+            self.root_smart_albums.addChild(item)
+            self._smart_album_items[sid] = item
+
+    def refresh_albums_only(self, repo: CatalogRepository) -> None:
+        """Refresh only the Static and Smart Albums counts without rebuilding the full tree."""
+        self._repo = repo
+        self._updating_tree = True
+        self.tree.blockSignals(True)
+        try:
+            self._populate_albums_section(repo)
+            if getattr(self, "_dark_mode", False):
+                self._sync_tree_item_colors()
+            self._sync_tree_selection()
+        finally:
+            self.tree.blockSignals(False)
+            self._updating_tree = False
+        self._update_summary_label()
+
+    def active_album_id(self) -> int | None:
+        """Return currently selected Static Album id, or None."""
+        return self._album_id
 
     def _apply_tag_item_visual_state(
         self, item: QTreeWidgetItem, state: Literal["neutral", "include", "exclude"]
@@ -1259,9 +1390,32 @@ class LeftNavigationDock(QDockWidget):
         try:
             self.tree.clearSelection()
 
+            # 0. Albums & Smart Albums
+            has_album = False
+            if self._album_id is not None and self._album_id in self._album_items:
+                a_item = self._album_items[self._album_id]
+                a_item.setSelected(True)
+                self.tree.setCurrentItem(a_item)
+                p = a_item.parent()
+                while p:
+                    p.setExpanded(True)
+                    p = p.parent()
+                self.tree.scrollToItem(a_item)
+                has_album = True
+            elif self._smart_album_id is not None and self._smart_album_id in self._smart_album_items:
+                s_item = self._smart_album_items[self._smart_album_id]
+                s_item.setSelected(True)
+                self.tree.setCurrentItem(s_item)
+                p = s_item.parent()
+                while p:
+                    p.setExpanded(True)
+                    p = p.parent()
+                self.tree.scrollToItem(s_item)
+                has_album = True
+
             # 1. Folders
             has_folder = False
-            if self._folder_id is not None and self._folder_id in self._folder_items:
+            if not has_album and self._folder_id is not None and self._folder_id in self._folder_items:
                 f_item = self._folder_items[self._folder_id]
                 self._folder_name = f_item.text(0)
                 f_item.setSelected(True)
@@ -1324,7 +1478,8 @@ class LeftNavigationDock(QDockWidget):
 
             # 7. All photos and videos (highlighted whenever no specific facet filter is active)
             is_all_media = (
-                not has_folder
+                not has_album
+                and not has_folder
                 and not has_date
                 and not self._include_tag_ids
                 and not self._exclude_tag_ids
@@ -1367,6 +1522,8 @@ class LeftNavigationDock(QDockWidget):
         untagged_sel = False
         folder_tuple: tuple[int, str] | None = None
         date_tuple: tuple | None = None
+        album_tuple: tuple[int, str] | None = None
+        smart_album_tuple: tuple[int, str] | None = None
         all_media = False
 
         for it in selected:
@@ -1382,10 +1539,22 @@ class LeftNavigationDock(QDockWidget):
                 folder_tuple = (int(payload), it.text(0))
             elif ntype == "date" and isinstance(payload, tuple):
                 date_tuple = payload
+            elif ntype == "album" and isinstance(payload, tuple):
+                album_tuple = (int(payload[0]), str(payload[1]))
+            elif ntype == "smart_album" and isinstance(payload, tuple):
+                smart_album_tuple = (int(payload[0]), str(payload[1]))
             elif ntype == "all_media":
                 all_media = True
 
-        if all_media and (folder_tuple is not None or date_tuple is not None or tag_ids or person_ids or untagged_sel):
+        if all_media and (
+            album_tuple is not None
+            or smart_album_tuple is not None
+            or folder_tuple is not None
+            or date_tuple is not None
+            or tag_ids
+            or person_ids
+            or untagged_sel
+        ):
             all_media = False
             if hasattr(self, "root_all") and self.root_all is not None:
                 self.root_all.setSelected(False)
@@ -1394,7 +1563,23 @@ class LeftNavigationDock(QDockWidget):
             self.clear_all_filters()
             return
 
+        if album_tuple is not None:
+            aid, aname = album_tuple
+            self._select_album_scope(album_id=aid, album_name=aname)
+            return
+        if smart_album_tuple is not None:
+            sid, sname = smart_album_tuple
+            self._select_smart_album_scope(smart_album_id=sid, smart_album_name=sname)
+            return
+
         changed = False
+        if self._album_id is not None or self._smart_album_id is not None or self._smart_album_rules is not None:
+            self._album_id = None
+            self._album_name = ""
+            self._smart_album_id = None
+            self._smart_album_name = ""
+            self._smart_album_rules = None
+            changed = True
         ctrl_held = bool(QGuiApplication.keyboardModifiers() & Qt.ControlModifier)
         if folder_tuple is not None:
             if hasattr(self, "root_all") and self.root_all is not None and self.root_all.isSelected():
@@ -1454,6 +1639,15 @@ class LeftNavigationDock(QDockWidget):
 
         if ntype == "all_media":
             self.clear_all_filters()
+            return
+        if ntype in ("section_albums", "section_my_albums", "section_smart_albums"):
+            item.setExpanded(not item.isExpanded())
+            return
+        if ntype == "album" and isinstance(payload, tuple):
+            self._select_album_scope(album_id=int(payload[0]), album_name=str(payload[1]))
+            return
+        if ntype == "smart_album" and isinstance(payload, tuple):
+            self._select_smart_album_scope(smart_album_id=int(payload[0]), smart_album_name=str(payload[1]))
             return
         if ntype == "section_folders":
             self._folder_id = None
@@ -1774,6 +1968,56 @@ class LeftNavigationDock(QDockWidget):
             act_add = QAction(make_wlpg_icon("folder_add", 16), "Add folder to gallery...", menu)
             act_add.triggered.connect(self.folder_add_requested.emit)
             menu.addAction(act_add)
+            menu.addSeparator()
+            act_save_smart = QAction(
+                make_wlpg_icon("star_filled", 16),
+                "Save Current Filter as Smart Album...",
+                menu,
+            )
+            act_save_smart.triggered.connect(self.save_filter_as_smart_album_requested.emit)
+            menu.addAction(act_save_smart)
+        elif ntype in ("section_albums", "section_my_albums"):
+            act_new_alb = QAction(make_wlpg_icon("pictures_library", 16), "New Album...", menu)
+            act_new_alb.triggered.connect(self.new_album_requested.emit)
+            menu.addAction(act_new_alb)
+            if ntype == "section_albums":
+                act_new_smart = QAction(
+                    make_wlpg_icon("star_filled", 16), "New Smart Album...", menu
+                )
+                act_new_smart.triggered.connect(self.new_smart_album_requested.emit)
+                menu.addAction(act_new_smart)
+        elif ntype == "section_smart_albums":
+            act_new_smart = QAction(
+                make_wlpg_icon("star_filled", 16), "New Smart Album...", menu
+            )
+            act_new_smart.triggered.connect(self.new_smart_album_requested.emit)
+            menu.addAction(act_new_smart)
+            act_save_smart = QAction(
+                "Save Current Filter as Smart Album...",
+                menu,
+            )
+            act_save_smart.triggered.connect(self.save_filter_as_smart_album_requested.emit)
+            menu.addAction(act_save_smart)
+        elif ntype == "album" and isinstance(payload, tuple):
+            aid, aname = int(payload[0]), str(payload[1])
+            act_ren = QAction("Rename Album...", menu)
+            act_ren.triggered.connect(lambda _c=False, i=aid, n=aname: self.rename_album_requested.emit(i, n))
+            menu.addAction(act_ren)
+            act_del = QAction("Delete Album", menu)
+            act_del.triggered.connect(lambda _c=False, i=aid, n=aname: self.delete_album_requested.emit(i, n))
+            menu.addAction(act_del)
+        elif ntype == "smart_album" and isinstance(payload, tuple):
+            sid, sname = int(payload[0]), str(payload[1])
+            act_edit = QAction("Edit Rules...", menu)
+            act_edit.triggered.connect(lambda _c=False, i=sid: self.edit_smart_album_requested.emit(i))
+            menu.addAction(act_edit)
+            act_ren = QAction("Rename Smart Album...", menu)
+            act_ren.triggered.connect(lambda _c=False, i=sid, n=sname: self.rename_smart_album_requested.emit(i, n))
+            menu.addAction(act_ren)
+            menu.addSeparator()
+            act_del = QAction("Delete Smart Album", menu)
+            act_del.triggered.connect(lambda _c=False, i=sid, n=sname: self.delete_smart_album_requested.emit(i, n))
+            menu.addAction(act_del)
 
         return menu
 
@@ -2182,25 +2426,81 @@ class LeftNavigationDock(QDockWidget):
         self._update_summary_label()
         self.filter_changed.emit()
 
+    def _reset_non_album_facets(self) -> None:
+        self._folder_id = None
+        self._folder_name = "All folders"
+        self._date_year = None
+        self._date_month = None
+        self._date_day = None
+        self._include_tag_ids.clear()
+        self._exclude_tag_ids.clear()
+        self._untagged_only = False
+        self._person_ids.clear()
+        self._person_boolean_mode = "OR"
+        self._ratings.clear()
+        self._flagged_only = False
+        self._edited_only = False
+        self._edited_filter = None
+        self._media_type = "all"
+        self._orientation_filter = "all"
+
+    def _select_album_scope(self, album_id: int, album_name: str = "") -> None:
+        """Select a Static Album as the active gallery scope."""
+        if (
+            self._album_id == album_id
+            and self._smart_album_id is None
+            and not self._folder_id
+            and not self._include_tag_ids
+            and not self._person_ids
+        ):
+            return
+        self._updating_tree = True
+        try:
+            self._reset_non_album_facets()
+            self._smart_album_id = None
+            self._smart_album_name = ""
+            self._smart_album_rules = None
+            self._album_id = int(album_id)
+            self._album_name = album_name
+            self._sync_tree_selection()
+        finally:
+            self._updating_tree = False
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def _select_smart_album_scope(self, smart_album_id: int, smart_album_name: str = "") -> None:
+        """Select a Smart Album as the active gallery scope."""
+        if (
+            self._smart_album_id == smart_album_id
+            and self._album_id is None
+            and not self._folder_id
+            and not self._include_tag_ids
+            and not self._person_ids
+        ):
+            return
+        self._updating_tree = True
+        try:
+            self._reset_non_album_facets()
+            self._album_id = None
+            self._album_name = ""
+            self._smart_album_id = int(smart_album_id)
+            self._smart_album_name = smart_album_name
+            self._smart_album_rules = None
+            self._sync_tree_selection()
+        finally:
+            self._updating_tree = False
+        self._update_summary_label()
+        self.filter_changed.emit()
+
     def clear_all_filters(self) -> None:
         self._updating_tree = True
         try:
-            self._folder_id = None
-            self._folder_name = "All folders"
-            self._date_year = None
-            self._date_month = None
-            self._date_day = None
-            self._include_tag_ids.clear()
-            self._exclude_tag_ids.clear()
-            self._untagged_only = False
-            self._person_ids.clear()
-            self._person_boolean_mode = "OR"
-            self._ratings.clear()
-            self._flagged_only = False
-            self._edited_only = False
-            self._edited_filter = None
-            self._media_type = "all"
-            self._orientation_filter = "all"
+            self._album_id = None
+            self._album_name = ""
+            self._smart_album_id = None
+            self._smart_album_name = ""
+            self._smart_album_rules = None
+            self._reset_non_album_facets()
 
             self._sync_tree_selection()
         finally:
@@ -2210,6 +2510,10 @@ class LeftNavigationDock(QDockWidget):
 
     def selected_scope_description(self) -> str:
         parts: list[str] = []
+        if self._album_id is not None:
+            parts.append(f"Album: {self._album_name or self._album_id}")
+        if self._smart_album_id is not None:
+            parts.append(f"Smart Album: {self._smart_album_name or self._smart_album_id}")
         if self._folder_id is not None:
             parts.append(f"Folder: {self._folder_name}")
         if self._date_year is not None:
@@ -2253,6 +2557,11 @@ class LeftNavigationDock(QDockWidget):
 
     def current_filter_state(self) -> dict[str, Any]:
         return {
+            "album_id": self._album_id,
+            "album_name": self._album_name,
+            "smart_album_id": self._smart_album_id,
+            "smart_album_name": self._smart_album_name,
+            "smart_album_rules": self._smart_album_rules,
             "folder_id": self._folder_id,
             "include_subfolders": self._include_subfolders,
             "date_year": self._date_year,
@@ -2274,6 +2583,11 @@ class LeftNavigationDock(QDockWidget):
 
     def restore_filter_state(self, state: dict[str, Any]) -> None:
         """Restores filter state from a dictionary (used for back/forward navigation history and startup restore)."""
+        self._album_id = state.get("album_id")
+        self._album_name = str(state.get("album_name") or "")
+        self._smart_album_id = state.get("smart_album_id")
+        self._smart_album_name = str(state.get("smart_album_name") or "")
+        self._smart_album_rules = state.get("smart_album_rules")
         self._folder_id = state.get("folder_id")
         self._include_subfolders = state.get("include_subfolders", True)
         self._date_year = state.get("date_year")
@@ -2329,6 +2643,9 @@ class LeftNavigationDock(QDockWidget):
     ) -> FilterQuerySpec:
         """Constructs an immutable FilterQuerySpec ready for CatalogRepository.query_media_records."""
         return FilterQuerySpec(
+            album_id=self._album_id,
+            smart_album_id=self._smart_album_id,
+            smart_album_rules=self._smart_album_rules,
             folder_id=self._folder_id,
             include_subfolders=self._include_subfolders,
             date_year=self._date_year,

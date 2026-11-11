@@ -93,6 +93,10 @@ _FLUENT_MAP: dict[str, tuple[str, str]] = {
     "caption": ("ri.chat-new-line", "#0078D4"),
     "geotag": ("msc.globe", "#0078D4"),
     "globe": ("msc.globe", "#0078D4"),
+    "map_light": ("ri.map-2-line", "#0078D4"),
+    "map_street": ("ri.road-map-line", "#107C41"),
+    "map_satellite": ("mdi6.satellite-variant", "#005A9E"),
+    "view_area_grid": ("ri.grid-fill", "#0078D4"),
     "warning": ("ri.alert-line", "#FFB900"),
     "outlier": ("ri.alert-line", "#FFB900"),
     # Ratings & Flags

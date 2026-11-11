@@ -9,6 +9,7 @@ from __future__ import annotations
 import calendar
 import datetime
 import io
+import json
 import os
 import re
 import time
@@ -209,6 +210,9 @@ class FilterQuerySpec:
     group_reverse: bool = False
     arrange_by: ArrangeMode = "date"
     reverse_sort: bool = False
+    album_id: int | None = None
+    smart_album_id: int | None = None
+    smart_album_rules: str | None = None
 
 
 @dataclass(slots=True)
@@ -764,14 +768,15 @@ class CatalogRepository:
             where_clauses.append(f"(m.is_video = 0 AND ({raw_clauses}))")
 
         # 6b. Orientation filter (landscape vs portrait)
+        # media.width and media.height are already stored in upright display dimensions.
         orient_val = getattr(spec, "orientation_filter", "all")
         if orient_val == "landscape":
             where_clauses.append(
-                "((m.orientation IN (5, 6, 7, 8) AND m.height > m.width) OR (COALESCE(m.orientation, 1) NOT IN (5, 6, 7, 8) AND m.width > m.height))"
+                "(COALESCE(m.width, 0) > 0 AND COALESCE(m.height, 0) > 0 AND m.width > m.height)"
             )
         elif orient_val == "portrait":
             where_clauses.append(
-                "((m.orientation IN (5, 6, 7, 8) AND m.width > m.height) OR (COALESCE(m.orientation, 1) NOT IN (5, 6, 7, 8) AND m.height > m.width))"
+                "(COALESCE(m.width, 0) > 0 AND COALESCE(m.height, 0) > 0 AND m.height > m.width)"
             )
 
         # 6b. Explicit media_ids filter (e.g. from World Map cluster click)
@@ -824,6 +829,28 @@ class CatalogRepository:
                 where_clauses.append(b_sql)
                 params.extend(b_params)
 
+        # 8b. Static Album & Smart Album filters
+        if getattr(spec, "album_id", None) is not None:
+            where_clauses.append(
+                "m.id IN (SELECT ai.media_id FROM album_items ai WHERE ai.album_id = ?)"
+            )
+            params.append(int(spec.album_id))
+
+        sa_rules_raw = getattr(spec, "smart_album_rules", None)
+        sa_id = getattr(spec, "smart_album_id", None)
+        if sa_rules_raw is None and sa_id is not None:
+            sa_row = conn.execute(
+                "SELECT rules_json FROM smart_albums WHERE id = ?;", (int(sa_id),)
+            ).fetchone()
+            sa_rules_raw = sa_row[0] if sa_row else None
+        if sa_rules_raw:
+            sa_sql, sa_params = compile_smart_album_where(sa_rules_raw, alias="m")
+            if sa_sql:
+                where_clauses.append(f"({sa_sql})")
+                params.extend(sa_params)
+        elif sa_id is not None:
+            where_clauses.append("1 = 0")
+
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
         # 9. Sort / Arrange clause: Group first, then sort within group
@@ -857,7 +884,7 @@ class CatalogRepository:
             grp_expr = "CASE WHEN (COALESCE(m.width, 0) * COALESCE(m.height, 0)) >= 16000000 THEN 1 WHEN (COALESCE(m.width, 0) * COALESCE(m.height, 0)) >= 8000000 THEN 2 WHEN (COALESCE(m.width, 0) * COALESCE(m.height, 0)) >= 2000000 THEN 3 WHEN (COALESCE(m.width, 0) * COALESCE(m.height, 0)) > 0 THEN 4 ELSE 5 END"
             grp_dir = "DESC" if getattr(spec, "group_reverse", False) else "ASC"
         elif group_mode in ("orientation",):
-            grp_expr = "CASE WHEN m.orientation IN (5, 6, 7, 8) THEN CASE WHEN m.height > m.width THEN 1 WHEN m.width > m.height THEN 2 ELSE 3 END ELSE CASE WHEN m.width > m.height THEN 1 WHEN m.height > m.width THEN 2 WHEN m.width > 0 THEN 3 ELSE 4 END END"
+            grp_expr = "CASE WHEN COALESCE(m.width, 0) > 0 AND COALESCE(m.height, 0) > 0 THEN CASE WHEN m.width > m.height THEN 1 WHEN m.height > m.width THEN 2 ELSE 3 END ELSE 4 END"
             grp_dir = "DESC" if getattr(spec, "group_reverse", False) else "ASC"
         elif group_mode in ("file_type", "file type"):
             grp_expr = "LOWER(COALESCE(m.ext, ''))"
@@ -1172,12 +1199,11 @@ class CatalogRepository:
                 else:
                     gkey = "Unknown Size"
             elif group_mode in ("orientation",):
-                eff_w, eff_h = (h, w) if orient in (5, 6, 7, 8) else (w, h)
-                if eff_w > eff_h and eff_w > 0:
+                if w > 0 and h > 0 and w > h:
                     gkey = "Landscape"
-                elif eff_h > eff_w and eff_h > 0:
+                elif w > 0 and h > 0 and h > w:
                     gkey = "Portrait"
-                elif eff_w > 0 and eff_w == eff_h:
+                elif w > 0 and w == h:
                     gkey = "Square"
                 else:
                     gkey = "Unknown Orientation"
@@ -1303,6 +1329,19 @@ class CatalogRepository:
                             f"UPDATE media SET {column} = ?, metadata_dirty = 1 WHERE id IN ({placeholders});",
                             [val, *chunk],
                         )
+
+    def update_media_metadata(self, media_id: int, **fields: Any) -> None:
+        """Updates allowlisted media metadata columns (orientation, dimensions, file stats) in catalog.db."""
+        allowed_cols = {"orientation", "width", "height", "mtime", "size", "metadata_dirty"}
+        updates = {k: v for k, v in fields.items() if k in allowed_cols and v is not None}
+        if not updates:
+            return
+        assignments = ", ".join(f"{col} = ?" for col in updates)
+        params: list[Any] = [*updates.values(), int(media_id)]
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            conn.execute(f"UPDATE media SET {assignments} WHERE id = ?;", params)
+            conn.commit()
 
     def set_rating(self, media_ids: Sequence[int], rating: int) -> None:
         if not media_ids:
@@ -2819,38 +2858,12 @@ class CatalogRepository:
 
         # Deduplicate any duplicate person face tags on photos where both people were tagged
         try:
-            self.deduplicate_media_people()
+            self.deduplicate_media_people(person_id=dst_id)
         except Exception:
             pass
 
         # Recalculate target person centroid / sub-centroids
-        try:
-            conn = self.engine.catalog_conn()
-            all_emb_rows = conn.execute(
-                "SELECT embedding FROM media_people WHERE person_id = ? AND state = 1 AND embedding IS NOT NULL;",
-                (dst_id,),
-            ).fetchall()
-            if all_emb_rows:
-                from src.core.face_matcher import (
-                    FaceVectorMatcher,
-                    deserialize_embedding,
-                    normalize_vector,
-                    serialize_embedding,
-                )
-                import numpy as np
-                all_vectors = [
-                    deserialize_embedding(bytes(r["embedding"]))
-                    for r in all_emb_rows
-                    if r["embedding"] and len(bytes(r["embedding"])) >= 2048
-                ]
-                if all_vectors:
-                    if len(all_vectors) >= 10:
-                        sub_c = FaceVectorMatcher.compute_sub_centroids(np.stack(all_vectors, axis=0), max_k=5)
-                    else:
-                        sub_c = normalize_vector(np.mean(np.stack(all_vectors, axis=0), axis=0, keepdims=True))
-                    self.update_person_centroid(dst_id, serialize_embedding(sub_c))
-        except Exception:
-            pass
+        self.recalculate_person_centroid(dst_id)
 
     def set_person_display_picture(self, person_id: int, media_id: int) -> bool:
         """
@@ -2903,13 +2916,18 @@ class CatalogRepository:
 
     def get_people_list(self) -> list[dict[str, Any]]:
         conn = self.engine.catalog_conn()
+        # Single-pass aggregation avoids O(people * media_people) nested-loop index scans
         rows = conn.execute(
             """
             SELECT p.id, p.name, p.thumbnail_blob, p.confirmed_count,
-                   COUNT(DISTINCT mp.media_id) AS media_count
+                   COALESCE(c.media_count, 0) AS media_count
             FROM people p
-            LEFT JOIN media_people mp ON mp.person_id = p.id AND mp.state = 1
-            GROUP BY p.id
+            LEFT JOIN (
+                SELECT person_id, COUNT(DISTINCT media_id) AS media_count
+                FROM media_people
+                WHERE state = 1 AND person_id IS NOT NULL
+                GROUP BY person_id
+            ) c ON c.person_id = p.id
             ORDER BY p.name COLLATE NOCASE ASC;
             """
         ).fetchall()
@@ -2917,20 +2935,35 @@ class CatalogRepository:
 
     get_all_people = get_people_list
 
-    def get_named_people_directory_data(self) -> list[dict[str, Any]]:
-        """Fast query (<80ms) for named people with photo and pending suggestion counts."""
+    def get_named_people_directory_data(
+        self, min_confidence: float = 0.0
+    ) -> list[dict[str, Any]]:
+        """Fast query (<60ms) for named people with photo and pending suggestion counts."""
         conn = self.engine.catalog_conn()
+        thresh = float(min_confidence)
+        # Aggregate confirmed and suggested counts in separate subqueries to prevent Cartesian row explosion
         named_rows = conn.execute(
             """
             SELECT p.id, p.name, p.thumbnail_blob, p.confirmed_count,
-                   COUNT(DISTINCT CASE WHEN mp.state = 1 THEN mp.media_id END) AS photo_count,
-                   COUNT(DISTINCT CASE WHEN mp_s.state = 0 AND mp_s.suggested_person_id = p.id THEN mp_s.id END) AS suggestion_count
+                   COALESCE(c.photo_count, 0) AS photo_count,
+                   COALESCE(s.suggestion_count, 0) AS suggestion_count
             FROM people p
-            LEFT JOIN media_people mp ON mp.person_id = p.id AND mp.state = 1
-            LEFT JOIN media_people mp_s ON mp_s.suggested_person_id = p.id AND mp_s.state = 0
-            GROUP BY p.id
+            LEFT JOIN (
+                SELECT person_id, COUNT(DISTINCT media_id) AS photo_count
+                FROM media_people
+                WHERE state = 1 AND person_id IS NOT NULL
+                GROUP BY person_id
+            ) c ON c.person_id = p.id
+            LEFT JOIN (
+                SELECT suggested_person_id, COUNT(*) AS suggestion_count
+                FROM media_people
+                WHERE state = 0 AND suggested_person_id IS NOT NULL
+                  AND (? <= 0.0 OR COALESCE(similarity_score, 1.0) >= ?)
+                GROUP BY suggested_person_id
+            ) s ON s.suggested_person_id = p.id
             ORDER BY photo_count DESC, p.name COLLATE NOCASE ASC;
-            """
+            """,
+            (thresh, thresh),
         ).fetchall()
 
         named_people: list[dict[str, Any]] = []
@@ -2944,16 +2977,19 @@ class CatalogRepository:
             })
         return named_people
 
-    def get_unnamed_face_clusters(self) -> list[dict[str, Any]]:
-        """Clusters unassigned face embeddings into recurring unnamed face groups."""
+    def get_unnamed_face_clusters(self, min_confidence: float = 0.52) -> list[dict[str, Any]]:
+        """Clusters unassigned face embeddings without a confident suggestion into recurring unnamed groups."""
         conn = self.engine.catalog_conn()
         unassigned_rows = conn.execute(
             """
             SELECT mp.id, mp.embedding, mp.suggested_person_id, p.name AS suggested_person_name
             FROM media_people mp
             LEFT JOIN people p ON p.id = mp.suggested_person_id
-            WHERE mp.state = 0 AND mp.embedding IS NOT NULL;
-            """
+            WHERE mp.state = 0
+              AND mp.embedding IS NOT NULL
+              AND (mp.suggested_person_id IS NULL OR COALESCE(mp.similarity_score, 0.0) < ?);
+            """,
+            (float(min_confidence),),
         ).fetchall()
 
         unnamed_clusters: list[dict[str, Any]] = []
@@ -3153,7 +3189,9 @@ class CatalogRepository:
 
         return updated_count
 
-    def deduplicate_media_people(self, media_id: int | None = None) -> int:
+    def deduplicate_media_people(
+        self, media_id: int | None = None, person_id: int | None = None
+    ) -> int:
         """
         Removes duplicate / phantom face boxes for the same person on the same media.
         Keeps the highest-quality box (having embedding, valid face dimensions)
@@ -3164,6 +3202,18 @@ class CatalogRepository:
             conn = self.engine.catalog_conn()
             if media_id is not None:
                 media_ids = [media_id]
+            elif person_id is not None:
+                rows = conn.execute(
+                    """
+                    SELECT media_id
+                    FROM media_people
+                    WHERE person_id = ? AND state = 1
+                    GROUP BY media_id
+                    HAVING COUNT(*) > 1;
+                    """,
+                    (int(person_id),),
+                ).fetchall()
+                media_ids = [int(r["media_id"]) for r in rows]
             else:
                 rows = conn.execute(
                     """
@@ -3473,7 +3523,11 @@ class CatalogRepository:
                 "SELECT embedding FROM media_people WHERE person_id = ? AND state = 1 AND embedding IS NOT NULL;",
                 (int(person_id),),
             ).fetchall()
-            vectors = [deserialize_embedding(r["embedding"]) for r in rows if r["embedding"]]
+            vectors = [
+                deserialize_embedding(bytes(r["embedding"]))
+                for r in rows
+                if r["embedding"] and len(bytes(r["embedding"])) >= 2048
+            ]
             if vectors:
                 if len(vectors) >= 10:
                     sub_c = FaceVectorMatcher.compute_sub_centroids(np.stack(vectors, axis=0), max_k=5)
@@ -4595,6 +4649,66 @@ class CatalogRepository:
     # -------------------------------------------------------------------------
     # World Map R*Tree Spatial Queries & Right Dock Selection Summary
     # -------------------------------------------------------------------------
+    @staticmethod
+    def build_map_filter_clauses(
+        year: int | None = None,
+        person_id: int | None = None,
+        min_rating: int | None = None,
+        alias: str = "m",
+    ) -> tuple[list[str], list[Any]]:
+        """Builds SQL WHERE fragments and bind params for Map View filters (year, person, rating)."""
+        clauses: list[str] = [f"COALESCE({alias}.is_missing, 0) = 0"]
+        params: list[Any] = []
+        if year is not None:
+            start_ts, end_ts = _compute_date_bounds_utc(int(year))
+            clauses.append(f"{alias}.date_taken BETWEEN ? AND ?")
+            params.extend([start_ts, end_ts])
+        if person_id is not None:
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM media_people mp "
+                f"WHERE mp.media_id = {alias}.id AND mp.person_id = ? AND mp.state = 1)"
+            )
+            params.append(int(person_id))
+        if min_rating is not None:
+            r_val = int(min_rating)
+            if r_val == 0:
+                clauses.append(f"COALESCE({alias}.rating, 0) = 0")
+            elif r_val > 0:
+                clauses.append(f"COALESCE({alias}.rating, 0) >= ?")
+                params.append(r_val)
+        return clauses, params
+
+    def get_geotagged_years(self) -> list[int]:
+        """Returns distinct years (descending) that have valid non-missing geotagged photos."""
+        conn = self.engine.catalog_conn()
+        rows = conn.execute(
+            """
+            SELECT DISTINCT strftime(
+                '%Y',
+                datetime(
+                    CASE WHEN date_taken > 100000000000 THEN date_taken / 1000 ELSE date_taken END,
+                    'unixepoch'
+                )
+            ) AS yr
+            FROM media
+            WHERE COALESCE(is_missing, 0) = 0
+              AND lat IS NOT NULL AND lon IS NOT NULL
+              AND lat BETWEEN -85.0 AND 85.0
+              AND lon BETWEEN -180.0 AND 180.0
+              AND NOT (ABS(lat) < 0.0001 AND ABS(lon) < 0.0001)
+              AND date_taken IS NOT NULL AND date_taken != 0
+            ORDER BY yr DESC;
+            """
+        ).fetchall()
+        years: list[int] = []
+        for r in rows:
+            yr_str = r["yr"] if isinstance(r, dict) else r[0]
+            if yr_str and yr_str.isdigit():
+                yr = int(yr_str)
+                if 1800 <= yr <= 2200:
+                    years.append(yr)
+        return years
+
     def query_map_clusters(
         self,
         min_lat: float,
@@ -4602,12 +4716,23 @@ class CatalogRepository:
         min_lon: float,
         max_lon: float,
         grid_degrees: float | None = None,
+        year: int | None = None,
+        person_id: int | None = None,
+        min_rating: int | None = None,
     ) -> list[dict[str, Any]]:
         """Queries media_rtree for geotagged items within the active map bounding box, optionally clustering in SQL."""
         conn = self.engine.catalog_conn()
+        extra_clauses, extra_params = self.build_map_filter_clauses(
+            year=year, person_id=person_id, min_rating=min_rating, alias="m"
+        )
+        extra_sql = (" AND " + " AND ".join(extra_clauses)) if extra_clauses else ""
+
         if grid_degrees is not None and grid_degrees > 0:
+            sql_params: list[Any] = [min_lat, max_lat, min_lon, max_lon]
+            sql_params.extend(extra_params)
+            sql_params.extend([float(grid_degrees), float(grid_degrees)])
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     COUNT(*) AS count,
                     AVG(r.min_lat) AS lat,
@@ -4618,10 +4743,10 @@ class CatalogRepository:
                 FROM media_rtree r
                 JOIN media m ON m.id = r.id
                 WHERE r.max_lat >= ? AND r.min_lat <= ?
-                  AND r.max_lon >= ? AND r.min_lon <= ?
+                  AND r.max_lon >= ? AND r.min_lon <= ?{extra_sql}
                 GROUP BY CAST(FLOOR(r.min_lat / ?) AS INTEGER), CAST(FLOOR(r.min_lon / ?) AS INTEGER);
                 """,
-                (min_lat, max_lat, min_lon, max_lon, float(grid_degrees), float(grid_degrees)),
+                sql_params,
             ).fetchall()
             results = []
             for r in rows:
@@ -4644,15 +4769,17 @@ class CatalogRepository:
             results.sort(key=lambda c: c["count"], reverse=True)
             return results
 
+        sql_params_flat: list[Any] = [min_lat, max_lat, min_lon, max_lon]
+        sql_params_flat.extend(extra_params)
         rows = conn.execute(
-            """
+            f"""
             SELECT m.id, m.filename, m.lat, m.lon, m.location_name, m.date_taken, m.rating
             FROM media_rtree r
             JOIN media m ON m.id = r.id
             WHERE r.max_lat >= ? AND r.min_lat <= ?
-              AND r.max_lon >= ? AND r.min_lon <= ?;
+              AND r.max_lon >= ? AND r.min_lon <= ?{extra_sql};
             """,
-            (min_lat, max_lat, min_lon, max_lon),
+            sql_params_flat,
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -4939,6 +5066,321 @@ class CatalogRepository:
                     )
             conn.commit()
 
+    # -------------------------------------------------------------------------
+    # Static Albums & 17-Dimension Boolean Smart Album Engine
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def compile_smart_album_where(
+        rules_dict: dict[str, Any] | str, alias: str = "m"
+    ) -> tuple[str, list[Any]]:
+        """Compile a Smart Album rules dict/JSON into parameterized SQLite WHERE SQL."""
+        return compile_smart_album_where(rules_dict, alias=alias)
+
+    def create_album(
+        self, name: str, description: str = "", cover_media_id: int | None = None
+    ) -> int:
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Album name cannot be empty")
+        now_ts = int(time.time())
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            cur = conn.execute(
+                """
+                INSERT INTO albums (name, description, cover_media_id, created_at)
+                VALUES (?, ?, ?, ?);
+                """,
+                (clean_name, description.strip(), cover_media_id, now_ts),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def rename_album(self, album_id: int, new_name: str) -> None:
+        clean_name = new_name.strip()
+        if not clean_name:
+            raise ValueError("Album name cannot be empty")
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            conn.execute(
+                "UPDATE albums SET name = ? WHERE id = ?;",
+                (clean_name, int(album_id)),
+            )
+            conn.commit()
+
+    def delete_album(self, album_id: int) -> None:
+        """Delete a Static Album (cascades album_items without deleting media rows)."""
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            conn.execute("DELETE FROM albums WHERE id = ?;", (int(album_id),))
+            conn.commit()
+
+    def add_media_to_album(self, album_id: int, media_ids: Sequence[int]) -> int:
+        if not media_ids:
+            return 0
+        aid = int(album_id)
+        added = 0
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            row = conn.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) FROM album_items WHERE album_id = ?;",
+                (aid,),
+            ).fetchone()
+            next_order = int(row[0]) + 1 if row else 1
+            for mid in media_ids:
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO album_items (album_id, media_id, sort_order)
+                    VALUES (?, ?, ?);
+                    """,
+                    (aid, int(mid), next_order),
+                )
+                if cur.rowcount > 0:
+                    added += 1
+                    next_order += 1
+            conn.execute(
+                "UPDATE albums SET cover_media_id = COALESCE(cover_media_id, ?) WHERE id = ?;",
+                (int(media_ids[0]), aid),
+            )
+            conn.commit()
+        return added
+
+    def remove_media_from_album(self, album_id: int, media_ids: Sequence[int]) -> int:
+        """Remove media associations from album_items without deleting media rows."""
+        if not media_ids:
+            return 0
+        aid = int(album_id)
+        removed = 0
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            for chunk in _iter_id_chunks([int(m) for m in media_ids], 900):
+                placeholders = ",".join("?" for _ in chunk)
+                cur = conn.execute(
+                    f"DELETE FROM album_items WHERE album_id = ? AND media_id IN ({placeholders});",
+                    [aid, *chunk],
+                )
+                removed += max(0, cur.rowcount)
+            cover_row = conn.execute(
+                "SELECT cover_media_id FROM albums WHERE id = ?;", (aid,)
+            ).fetchone()
+            if cover_row and cover_row["cover_media_id"] in set(int(m) for m in media_ids):
+                next_cover = conn.execute(
+                    "SELECT media_id FROM album_items WHERE album_id = ? ORDER BY sort_order ASC LIMIT 1;",
+                    (aid,),
+                ).fetchone()
+                conn.execute(
+                    "UPDATE albums SET cover_media_id = ? WHERE id = ?;",
+                    (int(next_cover[0]) if next_cover else None, aid),
+                )
+            conn.commit()
+        return removed
+
+    def get_albums_with_counts(self) -> list[dict[str, Any]]:
+        conn = self.engine.catalog_conn()
+        rows = conn.execute(
+            """
+            SELECT
+                a.id,
+                a.name,
+                a.description,
+                a.cover_media_id,
+                a.created_at,
+                COUNT(m.id) AS item_count
+            FROM albums a
+            LEFT JOIN album_items ai ON ai.album_id = a.id
+            LEFT JOIN media m ON m.id = ai.media_id AND COALESCE(m.is_missing, 0) = 0
+            GROUP BY a.id
+            ORDER BY LOWER(a.name) ASC, a.id ASC;
+            """
+        ).fetchall()
+        return [
+            {
+                "id": int(r["id"]),
+                "name": str(r["name"]),
+                "description": str(r["description"] or ""),
+                "cover_media_id": r["cover_media_id"],
+                "created_at": int(r["created_at"]),
+                "item_count": int(r["item_count"] or 0),
+            }
+            for r in rows
+        ]
+
+    def create_smart_album(
+        self, name: str, rules_dict: dict[str, Any] | str
+    ) -> int:
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Smart album name cannot be empty")
+        rules_json = (
+            rules_dict
+            if isinstance(rules_dict, str)
+            else json.dumps(rules_dict, ensure_ascii=False)
+        )
+        now_ts = int(time.time())
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            cur = conn.execute(
+                """
+                INSERT INTO smart_albums (name, rules_json, created_at)
+                VALUES (?, ?, ?);
+                """,
+                (clean_name, rules_json, now_ts),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def update_smart_album(
+        self,
+        smart_album_id: int,
+        name: str | None = None,
+        rules_dict: dict[str, Any] | str | None = None,
+    ) -> None:
+        updates: list[str] = []
+        params: list[Any] = []
+        if name is not None:
+            clean_name = name.strip()
+            if not clean_name:
+                raise ValueError("Smart album name cannot be empty")
+            updates.append("name = ?")
+            params.append(clean_name)
+        if rules_dict is not None:
+            rules_json = (
+                rules_dict
+                if isinstance(rules_dict, str)
+                else json.dumps(rules_dict, ensure_ascii=False)
+            )
+            updates.append("rules_json = ?")
+            params.append(rules_json)
+        if not updates:
+            return
+        params.append(int(smart_album_id))
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            conn.execute(
+                f"UPDATE smart_albums SET {', '.join(updates)} WHERE id = ?;",
+                params,
+            )
+            conn.commit()
+
+    def delete_smart_album(self, smart_album_id: int) -> None:
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            conn.execute(
+                "DELETE FROM smart_albums WHERE id = ?;", (int(smart_album_id),)
+            )
+            conn.commit()
+
+    def get_smart_album(self, smart_album_id: int) -> dict[str, Any] | None:
+        conn = self.engine.catalog_conn()
+        row = conn.execute(
+            "SELECT id, name, rules_json, created_at FROM smart_albums WHERE id = ?;",
+            (int(smart_album_id),),
+        ).fetchone()
+        if not row:
+            return None
+        raw_json = str(row["rules_json"] or "{}")
+        try:
+            rules_dict = json.loads(raw_json)
+        except Exception:
+            rules_dict = {"match_mode": "all", "rules": []}
+        return {
+            "id": int(row["id"]),
+            "name": str(row["name"]),
+            "rules_json": raw_json,
+            "rules_dict": rules_dict,
+            "created_at": int(row["created_at"]),
+        }
+
+    def count_smart_album_matches(self, rules_dict: dict[str, Any] | str) -> int:
+        where_sql, params = compile_smart_album_where(rules_dict, alias="m")
+        conn = self.engine.catalog_conn()
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM media m WHERE COALESCE(m.is_missing, 0) = 0 AND ({where_sql});",
+            params,
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def get_smart_albums_with_counts(self) -> list[dict[str, Any]]:
+        conn = self.engine.catalog_conn()
+        rows = conn.execute(
+            "SELECT id, name, rules_json, created_at FROM smart_albums ORDER BY id ASC;"
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            raw_json = str(r["rules_json"] or "{}")
+            try:
+                rules_dict = json.loads(raw_json)
+            except Exception:
+                rules_dict = {"match_mode": "all", "rules": []}
+            cnt = self.count_smart_album_matches(rules_dict)
+            out.append(
+                {
+                    "id": int(r["id"]),
+                    "name": str(r["name"]),
+                    "rules_json": raw_json,
+                    "rules_dict": rules_dict,
+                    "created_at": int(r["created_at"]),
+                    "item_count": cnt,
+                }
+            )
+        return out
+
+    def get_camera_models(self) -> list[str]:
+        """Return distinct non-empty camera make/model strings for Smart Album autocomplete."""
+        conn = self.engine.catalog_conn()
+        rows = conn.execute(
+            """
+            SELECT DISTINCT TRIM(
+                CASE
+                    WHEN COALESCE(camera_make, '') != '' AND COALESCE(camera_model, '') != ''
+                         AND LOWER(camera_model) NOT LIKE LOWER(camera_make) || '%'
+                        THEN camera_make || ' ' || camera_model
+                    WHEN COALESCE(camera_model, '') != ''
+                        THEN camera_model
+                    ELSE COALESCE(camera_make, '')
+                END
+            ) AS cam
+            FROM media
+            WHERE COALESCE(is_missing, 0) = 0
+              AND (COALESCE(TRIM(camera_make), '') != '' OR COALESCE(TRIM(camera_model), '') != '')
+            ORDER BY cam COLLATE NOCASE ASC;
+            """
+        ).fetchall()
+        return [str(r[0]) for r in rows if r[0]]
+
+    def get_distinct_places(self, limit: int = 200) -> list[str]:
+        """Return distinct non-empty place strings for Smart Album autocomplete."""
+        conn = self.engine.catalog_conn()
+        seen: dict[str, str] = {}
+        for col in ("location_name", "location_city", "location_state", "location_country"):
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT TRIM({col}) AS val
+                FROM media
+                WHERE COALESCE(is_missing, 0) = 0
+                  AND {col} IS NOT NULL AND TRIM({col}) != ''
+                LIMIT ?;
+                """,
+                (int(limit),),
+            ).fetchall()
+            for r in rows:
+                s = str(r[0]).strip()
+                if s and s.lower() not in seen:
+                    seen[s.lower()] = s
+        return sorted(seen.values(), key=str.lower)[:limit]
+
+    def get_distinct_extensions(self) -> list[str]:
+        """Return distinct lowercase file extensions in the catalog without leading dots."""
+        conn = self.engine.catalog_conn()
+        rows = conn.execute(
+            """
+            SELECT DISTINCT LOWER(LTRIM(COALESCE(ext, ''), '.')) AS e
+            FROM media
+            WHERE COALESCE(is_missing, 0) = 0 AND COALESCE(TRIM(ext), '') != ''
+            ORDER BY e ASC;
+            """
+        ).fetchall()
+        return [str(r[0]) for r in rows if r[0]]
+
 
 class ThumbnailRepository:
     """High-speed BLOB repository for thumbnails.db (256x256 WebP blobs)."""
@@ -5168,3 +5610,418 @@ class ThumbnailRepository:
         except Exception:
             pass
         return 0
+
+
+def _escape_like_term(val: str) -> str:
+    """Escape SQL LIKE wildcards using backslash as escape character."""
+    return val.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _parse_numeric_pair(val: Any) -> tuple[float, float] | None:
+    """Parse a two-value range from list/tuple, dict, or comma/dash/range string."""
+    if isinstance(val, (list, tuple)) and len(val) >= 2:
+        try:
+            a, b = float(val[0]), float(val[1])
+            return (min(a, b), max(a, b))
+        except (TypeError, ValueError):
+            return None
+    if isinstance(val, dict):
+        s_v = val.get("start", val.get("min"))
+        e_v = val.get("end", val.get("max"))
+        if s_v is not None and e_v is not None:
+            try:
+                a, b = float(s_v), float(e_v)
+                return (min(a, b), max(a, b))
+            except (TypeError, ValueError):
+                return None
+    txt = str(val or "").strip()
+    m = re.match(r"^\s*(-?\d+(?:\.\d+)?)\s*(?:-|to|\.\.|,)\s*(-?\d+(?:\.\d+)?)\s*$", txt, re.I)
+    if m:
+        a, b = float(m.group(1)), float(m.group(2))
+        return (min(a, b), max(a, b))
+    return None
+
+
+def _parse_month_number(val: Any) -> int | None:
+    if val is None:
+        return None
+    if isinstance(val, int) or str(val).strip().isdigit():
+        num = int(str(val).strip())
+        return num if 1 <= num <= 12 else None
+    s = str(val).strip().lower()
+    for m_idx in range(1, 13):
+        if calendar.month_name[m_idx].lower() == s or calendar.month_abbr[m_idx].lower() == s:
+            return m_idx
+    return None
+
+
+def _compile_numeric_expr_rule(
+    expr: str, op: str, val: Any, scale: float = 1.0
+) -> tuple[str, list[Any]] | None:
+    """Shared compiler for numeric range dimensions (file_size_mb, megapixels)."""
+    if op == "between":
+        pair = _parse_numeric_pair(val)
+        if not pair:
+            return None
+        return f"({expr} BETWEEN ? AND ?)", [pair[0] * scale, pair[1] * scale]
+    try:
+        num = float(val) * scale
+    except (TypeError, ValueError):
+        return None
+    if op in ("gte", ">="):
+        return f"({expr} >= ?)", [num]
+    if op in ("lte", "<="):
+        return f"({expr} <= ?)", [num]
+    if op in ("eq", "="):
+        return f"({expr} = ?)", [num]
+    return None
+
+
+def _compile_single_smart_rule(
+    rule: dict[str, Any], alias: str = "m"
+) -> tuple[str, list[Any]] | None:
+    """Compile a single {field, op, value} Smart Album rule row into parameterized SQL."""
+    raw_field = str(rule.get("field") or "").strip().lower()
+    op = str(rule.get("op") or "").strip().lower()
+    val = rule.get("value")
+    val_str = "" if val is None else str(val).strip()
+
+    # 1. People (confirmed faces state = 1)
+    if raw_field in ("people", "person"):
+        if op == "is_empty":
+            return f"NOT EXISTS (SELECT 1 FROM media_people mp WHERE mp.media_id = {alias}.id AND mp.state = 1)", []
+        if op == "is_not_empty":
+            return f"EXISTS (SELECT 1 FROM media_people mp WHERE mp.media_id = {alias}.id AND mp.state = 1)", []
+        if not val_str:
+            return None
+        if isinstance(val, int) and not isinstance(val, bool):
+            pred = "mp.person_id = ?"
+            param: Any = int(val)
+        else:
+            pred = "LOWER(p.name) = LOWER(?)"
+            param = val_str
+        sub = (
+            f"SELECT 1 FROM media_people mp JOIN people p ON p.id = mp.person_id "
+            f"WHERE mp.media_id = {alias}.id AND mp.state = 1 AND {pred}"
+        )
+        if op in ("excludes", "not_includes", "does_not_include"):
+            return f"NOT EXISTS ({sub})", [param]
+        return f"EXISTS ({sub})", [param]
+
+    # 2. Descriptive Tags (with tag_closure hierarchy)
+    if raw_field in ("tag", "tags", "descriptive_tag"):
+        if op == "is_empty":
+            return f"NOT EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = {alias}.id)", []
+        if op == "is_not_empty":
+            return f"EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = {alias}.id)", []
+        if not val_str:
+            return None
+        sub = (
+            f"SELECT 1 FROM media_tags mt "
+            f"JOIN tag_closure tc ON tc.descendant_id = mt.tag_id "
+            f"JOIN tags t ON t.id = tc.ancestor_id "
+            f"WHERE mt.media_id = {alias}.id "
+            f"AND (LOWER(t.name) = LOWER(?) OR LOWER(t.full_path) = LOWER(?))"
+        )
+        if op in ("excludes", "not_includes", "does_not_include"):
+            return f"NOT EXISTS ({sub})", [val_str, val_str]
+        return f"EXISTS ({sub})", [val_str, val_str]
+
+    # 3. Geotag / Place
+    if raw_field in ("place", "geotag", "location"):
+        if op == "has_gps":
+            return f"({alias}.lat IS NOT NULL AND {alias}.lon IS NOT NULL)", []
+        if op == "no_gps":
+            return f"({alias}.lat IS NULL OR {alias}.lon IS NULL)", []
+        if not val_str:
+            return None
+        pat = f"%{_escape_like_term(val_str.lower())}%"
+        loc_sql = (
+            f"(LOWER(COALESCE({alias}.location_name, '')) LIKE ? ESCAPE '\\' "
+            f"OR LOWER(COALESCE({alias}.location_country, '')) LIKE ? ESCAPE '\\' "
+            f"OR LOWER(COALESCE({alias}.location_state, '')) LIKE ? ESCAPE '\\' "
+            f"OR LOWER(COALESCE({alias}.location_city, '')) LIKE ? ESCAPE '\\')"
+        )
+        if op in ("not_contains", "excludes"):
+            return f"NOT {loc_sql}", [pat, pat, pat, pat]
+        return loc_sql, [pat, pat, pat, pat]
+
+    # 4. Time of Day
+    if raw_field in ("time_of_day", "time_taken"):
+        has_dt = f"({alias}.date_taken IS NOT NULL AND {alias}.date_taken != 0)"
+        hr_expr = f"CAST(strftime('%H', {alias}.date_taken, 'unixepoch', 'localtime') AS INTEGER)"
+        if op == "between_hours":
+            hours_txt = val_str
+            m_hm = re.match(r"^\s*(\d{1,2})(?::\d{2})?\s*-\s*(\d{1,2})(?::\d{2})?\s*$", hours_txt)
+            if m_hm:
+                h1, h2 = int(m_hm.group(1)), int(m_hm.group(2))
+            else:
+                pair = _parse_numeric_pair(val)
+                if not pair:
+                    return None
+                h1, h2 = int(pair[0]), int(pair[1])
+            h1 = max(0, min(23, h1))
+            h2 = max(0, min(23, h2))
+            if h1 <= h2:
+                return f"({has_dt} AND {hr_expr} BETWEEN ? AND ?)", [h1, h2]
+            return f"({has_dt} AND ({hr_expr} >= ? OR {hr_expr} <= ?))", [h1, h2]
+        preset = val_str.lower()
+        if "morning" in preset:
+            return f"({has_dt} AND {hr_expr} BETWEEN 5 AND 11)", []
+        if "afternoon" in preset:
+            return f"({has_dt} AND {hr_expr} BETWEEN 12 AND 16)", []
+        if "evening" in preset:
+            return f"({has_dt} AND {hr_expr} BETWEEN 17 AND 20)", []
+        if "night" in preset:
+            return f"({has_dt} AND ({hr_expr} >= 21 OR {hr_expr} <= 4))", []
+        return None
+
+    # 5. On This Day
+    if raw_field == "on_this_day":
+        sql = (
+            f"({alias}.date_taken IS NOT NULL AND {alias}.date_taken != 0 "
+            f"AND strftime('%m-%d', {alias}.date_taken, 'unixepoch', 'localtime') = strftime('%m-%d', 'now', 'localtime'))"
+        )
+        return ("NOT " + sql if op in ("is_not", "neq") else sql), []
+
+    # 6. Year
+    if raw_field == "year":
+        if op == "between":
+            pair = _parse_numeric_pair(val)
+            if not pair:
+                return None
+            y1, y2 = int(pair[0]), int(pair[1])
+            s_ts, _ = _compute_date_bounds_utc(y1)
+            _, e_ts = _compute_date_bounds_utc(y2)
+            return f"({alias}.date_taken BETWEEN ? AND ?)", [s_ts, e_ts]
+        try:
+            yr = int(val_str)
+        except ValueError:
+            return None
+        s_ts, e_ts = _compute_date_bounds_utc(yr)
+        if op in ("neq", "!=", "is_not"):
+            return f"({alias}.date_taken IS NULL OR {alias}.date_taken NOT BETWEEN ? AND ?)", [s_ts, e_ts]
+        if op in ("gte", ">="):
+            return f"({alias}.date_taken >= ?)", [s_ts]
+        if op in ("lte", "<="):
+            return f"({alias}.date_taken IS NOT NULL AND {alias}.date_taken != 0 AND {alias}.date_taken <= ?)", [e_ts]
+        return f"({alias}.date_taken BETWEEN ? AND ?)", [s_ts, e_ts]
+
+    # 7. Month
+    if raw_field == "month":
+        m_num = _parse_month_number(val)
+        if m_num is None:
+            return None
+        has_dt = f"({alias}.date_taken IS NOT NULL AND {alias}.date_taken != 0)"
+        m_expr = f"CAST(strftime('%m', {alias}.date_taken, 'unixepoch', 'localtime') AS INTEGER)"
+        if op in ("neq", "!=", "is_not"):
+            return f"({has_dt} AND {m_expr} != ?)", [m_num]
+        return f"({has_dt} AND {m_expr} = ?)", [m_num]
+
+    # 8. Date Taken (YYYY-MM-DD exact/range)
+    if raw_field in ("date_taken", "date"):
+        has_dt = f"({alias}.date_taken IS NOT NULL AND {alias}.date_taken != 0)"
+        d_expr = f"date({alias}.date_taken, 'unixepoch', 'localtime')"
+        if op == "between":
+            if isinstance(val, (list, tuple)) and len(val) >= 2:
+                d1, d2 = str(val[0]).strip(), str(val[1]).strip()
+            else:
+                parts = [p.strip() for p in re.split(r"\s*(?:to|\.\.|,)\s*", val_str) if p.strip()]
+                if len(parts) < 2:
+                    return None
+                d1, d2 = parts[0], parts[1]
+            return f"({has_dt} AND {d_expr} BETWEEN ? AND ?)", [min(d1, d2), max(d1, d2)]
+        if not val_str:
+            return None
+        # Support passing just a 4-digit year string in unified Year / Date UI field
+        if re.fullmatch(r"\d{4}", val_str):
+            return _compile_single_smart_rule({"field": "year", "op": op, "value": int(val_str)}, alias=alias)
+        if op in ("gte", ">=", "after"):
+            return f"({has_dt} AND {d_expr} >= ?)", [val_str]
+        if op in ("lte", "<=", "before"):
+            return f"({has_dt} AND {d_expr} <= ?)", [val_str]
+        if op in ("neq", "!=", "is_not"):
+            return f"({has_dt} AND {d_expr} != ?)", [val_str]
+        return f"({has_dt} AND {d_expr} = ?)", [val_str]
+
+    # 9. Camera (Make / Model)
+    if raw_field == "camera":
+        if op == "is_empty":
+            return f"(COALESCE(TRIM({alias}.camera_make), '') = '' AND COALESCE(TRIM({alias}.camera_model), '') = '')", []
+        if op == "is_not_empty":
+            return f"(COALESCE(TRIM({alias}.camera_make), '') != '' OR COALESCE(TRIM({alias}.camera_model), '') != '')", []
+        if not val_str:
+            return None
+        cam_expr = f"LOWER(TRIM(COALESCE({alias}.camera_make, '') || ' ' || COALESCE({alias}.camera_model, '')))"
+        if op in ("equals", "eq", "is"):
+            return f"(LOWER(COALESCE({alias}.camera_model, '')) = LOWER(?) OR {cam_expr} = LOWER(?))", [val_str, val_str]
+        pat = f"%{_escape_like_term(val_str.lower())}%"
+        if op in ("not_contains", "excludes"):
+            return f"({cam_expr} NOT LIKE ? ESCAPE '\\')", [pat]
+        return f"({cam_expr} LIKE ? ESCAPE '\\')", [pat]
+
+    # 10. Rating (0 = Unrated, 1..5 = Stars)
+    if raw_field == "rating":
+        if val_str.lower() == "unrated":
+            r_num = 0
+        else:
+            m_r = re.search(r"-?\d+", val_str)
+            if not m_r:
+                return None
+            r_num = int(m_r.group(0))
+        r_expr = f"COALESCE({alias}.rating, 0)"
+        if op in ("gte", ">="):
+            return f"({r_expr} >= ?)", [r_num]
+        if op in ("lte", "<="):
+            return f"({r_expr} <= ?)", [r_num]
+        if op in ("neq", "!=", "is_not"):
+            return f"({r_expr} != ?)", [r_num]
+        return f"({r_expr} = ?)", [r_num]
+
+    # 11. Flag
+    if raw_field in ("flag", "flagged"):
+        if op == "is_unflagged" or (op in ("eq", "is") and val_str.lower() in ("0", "false", "unflagged", "no")):
+            return f"COALESCE({alias}.flag, 0) = 0", []
+        return f"COALESCE({alias}.flag, 0) = 1", []
+
+    # 12. Media Type
+    if raw_field == "media_type":
+        mt = val_str.lower()
+        neg = op in ("is_not", "neq", "!=")
+        if mt in ("video", "videos"):
+            return (f"{alias}.is_video = 0" if neg else f"{alias}.is_video = 1"), []
+        if mt == "raw":
+            raw_set = ",".join(f"'{e}'" for e in RAW_EXTENSIONS)
+            sql = f"({alias}.is_video = 0 AND LOWER(LTRIM(COALESCE({alias}.ext, ''), '.')) IN ({raw_set}))"
+            return (f"NOT {sql}" if neg else sql), []
+        return (f"{alias}.is_video = 1" if neg else f"{alias}.is_video = 0"), []
+
+    # 13. File Extension
+    if raw_field in ("file_ext", "ext", "file_type"):
+        ext_norm = val_str.lower().lstrip(".")
+        if not ext_norm:
+            return None
+        if ext_norm == "raw":
+            raw_set = ",".join(f"'{e}'" for e in RAW_EXTENSIONS)
+            sql = f"LOWER(LTRIM(COALESCE({alias}.ext, ''), '.')) IN ({raw_set})"
+            return (f"NOT ({sql})" if op in ("is_not", "neq", "!=") else sql), []
+        if op in ("is_not", "neq", "!="):
+            return f"LOWER(LTRIM(COALESCE({alias}.ext, ''), '.')) != ?", [ext_norm]
+        return f"LOWER(LTRIM(COALESCE({alias}.ext, ''), '.')) = ?", [ext_norm]
+
+    # 14. Orientation
+    if raw_field == "orientation":
+        ori = val_str.lower()
+        dims_ok = f"(COALESCE({alias}.width, 0) > 0 AND COALESCE({alias}.height, 0) > 0)"
+        neg = op in ("is_not", "neq", "!=")
+        if "portrait" in ori:
+            sql = f"({dims_ok} AND {alias}.height > {alias}.width)"
+        elif "square" in ori:
+            sql = f"({dims_ok} AND {alias}.width = {alias}.height)"
+        else:
+            sql = f"({dims_ok} AND {alias}.width > {alias}.height)"
+        return (f"NOT {sql}" if neg else sql), []
+
+    # 15. File Size (MB)
+    if raw_field in ("file_size_mb", "file_size", "size_mb"):
+        return _compile_numeric_expr_rule(
+            f"COALESCE({alias}.size, 0)", op, val, scale=1024.0 * 1024.0
+        )
+
+    # 16. Megapixels
+    if raw_field == "megapixels":
+        mp_expr = (
+            f"((CAST(COALESCE({alias}.width, 0) AS REAL) * CAST(COALESCE({alias}.height, 0) AS REAL)) / 1000000.0)"
+        )
+        return _compile_numeric_expr_rule(mp_expr, op, val, scale=1.0)
+
+    # 17. Folder (recursive subtree by ID, or folder name/path match)
+    if raw_field == "folder":
+        if not val_str:
+            return None
+        neg = op in ("not_in_folder", "excludes", "is_not")
+        if isinstance(val, int) or val_str.isdigit():
+            fid = int(val_str)
+            sub = (
+                f"{alias}.folder_id IN ("
+                "WITH RECURSIVE subfolder_tree(id) AS ("
+                "SELECT ? UNION ALL "
+                "SELECT f.id FROM folders f JOIN subfolder_tree st ON f.parent_id = st.id"
+                ") SELECT id FROM subfolder_tree)"
+            )
+            return (f"NOT ({sub})" if neg else sub), [fid]
+        pat = f"%{_escape_like_term(val_str.lower())}%"
+        sub = (
+            f"{alias}.folder_id IN ("
+            "WITH RECURSIVE subfolder_tree(id) AS ("
+            "SELECT id FROM folders WHERE LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(path) LIKE ? ESCAPE '\\' "
+            "UNION ALL "
+            "SELECT f.id FROM folders f JOIN subfolder_tree st ON f.parent_id = st.id"
+            ") SELECT id FROM subfolder_tree)"
+        )
+        return (f"NOT ({sub})" if neg else sub), [pat, pat]
+
+    # 18. Caption / Filename
+    if raw_field in ("caption", "filename", "caption_filename"):
+        if raw_field == "caption":
+            cols = [f"COALESCE({alias}.caption, '')"]
+        elif raw_field == "filename":
+            cols = [f"COALESCE({alias}.filename, '')"]
+        else:
+            cols = [f"COALESCE({alias}.caption, '')", f"COALESCE({alias}.filename, '')"]
+
+        if op == "is_empty":
+            return "(" + " AND ".join(f"TRIM({c}) = ''" for c in cols) + ")", []
+        if op == "is_not_empty":
+            return "(" + " OR ".join(f"TRIM({c}) != ''" for c in cols) + ")", []
+        if not val_str:
+            return None
+        pat = f"%{_escape_like_term(val_str.lower())}%"
+        likes = [f"LOWER({c}) LIKE ? ESCAPE '\\'" for c in cols]
+        joined = "(" + " OR ".join(likes) + ")"
+        params = [pat] * len(cols)
+        if op in ("not_contains", "excludes"):
+            return f"NOT {joined}", params
+        return joined, params
+
+    return None
+
+
+def compile_smart_album_where(
+    rules_dict: dict[str, Any] | str, alias: str = "m"
+) -> tuple[str, list[Any]]:
+    """
+    Compile a Boolean Smart Album rule tree into parameterized SQL WHERE SQL.
+
+    Supports ``match_mode`` ("all" | "any") over ``rules`` rows across all 17+
+    grouping dimensions (people, tag, place, time_of_day, date_taken, year, month,
+    on_this_day, camera, rating, flag, media_type, file_ext, orientation,
+    file_size_mb, megapixels, folder, caption/filename).
+    """
+    if isinstance(rules_dict, str):
+        try:
+            parsed = json.loads(rules_dict)
+        except Exception:
+            return "1 = 1", []
+    else:
+        parsed = rules_dict or {}
+
+    match_mode = str(parsed.get("match_mode") or "all").strip().lower()
+    raw_rules = parsed.get("rules") or []
+
+    compiled_sql: list[str] = []
+    params: list[Any] = []
+    for r in raw_rules:
+        if not isinstance(r, dict):
+            continue
+        res = _compile_single_smart_rule(r, alias=alias)
+        if res is not None:
+            sql_part, p_part = res
+            compiled_sql.append(f"({sql_part})")
+            params.extend(p_part)
+
+    if not compiled_sql:
+        return "1 = 1", []
+
+    combiner = " OR " if match_mode == "any" else " AND "
+    return combiner.join(compiled_sql), params

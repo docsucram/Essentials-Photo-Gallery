@@ -39,6 +39,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "fileassoc"; Description: "Associate Essentials Photo Gallery with common image files (.jpg, .jpeg, .png, .webp)"; GroupDescription: "File Associations:"
 
+[InstallDelete]
+; Clean out previous PyInstaller runtime and assets before installing to prevent stale packages/DLLs
+Type: filesandordirs; Name: "{app}\_internal"
+Type: filesandordirs; Name: "{app}\models"
+Type: filesandordirs; Name: "{app}\resources"
+
 [Files]
 ; Main application binaries and dependencies from PyInstaller dist
 Source: "dist\EssentialsPhotoGallery\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

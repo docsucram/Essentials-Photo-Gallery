@@ -195,6 +195,7 @@ class SearchScopeBar(QFrame):
     location_clear_requested = Signal()
     special_people_clear_requested = Signal()
     media_type_clear_requested = Signal()
+    orientation_clear_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -519,7 +520,7 @@ class SearchScopeBar(QFrame):
         location_label: str | None = None,
         special_people_label: str | None = None,
     ) -> None:
-        """Re-renders active People, Tag, Rating, Flag, Date, and Location facet chips matching WLPG."""
+        """Re-renders active People, Tag, Rating, Flag, Date, Location, Media type, and Orientation facet chips matching WLPG."""
         while self.chips_layout.count():
             item = self.chips_layout.takeAt(0)
             if item.widget() is not None:
@@ -588,8 +589,11 @@ class SearchScopeBar(QFrame):
             lbl_r.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
             self.chips_layout.addWidget(lbl_r)
 
-            min_r = min(ratings)
-            r_text = f"★ {min_r} or higher" if len(ratings) > 1 else f"★ {min_r} only"
+            if tuple(ratings) == (0,):
+                r_text = "Unrated"
+            else:
+                min_r = min(ratings)
+                r_text = f"★ {min_r} or higher" if len(ratings) > 1 else f"★ {min_r} only"
             chip = FilterChip(r_text, self.chips_widget)
             chip.remove_clicked.connect(self.rating_clear_requested.emit)
             self.chips_layout.addWidget(chip)
@@ -646,6 +650,20 @@ class SearchScopeBar(QFrame):
 
             chip = FilterChip(m_label, self.chips_widget)
             chip.remove_clicked.connect(self.media_type_clear_requested.emit)
+            self.chips_layout.addWidget(chip)
+
+        # 8. Active Orientation Chip: "Orientation: Landscape" / "Orientation: Portrait" - ignore "all"
+        orient_val = str(filter_state.get("orientation_filter") or "").lower().strip()
+        if orient_val and orient_val not in ("all", "none"):
+            lbl_o = QLabel("Orientation:", self.chips_widget)
+            lbl_o.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
+            self.chips_layout.addWidget(lbl_o)
+
+            o_label = "Landscape" if orient_val == "landscape" else (
+                "Portrait" if orient_val == "portrait" else orient_val.capitalize()
+            )
+            chip = FilterChip(o_label, self.chips_widget)
+            chip.remove_clicked.connect(self.orientation_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 
     def _resolve_person_name(self, person_id: int, catalog_repo: CatalogRepository) -> str:

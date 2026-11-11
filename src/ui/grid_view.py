@@ -1546,11 +1546,22 @@ class ThumbnailGridView(QListView):
         cell_w, cell_h = self._cell_dimensions()
         self.card_delegate.set_cell_size(QSize(cell_w, cell_h))
         vw = max(240, self.viewport().width())
+        uniform_rows = bool(
+            self.card_delegate.is_horizontal_card
+            or self.card_delegate.face_crop_person_id is not None
+        )
+        chrome_h = (
+            None
+            if uniform_rows
+            else max(0, cell_h - self._thumb_size - (self._cell_padding * 2) + 14)
+        )
         self.catalog_model.set_grid_metrics(
             viewport_width=vw,
             cell_width=cell_w,
             cell_height=cell_h,
             spacing=self._grid_spacing,
+            chrome_height=chrome_h,
+            uniform_row_heights=uniform_rows,
         )
         self._update_scrollbar_range()
         self.viewport().update()
@@ -2640,6 +2651,57 @@ class ThumbnailGridView(QListView):
             menu.exec(global_pos)
         return menu
 
+    def _append_album_menu_actions(
+        self, menu: QMenu, media_id: int, main_win: Any
+    ) -> None:
+        """Append ``Add to Album ▸`` and optional ``Remove from Album`` actions."""
+        from src.ui.ribbon_toolbar import make_wlpg_icon
+
+        repo = getattr(main_win, "catalog_repo", None)
+        if repo is None:
+            return
+        selected_ids = self.selected_media_ids()
+        target_mids = (
+            list(selected_ids)
+            if (selected_ids and media_id in selected_ids)
+            else [int(media_id)]
+        )
+
+        add_album_menu = menu.addMenu(make_wlpg_icon("pictures_library", 16), "Add to Album")
+        menu._add_album_menu = add_album_menu
+        add_album_menu.setFont(QFont("Segoe UI", 9))
+
+        try:
+            albums = repo.get_albums_with_counts()
+        except Exception:
+            albums = []
+
+        for alb in albums:
+            aid = int(alb["id"])
+            aname = str(alb["name"])
+            cnt = int(alb.get("item_count", 0))
+            act_alb = add_album_menu.addAction(f"{aname} ({cnt})")
+            if hasattr(main_win, "add_media_to_album"):
+                act_alb.triggered.connect(
+                    lambda _c=False, a=aid, mids=target_mids: main_win.add_media_to_album(a, mids)
+                )
+
+        if albums:
+            add_album_menu.addSeparator()
+        act_new_from_sel = add_album_menu.addAction("New Album from Selection...")
+        if hasattr(main_win, "create_album_from_media"):
+            act_new_from_sel.triggered.connect(
+                lambda _c=False, mids=target_mids: main_win.create_album_from_media(mids)
+            )
+
+        nav = getattr(main_win, "left_nav_dock", None)
+        active_aid = nav.active_album_id() if (nav is not None and hasattr(nav, "active_album_id")) else None
+        if active_aid is not None and hasattr(main_win, "remove_media_from_album"):
+            act_rem = menu.addAction("Remove from Album")
+            act_rem.triggered.connect(
+                lambda _c=False, a=int(active_aid), mids=target_mids: main_win.remove_media_from_album(a, mids)
+            )
+
     def _show_card_context_menu(
         self, global_pos: QPoint, media_id: int, is_video: bool = False
     ) -> QMenu:
@@ -2720,12 +2782,14 @@ class ThumbnailGridView(QListView):
                 act_ren.triggered.connect(main_win.rename_selection)
 
             menu.addSeparator()
+            self._append_album_menu_actions(menu, media_id, main_win)
+            menu.addSeparator()
 
             # 7. Properties
             act_prop = menu.addAction("Properties")
             act_prop.setShortcut("Alt+Enter")
             if is_mw and hasattr(main_win, "open_file_properties"):
-                act_prop.triggered.connect(lambda checked=False, mid=selected_ids[0]: main_win.open_file_properties(mid))
+                act_prop.triggered.connect(lambda checked=False, mid=media_id: main_win.open_file_properties(mid))
             elif is_mw and hasattr(main_win, "toggle_right_pane"):
                 act_prop.triggered.connect(lambda: main_win.toggle_right_pane("info"))
 
@@ -2850,6 +2914,9 @@ class ThumbnailGridView(QListView):
                 target_mids = sel_mids if (sel_mids and media_id in sel_mids) else [media_id]
                 act_rescan.triggered.connect(lambda checked=False, t_ids=target_mids: main_win.rescan_faces_for_selection(t_ids))
 
+            menu.addSeparator()
+
+            self._append_album_menu_actions(menu, media_id, main_win)
             menu.addSeparator()
 
             # 12. Properties

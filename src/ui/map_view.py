@@ -13,13 +13,17 @@ from __future__ import annotations
 import base64
 import json
 import os
+import threading
+import urllib.parse
+import urllib.request
 from collections.abc import Sequence
 from typing import Any
 
-from PySide6.QtCore import QFile, QModelIndex, QObject, QPointF, QRectF, QSize, Qt, Signal, Slot
+from PySide6.QtCore import QFile, QModelIndex, QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QCursor,
     QFont,
     QMouseEvent,
     QPainter,
@@ -32,16 +36,11 @@ from PySide6.QtGui import (
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
-    QComboBox,
     QCompleter,
     QDoubleSpinBox,
-    QFrame,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QListView,
     QListWidget,
     QListWidgetItem,
+    QLineEdit,
     QPushButton,
     QStackedWidget,
     QVBoxLayout,
@@ -49,7 +48,6 @@ from PySide6.QtWidgets import (
 )
 
 from src.db.repository import CatalogRepository
-from src.ui.icon_provider import get_icon
 
 # Detect QtWebEngine and QtWebChannel availability with environment override
 HAS_WEBENGINE = False
@@ -316,7 +314,7 @@ def generate_leaflet_html(
     }}
     window.pendingFitBounds = null;
     isInternalMove = true;
-    map.fitBounds([[min_lat, min_lon], [max_lat, max_lon]], {{ padding: [30, 30], maxZoom: 14, animate: false }});
+    map.fitBounds([[min_lat, min_lon], [max_lat, max_lon]], {{ padding: [18, 18], maxZoom: 14, animate: false }});
     setTimeout(function() {{ isInternalMove = false; }}, 100);
   }}
 
@@ -341,8 +339,11 @@ def generate_leaflet_html(
     }}
     map = L.map('map', {{
       zoomControl: true,
+      boxZoom: true,
       minZoom: 2,
       maxZoom: 19,
+      zoomSnap: 0.25,
+      zoomDelta: 0.5,
       zoomAnimation: true,
       fadeAnimation: true,
       markerZoomAnimation: true,
@@ -566,17 +567,54 @@ class MapBridge(QObject):
         self.bounds_changed.emit(min_lat, max_lat, min_lon, max_lon)
 
 
+def geocode_place_nominatim(
+    query: str, limit: int = 5, timeout: float = 2.0
+) -> list[dict[str, Any]]:
+    """Queries OpenStreetMap Nominatim for place candidates, failing silently when offline."""
+    q = (query or "").strip()
+    if len(q) < 2 or os.environ.get("PYTEST_CURRENT_TEST"):
+        return []
+    url = (
+        "https://nominatim.openstreetmap.org/search?"
+        + urllib.parse.urlencode({"format": "jsonv2", "limit": str(limit), "q": q})
+    )
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "EssentialsPhotoGallery/0.11 (local desktop map search)"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+        if not isinstance(payload, list):
+            return []
+        results: list[dict[str, Any]] = []
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                lat = float(entry["lat"])
+                lon = float(entry["lon"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            label = str(entry.get("display_name") or entry.get("name") or q)
+            results.append({"name": label, "formatted_address": label, "lat": lat, "lon": lon})
+        return results
+    except Exception:
+        return []
+
+
 class _MapLocationSearchBox(QLineEdit):
-    """Search input with an instant gazetteer dropdown popup powered by QCompleter."""
+    """Search input with offline gazetteer + Nominatim autocomplete popup powered by QCompleter."""
 
     location_chosen = Signal(float, float, str)  # lat, lon, label
+    _nominatim_results_ready = Signal(str, list)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setPlaceholderText("Find place on map...")
         self.setClearButtonEnabled(True)
-        self.setMinimumWidth(200)
-        self.setMaximumWidth(320)
+        self.setMinimumWidth(180)
+        self.setMaximumWidth(280)
         self.setFixedHeight(26)
         self.setStyleSheet(
             "QLineEdit { "
@@ -613,35 +651,74 @@ class _MapLocationSearchBox(QLineEdit):
         self.textEdited.connect(self._on_text_edited)
         self.returnPressed.connect(self._on_return_pressed)
 
-    def _on_text_edited(self, text: str) -> None:
-        q = text.strip()
-        if len(q) < 2:
-            self._model.clear()
-            return
-        from src.core.geotag_resolver import search_places_offline
+        self._last_query: str = ""
+        self._nominatim_timer = QTimer(self)
+        self._nominatim_timer.setSingleShot(True)
+        self._nominatim_timer.setInterval(320)
+        self._nominatim_timer.timeout.connect(self._fetch_nominatim_async)
+        self._nominatim_results_ready.connect(self._merge_nominatim_results)
 
-        results = search_places_offline(q, limit=10)
-        if not results:
-            self._model.clear()
-            return
+    def _populate_results(self, results: list[dict[str, Any]], show_popup: bool = True) -> None:
         self._model.clear()
+        seen_labels: set[str] = set()
         for r in results:
-            label = r.get("formatted_address") or r.get("name") or ""
+            label = str(r.get("formatted_address") or r.get("name") or "").strip()
+            if not label or label in seen_labels:
+                continue
+            seen_labels.add(label)
             lat = float(r["lat"])
             lon = float(r["lon"])
             item = QStandardItem(label)
             item.setData((lat, lon, label), Qt.UserRole)
             self._model.appendRow(item)
-        self._completer.complete()
+        if show_popup and self._model.rowCount() > 0:
+            self._completer.complete()
+
+    def _on_text_edited(self, text: str) -> None:
+        q = text.strip()
+        self._last_query = q
+        if len(q) < 2:
+            self._nominatim_timer.stop()
+            self._model.clear()
+            return
+        from src.core.geotag_resolver import search_places_offline
+
+        results = search_places_offline(q, limit=8)
+        self._populate_results(results, show_popup=bool(results))
+        self._nominatim_timer.start()
+
+    def _fetch_nominatim_async(self) -> None:
+        q = self._last_query.strip()
+        if len(q) < 3:
+            return
+
+        def _worker() -> None:
+            res = geocode_place_nominatim(q, limit=5, timeout=2.0)
+            if res:
+                self._nominatim_results_ready.emit(q, res)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _merge_nominatim_results(self, query: str, nom_results: list[dict[str, Any]]) -> None:
+        if query != self.text().strip():
+            return
+        from src.core.geotag_resolver import search_places_offline
+
+        combined = list(search_places_offline(query, limit=6)) + list(nom_results)
+        self._populate_results(combined, show_popup=self.hasFocus())
 
     def _on_item_activated(self, index: QModelIndex) -> None:
         data = self._model.data(index, Qt.UserRole)
         if data and len(data) >= 3:
-            lat, lon, label = data[0], data[1], data[2]
+            lat, lon, label = float(data[0]), float(data[1]), str(data[2])
             self.setText(label)
             self.location_chosen.emit(lat, lon, label)
 
     def _on_return_pressed(self) -> None:
+        self.trigger_search()
+
+    def trigger_search(self) -> bool:
+        """Resolves current search input via popup, offline gazetteer, or Nominatim and emits `location_chosen`."""
         popup = self._completer.popup()
         if popup and popup.isVisible():
             cur = popup.currentIndex()
@@ -650,6 +727,29 @@ class _MapLocationSearchBox(QLineEdit):
             if cur.isValid():
                 self._on_item_activated(cur)
                 popup.hide()
+                return True
+
+        q = self.text().strip()
+        if not q:
+            return False
+
+        from src.core.geotag_resolver import search_places_offline
+
+        matches = search_places_offline(q, limit=1)
+        if not matches:
+            matches = geocode_place_nominatim(q, limit=1, timeout=2.5)
+        if matches:
+            p = matches[0]
+            label = str(p.get("formatted_address") or p.get("name") or q)
+            self.location_chosen.emit(float(p["lat"]), float(p["lon"]), label)
+            return True
+        if self._model.rowCount() > 0:
+            self._on_item_activated(self._model.index(0, 0))
+            return True
+        return False
+
+
+MapLocationSearchBox = _MapLocationSearchBox
 
 
 class _InteractiveMapCanvas(QWidget):
@@ -662,6 +762,7 @@ class _InteractiveMapCanvas(QWidget):
     cluster_clicked = Signal(list)
     cluster_clicked_data = Signal(list, str)
     viewport_bbox_dragged = Signal(float, float, float, float)
+    area_drawn = Signal(float, float, float, float)
     map_background_clicked = Signal()
 
     CONTINENTS = [
@@ -687,6 +788,15 @@ class _InteractiveMapCanvas(QWidget):
         self.max_lon: float = 180.0
         self.clusters: list[dict[str, Any]] = []
         self._pin_hit_rects: list[tuple[QRectF, list[int], str, float, float]] = []
+        self._drag_origin: QPointF | None = None
+        self._drag_current: QPointF | None = None
+
+    def _xy_to_lat_lon(self, pt: QPointF) -> tuple[float, float]:
+        w = max(1.0, float(self.width()))
+        h = max(1.0, float(self.height()))
+        lon = self.min_lon + (max(0.0, min(w, pt.x())) / w) * (self.max_lon - self.min_lon)
+        lat = self.max_lat - (max(0.0, min(h, pt.y())) / h) * (self.max_lat - self.min_lat)
+        return max(-85.0, min(85.0, lat)), max(-180.0, min(180.0, lon))
 
     def set_bounds_and_clusters(
         self,
@@ -817,9 +927,56 @@ class _InteractiveMapCanvas(QWidget):
                 painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
                 painter.drawText(pin_rect, Qt.AlignCenter, str(cnt))
 
+        # Draw active rectangle-zoom rubberband when dragging on blank map
+        if self._drag_origin is not None and self._drag_current is not None:
+            sel_rect = QRectF(self._drag_origin, self._drag_current).normalized()
+            if sel_rect.width() >= 2 and sel_rect.height() >= 2:
+                painter.save()
+                painter.setBrush(QBrush(QColor(0, 102, 204, 45)))
+                painter.setPen(QPen(QColor("#0066CC"), 2.0, Qt.DashLine))
+                painter.drawRect(sel_rect)
+                painter.restore()
+
         painter.end()
 
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton:
+            pos = event.position()
+            on_pin = any(pin_rect.contains(pos) for pin_rect, *_ in self._pin_hit_rects)
+            if not on_pin or bool(event.modifiers() & Qt.ShiftModifier):
+                self._drag_origin = pos
+                self._drag_current = pos
+                self.update()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._drag_origin is not None:
+            self._drag_current = event.position()
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton and self._drag_origin is not None:
+            end_pos = event.position()
+            drag_rect = QRectF(self._drag_origin, end_pos).normalized()
+            start_lat, start_lon = self._xy_to_lat_lon(self._drag_origin)
+            end_lat, end_lon = self._xy_to_lat_lon(end_pos)
+            self._drag_origin = None
+            self._drag_current = None
+            self.update()
+            if drag_rect.width() >= 6 or drag_rect.height() >= 6:
+                self.viewport_bbox_dragged.emit(
+                    min(start_lat, end_lat),
+                    max(start_lat, end_lat),
+                    min(start_lon, end_lon),
+                    max(start_lon, end_lon),
+                )
+                event.accept()
+                return
         if event.button() == Qt.LeftButton:
             pos = event.position()
             for pin_rect, media_ids, label, _la, _lo in self._pin_hit_rects:
@@ -865,8 +1022,9 @@ class _InteractiveMapCanvas(QWidget):
 class WorldMapView(QWidget):
     """
     Geotag World Map View backed by SQLite's R*Tree (`media_rtree`).
-    Renders an interactive Leaflet map (Voyager, OSM, Satellite, Terrain) via QWebEngineView
+    Renders an interactive Leaflet map (Clean Light, OSM Street, Satellite) via QWebEngineView
     with automatic silent fallback to high-performance vector canvas (_InteractiveMapCanvas).
+    Controls live in the contextual top Ribbon (Map tab); no duplicate internal toolbar.
     """
 
     bbox_changed = Signal(float, float, float, float)
@@ -878,6 +1036,8 @@ class WorldMapView(QWidget):
     filter_to_bbox_requested = Signal(float, float, float, float)
     close_requested = Signal()
     open_media_requested = Signal(int)
+    map_stats_Changed = Signal(int, int, int)
+    map_filters_changed = Signal(object, object, object)
 
     def minimumSizeHint(self) -> QSize:
         return QSize(300, 200)
@@ -896,102 +1056,15 @@ class WorldMapView(QWidget):
         self._web_loaded: bool = False
         self._current_style: str = "clean"
         self._pending_fit_bounds: tuple[float, float, float, float] | None = None
+        self._filter_year: int | None = None
+        self._filter_person_id: int | None = None
+        self._filter_min_rating: int | None = None
 
         vbox = QVBoxLayout(self)
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.setSpacing(0)
 
-        # Top Map Control Bar
-        top_bar = QFrame(self)
-        top_bar.setFixedHeight(40)
-        top_bar.setStyleSheet(
-            "background-color: #EEF3F8; border-bottom: 1px solid #C8D2E0;"
-        )
-        t_hbox = QHBoxLayout(top_bar)
-        t_hbox.setContentsMargins(10, 4, 10, 4)
-        t_hbox.setSpacing(8)
-
-        lbl_title = QLabel("🌍 World Map", top_bar)
-        lbl_title.setFont(QFont("Segoe UI", 10, QFont.Bold))
-        lbl_title.setStyleSheet("color: #1E395B;")
-        t_hbox.addWidget(lbl_title)
-
-        # Instant Offline Gazetteer Place Search
-        self.search_box = _MapLocationSearchBox(top_bar)
-        self.search_box.location_chosen.connect(
-            lambda lat, lon, _label: self.fly_to(lat, lon, 13)
-        )
-        t_hbox.addWidget(self.search_box)
-
-        # Map Style Selector (Clean Voyager, Street OSM, Satellite Esri, Terrain Topo)
-        lbl_style = QLabel("Style:", top_bar)
-        lbl_style.setStyleSheet("color: #1E395B; font-size: 9pt;")
-        t_hbox.addWidget(lbl_style)
-
-        self.combo_style = QComboBox(top_bar)
-        self.combo_style.addItems(
-            ["Clean (Esri)", "Street (OSM)", "Satellite (Esri)", "Terrain (Topo)"]
-        )
-        self.combo_style.setFixedHeight(26)
-        self.combo_style.setStyleSheet(
-            "QComboBox { background-color: #FFFFFF; border: 1px solid #7DA2CE; border-radius: 3px; padding: 2px 8px; font-family: 'Segoe UI', sans-serif; font-size: 9pt; } "
-            "QComboBox::drop-down { border: none; width: 16px; }"
-        )
-        self.combo_style.currentIndexChanged.connect(self._on_style_changed)
-        t_hbox.addWidget(self.combo_style)
-
-        # Fit to Photos button
-        self.btn_fit_photos = QPushButton("Fit to photos", top_bar)
-        self.btn_fit_photos.setIcon(get_icon("fit_photos", 16))
-        self.btn_fit_photos.setIconSize(QSize(16, 16))
-        self.btn_fit_photos.setCursor(Qt.PointingHandCursor)
-        self.btn_fit_photos.setFixedHeight(26)
-        self.btn_fit_photos.setStyleSheet(
-            "QPushButton { background-color: #FFFFFF; border: 1px solid #7DA2CE; border-radius: 3px; padding: 2px 10px; font-family: 'Segoe UI', sans-serif; font-size: 9pt; } "
-            "QPushButton:hover { background-color: #E5F3FF; border-color: #0066CC; }"
-        )
-        self.btn_fit_photos.clicked.connect(self.fit_to_photos)
-        t_hbox.addWidget(self.btn_fit_photos)
-
-        t_hbox.addStretch(1)
-
-        self.lbl_cluster_summary = QLabel("0 photos in view", top_bar)
-        self.lbl_cluster_summary.setStyleSheet(
-            "color: #29588C; font-weight: bold; font-family: 'Segoe UI', sans-serif; font-size: 9pt;"
-        )
-        t_hbox.addWidget(self.lbl_cluster_summary)
-
-        self.btn_filter_grid = QPushButton("View area in grid", top_bar)
-        self.btn_filter_grid.setIcon(get_icon("all_media", 16))
-        self.btn_filter_grid.setIconSize(QSize(16, 16))
-        self.btn_filter_grid.setCursor(Qt.PointingHandCursor)
-        self.btn_filter_grid.setFixedHeight(26)
-        self.btn_filter_grid.setStyleSheet(
-            "QPushButton { background-color: #0066CC; color: #FFFFFF; border: 1px solid #0055AA; border-radius: 3px; padding: 2px 12px; font-family: 'Segoe UI', sans-serif; font-size: 9pt; font-weight: 600; } "
-            "QPushButton:hover { background-color: #004D99; }"
-        )
-        self.btn_filter_grid.clicked.connect(
-            lambda: self.filter_to_bbox_requested.emit(
-                self._min_lat, self._max_lat, self._min_lon, self._max_lon
-            )
-        )
-        t_hbox.addWidget(self.btn_filter_grid)
-
-        self.btn_close_map = QPushButton("Return to grid", top_bar)
-        self.btn_close_map.setIcon(get_icon("thumbnail_grid", 16))
-        self.btn_close_map.setIconSize(QSize(16, 16))
-        self.btn_close_map.setCursor(Qt.PointingHandCursor)
-        self.btn_close_map.setFixedHeight(26)
-        self.btn_close_map.setStyleSheet(
-            "QPushButton { background-color: #FFFFFF; border: 1px solid #7DA2CE; border-radius: 3px; padding: 2px 10px; font-family: 'Segoe UI', sans-serif; font-size: 9pt; } "
-            "QPushButton:hover { background-color: #FFEFEF; border-color: #CC0000; color: #CC0000; }"
-        )
-        self.btn_close_map.clicked.connect(self.close_requested.emit)
-        t_hbox.addWidget(self.btn_close_map)
-
-        vbox.addWidget(top_bar)
-
-        # Full-size Central Map View Stack (fills 100% of workspace, no duplicate right splitter column!)
+        # Full-size Central Map View Stack (fills 100% of workspace right up to Ribbon)
         self.map_stack = QStackedWidget(self)
         self.canvas = _InteractiveMapCanvas(self.map_stack)
         self.canvas.cluster_selected.connect(self.cluster_selected.emit)
@@ -1057,7 +1130,7 @@ class WorldMapView(QWidget):
 
         vbox.addWidget(self.map_stack, 1)
 
-        # Backwards-compatibility stubs for tests
+        # Backwards-compatibility headless stubs for tests (unparented, not added to layout)
         self.cluster_list = QListWidget()
         self.cluster_list.hide()
         self.btn_toggle_engine = QPushButton("🗺 View: Leaflet Web")
@@ -1072,6 +1145,7 @@ class WorldMapView(QWidget):
         self._repo = repo
         if thumb_repo is not None:
             self._thumb_repo = thumb_repo
+        self._emit_map_stats()
 
     def _attach_cluster_thumbnails(self, clusters: list[dict[str, Any]]) -> None:
         """Enriches cluster dictionaries with thumbnail base64 data URIs and QPixmaps."""
@@ -1107,16 +1181,75 @@ class WorldMapView(QWidget):
         except Exception:
             pass
 
-    def _on_style_changed(self, idx: int) -> None:
-        styles = ["clean", "street", "satellite", "terrain"]
-        if 0 <= idx < len(styles):
-            self.set_map_style(styles[idx])
+    @property
+    def map_style(self) -> str:
+        return self._current_style
+
+    @property
+    def active_map_filters(self) -> tuple[int | None, int | None, int | None]:
+        return (self._filter_year, self._filter_person_id, self._filter_min_rating)
+
+    def has_active_map_filters(self) -> bool:
+        return (
+            self._filter_year is not None
+            or self._filter_person_id is not None
+            or self._filter_min_rating is not None
+        )
+
+    def set_map_filters(
+        self,
+        year: int | None = None,
+        person_id: int | None = None,
+        min_rating: int | None = None,
+        *,
+        fit: bool = False,
+    ) -> None:
+        """Applies optional Year / Person / Rating filters to map clusters and stats."""
+        self._filter_year = int(year) if year is not None else None
+        self._filter_person_id = int(person_id) if person_id is not None else None
+        self._filter_min_rating = int(min_rating) if min_rating is not None else None
+        self.map_filters_changed.emit(
+            self._filter_year, self._filter_person_id, self._filter_min_rating
+        )
+        if fit:
+            self.fit_to_photos()
+        else:
+            self.refresh_current_viewport()
+
+    def clear_map_filters(self, *, fit: bool = False) -> None:
+        """Clears all active Year / Person / Rating map filters."""
+        self.set_map_filters(None, None, None, fit=fit)
 
     def set_map_style(self, style_name: str) -> None:
         """Switches base tile layer dynamically."""
         self._current_style = style_name
         if self._web_loaded and self.web_view is not None:
             self.web_view.page().runJavaScript(f"switchBaseLayer('{style_name}');")
+
+    def view_area_in_grid(self) -> None:
+        """Emits `filter_to_bbox_requested` for the currently visible map viewport bounds."""
+        self.filter_to_bbox_requested.emit(
+            self._min_lat,
+            self._max_lat,
+            self._min_lon,
+            self._max_lon,
+        )
+
+    def fly_to_place(self, query: str, zoom: int = 13) -> bool:
+        """Resolves a place name via offline gazetteer or Nominatim and flies the map to it."""
+        q = (query or "").strip()
+        if not q:
+            return False
+        from src.core.geotag_resolver import search_places_offline
+
+        matches = search_places_offline(q, limit=1)
+        if not matches:
+            matches = geocode_place_nominatim(q, limit=1, timeout=2.5)
+        if matches:
+            p = matches[0]
+            self.fly_to(float(p["lat"]), float(p["lon"]), zoom=zoom)
+            return True
+        return False
 
     def _toggle_map_engine(self) -> None:
         """Toggles between WebEngine view and Vector Canvas view (for testing/diagnostics)."""
@@ -1154,14 +1287,27 @@ class WorldMapView(QWidget):
                     f"updateClusters({_clusters_to_json(self._current_clusters)});"
                 )
 
-    def _on_web_bounds_changed(
+    def _emit_map_stats(self) -> tuple[int, int, int]:
+        geotagged_count = sum(int(c.get("count", 0)) for c in self._current_clusters)
+        cluster_count = len(self._current_clusters)
+        total_items = geotagged_count
+        if self._repo is not None:
+            try:
+                row = self._repo.conn.execute("SELECT COUNT(*) FROM media;").fetchone()
+                if row is not None:
+                    total_items = int(row[0])
+            except Exception:
+                total_items = geotagged_count
+        self.map_stats_Changed.emit(geotagged_count, cluster_count, total_items)
+        return geotagged_count, cluster_count, total_items
+
+    def _update_viewport_clusters(
         self, min_lat: float, max_lat: float, min_lon: float, max_lon: float
-    ) -> None:
-        """Called when user pans/zooms the Leaflet map."""
-        self._min_lat = max(-85.0, min(85.0, float(min_lat)))
-        self._max_lat = max(-85.0, min(85.0, float(max_lat)))
-        self._min_lon = max(-180.0, min(180.0, float(min_lon)))
-        self._max_lon = max(-180.0, min(180.0, float(max_lon)))
+    ) -> list[dict[str, Any]]:
+        self._min_lat = max(-85.0, min(float(min_lat), float(max_lat)))
+        self._max_lat = min(85.0, max(float(min_lat), float(max_lat)))
+        self._min_lon = max(-180.0, min(float(min_lon), float(max_lon)))
+        self._max_lon = min(180.0, max(float(min_lon), float(max_lon)))
 
         self.spin_min_lat.setValue(self._min_lat)
         self.spin_max_lat.setValue(self._max_lat)
@@ -1173,9 +1319,21 @@ class WorldMapView(QWidget):
 
         raw_points: list[dict[str, Any]] = []
         if self._repo is not None:
-            raw_points = self._repo.query_map_clusters(
-                self._min_lat, self._max_lat, self._min_lon, self._max_lon, grid_degrees=grid_deg
-            )
+            if self.has_active_map_filters():
+                raw_points = self._repo.query_map_clusters(
+                    self._min_lat,
+                    self._max_lat,
+                    self._min_lon,
+                    self._max_lon,
+                    grid_degrees=grid_deg,
+                    year=self._filter_year,
+                    person_id=self._filter_person_id,
+                    min_rating=self._filter_min_rating,
+                )
+            else:
+                raw_points = self._repo.query_map_clusters(
+                    self._min_lat, self._max_lat, self._min_lon, self._max_lon, grid_degrees=grid_deg
+                )
 
         self._current_clusters = cluster_gps_points(raw_points, grid_degrees=grid_deg)
         self._attach_cluster_thumbnails(self._current_clusters)
@@ -1183,10 +1341,10 @@ class WorldMapView(QWidget):
             self._min_lat, self._max_lat, self._min_lon, self._max_lon, self._current_clusters
         )
 
-        total_items = sum(c["count"] for c in self._current_clusters)
-        self.lbl_cluster_summary.setText(
-            f"{total_items} geotagged items in {len(self._current_clusters)} clusters"
-        )
+        if self._web_loaded and self.web_view is not None:
+            self.web_view.page().runJavaScript(
+                f"updateClusters({_clusters_to_json(self._current_clusters)});"
+            )
 
         self.cluster_list.clear()
         for c in self._current_clusters:
@@ -1195,12 +1353,15 @@ class WorldMapView(QWidget):
             )
             item.setData(Qt.UserRole, (c["media_ids"], c["label"]))
 
-        if self._web_loaded and self.web_view is not None:
-            self.web_view.page().runJavaScript(
-                f"updateClusters({_clusters_to_json(self._current_clusters)});"
-            )
-
+        self._emit_map_stats()
         self.bbox_changed.emit(self._min_lat, self._max_lat, self._min_lon, self._max_lon)
+        return self._current_clusters
+
+    def _on_web_bounds_changed(
+        self, min_lat: float, max_lat: float, min_lon: float, max_lon: float
+    ) -> None:
+        """Called when user pans/zooms the Leaflet map."""
+        self._update_viewport_clusters(min_lat, max_lat, min_lon, max_lon)
 
     def _on_cluster_list_clicked(self, item: QListWidgetItem) -> None:
         data = item.data(Qt.UserRole)
@@ -1224,27 +1385,68 @@ class WorldMapView(QWidget):
         elif self.canvas is not None:
             self.canvas.update()
 
+    def _get_clean_geotag_bounds(self) -> tuple[float, float, float, float] | None:
+        if self._repo is None:
+            return None
+        engine = getattr(self._repo, "engine", None)
+        if engine is None:
+            return self._repo.get_geotag_bounds()
+        filter_clauses, filter_params = CatalogRepository.build_map_filter_clauses(
+            year=self._filter_year,
+            person_id=self._filter_person_id,
+            min_rating=self._filter_min_rating,
+            alias="m",
+        )
+        extra_sql = (" AND " + " AND ".join(filter_clauses)) if filter_clauses else ""
+        conn = engine.catalog_conn()
+        row = conn.execute(
+            f"""
+            SELECT MIN(m.lat) AS min_lat, MAX(m.lat) AS max_lat,
+                   MIN(m.lon) AS min_lon, MAX(m.lon) AS max_lon
+            FROM media m
+            WHERE m.lat IS NOT NULL AND m.lon IS NOT NULL
+              AND m.lat BETWEEN -85.0 AND 85.0
+              AND m.lon BETWEEN -180.0 AND 180.0
+              AND NOT (ABS(m.lat) < 0.0001 AND ABS(m.lon) < 0.0001){extra_sql};
+            """,
+            filter_params,
+        ).fetchone()
+        if (
+            row
+            and row["min_lat"] is not None
+            and row["max_lat"] is not None
+            and row["min_lon"] is not None
+            and row["max_lon"] is not None
+        ):
+            return (
+                float(row["min_lat"]),
+                float(row["max_lat"]),
+                float(row["min_lon"]),
+                float(row["max_lon"]),
+            )
+        return None
+
     def fit_to_photos(self) -> None:
-        """Fits map bounds to encompass all geotagged photos in the catalog."""
-        if self._repo is not None:
-            bounds = self._repo.get_geotag_bounds()
-            if bounds:
-                min_la, max_la, min_lo, max_lo = bounds
-                lat_pad = max(0.04, (max_la - min_la) * 0.15)
-                lon_pad = max(0.04, (max_lo - min_lo) * 0.15)
-                min_la = max(-85.0, min_la - lat_pad)
-                max_la = min(85.0, max_la + lat_pad)
-                min_lo = max(-180.0, min_lo - lon_pad)
-                max_lo = min(180.0, max_lo + lon_pad)
-                self._pending_fit_bounds = (min_la, max_la, min_lo, max_lo)
-                self.set_viewport_bbox(min_la, max_la, min_lo, max_lo)
-                if self._web_loaded and self.web_view is not None:
-                    self._pending_fit_bounds = None
-                    self.web_view.page().runJavaScript(
-                        f"fitMapBounds({min_la}, {max_la}, {min_lo}, {max_lo});"
-                    )
-                return
-        self.set_viewport_bbox(-60.0, 75.0, -140.0, 140.0)
+        """Fits map bounds snugly to valid plotted geotagged photos in the catalog."""
+        bounds = self._get_clean_geotag_bounds()
+        if bounds:
+            min_la, max_la, min_lo, max_lo = bounds
+            lat_pad = max(0.015, (max_la - min_la) * 0.02)
+            lon_pad = max(0.015, (max_lo - min_lo) * 0.02)
+            min_la = max(-85.0, min_la - lat_pad)
+            max_la = min(85.0, max_la + lat_pad)
+            min_lo = max(-180.0, min_lo - lon_pad)
+            max_lo = min(180.0, max_lo + lon_pad)
+        else:
+            min_la, max_la, min_lo, max_lo = -50.0, 70.0, -130.0, 140.0
+
+        self._pending_fit_bounds = (min_la, max_la, min_lo, max_lo)
+        self.set_viewport_bbox(min_la, max_la, min_lo, max_lo)
+        if self._web_loaded and self.web_view is not None:
+            self._pending_fit_bounds = None
+            self.web_view.page().runJavaScript(
+                f"fitMapBounds({min_la}, {max_la}, {min_lo}, {max_lo});"
+            )
 
     def refresh_current_viewport(self) -> None:
         """Refreshes clusters for the current bounding box."""
@@ -1264,58 +1466,7 @@ class WorldMapView(QWidget):
         """
         if repo is not None:
             self._repo = repo
-
-        self._min_lat = min(float(min_lat), float(max_lat))
-        self._max_lat = max(float(min_lat), float(max_lat))
-        self._min_lon = min(float(min_lon), float(max_lon))
-        self._max_lon = max(float(min_lon), float(max_lon))
-
-        self.spin_min_lat.setValue(self._min_lat)
-        self.spin_max_lat.setValue(self._max_lat)
-        self.spin_min_lon.setValue(self._min_lon)
-        self.spin_max_lon.setValue(self._max_lon)
-
-        lat_span = max(0.1, self._max_lat - self._min_lat)
-        grid_deg = max(0.05, lat_span / 25.0)
-
-        raw_points: list[dict[str, Any]] = []
-        if self._repo is not None:
-            raw_points = self._repo.query_map_clusters(
-                self._min_lat, self._max_lat, self._min_lon, self._max_lon, grid_degrees=grid_deg
-            )
-
-        self._current_clusters = cluster_gps_points(raw_points, grid_degrees=grid_deg)
-        self._attach_cluster_thumbnails(self._current_clusters)
-
-        self.canvas.set_bounds_and_clusters(
-            self._min_lat,
-            self._max_lat,
-            self._min_lon,
-            self._max_lon,
-            self._current_clusters,
-        )
-
-        if self._web_loaded and self.web_view is not None:
-            self.web_view.page().runJavaScript(
-                f"updateClusters({_clusters_to_json(self._current_clusters)});"
-            )
-
-        total_items = sum(c["count"] for c in self._current_clusters)
-        self.lbl_cluster_summary.setText(
-            f"{total_items} geotagged items in {len(self._current_clusters)} clusters"
-        )
-
-        self.cluster_list.clear()
-        for c in self._current_clusters:
-            item = QListWidgetItem(
-                f"📍 {c['label']} ({c['count']} items)", self.cluster_list
-            )
-            item.setData(Qt.UserRole, (c["media_ids"], c["label"]))
-
-        self.bbox_changed.emit(
-            self._min_lat, self._max_lat, self._min_lon, self._max_lon
-        )
-        return self._current_clusters
+        return self._update_viewport_clusters(min_lat, max_lat, min_lon, max_lon)
 
     @property
     def current_clusters(self) -> list[dict[str, Any]]:

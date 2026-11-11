@@ -1949,6 +1949,108 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawPolygon(top_arrow)
         p.drawPolygon(bot_arrow)
 
+    elif kind == "map_light":
+        # Minimal folded light map sheet with crisp creases and azure pin
+        for idx, (x0, x1, top_c, bot_c) in enumerate((
+            (0.10, 0.36, "#F8FBFF", "#E6EFF9"),
+            (0.36, 0.64, "#EDF4FC", "#DAE8F7"),
+            (0.64, 0.90, "#F8FBFF", "#E6EFF9"),
+        )):
+            y_off = 0.04 if idx == 1 else 0.0
+            poly = QPolygonF([
+                QPointF(s * x0, s * (0.20 + (0.04 if idx == 2 else 0.0))),
+                QPointF(s * x1, s * (0.20 + y_off)),
+                QPointF(s * x1, s * (0.80 + y_off)),
+                QPointF(s * x0, s * (0.80 + (0.04 if idx == 2 else 0.0))),
+            ])
+            grad = QLinearGradient(0, s * 0.2, 0, s * 0.84)
+            grad.setColorAt(0.0, QColor(top_c))
+            grad.setColorAt(1.0, QColor(bot_c))
+            p.setPen(QPen(QColor("#8AA8C7"), 1.1))
+            p.setBrush(grad)
+            p.drawPolygon(poly)
+        p.setPen(QPen(QColor("#78A9DA"), 1.3, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.16, s * 0.56), QPointF(s * 0.84, s * 0.44))
+        p.drawLine(QPointF(s * 0.44, s * 0.28), QPointF(s * 0.56, s * 0.76))
+        # Subtle pin marker
+        p.setPen(QPen(QColor("#FFFFFF"), 1.2))
+        p.setBrush(QColor("#0078D4"))
+        p.drawEllipse(QPointF(s * 0.62, s * 0.42), s * 0.10, s * 0.10)
+
+    elif kind == "map_street":
+        # Richly colored OpenStreetMap-style folded road map with parks, river & crimson pin
+        panels = (
+            (0.10, 0.36, "#FFF7E6"),
+            (0.36, 0.64, "#E9F5E3"),
+            (0.64, 0.90, "#FFF9EE"),
+        )
+        for idx, (x0, x1, fill_c) in enumerate(panels):
+            y_top_l = 0.18 if idx != 2 else 0.23
+            y_top_r = 0.23 if idx == 0 else (0.18 if idx == 2 else 0.23)
+            y_bot_l = y_top_l + 0.60
+            y_bot_r = y_top_r + 0.60
+            poly = QPolygonF([
+                QPointF(s * x0, s * y_top_l),
+                QPointF(s * x1, s * y_top_r),
+                QPointF(s * x1, s * y_bot_r),
+                QPointF(s * x0, s * y_bot_l),
+            ])
+            p.setPen(QPen(QColor("#6E8E72"), 1.1))
+            p.setBrush(QColor(fill_c))
+            p.drawPolygon(poly)
+        # River ribbon & arterial road
+        p.setPen(QPen(QColor("#4EA3E3"), 2.0, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.16, s * 0.66), QPointF(s * 0.84, s * 0.34))
+        p.setPen(QPen(QColor("#E69F22"), 2.2, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.20, s * 0.36), QPointF(s * 0.80, s * 0.68))
+        # Coral map pin
+        p.setPen(QPen(QColor("#8B1E14"), 1.0))
+        p.setBrush(QColor("#E03E2D"))
+        p.drawEllipse(QPointF(s * 0.50, s * 0.42), s * 0.11, s * 0.11)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawEllipse(QPointF(s * 0.50, s * 0.42), s * 0.04, s * 0.04)
+
+    elif kind == "map_satellite":
+        # Satellite imagery globe tile + orbiting solar-winged satellite
+        p.setPen(QPen(QColor("#1B4D7A"), 1.2))
+        earth_grad = QLinearGradient(s * 0.15, s * 0.20, s * 0.85, s * 0.88)
+        earth_grad.setColorAt(0.0, QColor("#1D5FA7"))
+        earth_grad.setColorAt(1.0, QColor("#0E3868"))
+        p.setBrush(earth_grad)
+        p.drawRoundedRect(QRectF(s * 0.12, s * 0.24, s * 0.64, s * 0.64), 4.0, 4.0)
+        # Aerial land imagery patches
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#4F9D58"))
+        p.drawPolygon(QPolygonF([
+            QPointF(s * 0.16, s * 0.42),
+            QPointF(s * 0.40, s * 0.32),
+            QPointF(s * 0.48, s * 0.52),
+            QPointF(s * 0.28, s * 0.72),
+            QPointF(s * 0.16, s * 0.60),
+        ]))
+        p.setBrush(QColor("#82B366"))
+        p.drawEllipse(QRectF(s * 0.46, s * 0.56, s * 0.24, s * 0.22))
+        # Orbiting satellite in upper-right
+        p.setPen(QPen(QColor("#2C3E50"), 1.1))
+        p.setBrush(QColor("#4DA3FF"))
+        p.drawRect(QRectF(s * 0.56, s * 0.12, s * 0.12, s * 0.16))
+        p.drawRect(QRectF(s * 0.78, s * 0.22, s * 0.14, s * 0.12))
+        p.setBrush(QColor("#DCE4EC"))
+        p.drawRect(QRectF(s * 0.66, s * 0.16, s * 0.14, s * 0.14))
+
+    elif kind in ("view_area_grid", "all_media"):
+        # 2x2 photo thumbnail grid with a crisp geotag accent
+        p.setPen(QPen(QColor("#2B6CB0"), 1.1))
+        for rx, ry, fc in (
+            (0.16, 0.18, "#89C4F4"),
+            (0.54, 0.18, "#6BB3EB"),
+            (0.16, 0.54, "#6BB3EB"),
+            (0.54, 0.54, "#4C9ED9"),
+        ):
+            p.setBrush(QColor(fc))
+            p.drawRoundedRect(QRectF(s * rx, s * ry, s * 0.30, s * 0.30), 2.0, 2.0)
+
     else:
         p.setPen(QPen(QColor("#3E6B99"), 1.1))
         p.setBrush(QColor("#D8EAF9"))
@@ -5208,6 +5310,9 @@ class RibbonToolbar(QWidget):
     auto_color_preview_requested = Signal()
     color_preview_cancelled = Signal()
     color_adjustment_selected = Signal(float, float)        # (temperature, tint)
+    map_location_chosen = Signal(float, float, str)         # (lat, lon, label)
+    map_location_search_requested = Signal(str)             # fallback text search
+    map_filters_changed = Signal(object, object, object)    # (year, person_id, min_rating)
     auto_color_selected = Signal()
 
     exposure_menu_about_to_show = Signal()
@@ -5607,6 +5712,7 @@ class RibbonToolbar(QWidget):
         self.tab_create = self._build_create_tab()
         self.tab_view = self._build_view_tab()
         self.tab_batch_people = self._build_batch_people_tab()
+        self.tab_map = self._build_map_tab()
 
         self.tab_widget.addTab(self.tab_home, "Home")
         self.tab_widget.addTab(self.tab_edit, "Edit")
@@ -5614,7 +5720,9 @@ class RibbonToolbar(QWidget):
         self.tab_widget.addTab(self.tab_create, "Create")
         self.tab_widget.addTab(self.tab_view, "View")
         self.tab_widget.addTab(self.tab_batch_people, "Batch people tagging")
-        self.tab_widget.tabBar().setTabVisible(5, False)
+        self.tab_widget.addTab(self.tab_map, "Map")
+        self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_batch_people), False)
+        self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_map), False)
 
         self.tab_widget.tabBarDoubleClicked.connect(self._on_tab_bar_double_clicked)
         self.tab_widget.tabBarClicked.connect(self._on_tab_bar_clicked)
@@ -5750,7 +5858,8 @@ class RibbonToolbar(QWidget):
         main_vbox.addWidget(self.scope_bar)
 
         for w in (self, self.top_header, self.tab_widget, self.tab_widget.tabBar(), self.below_ribbon_bar,
-                  self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, self.tab_batch_people):
+                  self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, self.tab_batch_people,
+                  self.tab_map):
             w.installEventFilter(self)
 
         self._load_qat_settings()
@@ -6371,6 +6480,7 @@ class RibbonToolbar(QWidget):
             getattr(self, "btn_zoom_in", None),
             getattr(self, "btn_zoom_out", None),
             getattr(self, "btn_view_thumbnails", None),
+            getattr(self, "btn_view_people", None),
             getattr(self, "btn_view_map", None),
             getattr(self, "btn_view_slideshow", None),
             getattr(self, "btn_toggle_nav_pane", None),
@@ -6388,6 +6498,7 @@ class RibbonToolbar(QWidget):
             getattr(self, "tab_find", None),
             getattr(self, "tab_create", None),
             getattr(self, "tab_view", None),
+            getattr(self, "tab_map", None),
         ):
             if page and page.layout():
                 for i in range(page.layout().count()):
@@ -8220,7 +8331,7 @@ class RibbonToolbar(QWidget):
         hbox.addWidget(grp_zoom)
 
         # ---------------------------------------------------------------------
-        # Group 4: Views Group (Thumbnails, World Map, Slide show)
+        # Group 4: Views Group (Gallery, People, World Map, Slide show)
         # ---------------------------------------------------------------------
         grp_slideshow = _RibbonGroupBox("Views", page)
         self.grp_slideshow = grp_slideshow
@@ -8234,6 +8345,15 @@ class RibbonToolbar(QWidget):
             lambda: self.action_triggered.emit("show_thumbnails_view")
         )
         grp_slideshow.content_layout.addWidget(self.btn_view_thumbnails)
+
+        self.btn_view_people = self._make_btn(
+            "People", "people_tag", grp_slideshow, large=True, checkable=True
+        )
+        self.btn_view_people.setToolTip("Open the People Directory to browse and name faces")
+        self.btn_view_people.clicked.connect(
+            lambda: self.action_triggered.emit("toggle_people_directory")
+        )
+        grp_slideshow.content_layout.addWidget(self.btn_view_people)
 
         self.btn_view_map = self._make_btn("World\nMap", "globe", grp_slideshow, large=True, checkable=True)
         self.btn_view_map.setToolTip("Explore geotagged photos on the World Map (Leaflet / Offline)")
@@ -8702,32 +8822,436 @@ class RibbonToolbar(QWidget):
                 self.btn_batch_ignore.setText("Don't show\nagain")
                 self.btn_batch_ignore.setToolTip("Ignore / don't suggest this face again (I)")
 
-    def set_active_mode(self, mode: Literal["grid", "viewer", "map", "batch_people"]) -> None:
-        """Switches Ribbon context when entering/exiting Single Media Viewer, World Map, or Batch People Tagging."""
+    def _build_map_tab(self) -> QWidget:
+        from src.ui.map_view import _MapLocationSearchBox
+
+        page = _RibbonPage()
+        hbox = QHBoxLayout(page)
+        hbox.setContentsMargins(4, 2, 4, 2)
+        hbox.setSpacing(4)
+
+        # ---------------------------------------------------------------------
+        # Group 1: Location Search
+        # ---------------------------------------------------------------------
+        self.grp_map_location = _RibbonGroupBox("Location Search", page)
+        loc_holder = QWidget(self.grp_map_location)
+        loc_layout = QHBoxLayout(loc_holder)
+        loc_layout.setContentsMargins(4, 0, 4, 0)
+        loc_layout.setSpacing(4)
+
+        self.map_search_box = _MapLocationSearchBox(loc_holder)
+        self.map_search_box.location_chosen.connect(self.map_location_chosen.emit)
+        loc_layout.addWidget(self.map_search_box)
+
+        self.btn_map_search_go = QPushButton("Go", loc_holder)
+        self.btn_map_search_go.setFixedHeight(26)
+        self.btn_map_search_go.setCursor(Qt.PointingHandCursor)
+        self.btn_map_search_go.setToolTip("Search location and fly map there")
+        self.btn_map_search_go.setStyleSheet(
+            "QPushButton { background-color: #0066CC; color: #FFFFFF; border: 1px solid #0055AA; "
+            "border-radius: 3px; padding: 2px 10px; font-family: 'Segoe UI', sans-serif; font-size: 9pt; font-weight: 600; } "
+            "QPushButton:hover { background-color: #004D99; }"
+        )
+        self.btn_map_search_go.clicked.connect(self._on_map_search_go_clicked)
+        loc_layout.addWidget(self.btn_map_search_go)
+
+        self.grp_map_location.content_layout.addWidget(loc_holder, 0, Qt.AlignVCenter)
+        self.grp_map_location.adjust_to_content()
+        hbox.addWidget(self.grp_map_location)
+
+        # ---------------------------------------------------------------------
+        # Group 2: Map Style
+        # ---------------------------------------------------------------------
+        self.grp_map_style = _RibbonGroupBox("Map Style", page)
+        self.map_style_btn_group = QButtonGroup(self)
+        self.map_style_btn_group.setExclusive(True)
+
+        self.btn_map_style_light = self._make_btn(
+            "Clean\n(Light)", "map_light", self.grp_map_style, large=True, checkable=True
+        )
+        self.btn_map_style_light.setChecked(True)
+        self.btn_map_style_light.setToolTip("Clean light road map style")
+        self.btn_map_style_light.clicked.connect(
+            lambda: self.action_triggered.emit("map_style_light")
+        )
+
+        self.btn_map_style_street = self._make_btn(
+            "Street\n(OSM)", "map_street", self.grp_map_style, large=True, checkable=True
+        )
+        self.btn_map_style_street.setToolTip("OpenStreetMap street map layer")
+        self.btn_map_style_street.clicked.connect(
+            lambda: self.action_triggered.emit("map_style_street")
+        )
+
+        self.btn_map_style_satellite = self._make_btn(
+            "Satellite", "map_satellite", self.grp_map_style, large=True, checkable=True
+        )
+        self.btn_map_style_satellite.setToolTip("Satellite aerial imagery layer")
+        self.btn_map_style_satellite.clicked.connect(
+            lambda: self.action_triggered.emit("map_style_satellite")
+        )
+
+        for btn in (
+            self.btn_map_style_light,
+            self.btn_map_style_street,
+            self.btn_map_style_satellite,
+        ):
+            self.map_style_btn_group.addButton(btn)
+            self.grp_map_style.content_layout.addWidget(btn)
+        hbox.addWidget(self.grp_map_style)
+
+        # ---------------------------------------------------------------------
+        # Group 3: Map Filter
+        # ---------------------------------------------------------------------
+        self.grp_map_filter = _RibbonGroupBox("Map Filter", page)
+
+        self.btn_map_fit_photos = self._make_btn(
+            "Fit to\nphotos", "fit_photos", self.grp_map_filter, large=True
+        )
+        self.btn_map_fit_photos.setToolTip("Zoom the map to fit plotted photos")
+        self.btn_map_fit_photos.clicked.connect(
+            lambda: self.action_triggered.emit("map_fit_photos")
+        )
+        self.grp_map_filter.content_layout.addWidget(self.btn_map_fit_photos)
+
+        self.btn_map_view_grid = self._make_btn(
+            "View area\nin grid", "view_area_grid", self.grp_map_filter, large=True
+        )
+        self.btn_map_view_grid.setToolTip("Filter the gallery grid to the currently visible map area")
+        self.btn_map_view_grid.clicked.connect(
+            lambda: self.action_triggered.emit("map_view_area_in_grid")
+        )
+        self.grp_map_filter.content_layout.addWidget(self.btn_map_view_grid)
+
+        self._map_filter_year: int | None = None
+        self._map_filter_person_id: int | None = None
+        self._map_filter_min_rating: int | None = None
+        self._map_people_names: dict[int, str] = {}
+
+        map_filter_col = QVBoxLayout()
+        map_filter_col.setContentsMargins(2, 1, 2, 1)
+        map_filter_col.setSpacing(2)
+
+        self.btn_map_filter_year = self._make_tool_btn(
+            "Year: All", "years", self.grp_map_filter, large=False
+        )
+        self.btn_map_filter_year.setCheckable(True)
+        self.btn_map_filter_year.setFixedHeight(22)
+        self.btn_map_filter_year.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.btn_map_filter_year.setMinimumWidth(115)
+        self.btn_map_filter_year.setToolTip("Filter map pins by photo year")
+        self.menu_map_filter_year = QMenu(self.btn_map_filter_year)
+        self.btn_map_filter_year.setMenu(self.menu_map_filter_year)
+        map_filter_col.addWidget(self.btn_map_filter_year)
+
+        self.btn_map_filter_person = self._make_tool_btn(
+            "Person: All", "person", self.grp_map_filter, large=False
+        )
+        self.btn_map_filter_person.setCheckable(True)
+        self.btn_map_filter_person.setFixedHeight(22)
+        self.btn_map_filter_person.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.btn_map_filter_person.setMinimumWidth(115)
+        self.btn_map_filter_person.setToolTip("Filter map pins by tagged person")
+        self.menu_map_filter_person = QMenu(self.btn_map_filter_person)
+        self.btn_map_filter_person.setMenu(self.menu_map_filter_person)
+        map_filter_col.addWidget(self.btn_map_filter_person)
+
+        self.btn_map_filter_rating = self._make_tool_btn(
+            "Rating: Any", "rating", self.grp_map_filter, large=False
+        )
+        self.btn_map_filter_rating.setCheckable(True)
+        self.btn_map_filter_rating.setFixedHeight(22)
+        self.btn_map_filter_rating.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.btn_map_filter_rating.setMinimumWidth(115)
+        self.btn_map_filter_rating.setToolTip("Filter map pins by star rating")
+        self.menu_map_filter_rating = QMenu(self.btn_map_filter_rating)
+        self.btn_map_filter_rating.setMenu(self.menu_map_filter_rating)
+        map_filter_col.addWidget(self.btn_map_filter_rating)
+
+        self.grp_map_filter.content_layout.addLayout(map_filter_col)
+
+        self.btn_map_clear_filters = self._make_btn(
+            "Clear\nfilters", "cancel", self.grp_map_filter, large=True
+        )
+        self.btn_map_clear_filters.setToolTip("Clear Year, Person, and Rating filters on the map")
+        self.btn_map_clear_filters.setEnabled(False)
+        self.btn_map_clear_filters.clicked.connect(self.clear_map_filters)
+        self.grp_map_filter.content_layout.addWidget(self.btn_map_clear_filters)
+
+        self.populate_map_filters([], [])
+        self.grp_map_filter.adjust_to_content()
+        hbox.addWidget(self.grp_map_filter)
+
+        # ---------------------------------------------------------------------
+        # Group 4: Panes
+        # ---------------------------------------------------------------------
+        self.grp_map_panes = _RibbonGroupBox("Panes", page)
+
+        self.btn_map_nav_pane = self._make_btn(
+            "Navigation\npane", "pane_left", self.grp_map_panes, large=True, checkable=True
+        )
+        self.btn_map_nav_pane.setToolTip("Show or hide the Navigation pane (Ctrl+N)")
+        self.btn_map_nav_pane.clicked.connect(
+            lambda: self.action_triggered.emit("toggle_nav_pane")
+        )
+        self.grp_map_panes.content_layout.addWidget(self.btn_map_nav_pane)
+
+        self.btn_map_tag_pane = self._make_btn(
+            "Tag and\ncaption pane", "pane_right", self.grp_map_panes, large=True, checkable=True
+        )
+        self.btn_map_tag_pane.setToolTip("Show or hide the Tag and caption pane (Ctrl+I)")
+        self.btn_map_tag_pane.clicked.connect(
+            lambda: self.action_triggered.emit("toggle_tag_pane")
+        )
+        self.grp_map_panes.content_layout.addWidget(self.btn_map_tag_pane)
+        self.grp_map_panes.adjust_to_content()
+        hbox.addWidget(self.grp_map_panes)
+
+        # ---------------------------------------------------------------------
+        # Group 5: Close (last item, matching Single Image View's Close file)
+        # ---------------------------------------------------------------------
+        self.grp_map_close = _RibbonGroupBox("Close", page)
+        self.btn_map_close = self._make_btn(
+            "Close\nmap", "close_file", self.grp_map_close, large=True
+        )
+        self.btn_map_close.setToolTip("Close World Map and return to Gallery (Esc)")
+        self.btn_map_close.clicked.connect(
+            lambda: self.action_triggered.emit("close_map")
+        )
+        self.grp_map_close.content_layout.addWidget(self.btn_map_close)
+        hbox.addWidget(self.grp_map_close)
+
+        hbox.addStretch(1)
+
+        return page
+
+    def _on_map_search_go_clicked(self) -> None:
+        if not hasattr(self, "map_search_box"):
+            return
+        handled = self.map_search_box.trigger_search()
+        if not handled:
+            text = self.map_search_box.text().strip()
+            if text:
+                self.map_location_search_requested.emit(text)
+
+    def sync_map_pane_buttons(self, nav_visible: bool, tag_visible: bool) -> None:
+        if hasattr(self, "btn_map_nav_pane"):
+            self.btn_map_nav_pane.setChecked(bool(nav_visible))
+        if hasattr(self, "btn_map_tag_pane"):
+            self.btn_map_tag_pane.setChecked(bool(tag_visible))
+
+    def populate_map_filters(
+        self, years: list[int], people: list[dict[str, Any]]
+    ) -> None:
+        """Populate the Map ribbon's Year, Person, and Rating filter menus."""
+        if hasattr(self, "menu_map_filter_year"):
+            self.menu_map_filter_year.clear()
+            act_all_years = self.menu_map_filter_year.addAction("All years")
+            act_all_years.setCheckable(True)
+            act_all_years.setData(None)
+            act_all_years.triggered.connect(lambda: self._on_map_year_picked(None))
+            if years:
+                self.menu_map_filter_year.addSeparator()
+            for yr in years:
+                act = self.menu_map_filter_year.addAction(str(yr))
+                act.setCheckable(True)
+                act.setData(int(yr))
+                act.triggered.connect(lambda checked=False, y=int(yr): self._on_map_year_picked(y))
+
+        self._map_people_names = {}
+        if hasattr(self, "menu_map_filter_person"):
+            self.menu_map_filter_person.clear()
+            act_all_people = self.menu_map_filter_person.addAction("All people")
+            act_all_people.setCheckable(True)
+            act_all_people.setData(None)
+            act_all_people.triggered.connect(lambda: self._on_map_person_picked(None))
+            named_people = [p for p in (people or []) if p.get("id") is not None and (p.get("name") or "").strip()]
+            if named_people:
+                self.menu_map_filter_person.addSeparator()
+            for person in named_people:
+                pid = int(person["id"])
+                name = str(person["name"]).strip()
+                count = int(person.get("confirmed_count") or person.get("media_count") or 0)
+                self._map_people_names[pid] = name
+                label = f"{name} ({count:,})" if count > 0 else name
+                act = self.menu_map_filter_person.addAction(label)
+                act.setCheckable(True)
+                act.setData(pid)
+                act.triggered.connect(lambda checked=False, p_id=pid: self._on_map_person_picked(p_id))
+
+        if hasattr(self, "menu_map_filter_rating"):
+            self.menu_map_filter_rating.clear()
+            rating_choices: list[tuple[str, int | None]] = [
+                ("Any rating", None),
+                ("5 stars", 5),
+                ("4+ stars", 4),
+                ("3+ stars", 3),
+                ("2+ stars", 2),
+                ("1+ stars", 1),
+                ("Unrated", 0),
+            ]
+            for label, val in rating_choices:
+                act = self.menu_map_filter_rating.addAction(label)
+                act.setCheckable(True)
+                act.setData(val)
+                act.triggered.connect(lambda checked=False, v=val: self._on_map_rating_picked(v))
+
+        self.set_map_filter_ui(
+            self._map_filter_year,
+            self._map_filter_person_id,
+            self._map_filter_min_rating,
+        )
+
+    def _on_map_year_picked(self, year: int | None) -> None:
+        self.set_map_filter_ui(year, self._map_filter_person_id, self._map_filter_min_rating)
+        self.map_filters_changed.emit(
+            self._map_filter_year, self._map_filter_person_id, self._map_filter_min_rating
+        )
+
+    def _on_map_person_picked(self, person_id: int | None) -> None:
+        self.set_map_filter_ui(self._map_filter_year, person_id, self._map_filter_min_rating)
+        self.map_filters_changed.emit(
+            self._map_filter_year, self._map_filter_person_id, self._map_filter_min_rating
+        )
+
+    def _on_map_rating_picked(self, min_rating: int | None) -> None:
+        self.set_map_filter_ui(self._map_filter_year, self._map_filter_person_id, min_rating)
+        self.map_filters_changed.emit(
+            self._map_filter_year, self._map_filter_person_id, self._map_filter_min_rating
+        )
+
+    def clear_map_filters(self) -> None:
+        """Reset all Map ribbon filters and emit map_filters_changed."""
+        self.set_map_filter_ui(None, None, None)
+        self.map_filters_changed.emit(None, None, None)
+
+    def set_map_filter_ui(
+        self,
+        year: int | None,
+        person_id: int | None,
+        min_rating: int | None,
+    ) -> None:
+        """Synchronize the Map ribbon filter buttons and menus with active filter values."""
+        self._map_filter_year = int(year) if year is not None else None
+        self._map_filter_person_id = int(person_id) if person_id is not None else None
+        self._map_filter_min_rating = int(min_rating) if min_rating is not None else None
+
+        if hasattr(self, "btn_map_filter_year"):
+            self.btn_map_filter_year.setText(
+                f"Year: {self._map_filter_year}" if self._map_filter_year is not None else "Year: All"
+            )
+            self.btn_map_filter_year.setChecked(self._map_filter_year is not None)
+            for act in self.menu_map_filter_year.actions():
+                if act.isSeparator():
+                    continue
+                act.setChecked(act.data() == self._map_filter_year)
+
+        if hasattr(self, "btn_map_filter_person"):
+            if self._map_filter_person_id is not None:
+                p_name = self._map_people_names.get(
+                    self._map_filter_person_id, f"Person #{self._map_filter_person_id}"
+                )
+                if len(p_name) > 14:
+                    p_name = p_name[:13].rstrip() + "…"
+                self.btn_map_filter_person.setText(f"Person: {p_name}")
+                self.btn_map_filter_person.setChecked(True)
+            else:
+                self.btn_map_filter_person.setText("Person: All")
+                self.btn_map_filter_person.setChecked(False)
+            for act in self.menu_map_filter_person.actions():
+                if act.isSeparator():
+                    continue
+                act.setChecked(act.data() == self._map_filter_person_id)
+
+        if hasattr(self, "btn_map_filter_rating"):
+            if self._map_filter_min_rating == 0:
+                r_txt = "Rating: Unrated"
+            elif self._map_filter_min_rating == 5:
+                r_txt = "Rating: 5★"
+            elif self._map_filter_min_rating is not None:
+                r_txt = f"Rating: {self._map_filter_min_rating}+★"
+            else:
+                r_txt = "Rating: Any"
+            self.btn_map_filter_rating.setText(r_txt)
+            self.btn_map_filter_rating.setChecked(self._map_filter_min_rating is not None)
+            for act in self.menu_map_filter_rating.actions():
+                if act.isSeparator():
+                    continue
+                act.setChecked(act.data() == self._map_filter_min_rating)
+
+        has_any = (
+            self._map_filter_year is not None
+            or self._map_filter_person_id is not None
+            or self._map_filter_min_rating is not None
+        )
+        if hasattr(self, "btn_map_clear_filters"):
+            self.btn_map_clear_filters.setEnabled(has_any)
+        if hasattr(self, "grp_map_filter"):
+            self.grp_map_filter.adjust_to_content()
+
+    def sync_map_style_button(self, style_name: str) -> None:
+        mapping = {
+            "clean": getattr(self, "btn_map_style_light", None),
+            "light": getattr(self, "btn_map_style_light", None),
+            "street": getattr(self, "btn_map_style_street", None),
+            "satellite": getattr(self, "btn_map_style_satellite", None),
+        }
+        btn = mapping.get((style_name or "").lower())
+        if btn is not None:
+            btn.setChecked(True)
+
+    def set_active_view_button(self, active: Literal["gallery", "people", "map"]) -> None:
+        if hasattr(self, "btn_view_thumbnails"):
+            self.btn_view_thumbnails.setChecked(active == "gallery")
+        if hasattr(self, "btn_view_people"):
+            self.btn_view_people.setChecked(active == "people")
+        if hasattr(self, "btn_view_map"):
+            self.btn_view_map.setChecked(active == "map")
+
+    def _set_tab_visible(self, tab: QWidget | None, visible: bool) -> None:
+        if tab is None:
+            return
+        idx = self.tab_widget.indexOf(tab)
+        if idx >= 0:
+            self.tab_widget.tabBar().setTabVisible(idx, visible)
+
+    def set_active_mode(self, mode: Literal["grid", "viewer", "map", "batch_people", "people"]) -> None:
+        """Switches Ribbon context when entering/exiting Single Media Viewer, World Map, People, or Batch People Tagging."""
+        tab_map = getattr(self, "tab_map", None)
+        tab_batch = getattr(self, "tab_batch_people", None)
+
         if mode == "batch_people":
-            for i in range(5):
-                self.tab_widget.tabBar().setTabVisible(i, False)
-            if hasattr(self, "tab_batch_people"):
-                self.tab_widget.tabBar().setTabVisible(5, True)
-                self.tab_widget.setCurrentWidget(self.tab_batch_people)
+            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map):
+                self._set_tab_visible(tab, False)
+            self._set_tab_visible(tab_batch, True)
+            if tab_batch is not None:
+                self.tab_widget.setCurrentWidget(tab_batch)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
                 self.scope_bar.setVisible(False)
             return
 
-        if hasattr(self, "tab_batch_people"):
-            idx = self.tab_widget.indexOf(self.tab_batch_people)
-            if idx >= 0:
-                self.tab_widget.tabBar().setTabVisible(idx, False)
-            if self.tab_widget.currentWidget() == self.tab_batch_people:
-                self.tab_widget.setCurrentWidget(self.tab_home)
+        self._set_tab_visible(tab_batch, False)
+
+        if mode == "map":
+            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view):
+                self._set_tab_visible(tab, False)
+            self._set_tab_visible(tab_map, True)
+            if tab_map is not None:
+                self.tab_widget.setCurrentWidget(tab_map)
+            self.set_active_view_button("map")
+            if hasattr(self, "scope_bar") and self.scope_bar is not None:
+                self.scope_bar.setVisible(False)
+            return
+
+        self._set_tab_visible(tab_map, False)
 
         if mode == "viewer":
-            # In Single Image View, hide Home (0) and Find (2), showing File, Edit, Create, View
-            self.tab_widget.tabBar().setTabVisible(0, False)
-            self.tab_widget.tabBar().setTabVisible(1, True)
-            self.tab_widget.tabBar().setTabVisible(2, False)
-            self.tab_widget.tabBar().setTabVisible(3, True)
-            self.tab_widget.tabBar().setTabVisible(4, True)
+            # In Single Image View, hide Home and Find, showing File, Edit, Create, View
+            self._set_tab_visible(self.tab_home, False)
+            self._set_tab_visible(self.tab_edit, True)
+            self._set_tab_visible(self.tab_find, False)
+            self._set_tab_visible(self.tab_create, True)
+            self._set_tab_visible(self.tab_view, True)
             self._set_edit_tab_mode("viewer")
             self.tab_widget.setCurrentWidget(self.tab_edit)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
@@ -8750,26 +9274,13 @@ class RibbonToolbar(QWidget):
                 self.btn_zoom_fit.setVisible(True)
             if hasattr(self, "grp_zoom"):
                 self.grp_zoom.adjust_to_content()
-        elif mode == "map":
-            for i in range(5):
-                self.tab_widget.tabBar().setTabVisible(i, True)
-            self.tab_widget.setCurrentWidget(self.tab_view)
-            if hasattr(self, "btn_view_map"):
-                self.btn_view_map.setChecked(True)
-            if hasattr(self, "btn_view_thumbnails"):
-                self.btn_view_thumbnails.setChecked(False)
-            if hasattr(self, "scope_bar") and self.scope_bar is not None:
-                self.scope_bar.setVisible(False)
         else:
-            # Grid mode: restore Home and Find tabs
-            for i in range(5):
-                self.tab_widget.tabBar().setTabVisible(i, True)
-            if hasattr(self, "btn_view_map"):
-                self.btn_view_map.setChecked(False)
-            if hasattr(self, "btn_view_thumbnails"):
-                self.btn_view_thumbnails.setChecked(True)
+            # Grid / People Directory mode: restore main tabs
+            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view):
+                self._set_tab_visible(tab, True)
+            self.set_active_view_button("people" if mode == "people" else "gallery")
             self._set_edit_tab_mode("grid")
-            if self.tab_widget.currentWidget() in (self.tab_edit, getattr(self, "tab_batch_people", None)):
+            if self.tab_widget.currentWidget() in (self.tab_edit, tab_batch, tab_map):
                 self.tab_widget.setCurrentWidget(self.tab_home)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
                 self.scope_bar.setVisible(True)
