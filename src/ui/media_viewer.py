@@ -6964,7 +6964,7 @@ class SingleMediaViewer(QWidget):
             return
         super().keyPressEvent(event)
 
-    def _show_viewer_context_menu(self, pos: QPoint) -> None:
+    def _show_viewer_context_menu(self, pos: QPoint) -> QMenu | None:
         """Authentic context menu for SingleMediaViewer (Previous, Next, Rotate, Rescan for faces, etc.)."""
         if self.current_media_id is None:
             return
@@ -6997,8 +6997,9 @@ class SingleMediaViewer(QWidget):
             return
 
         menu = self._build_viewer_context_menu()
-        if menu is not None:
+        if menu is not None and not getattr(self, "_suppress_menu_exec", False):
             menu.exec(self.graphics_view.mapToGlobal(pos))
+        return menu
 
     def _build_viewer_context_menu(self) -> QMenu | None:
         """Constructs the authentic context menu for SingleMediaViewer (Open with, Rotate, Copy, Delete, etc.)."""
