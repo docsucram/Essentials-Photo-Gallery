@@ -94,6 +94,13 @@ from src.ui.grid_view import MediaCardDelegate, ThumbnailGridView
 from src.ui.left_nav_dock import LeftNavigationDock
 from src.ui.map_view import WorldMapView
 from src.ui.smart_album_dialog import SmartAlbumDialog
+from src.ui.win32_frame import (
+    apply_win32_frameless_styles,
+    handle_win32_native_event,
+    is_win32_frameless_supported,
+)
+from src.ui.albums_view import AlbumsView
+from src.ui.compare_view import CompareMediaView
 from src.ui.media_viewer import SingleMediaViewer
 from src.ui.people_directory_view import PeopleDirectoryView
 from src.utils.paths import get_icons_dir, get_themes_dir
@@ -696,10 +703,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.resize(1360, 840)
         self.setMinimumSize(500, 400)
 
-        self._resize_filter = _FramelessResizeFilter(self)
-        app = QApplication.instance()
-        if app:
-            app.installEventFilter(self._resize_filter)
+        self._resize_filter = None
+        if not is_win32_frameless_supported():
+            self._resize_filter = _FramelessResizeFilter(self)
+            app = QApplication.instance()
+            if app:
+                app.installEventFilter(self._resize_filter)
 
         self.engine = engine
         self.catalog_repo = CatalogRepository(engine)
@@ -824,6 +833,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.grid_view.set_person_header_bar(self.person_header_bar)
         self.person_header_bar.back_to_directory_requested.connect(self.open_people_directory_view)
         self.person_header_bar.review_suggestions_requested.connect(lambda pid: self.open_batch_people_view(person_id=pid))
+        self.person_header_bar.open_media_requested.connect(self.open_single_viewer)
         self.person_header_bar.view_mode_changed.connect(self._on_person_view_mode_changed)
         self.person_header_bar.person_renamed.connect(
             lambda pid, name: (self.refresh_navigation_and_autocomplete(), self.left_nav_dock.select_person(pid))
@@ -867,6 +877,19 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.person_header_bar.unnamed_person_named.connect(self._on_unnamed_person_named)
         self.central_stack.addWidget(self.people_directory_view)
 
+        # Visual Albums & Smart Albums Directory View
+        self.albums_view = AlbumsView(self.engine, self.central_stack)
+        self.albums_view.album_selected.connect(self._on_albums_view_album_selected)
+        self.albums_view.smart_album_selected.connect(self._on_albums_view_smart_album_selected)
+        self.albums_view.new_album_requested.connect(self._on_new_album_requested)
+        self.albums_view.rename_album_requested.connect(self._on_rename_album_requested)
+        self.albums_view.delete_album_requested.connect(self._on_delete_album_requested)
+        self.albums_view.new_smart_album_requested.connect(self._on_new_smart_album_requested)
+        self.albums_view.edit_smart_album_requested.connect(self._on_edit_smart_album_requested)
+        self.albums_view.rename_smart_album_requested.connect(self._on_rename_smart_album_requested)
+        self.albums_view.delete_smart_album_requested.connect(self._on_delete_smart_album_requested)
+        self.central_stack.addWidget(self.albums_view)
+
         # Integrated Duplicate & Burst Finder View (like World Map & Batch People Tag)
         from src.ui.duplicate_finder_dialog import DuplicateFinderView
         self.duplicate_finder_view = DuplicateFinderView(
@@ -877,6 +900,17 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.duplicate_finder_view.back_to_gallery_requested.connect(self.show_grid_view)
         self.duplicate_finder_view.duplicates_cleaned.connect(self._on_duplicates_cleaned)
         self.central_stack.addWidget(self.duplicate_finder_view)
+
+        # Integrated Multi-Photo Compare / Light Table View
+        self.compare_view = CompareMediaView(self.central_stack)
+        self.compare_view.bind_repositories(self.catalog_repo, self.thumb_repo)
+        self.compare_view.close_requested.connect(self._on_compare_closed)
+        self.compare_view.rating_changed.connect(lambda _mid, _r: self.rebuild_and_run_query())
+        self.compare_view.flag_toggled.connect(lambda _mid, _f: self.rebuild_and_run_query())
+        self.compare_view.media_deleted.connect(lambda _mid: self.rebuild_and_run_query())
+        self.compare_view.open_in_editor_requested.connect(self._on_compare_open_editor)
+        self.central_stack.addWidget(self.compare_view)
+        self.grid_view.compare_requested.connect(self.open_compare_view)
 
         self.setCentralWidget(self.central_stack)
 
@@ -1183,6 +1217,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         # Left Navigation Dock
         self.left_nav_dock.filter_changed.connect(self._on_nav_filter_changed)
         self.left_nav_dock.people_directory_requested.connect(self.open_people_directory_view)
+        self.left_nav_dock.albums_view_requested.connect(self.open_albums_view)
+        self.left_nav_dock.section_order_changed.connect(self._on_nav_section_order_changed)
         self.left_nav_dock.folder_add_requested.connect(self._prompt_and_add_folder)
         self.left_nav_dock.folder_remove_requested.connect(self._on_remove_folder_from_library)
         self.left_nav_dock.folder_renamed.connect(self._on_folder_renamed)
@@ -2365,6 +2401,19 @@ class PhotoGalleryMainWindow(QMainWindow):
                     self.scope_bar.set_scope_label("People directory")
                     self.ribbon.set_scope_label("People")
                     self.lbl_sync_status.setText("People directory")
+            elif view == "albums_view":
+                if hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
+                    self.show_grid_view()
+                self._active_map_media_ids = None
+                self.grid_view.set_person_header(None)
+                self.card_delegate.set_face_crop_person_id(None)
+                if hasattr(self, "albums_view"):
+                    self.central_stack.setCurrentWidget(self.albums_view)
+                    self.ribbon.set_active_mode("albums")
+                    self.albums_view.refresh()
+                    self.scope_bar.set_scope_label("Albums")
+                    self.ribbon.set_scope_label("Albums")
+                    self.lbl_sync_status.setText("Albums")
             elif view == "unnamed_person":
                 if hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
                     self.show_grid_view()
@@ -2520,6 +2569,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.show_grid_view()
         elif hasattr(self, "people_directory_view") and self.central_stack.currentWidget() == self.people_directory_view:
             self.show_grid_view()
+        elif hasattr(self, "albums_view") and self.central_stack.currentWidget() == self.albums_view:
+            self.show_grid_view()
         elif hasattr(self, "batch_people_view") and self.central_stack.currentWidget() == self.batch_people_view:
             self.close_batch_people_view()
 
@@ -2533,9 +2584,28 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         self.rebuild_and_run_query()
 
+    def _restore_docks_after_batch_people(self) -> None:
+        """Restores left navigation and right tag docks when leaving BatchPeopleView."""
+        if hasattr(self, "batch_people_view"):
+            self.batch_people_view.set_use_ribbon_mode(False)
+        if hasattr(self, "_prev_ribbon_tab"):
+            delattr(self, "_prev_ribbon_tab")
+        is_nav_vis = getattr(self, "_nav_dock_was_visible", True)
+        self.left_nav_dock.setVisible(is_nav_vis)
+        if is_nav_vis:
+            self.left_nav_dock.show()
+            self.left_nav_dock.setMinimumWidth(190)
+            self.resizeDocks([self.left_nav_dock], [230], Qt.Horizontal)
+        if hasattr(self, "ribbon") and hasattr(self.ribbon, "btn_toggle_nav_pane"):
+            self.ribbon.btn_toggle_nav_pane.setChecked(is_nav_vis)
+        self.right_tag_dock.show()
+        self.right_tag_dock.setVisible(True)
+        self.right_tag_dock.set_view_mode("grid")
+
     def open_people_directory_view(self) -> None:
         """Opens Immich / Google Photos inspired People Directory grid."""
         if hasattr(self, "people_directory_view"):
+            self._restore_docks_after_batch_people()
             self._active_map_media_ids = None
             self.grid_view.set_person_header(None)
             self.card_delegate.set_face_crop_person_id(None)
@@ -2546,6 +2616,83 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.ribbon.set_scope_label("People")
             self.lbl_sync_status.setText("People directory")
             self._push_nav_state({"view": "people_directory"})
+
+    def open_albums_view(self) -> None:
+        """Opens the visual Albums & Smart Albums directory view."""
+        if hasattr(self, "albums_view"):
+            self._restore_docks_after_batch_people()
+            self._active_map_media_ids = None
+            self.grid_view.set_person_header(None)
+            self.card_delegate.set_face_crop_person_id(None)
+            self.central_stack.setCurrentWidget(self.albums_view)
+            self.ribbon.set_active_mode("albums")
+            self.albums_view.refresh()
+            self.scope_bar.set_scope_label("Albums")
+            self.ribbon.set_scope_label("Albums")
+            self.lbl_sync_status.setText("Albums")
+            if not self._is_navigating_history:
+                self._push_nav_state({"view": "albums_view"})
+
+    def _on_albums_view_album_selected(self, album_id: int, album_name: str) -> None:
+        self._active_map_media_ids = None
+        self.left_nav_dock._select_album_scope(album_id=int(album_id), album_name=album_name)
+
+    def _on_albums_view_smart_album_selected(self, smart_album_id: int, smart_album_name: str) -> None:
+        self._active_map_media_ids = None
+        self.left_nav_dock._select_smart_album_scope(
+            smart_album_id=int(smart_album_id), smart_album_name=smart_album_name
+        )
+
+    def open_compare_view(self, media_ids: list[int] | None = None) -> None:
+        """Open the Multi-Photo Compare / Light Table view for the selected or active grid photos."""
+        if not hasattr(self, "compare_view"):
+            return
+        ids = list(media_ids) if media_ids is not None else self.grid_view.selected_media_ids()
+        if not ids:
+            return
+        all_grid_ids = [
+            int(r.id) for r in getattr(self.catalog_model, "_records", []) if getattr(r, "id", None) is not None
+        ]
+        self.left_nav_dock.setVisible(False)
+        self.right_tag_dock.setVisible(False)
+        self.compare_view.bind_repositories(self.catalog_repo, self.thumb_repo)
+        self.compare_view.set_dark_mode(getattr(self, "_dark_mode", False))
+        self.compare_view.open_media_ids(ids, all_grid_ids=all_grid_ids, repo=self.catalog_repo, thumb_repo=self.thumb_repo)
+        self.central_stack.setCurrentWidget(self.compare_view)
+        self.ribbon.set_active_mode("compare")
+        if hasattr(self.ribbon, "btn_cmp_lock_sync"):
+            self.ribbon.btn_cmp_lock_sync.setChecked(self.compare_view.lock_sync)
+        if hasattr(self.ribbon, "btn_cmp_peaking"):
+            self.ribbon.btn_cmp_peaking.setChecked(self.compare_view.focus_peaking)
+        if hasattr(self.ribbon, "btn_cmp_clipping"):
+            self.ribbon.btn_cmp_clipping.setChecked(self.compare_view.clipping_warnings)
+        if hasattr(self.ribbon, "btn_cmp_auto_advance"):
+            self.ribbon.btn_cmp_auto_advance.setChecked(self.compare_view.auto_advance)
+        if hasattr(self.ribbon, "btn_cmp_dark_bg"):
+            self.ribbon.btn_cmp_dark_bg.setChecked(getattr(self, "_dark_mode", False))
+        self.compare_view.setFocus()
+
+    def _on_compare_closed(self, winner_id: Any = None) -> None:
+        self.left_nav_dock.setVisible(True)
+        self.right_tag_dock.setVisible(True)
+        self.show_grid_view()
+        if winner_id is not None and hasattr(self.grid_view, "select_media_id"):
+            try:
+                self.grid_view.select_media_id(int(winner_id))
+            except Exception:
+                pass
+
+    def _on_compare_open_editor(self, media_id: int) -> None:
+        self.left_nav_dock.setVisible(True)
+        self.right_tag_dock.setVisible(True)
+        self.open_single_viewer(int(media_id))
+
+    def _on_nav_section_order_changed(self, order: list[str]) -> None:
+        try:
+            settings = QSettings("PhotoGallery64", "PhotoGallery64")
+            settings.setValue("nav_section_order", json.dumps(order))
+        except Exception:
+            pass
 
     def _on_directory_person_selected(self, person_id: int) -> None:
         """Navigates from People Directory into a single person's photo timeline."""
@@ -3075,6 +3222,9 @@ class PhotoGalleryMainWindow(QMainWindow):
     def _on_rating_shortcut(self, rating: int) -> None:
         focused = QApplication.focusWidget()
         if isinstance(focused, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            return
+        if hasattr(self, "compare_view") and self.central_stack.currentWidget() is self.compare_view:
+            self.compare_view.rate_focused_pane(rating)
             return
         self.apply_rating_to_selection(rating)
 
@@ -4316,20 +4466,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.central_stack.setCurrentWidget(self.grid_view)
         if hasattr(self, "ribbon"):
             self.ribbon.set_active_mode("grid")
-        if hasattr(self, "batch_people_view"):
-            self.batch_people_view.set_use_ribbon_mode(False)
-        if hasattr(self, "_prev_ribbon_tab"):
-            delattr(self, "_prev_ribbon_tab")
-        self.left_nav_dock.show()
-        self.left_nav_dock.setVisible(True)
-        self.right_tag_dock.show()
-        self.right_tag_dock.setVisible(True)
-        self.right_tag_dock.set_view_mode("grid")
+        self._restore_docks_after_batch_people()
         if getattr(self, "_batch_people_modified", False):
             self._batch_people_modified = False
             self.refresh_people_navigation_and_autocomplete()
             self.rebuild_and_run_query()
-        self.lbl_sync_status.setText("✓ Returned to gallery")
+        self.lbl_sync_status.setText("Returned to gallery")
         if not self._is_navigating_history:
             filt = self.current_filter.to_dict() if hasattr(self, "current_filter") and self.current_filter else {}
             self._push_nav_state({"view": "grid", "filter": filt})
@@ -4346,7 +4488,6 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.lbl_sync_status.setText(f"✓ Confirmed {len(face_ids)} face(s)")
         if getattr(self, "find_people_enabled", True):
             self.start_face_detection()
-        self.show_status_message(f"✓ Tagged '{person_name.strip()}' in {len(target_ids)} item(s)", 3000)
 
     def _on_batch_faces_rejected(self, face_ids: list[int]) -> None:
         """Slot called when faces are rejected in BatchPeopleView."""
@@ -5527,6 +5668,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 and self.media_viewer.current_media_id == mid
             )
             if in_viewer and self.media_viewer.current_pil_image is not None:
+                self.media_viewer.ensure_master_rendered()
                 save_fmt = "JPEG" if new_file.suffix.lower() in (".jpg", ".jpeg") else "PNG"
                 self.media_viewer.current_pil_image.save(new_file, format=save_fmt, quality=95)
             else:
@@ -5824,6 +5966,51 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.open_tag_hierarchy_dialog()
         elif action_id in ("show_thumbnails_view", "show_grid_view"):
             self.trigger_thumbnail_view()
+        elif action_id == "toggle_albums_view":
+            if hasattr(self, "albums_view") and self.central_stack.currentWidget() == self.albums_view:
+                self.show_grid_view()
+            else:
+                self.open_albums_view()
+        elif action_id == "open_compare_view":
+            self.open_compare_view()
+        elif action_id == "compare_layout_side":
+            self.compare_view.set_layout_mode("side_by_side")
+        elif action_id == "compare_layout_top_bottom":
+            self.compare_view.set_layout_mode("top_bottom")
+        elif action_id == "compare_layout_3up":
+            self.compare_view.set_layout_mode("three_up")
+        elif action_id == "compare_layout_quad":
+            self.compare_view.set_layout_mode("quad")
+        elif action_id == "compare_layout_wipe":
+            self.compare_view.set_layout_mode("wipe")
+        elif action_id == "compare_swap_panes":
+            self.compare_view.swap_panes()
+        elif action_id.startswith("compare_lock_sync:"):
+            self.compare_view.set_lock_sync(action_id.endswith(":1"))
+        elif action_id == "compare_zoom_face":
+            self.compare_view.zoom_to_faces()
+        elif action_id == "compare_zoom_1to1":
+            self.compare_view.zoom_actual_1_to_1()
+        elif action_id == "compare_zoom_fit":
+            self.compare_view.zoom_fit()
+        elif action_id.startswith("compare_focus_peaking:"):
+            self.compare_view.set_focus_peaking(action_id.endswith(":1"))
+        elif action_id.startswith("compare_clipping_warnings:"):
+            self.compare_view.set_clipping_warnings(action_id.endswith(":1"))
+        elif action_id.startswith("compare_auto_advance:"):
+            self.compare_view.set_auto_advance(action_id.endswith(":1"))
+        elif action_id.startswith("compare_dark_backdrop:"):
+            self.compare_view.set_dark_mode(action_id.endswith(":1"))
+        elif action_id == "compare_pin_active":
+            self.compare_view.toggle_pin_focused_pane()
+        elif action_id == "compare_dismiss_active":
+            self.compare_view.dismiss_focused_pane()
+        elif action_id == "compare_keep_winner":
+            self.compare_view.keep_winner_only()
+        elif action_id == "compare_open_editor":
+            self.compare_view.open_winner_in_editor()
+        elif action_id == "compare_close":
+            self.compare_view.close_compare()
         elif action_id == "toggle_people_directory":
             if hasattr(self, "people_directory_view") and self.central_stack.currentWidget() == self.people_directory_view:
                 self.show_grid_view()
@@ -6409,6 +6596,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             show_people=getattr(self.left_nav_dock, "_show_people", True),
             show_ratings=getattr(self.left_nav_dock, "_show_ratings", True),
             show_places=getattr(self.left_nav_dock, "_show_places", True),
+            show_albums=getattr(self.left_nav_dock, "_show_albums", True),
             find_people_enabled=getattr(self, "find_people_enabled", True),
             tooltip_previews=getattr(self, "tooltip_previews", True),
             jpeg_quality=getattr(self, "jpeg_quality", 83),
@@ -6450,12 +6638,14 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.nav_show_people = dlg.show_people()
             self.nav_show_ratings = dlg.show_ratings()
             self.nav_show_places = dlg.show_places()
+            self.nav_show_albums = dlg.show_albums()
             self.left_nav_dock.set_navigation_sections_visibility(
                 show_dates=self.nav_show_dates,
                 show_tags=self.nav_show_tags,
                 show_people=self.nav_show_people,
                 show_ratings=self.nav_show_ratings,
                 show_places=self.nav_show_places,
+                show_albums=self.nav_show_albums,
             )
 
             old_find_people = getattr(self, "find_people_enabled", True)
@@ -6481,6 +6671,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             settings.setValue("nav_show_people", self.nav_show_people)
             settings.setValue("nav_show_ratings", self.nav_show_ratings)
             settings.setValue("nav_show_places", self.nav_show_places)
+            settings.setValue("nav_show_albums", self.nav_show_albums)
             settings.setValue("find_people_enabled", self.find_people_enabled)
             settings.setValue("tooltip_previews", self.tooltip_previews)
             settings.setValue("jpeg_quality", self.jpeg_quality)
@@ -7423,8 +7614,10 @@ class PhotoGalleryMainWindow(QMainWindow):
                 getattr(self, "person_header_bar", None),
                 getattr(self, "scope_bar", None),
                 getattr(self, "people_directory_view", None),
+                getattr(self, "albums_view", None),
                 getattr(self, "batch_people_view", None),
                 getattr(self, "duplicate_finder_view", None),
+                getattr(self, "compare_view", None),
             ):
                 if w is not None:
                     if hasattr(w, "apply_theme_mode"):
@@ -7701,6 +7894,16 @@ class PhotoGalleryMainWindow(QMainWindow):
             focus_w = self.right_tag_dock.focusWidget()
         is_text_entry = isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit))
 
+        if (
+            not is_text_entry
+            and hasattr(self, "compare_view")
+            and self.central_stack.currentWidget() is self.compare_view
+            and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier))
+        ):
+            self.compare_view.keyPressEvent(event)
+            if event.isAccepted():
+                return
+
         # Star ratings: 0, 1, 2, 3, 4, 5 (when not focused on a text entry and no Ctrl/Alt modifier)
         if not is_text_entry and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier):
             if Qt.Key_0 <= event.key() <= Qt.Key_5:
@@ -7911,6 +8114,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             settings.setValue("nav_show_people", getattr(self.left_nav_dock, "_show_people", True))
             settings.setValue("nav_show_ratings", getattr(self.left_nav_dock, "_show_ratings", True))
             settings.setValue("nav_show_places", getattr(self.left_nav_dock, "_show_places", True))
+            settings.setValue("nav_show_albums", getattr(self.left_nav_dock, "_show_albums", True))
+            settings.setValue("nav_section_order", json.dumps(self.left_nav_dock.get_section_order()))
             settings.setValue("find_people_enabled", getattr(self, "find_people_enabled", False))
             settings.setValue("tooltip_previews", getattr(self, "tooltip_previews", True))
             settings.setValue("jpeg_quality", getattr(self, "jpeg_quality", 83))
@@ -8042,6 +8247,15 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.nav_show_people = _to_bool(_get_val("nav_show_people", True), True)
             self.nav_show_ratings = _to_bool(_get_val("nav_show_ratings", True), True)
             self.nav_show_places = _to_bool(_get_val("nav_show_places", True), True)
+            self.nav_show_albums = _to_bool(_get_val("nav_show_albums", True), True)
+            raw_order = _get_val("nav_section_order", None)
+            if raw_order:
+                try:
+                    parsed_order = json.loads(str(raw_order)) if isinstance(raw_order, str) else list(raw_order)
+                    if isinstance(parsed_order, list):
+                        self.left_nav_dock.set_section_order(parsed_order)
+                except Exception:
+                    pass
             self.find_people_enabled = _to_bool(_get_val("find_people_enabled", False), False)
             self.tooltip_previews = _to_bool(_get_val("tooltip_previews", True), True)
             self.jpeg_quality = int(_get_val("jpeg_quality", 83))
@@ -8060,6 +8274,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 show_people=self.nav_show_people,
                 show_ratings=self.nav_show_ratings,
                 show_places=self.nav_show_places,
+                show_albums=self.nav_show_albums,
             )
 
             saved_theme = _get_val("theme", "wlpg_aero")
@@ -8211,19 +8426,13 @@ class PhotoGalleryMainWindow(QMainWindow):
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
-        try:
-            import ctypes
-            class MARGINS(ctypes.Structure):
-                _fields_ = [
-                    ("cxLeftWidth", ctypes.c_int),
-                    ("cxRightWidth", ctypes.c_int),
-                    ("cyTopHeight", ctypes.c_int),
-                    ("cyBottomHeight", ctypes.c_int),
-                ]
-            m = MARGINS(1, 1, 1, 1)
-            ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(int(self.winId()), ctypes.byref(m))
-        except Exception:
-            pass
+        apply_win32_frameless_styles(int(self.winId()))
+
+    def nativeEvent(self, eventType, message):
+        res = handle_win32_native_event(self, eventType, message)
+        if res is not None:
+            return res
+        return super().nativeEvent(eventType, message)
         if not getattr(self, "_initial_show_done", False):
             self._initial_show_done = True
             if self.central_stack.currentWidget() == self.media_viewer:
@@ -8251,6 +8460,8 @@ class PhotoGalleryMainWindow(QMainWindow):
     def _refresh_albums_ui(self) -> None:
         if hasattr(self, "left_nav_dock"):
             self.left_nav_dock.refresh_albums_only(self.catalog_repo)
+        if hasattr(self, "albums_view"):
+            self.albums_view.refresh()
 
     def add_media_to_album(self, album_id: int, media_ids: Sequence[int]) -> int:
         """Add ``media_ids`` into Static Album ``album_id`` and refresh UI."""
@@ -8369,7 +8580,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             return
         try:
             self.catalog_repo.update_smart_album(
-                int(smart_album_id), name=dlg.get_name(), rules=dlg.get_rules_dict()
+                int(smart_album_id), name=dlg.get_name(), rules_dict=dlg.get_rules_dict()
             )
         except Exception as exc:
             QMessageBox.warning(self, "Edit Smart Album", f"Could not update Smart Album: {exc}")

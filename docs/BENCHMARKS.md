@@ -72,3 +72,33 @@ All bottlenecks identified in the 100,000- and 500,000-item scale benchmark have
 | **Cold 40-Item Viewport (First Thumbnail Ready)** | `46.0 ms` (+940ms UI stall) | **`28.4 ms` (+0ms stall)** | `176.9 ms` (+4.5s UI stall) | **`78.1 ms` (+0ms stall)** | **~2.2× faster worker + no UI stall** |
 | **Cold 40-Item Viewport (All 40 Decoded)** | `258.1 ms` | **`204.1 ms`** | `182.0 ms` | **`120.2 ms`** | **1.3× – 1.5× faster** |
 | **Warm 40-Item Viewport (Batched SQL Read)** | `23.8 ms` | **`19.6 ms`** | `16.7 ms` | **`12.4 ms`** | **Sub-20ms full viewport** |
+
+---
+
+## 3. v0.12.0 Verification Run & Editor/Colour Pop Micro-Benchmarks
+
+*Measured: 2026-11-13 (`QT_QPA_PLATFORM=offscreen`, `tests/benchmark_scale.py` + v0.12.0 pipeline micro-benchmarks)*
+
+### A. 100,000 & 500,000 Item Scale Regression Check (`tests/benchmark_scale.py`)
+
+| Metric | 100k (v0.12.0) | 500k (v0.12.0) | Status |
+| :--- | :---: | :---: | :--- |
+| **`set_records()` + Qt `endResetModel()`** | `13.3 ms` | `37.4 ms` | Pass (no regression) |
+| **1× `notify_pixmap_ready()` / 40× Est.** | `1.1 ms` / `45.7 ms` | `1.8 ms` / `70.1 ms` | Pass (direct update `3.53 ms` / `6.50 ms`) |
+| **Mosaic Layout `compute_mosaic_geometry()`** | `44.3 ms` | `293.3 ms` | Pass |
+| **SQL `query_all` / `query_folder` / `nav_refresh`** | `205.2 / 235.2 / 50.3 ms` | `1,389.5 / 1,880.2 / 148.1 ms` | Pass |
+| **Scroll: Empty / Warm `p95`** | `10.34 / 12.84 ms` | `10.25 / 12.71 ms` | Pass (`60+ FPS`) |
+| **Scroll: Contended / Arrival Max** | `15.27 / 11.17 ms` | `17.07 / 10.62 ms` | Pass (0 hitches) |
+| **Cold 40-Item Viewport (First / Total)** | `24.3 ms` / `211.6 ms` | `26.5 ms` / `116.9 ms` | Pass |
+| **Warm 40-Item Viewport (Workers / Batched SQL)** | `45.8 ms` / `22.6 ms` | `45.6 ms` / `23.0 ms` | Pass |
+
+### B. Editor Stage Cache & Colour Pop Multi-Pick Speedups (`v0.12.0`)
+
+| Pipeline Benchmark (`1280×853` Proxy, `960×640` Scrub) | Baseline / Cold | v0.12.0 Optimized | Speedup |
+| :--- | :---: | :---: | :--- |
+| **Editor `render_adjusted_image` (`1280px` cold, Denoise+Dehaze+LAB+Vignette)** | `270.3 ms` | — | Baseline |
+| **Editor `dd_img` Stage Cache Hit (adjusting Exposure/LAB)** | `270.3 ms` | **`81.5 ms`** | **3.3× faster** |
+| **Editor `tl_img` Stage Cache Hit (adjusting Vignette/Preset)** | `270.3 ms` | **`25.8 ms`** | **10.5× faster** |
+| **Editor `960px` Active Scrub Proxy (cold)** | `270.3 ms` | **`87.0 ms`** | **3.1× faster** |
+| **Colour Pop 4-Colour Mask (active tolerance scrub)** | `112.1 ms` | **`32.6 ms`** | **3.4× faster** |
+| **Colour Pop 4-Colour Mask (released, `guided_filter_matte`)** | `112.1 ms` | **`43.9 ms`** | **2.6× faster** |

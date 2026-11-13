@@ -5713,6 +5713,7 @@ class RibbonToolbar(QWidget):
         self.tab_view = self._build_view_tab()
         self.tab_batch_people = self._build_batch_people_tab()
         self.tab_map = self._build_map_tab()
+        self.tab_compare = self._build_compare_tab()
 
         self.tab_widget.addTab(self.tab_home, "Home")
         self.tab_widget.addTab(self.tab_edit, "Edit")
@@ -5721,8 +5722,10 @@ class RibbonToolbar(QWidget):
         self.tab_widget.addTab(self.tab_view, "View")
         self.tab_widget.addTab(self.tab_batch_people, "Batch people tagging")
         self.tab_widget.addTab(self.tab_map, "Map")
+        self.tab_widget.addTab(self.tab_compare, "Compare")
         self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_batch_people), False)
         self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_map), False)
+        self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_compare), False)
 
         self.tab_widget.tabBarDoubleClicked.connect(self._on_tab_bar_double_clicked)
         self.tab_widget.tabBarClicked.connect(self._on_tab_bar_clicked)
@@ -6284,6 +6287,12 @@ class RibbonToolbar(QWidget):
         self.setUpdatesEnabled(False)
         try:
             for btn in getattr(self, "_all_themed_buttons", []):
+                cmp_kind = btn.property("_compare_icon_kind")
+                if cmp_kind:
+                    size = 32 if getattr(btn, "_is_large", False) else 16
+                    btn.setIcon(self._make_compare_icon(str(cmp_kind), size))
+                    btn.setIconSize(QSize(size, size))
+                    continue
                 kind = getattr(btn, "_icon_kind", None)
                 if kind:
                     size = 32 if getattr(btn, "_is_large", False) else 16
@@ -6480,6 +6489,7 @@ class RibbonToolbar(QWidget):
             getattr(self, "btn_zoom_in", None),
             getattr(self, "btn_zoom_out", None),
             getattr(self, "btn_view_thumbnails", None),
+            getattr(self, "btn_view_albums", None),
             getattr(self, "btn_view_people", None),
             getattr(self, "btn_view_map", None),
             getattr(self, "btn_view_slideshow", None),
@@ -8182,6 +8192,8 @@ class RibbonToolbar(QWidget):
         btn_more.setCursor(Qt.PointingHandCursor)
         btn_more.setStyleSheet(btn_style)
 
+        self._arrange_box = arrange_box
+        self._arrange_scroll_btns = (btn_up, btn_dn, btn_more)
         self.btn_arrange_more = btn_more
         btn_more.clicked.connect(self._show_arrange_more_menu)
         v_arrows.addWidget(btn_up)
@@ -8346,6 +8358,15 @@ class RibbonToolbar(QWidget):
         )
         grp_slideshow.content_layout.addWidget(self.btn_view_thumbnails)
 
+        self.btn_view_albums = self._make_btn(
+            "Albums", "pictures_library", grp_slideshow, large=True, checkable=True
+        )
+        self.btn_view_albums.setToolTip("Open the Albums Directory to browse Static and Smart Albums")
+        self.btn_view_albums.clicked.connect(
+            lambda: self.action_triggered.emit("toggle_albums_view")
+        )
+        grp_slideshow.content_layout.addWidget(self.btn_view_albums)
+
         self.btn_view_people = self._make_btn(
             "People", "people_tag", grp_slideshow, large=True, checkable=True
         )
@@ -8359,6 +8380,13 @@ class RibbonToolbar(QWidget):
         self.btn_view_map.setToolTip("Explore geotagged photos on the World Map (Leaflet / Offline)")
         self.btn_view_map.clicked.connect(lambda: self.action_triggered.emit("toggle_map_view"))
         grp_slideshow.content_layout.addWidget(self.btn_view_map)
+
+        self.btn_view_compare = self._make_btn("Compare", "layout_grid", grp_slideshow, large=True)
+        self.btn_view_compare.setProperty("_compare_icon_kind", "compare_ab")
+        self.btn_view_compare.setIcon(self._make_compare_icon("compare_ab"))
+        self.btn_view_compare.setToolTip("Compare selected photos side-by-side (C)")
+        self.btn_view_compare.clicked.connect(lambda: self.action_triggered.emit("open_compare_view"))
+        grp_slideshow.content_layout.addWidget(self.btn_view_compare)
 
         split_view, self.btn_view_slideshow = self._make_slideshow_split_button(grp_slideshow)
         grp_slideshow.content_layout.addWidget(split_view)
@@ -8822,6 +8850,254 @@ class RibbonToolbar(QWidget):
                 self.btn_batch_ignore.setText("Don't show\nagain")
                 self.btn_batch_ignore.setToolTip("Ignore / don't suggest this face again (I)")
 
+    @staticmethod
+    def _make_compare_icon(kind: str, size: int = 32) -> QIcon:
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(QColor("#1E3A5F"), 1.6)
+        fill = QColor("#DCEBFA")
+        p.setPen(pen)
+        p.setBrush(fill)
+        m = max(2, round(size * 4 / 32))
+        w = size - 2 * m
+        h = size - 2 * m
+        if kind == "compare_ab":
+            half = (w - 3) // 2
+            p.drawRoundedRect(m, m, half, h, 2, 2)
+            p.drawRoundedRect(m + half + 3, m, w - half - 3, h, 2, 2)
+            p.setPen(QPen(QColor("#0F6CBD"), 1.6))
+            p.drawLine(m + half + 1, m - 1, m + half + 1, m + h + 1)
+            f = QFont("Segoe UI", max(6, round(size * 8 / 32)), QFont.Weight.Bold)
+            p.setFont(f)
+            p.setPen(QColor("#1E3A5F"))
+            p.drawText(QRectF(m, m, half, h), Qt.AlignmentFlag.AlignCenter, "A")
+            p.drawText(QRectF(m + half + 3, m, w - half - 3, h), Qt.AlignmentFlag.AlignCenter, "B")
+        elif kind == "side_by_side":
+            half = (w - 2) // 2
+            p.drawRoundedRect(m, m, half, h, 2, 2)
+            p.drawRoundedRect(m + half + 2, m, w - half - 2, h, 2, 2)
+        elif kind == "top_bottom":
+            half = (h - 2) // 2
+            p.drawRoundedRect(m, m, w, half, 2, 2)
+            p.drawRoundedRect(m, m + half + 2, w, h - half - 2, 2, 2)
+        elif kind == "three_up":
+            col = (w - 4) // 3
+            p.drawRoundedRect(m, m, col, h, 2, 2)
+            p.drawRoundedRect(m + col + 2, m, col, h, 2, 2)
+            p.drawRoundedRect(m + 2 * (col + 2), m, w - 2 * (col + 2), h, 2, 2)
+        elif kind == "quad":
+            cw = (w - 2) // 2
+            ch = (h - 2) // 2
+            p.drawRoundedRect(m, m, cw, ch, 2, 2)
+            p.drawRoundedRect(m + cw + 2, m, w - cw - 2, ch, 2, 2)
+            p.drawRoundedRect(m, m + ch + 2, cw, h - ch - 2, 2, 2)
+            p.drawRoundedRect(m + cw + 2, m + ch + 2, w - cw - 2, h - ch - 2, 2, 2)
+        elif kind == "wipe":
+            p.drawRoundedRect(m, m, w, h, 2, 2)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#93C5FD"))
+            p.drawRect(m + 1, m + 1, w // 2 - 1, h - 2)
+            cx = m + w // 2
+            p.setPen(QPen(QColor("#0F6CBD"), 2.0))
+            p.drawLine(cx, m - 1, cx, m + h + 1)
+            p.setBrush(QColor("#0F6CBD"))
+            p.drawEllipse(QPointF(cx, m + h * 0.5), 3.5, 3.5)
+        elif kind == "lock_sync":
+            p.drawRoundedRect(4, 9, 11, 14, 2, 2)
+            p.drawRoundedRect(17, 9, 11, 14, 2, 2)
+            p.setPen(QPen(QColor("#0F6CBD"), 2.2))
+            p.drawLine(11, 16, 21, 16)
+        elif kind == "clipping":
+            p.drawRoundedRect(m, m, w, h, 3, 3)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#EF4444"))
+            p.drawEllipse(m + 3, m + 4, 8, 8)
+            p.setBrush(QColor("#2563EB"))
+            p.drawEllipse(m + w - 11, m + h - 12, 8, 8)
+        elif kind == "dark_backdrop":
+            # Half-black / half-white contrast circle
+            r = QRectF(m + 1, m + 1, w - 2, h - 2)
+            p.setPen(QPen(QColor("#334155"), 1.6))
+            p.setBrush(QColor("#FFFFFF"))
+            p.drawEllipse(r)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#111827"))
+            p.drawPie(r, 90 * 16, 180 * 16)
+            p.setPen(QPen(QColor("#334155"), 1.6))
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(r)
+        elif kind == "auto_advance":
+            p.drawRoundedRect(m, m + 3, w - 4, h - 6, 2, 2)
+            p.setPen(QPen(QColor("#0F6CBD"), 2.0))
+            p.drawLine(m + 5, size // 2, m + w - 3, size // 2)
+            p.drawLine(m + w - 8, size // 2 - 4, m + w - 3, size // 2)
+            p.drawLine(m + w - 8, size // 2 + 4, m + w - 3, size // 2)
+        p.end()
+        return QIcon(pm)
+
+    def _build_compare_tab(self) -> QWidget:
+        """Contextual 'Compare' Ribbon tab for Multi-Photo Light Table View."""
+        page = _RibbonPage()
+        hbox = QHBoxLayout(page)
+        hbox.setContentsMargins(4, 2, 4, 2)
+        hbox.setSpacing(4)
+
+        # Group 1: Layout
+        self.grp_cmp_layout = _RibbonGroupBox("Layout", page)
+        self.btn_cmp_side = self._make_btn("Side-by-Side", "layout_grid", self.grp_cmp_layout, large=True)
+        self.btn_cmp_side.setProperty("_compare_icon_kind", "side_by_side")
+        self.btn_cmp_side.setIcon(self._make_compare_icon("side_by_side"))
+        self.btn_cmp_side.setToolTip("Side-by-Side (2-Up)\nDisplay two photos next to each other in vertical split panes.")
+        self.btn_cmp_side.clicked.connect(lambda: self.action_triggered.emit("compare_layout_side"))
+
+        self.btn_cmp_top_bot = self._make_btn("Top / Bottom", "layout_grid", self.grp_cmp_layout, large=True)
+        self.btn_cmp_top_bot.setProperty("_compare_icon_kind", "top_bottom")
+        self.btn_cmp_top_bot.setIcon(self._make_compare_icon("top_bottom"))
+        self.btn_cmp_top_bot.setToolTip("Top / Bottom (2-Up)\nStack two photos vertically—ideal for wide panoramas or landscape shots.")
+        self.btn_cmp_top_bot.clicked.connect(lambda: self.action_triggered.emit("compare_layout_top_bottom"))
+
+        self.btn_cmp_3up = self._make_btn("3-Up", "layout_grid", self.grp_cmp_layout, large=True)
+        self.btn_cmp_3up.setProperty("_compare_icon_kind", "three_up")
+        self.btn_cmp_3up.setIcon(self._make_compare_icon("three_up"))
+        self.btn_cmp_3up.setToolTip("3-Up\nDisplay three photos side-by-side simultaneously.")
+        self.btn_cmp_3up.clicked.connect(lambda: self.action_triggered.emit("compare_layout_3up"))
+
+        self.btn_cmp_quad = self._make_btn("2x2 Quad", "layout_grid", self.grp_cmp_layout, large=True)
+        self.btn_cmp_quad.setProperty("_compare_icon_kind", "quad")
+        self.btn_cmp_quad.setIcon(self._make_compare_icon("quad"))
+        self.btn_cmp_quad.setToolTip("2×2 Quad (4-Up)\nDisplay up to four photos in a 2×2 light-table grid.")
+        self.btn_cmp_quad.clicked.connect(lambda: self.action_triggered.emit("compare_layout_quad"))
+
+        self.btn_cmp_wipe = self._make_btn("Wipe\nSlider", "layout_grid", self.grp_cmp_layout, large=True)
+        self.btn_cmp_wipe.setProperty("_compare_icon_kind", "wipe")
+        self.btn_cmp_wipe.setIcon(self._make_compare_icon("wipe"))
+        self.btn_cmp_wipe.setToolTip(
+            "Before / After Wipe Slider\nOverlay Slot A and Slot B with a draggable curtain divider (double-click to reset to 50%)."
+        )
+        self.btn_cmp_wipe.clicked.connect(lambda: self.action_triggered.emit("compare_layout_wipe"))
+
+        self.btn_cmp_swap = self._make_btn("Swap\nPanes", "rotate_cw", self.grp_cmp_layout, large=True)
+        self.btn_cmp_swap.setToolTip("Swap Panes\nSwap the photos in the first two panes (left ↔ right or top ↔ bottom).")
+        self.btn_cmp_swap.clicked.connect(lambda: self.action_triggered.emit("compare_swap_panes"))
+
+        for b in (
+            self.btn_cmp_side,
+            self.btn_cmp_top_bot,
+            self.btn_cmp_3up,
+            self.btn_cmp_quad,
+            self.btn_cmp_wipe,
+            self.btn_cmp_swap,
+        ):
+            self.grp_cmp_layout.content_layout.addWidget(b)
+        self.grp_cmp_layout.adjust_to_content()
+        hbox.addWidget(self.grp_cmp_layout)
+
+        # Group 2: Inspect & Sync
+        self.grp_cmp_inspect = _RibbonGroupBox("Inspect & Sync", page)
+        self.btn_cmp_lock_sync = self._make_btn("Lock Pan\n& Zoom", "fit_window", self.grp_cmp_inspect, large=True, checkable=True)
+        self.btn_cmp_lock_sync.setProperty("_compare_icon_kind", "lock_sync")
+        self.btn_cmp_lock_sync.setIcon(self._make_compare_icon("lock_sync"))
+        self.btn_cmp_lock_sync.setChecked(True)
+        self.btn_cmp_lock_sync.setToolTip(
+            "Lock Pan & Zoom\nWhen enabled, zooming and panning one pane moves all panes together using normalized coordinates.\n"
+            "Tip: Hold Shift while dragging or scrolling to nudge a single pane independently."
+        )
+        self.btn_cmp_lock_sync.clicked.connect(
+            lambda checked: self.action_triggered.emit(f"compare_lock_sync:{1 if checked else 0}")
+        )
+
+        self.btn_cmp_zoom_face = self._make_btn("Zoom to\nFace (F)", "people_tag", self.grp_cmp_inspect, large=True)
+        self.btn_cmp_zoom_face.setToolTip(
+            "Zoom to Face (F)\nZoom all panes onto the primary detected face (~45% viewport height).\n"
+            "Press F again to cycle through multiple detected faces."
+        )
+        self.btn_cmp_zoom_face.clicked.connect(lambda: self.action_triggered.emit("compare_zoom_face"))
+
+        self.btn_cmp_1to1 = self._make_btn("1:1\n(100%)", "actual_size", self.grp_cmp_inspect, large=True)
+        self.btn_cmp_1to1.setToolTip("1:1 Actual Pixels (100%)\nZoom all panes to 100% pixel resolution to check critical focus and noise.")
+        self.btn_cmp_1to1.clicked.connect(lambda: self.action_triggered.emit("compare_zoom_1to1"))
+
+        self.btn_cmp_fit = self._make_btn("Fit to\nPane", "fit_window", self.grp_cmp_inspect, large=True)
+        self.btn_cmp_fit.setToolTip("Fit to Pane\nReset zoom so the entire photo fits inside each pane.")
+        self.btn_cmp_fit.clicked.connect(lambda: self.action_triggered.emit("compare_zoom_fit"))
+
+        self.btn_cmp_peaking = self._make_btn("Focus\nPeaking", "auto_adjust", self.grp_cmp_inspect, large=True, checkable=True)
+        self.btn_cmp_peaking.setToolTip(
+            "Focus Peaking\nOverlay bright green edge-contrast highlights on sharp, in-focus details across all panes."
+        )
+        self.btn_cmp_peaking.clicked.connect(
+            lambda checked: self.action_triggered.emit(f"compare_focus_peaking:{1 if checked else 0}")
+        )
+
+        self.btn_cmp_clipping = self._make_btn("Clipping\nWarnings", "auto_adjust", self.grp_cmp_inspect, large=True, checkable=True)
+        self.btn_cmp_clipping.setProperty("_compare_icon_kind", "clipping")
+        self.btn_cmp_clipping.setIcon(self._make_compare_icon("clipping"))
+        self.btn_cmp_clipping.setToolTip(
+            "Highlight & Shadow Clipping Warnings\nHighlight blown-out highlights in red and crushed black shadows in blue."
+        )
+        self.btn_cmp_clipping.clicked.connect(
+            lambda checked: self.action_triggered.emit(f"compare_clipping_warnings:{1 if checked else 0}")
+        )
+
+        self.btn_cmp_dark_bg = self._make_btn("Dark\nBackdrop", "fit_window", self.grp_cmp_inspect, large=True, checkable=True)
+        self.btn_cmp_dark_bg.setProperty("_compare_icon_kind", "dark_backdrop")
+        self.btn_cmp_dark_bg.setIcon(self._make_compare_icon("dark_backdrop"))
+        self.btn_cmp_dark_bg.setToolTip(
+            "Dark Backdrop (Compare Only)\nToggle a dark studio backdrop for Compare mode without changing the rest of the app's theme."
+        )
+        self.btn_cmp_dark_bg.clicked.connect(
+            lambda checked: self.action_triggered.emit(f"compare_dark_backdrop:{1 if checked else 0}")
+        )
+
+        for b in (
+            self.btn_cmp_lock_sync,
+            self.btn_cmp_zoom_face,
+            self.btn_cmp_1to1,
+            self.btn_cmp_fit,
+            self.btn_cmp_peaking,
+            self.btn_cmp_clipping,
+            self.btn_cmp_dark_bg,
+        ):
+            self.grp_cmp_inspect.content_layout.addWidget(b)
+        self.grp_cmp_inspect.adjust_to_content()
+        hbox.addWidget(self.grp_cmp_inspect)
+
+        # Group 3: Select & Cull
+        self.grp_cmp_cull = _RibbonGroupBox("Select & Cull", page)
+        self.btn_cmp_auto_advance = self._make_btn("Auto-\nAdvance", "next", self.grp_cmp_cull, large=True, checkable=True)
+        self.btn_cmp_auto_advance.setProperty("_compare_icon_kind", "auto_advance")
+        self.btn_cmp_auto_advance.setIcon(self._make_compare_icon("auto_advance"))
+        self.btn_cmp_auto_advance.setToolTip(
+            "Auto-Advance Challenger\nWhen a pane is Pinned, rating (1-5) or flagging (P) the other pane automatically advances it to the next candidate."
+        )
+        self.btn_cmp_auto_advance.clicked.connect(
+            lambda checked: self.action_triggered.emit(f"compare_auto_advance:{1 if checked else 0}")
+        )
+
+        self.btn_cmp_edit = self._make_btn("Open Selected\nin Editor", "fine_tune", self.grp_cmp_cull, large=True)
+        self.btn_cmp_edit.setToolTip("Open Selected in Editor\nOpen the focused (or pinned) photo directly in the Photo Editor.")
+        self.btn_cmp_edit.clicked.connect(lambda: self.action_triggered.emit("compare_open_editor"))
+
+        for b in (self.btn_cmp_auto_advance, self.btn_cmp_edit):
+            self.grp_cmp_cull.content_layout.addWidget(b)
+        self.grp_cmp_cull.adjust_to_content()
+        hbox.addWidget(self.grp_cmp_cull)
+
+        # Group 4: Close (directly to the right, not far right)
+        self.grp_cmp_close = _RibbonGroupBox("Close", page)
+        self.btn_cmp_close = self._make_btn("Close\nCompare (Esc)", "close_file", self.grp_cmp_close, large=True)
+        self.btn_cmp_close.setToolTip("Close Compare (Esc)\nExit Compare mode and return to the gallery.")
+        self.btn_cmp_close.clicked.connect(lambda: self.action_triggered.emit("compare_close"))
+        self.grp_cmp_close.content_layout.addWidget(self.btn_cmp_close)
+        self.grp_cmp_close.adjust_to_content()
+        hbox.addWidget(self.grp_cmp_close)
+
+        hbox.addStretch(1)
+
+        return page
+
     def _build_map_tab(self) -> QWidget:
         from src.ui.map_view import _MapLocationSearchBox
 
@@ -9200,9 +9476,11 @@ class RibbonToolbar(QWidget):
         if btn is not None:
             btn.setChecked(True)
 
-    def set_active_view_button(self, active: Literal["gallery", "people", "map"]) -> None:
+    def set_active_view_button(self, active: Literal["gallery", "albums", "people", "map"]) -> None:
         if hasattr(self, "btn_view_thumbnails"):
             self.btn_view_thumbnails.setChecked(active == "gallery")
+        if hasattr(self, "btn_view_albums"):
+            self.btn_view_albums.setChecked(active == "albums")
         if hasattr(self, "btn_view_people"):
             self.btn_view_people.setChecked(active == "people")
         if hasattr(self, "btn_view_map"):
@@ -9215,10 +9493,23 @@ class RibbonToolbar(QWidget):
         if idx >= 0:
             self.tab_widget.tabBar().setTabVisible(idx, visible)
 
-    def set_active_mode(self, mode: Literal["grid", "viewer", "map", "batch_people", "people"]) -> None:
-        """Switches Ribbon context when entering/exiting Single Media Viewer, World Map, People, or Batch People Tagging."""
+    def set_active_mode(self, mode: Literal["grid", "viewer", "map", "batch_people", "people", "albums", "compare"]) -> None:
+        """Switches Ribbon context when entering/exiting Single Media Viewer, World Map, People, Compare, or Batch People Tagging."""
         tab_map = getattr(self, "tab_map", None)
         tab_batch = getattr(self, "tab_batch_people", None)
+        tab_compare = getattr(self, "tab_compare", None)
+
+        if mode == "compare":
+            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map, tab_batch):
+                self._set_tab_visible(tab, False)
+            self._set_tab_visible(tab_compare, True)
+            if tab_compare is not None:
+                self.tab_widget.setCurrentWidget(tab_compare)
+            if hasattr(self, "scope_bar") and self.scope_bar is not None:
+                self.scope_bar.setVisible(False)
+            return
+
+        self._set_tab_visible(tab_compare, False)
 
         if mode == "batch_people":
             for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map):
@@ -9278,7 +9569,9 @@ class RibbonToolbar(QWidget):
             # Grid / People Directory mode: restore main tabs
             for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view):
                 self._set_tab_visible(tab, True)
-            self.set_active_view_button("people" if mode == "people" else "gallery")
+            self.set_active_view_button(
+                "albums" if mode == "albums" else ("people" if mode == "people" else "gallery")
+            )
             self._set_edit_tab_mode("grid")
             if self.tab_widget.currentWidget() in (self.tab_edit, tab_batch, tab_map):
                 self.tab_widget.setCurrentWidget(self.tab_home)
@@ -9872,9 +10165,76 @@ class RibbonToolbar(QWidget):
             btn.update()
         self._apply_file_menu_stylesheet(False)
 
+    def _apply_arrange_box_theme(self, is_dark: bool) -> None:
+        arrange_box = getattr(self, "_arrange_box", None)
+        if arrange_box is not None:
+            if is_dark:
+                arrange_box.setStyleSheet(
+                    """
+                    QFrame#RibbonArrangeBox {
+                        background: #1B1E24;
+                        border: 1px solid #3E4756;
+                        border-radius: 2px;
+                    }
+                    """
+                )
+            else:
+                arrange_box.setStyleSheet(
+                    """
+                    QFrame#RibbonArrangeBox {
+                        background: #FFFFFF;
+                        border: 1px solid #ABBFD3;
+                        border-radius: 2px;
+                    }
+                    """
+                )
+        scroll_btns = getattr(self, "_arrange_scroll_btns", ())
+        if scroll_btns:
+            if is_dark:
+                btn_style = """
+                    QPushButton {
+                        border: 1px solid #3E4756;
+                        background: #252A33;
+                        color: #D8E0EA;
+                        font-size: 7pt;
+                        padding: 0;
+                    }
+                    QPushButton:hover {
+                        background: #323A46;
+                        border-color: #60A5FA;
+                    }
+                    QPushButton:disabled {
+                        color: #5A6577;
+                        background: #1E222A;
+                        border-color: #2E3440;
+                    }
+                """
+            else:
+                btn_style = """
+                    QPushButton {
+                        border: 1px solid #D2DFEE;
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F6F9FD, stop:1 #E2ECF7);
+                        color: #55687C;
+                        font-size: 7pt;
+                        padding: 0;
+                    }
+                    QPushButton:hover {
+                        background: #CCE4F7;
+                        border-color: #7BAEDB;
+                    }
+                    QPushButton:disabled {
+                        color: #B0C4DE;
+                        background: #F4F6F9;
+                        border-color: #DCE6F2;
+                    }
+                """
+            for b in scroll_btns:
+                b.setStyleSheet(btn_style)
+
     def set_dark_mode(self, is_dark: bool) -> None:
         self._dark_mode = bool(is_dark)
         self._is_dark = self._dark_mode
+        self._apply_arrange_box_theme(self._dark_mode)
         for btn in getattr(self, "_responsive_large_buttons", []):
             if hasattr(btn, "_is_dark"):
                 btn._is_dark = self._dark_mode
@@ -10313,6 +10673,7 @@ class RibbonToolbar(QWidget):
         self._dark_mode = False
         self._is_dark = False
         self._current_theme_mode = "modern"
+        self._apply_arrange_box_theme(False)
         arrow_drop_down = ARROW_DROPDOWN_PATH
         self.setStyleSheet(
             """

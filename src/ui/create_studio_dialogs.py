@@ -66,6 +66,7 @@ from src.imaging.create_tools import (
     create_then_and_now_card,
     align_burst_frame,
     detect_faces_in_image,
+    detect_faces_with_landmarks,
     fuse_face,
 )
 from src.imaging.creative_effects import (
@@ -74,6 +75,7 @@ from src.imaging.creative_effects import (
     estimate_subject_mask,
     estimate_depth_map,
     compute_color_similarity_mask,
+    compute_multi_color_similarity_mask,
     apply_color_pop,
     refine_mask_brush,
     build_bokeh_pyramid,
@@ -378,23 +380,40 @@ class ZoomablePreviewCanvas(QGraphicsView):
 # =============================================================================
 
 class PanoramaWorker(QThread):
-    """Background worker for multi-image stitching."""
+    """Background worker for multi-image loading & stitching."""
     progress_updated = Signal(str)
     raw_stitching_finished = Signal(bool, object, str)
 
     def __init__(
         self,
-        images_bgr: list[np.ndarray],
-        projection_mode: str,
+        images_bgr: list[np.ndarray] | None = None,
+        projection_mode: str = "cylindrical",
+        photo_paths: list[Path] | None = None,
     ) -> None:
         super().__init__()
         self.images_bgr = images_bgr
+        self.photo_paths = photo_paths or []
         self.projection_mode = projection_mode
 
     def run(self) -> None:
+        imgs = self.images_bgr
+        if imgs is None:
+            imgs = []
+            for idx, p in enumerate(self.photo_paths, start=1):
+                if self.isInterruptionRequested():
+                    return
+                self.progress_updated.emit(f"Loading photo {idx} of {len(self.photo_paths)}...")
+                img = load_bgr_exif_safe(p)
+                if img is not None:
+                    imgs.append(img)
+        if len(imgs) < 2:
+            self.raw_stitching_finished.emit(False, np.empty((0, 0, 3), dtype=np.uint8), "Could not load 2+ valid images.")
+            return
+        if self.isInterruptionRequested():
+            return
         self.progress_updated.emit("Analyzing feature keypoints & camera trajectories...")
         success, raw_bgr, msg = stitch_panorama_raw(
-            self.images_bgr,
+            imgs,
             projection_mode=self.projection_mode,
         )
         self.raw_stitching_finished.emit(success, raw_bgr, msg)
@@ -622,34 +641,43 @@ class PanoramaDialog(QDialog):
             self.zoom_bar.update_zoom_display(scale_val)
 
     def _load_and_stitch(self) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            return
+        if len(self.photo_paths) < 2:
+            self.lbl_status.setText("Failed: Need at least 2 photos to stitch.")
+            self.progress_bar.setVisible(False)
+            self.btn_restitch.setEnabled(True)
+            return
+
         self.progress_bar.setVisible(True)
         self.btn_save.setEnabled(False)
         self.btn_restitch.setEnabled(False)
         self.lbl_status.setText("Loading photos & initializing stitcher...")
 
-        # Load photos in BGR respecting EXIF orientation
-        images_bgr = []
-        for p in self.photo_paths:
-            img = load_bgr_exif_safe(p)
-            if img is not None:
-                images_bgr.append(img)
-
-        if len(images_bgr) < 2:
-            self.lbl_status.setText("Failed: Could not load 2+ valid images.")
-            self.progress_bar.setVisible(False)
-            self.btn_restitch.setEnabled(True)
-            return
-
         mode_text = self.cmb_projection.currentText()
         proj_mode = "planar" if "Planar" in mode_text else ("spherical" if "Spherical" in mode_text else "cylindrical")
 
         self._worker = PanoramaWorker(
-            images_bgr=images_bgr,
+            images_bgr=None,
             projection_mode=proj_mode,
+            photo_paths=self.photo_paths,
         )
         self._worker.progress_updated.connect(self.lbl_status.setText)
         self._worker.raw_stitching_finished.connect(self._on_raw_stitch_completed)
         self._worker.start()
+
+    def _stop_worker(self) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.requestInterruption()
+            self._worker.wait(5000)
+
+    def reject(self) -> None:
+        self._stop_worker()
+        super().reject()
+
+    def closeEvent(self, event) -> None:
+        self._stop_worker()
+        super().closeEvent(event)
 
     def _on_raw_stitch_completed(self, success: bool, raw_bgr: np.ndarray, msg: str) -> None:
         self.progress_bar.setVisible(False)
@@ -1167,11 +1195,21 @@ class CollageDialog(QDialog):
 
 class _InteractiveFaceItem(QGraphicsRectItem):
     """Interactive face box with robust click handling, high-contrast cosmetic rendering, and hover feedback."""
-    def __init__(self, rect: QRectF, index: int, on_clicked: Any, is_selected: bool = False) -> None:
+    def __init__(
+        self,
+        rect: QRectF,
+        index: int,
+        on_clicked: Any,
+        is_selected: bool = False,
+        is_swapped: bool = False,
+        on_dismiss: Any = None,
+    ) -> None:
         super().__init__(rect)
         self.index = index
         self.on_clicked = on_clicked
         self.is_selected = is_selected
+        self.is_swapped = is_swapped
+        self.on_dismiss = on_dismiss
         self._is_hovered = False
         self.setCursor(Qt.PointingHandCursor)
         self.setAcceptHoverEvents(True)
@@ -1191,6 +1229,10 @@ class _InteractiveFaceItem(QGraphicsRectItem):
             self.on_clicked(self.index)
             event.accept()
             return
+        if event.button() == Qt.RightButton and self.on_dismiss is not None:
+            self.on_dismiss(self.index)
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def paint(self, painter: QPainter, option: Any, widget: Any = None) -> None:
@@ -1199,9 +1241,13 @@ class _InteractiveFaceItem(QGraphicsRectItem):
         r = self.rect()
 
         if self.is_selected:
-            fill_col = QColor(0, 120, 215, 65)
+            fill_col = QColor(0, 120, 215, 55)
             border_col = QColor("#0078D7")
             pen_w = 2.8
+        elif self.is_swapped:
+            fill_col = QColor(16, 163, 74, 30)
+            border_col = QColor("#16A34A")
+            pen_w = 2.4
         elif self._is_hovered:
             fill_col = QColor(0, 162, 237, 45)
             border_col = QColor("#00A2ED")
@@ -1221,7 +1267,7 @@ class _InteractiveFaceItem(QGraphicsRectItem):
         painter.setBrush(Qt.NoBrush)
         painter.drawRect(r)
 
-        # 3. Main vibrant Aero blue frame
+        # 3. Main vibrant frame
         main_pen = QPen(border_col, pen_w)
         main_pen.setCosmetic(True)
         painter.setPen(main_pen)
@@ -1250,13 +1296,70 @@ class _InteractiveFaceItem(QGraphicsRectItem):
         painter.restore()
 
 
+class _PhotoFuseWorker(QThread):
+    """Background worker for loading, aligning burst shots, and detecting faces."""
+    progress_updated = Signal(str)
+    finished_ok = Signal(int, object, object, object, object)  # base_idx, frames_bgr, aligned_frames_bgr, align_ok, detections
+    finished_err = Signal(str)
+
+    def __init__(
+        self,
+        photo_paths: list[Path],
+        frames_bgr: list[np.ndarray],
+        base_idx: int = 0,
+    ) -> None:
+        super().__init__()
+        self.photo_paths = photo_paths
+        self.frames_bgr = frames_bgr
+        self.base_idx = base_idx
+
+    def run(self) -> None:
+        frames = list(self.frames_bgr)
+        if not frames:
+            for idx, p in enumerate(self.photo_paths, start=1):
+                if self.isInterruptionRequested():
+                    return
+                self.progress_updated.emit(f"Loading photo {idx} of {len(self.photo_paths)}...")
+                img = load_bgr_exif_safe(p)
+                if img is not None:
+                    frames.append(img)
+
+        if len(frames) < 2:
+            self.finished_err.emit("Need at least 2 valid photos to fuse.")
+            return
+
+        base_idx = max(0, min(self.base_idx, len(frames) - 1))
+        base = frames[base_idx]
+        aligned_frames: list[np.ndarray] = []
+        align_ok: list[bool] = []
+
+        for i, target in enumerate(frames):
+            if self.isInterruptionRequested():
+                return
+            if i == base_idx:
+                aligned_frames.append(base.copy())
+                align_ok.append(True)
+            else:
+                self.progress_updated.emit(f"Aligning Shot {i + 1} to Base Shot {base_idx + 1}...")
+                ok, aligned = align_burst_frame(base, target)
+                aligned_frames.append(aligned)
+                align_ok.append(bool(ok))
+
+        if self.isInterruptionRequested():
+            return
+        self.progress_updated.emit("Detecting faces...")
+        detections = detect_faces_with_landmarks(base)
+        self.finished_ok.emit(base_idx, frames, aligned_frames, align_ok, detections)
+
+
 class PhotoFuseDialog(QDialog):
     """
     Photo Fuse — Best-Face Group Shot Combiner:
-    - Automatically aligns 2..6 burst group shots to Base Frame (0) via Homography.
-    - Automatically detects faces in the base frame.
-    - Clicking a face box opens the bottom replacement strip of that person from all shots.
-    - Seamlessly clones the chosen face into the group shot using Poisson cloning.
+    - Visual Base Shot selector with cached per-base alignment & detections
+    - Clear warning when selected photos cannot be aligned
+    - InsightFace (or strict Haar) face + landmark detection
+    - Per-face local landmark/ECC alignment + multi-band Laplacian blending
+    - Show/Hide face boxes toggle and clear Before/After comparison
     """
 
     def __init__(
@@ -1271,15 +1374,25 @@ class PhotoFuseDialog(QDialog):
 
         self.frames_bgr: list[np.ndarray] = []
         self.aligned_frames_bgr: list[np.ndarray] = []
+        self.alignment_ok: list[bool] = []
         self.base_fused_bgr: np.ndarray | None = None
+        self.base_shot_idx: int = 0
         self.face_boxes: list[tuple[int, int, int, int]] = []
+        self.face_kps: list[np.ndarray | None] = []
+        self.face_applied_shot: dict[int, int] = {}
+        self._src_kps_cache: dict[tuple[int, int], np.ndarray | None] = {}
+        self._base_cache: dict[int, tuple[list[np.ndarray], list[bool], list[dict[str, Any]]]] = {}
+        self._base_buttons: list[QToolButton] = []
         self.selected_face_idx: int = -1
+        self._showing_original: bool = False
+        self._show_face_boxes: bool = True
         self._is_fit_mode: bool = True
+        self._worker: _PhotoFuseWorker | None = None
 
         self.setWindowTitle("Photo Fuse — Essentials Photo Gallery")
         self.setWindowIcon(make_wlpg_icon("photo_fuse", 24))
-        self.resize(1240, 800)
-        self.setMinimumSize(960, 620)
+        self.resize(1240, 820)
+        self.setMinimumSize(960, 640)
         self._init_ui()
         self._align_and_detect()
 
@@ -1288,11 +1401,31 @@ class PhotoFuseDialog(QDialog):
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
 
-        # ---------------- Left: Canvas + Expression Strip + Zoom Bar ----------------
+        # ---------------- Left: Banner + Canvas + Expression Strip + Zoom Bar ----------------
         left_widget = QWidget(self)
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(6)
+
+        # Alignment warning banner (hidden unless alignment fails)
+        self.lbl_align_warning = QLabel("", self)
+        self.lbl_align_warning.setWordWrap(True)
+        self.lbl_align_warning.setVisible(False)
+        self.lbl_align_warning.setStyleSheet(
+            "background: #FEF3C7; color: #92400E; border: 1px solid #F59E0B; "
+            "border-radius: 4px; padding: 6px 10px; font-size: 11px; font-weight: bold;"
+        )
+        left_layout.addWidget(self.lbl_align_warning)
+
+        # Before/After mode banner (shown only when viewing original base)
+        self.lbl_preview_mode = QLabel("", self)
+        self.lbl_preview_mode.setVisible(False)
+        self.lbl_preview_mode.setAlignment(Qt.AlignCenter)
+        self.lbl_preview_mode.setStyleSheet(
+            "background: #1E3A8A; color: #FFFFFF; border-radius: 4px; padding: 4px 10px; "
+            "font-size: 11px; font-weight: bold;"
+        )
+        left_layout.addWidget(self.lbl_preview_mode)
 
         # Canvas
         self.view = ZoomablePreviewCanvas(self)
@@ -1304,12 +1437,12 @@ class PhotoFuseDialog(QDialog):
         self.view.zoom_changed.connect(self._on_zoom_changed)
         left_layout.addWidget(self.view, 1)
 
-        # Bottom face replacement strip
+        # Bottom face replacement strip (tall enough for 64x64 thumbs + full label + scrollbar)
         self.strip_frame = QFrame()
-        self.strip_frame.setFixedHeight(125)
+        self.strip_frame.setFixedHeight(162)
         self.strip_frame.setStyleSheet("background: #F4F6FA; border: 1px solid #D2DFEE; border-radius: 4px;")
         strip_layout = QVBoxLayout(self.strip_frame)
-        strip_layout.setContentsMargins(8, 4, 8, 4)
+        strip_layout.setContentsMargins(8, 6, 8, 6)
         strip_layout.setSpacing(4)
 
         self.lbl_strip_info = QLabel("Click any highlighted face box above to view expressions from all shots:")
@@ -1324,11 +1457,11 @@ class PhotoFuseDialog(QDialog):
 
         self.strip_content = QWidget()
         self.strip_content_layout = QHBoxLayout(self.strip_content)
-        self.strip_content_layout.setContentsMargins(4, 4, 4, 4)
+        self.strip_content_layout.setContentsMargins(4, 2, 4, 2)
         self.strip_content_layout.setSpacing(10)
         self.strip_content_layout.addStretch(1)
         self.strip_scroll.setWidget(self.strip_content)
-        strip_layout.addWidget(self.strip_scroll)
+        strip_layout.addWidget(self.strip_scroll, 1)
 
         left_layout.addWidget(self.strip_frame)
 
@@ -1337,7 +1470,17 @@ class PhotoFuseDialog(QDialog):
         status_bar.setContentsMargins(4, 2, 4, 2)
         status_bar.setSpacing(8)
 
-        self.lbl_status = QLabel("Aligning burst frames...", self)
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setFixedSize(110, 12)
+        self.progress_bar.setStyleSheet(
+            "QProgressBar { height: 12px; border: 1px solid #c0c0c0; border-radius: 2px; background: #e0e0e0; } "
+            "QProgressBar::chunk { background: #2D72BC; }"
+        )
+        self.progress_bar.setVisible(False)
+        status_bar.addWidget(self.progress_bar)
+
+        self.lbl_status = QLabel("Loading & aligning burst frames...", self)
         self.lbl_status.setStyleSheet("color: #444; font-size: 11px;")
         status_bar.addWidget(self.lbl_status)
 
@@ -1355,7 +1498,7 @@ class PhotoFuseDialog(QDialog):
 
         # ---------------- Right: Sidebar ----------------
         sidebar_scroll = QScrollArea(self)
-        sidebar_scroll.setFixedWidth(280)
+        sidebar_scroll.setFixedWidth(290)
         sidebar_scroll.setWidgetResizable(True)
         sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         sidebar_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
@@ -1365,25 +1508,46 @@ class PhotoFuseDialog(QDialog):
         sidebar_layout.setContentsMargins(0, 0, 4, 0)
         sidebar_layout.setSpacing(8)
 
-        # Instructions
-        grp_how = _FineTuneGroup("How Photo Fuse Works")
-        lbl_how = QLabel(
-            "1. Click a face box on the photo to preview that person across all burst shots.\n\n"
-            "2. Click an expression thumbnail below to blend it seamlessly into the composite.\n\n"
-            "3. Repeat for any person with blinking eyes or looking away.",
-            self,
-        )
-        lbl_how.setWordWrap(True)
-        lbl_how.setStyleSheet("color: #444; font-size: 11px; line-height: 1.4;")
-        grp_how.layout().addWidget(lbl_how)
-        sidebar_layout.addWidget(grp_how)
+        # Base Photo Selector (visual thumbnail strip)
+        grp_base = _FineTuneGroup("Base Photo")
+        lbl_base_hint = QLabel("Pick the starting shot:", self)
+        lbl_base_hint.setStyleSheet("color: #555; font-size: 11px;")
+        grp_base.layout().addWidget(lbl_base_hint)
 
-        # Status & Reset
-        grp_actions = _FineTuneGroup("Actions")
-        self.lbl_fuse_summary = QLabel(f"Processing {len(self.photo_paths)} burst shots.", self)
+        self.base_strip_scroll = QScrollArea(self)
+        self.base_strip_scroll.setFixedHeight(104)
+        self.base_strip_scroll.setWidgetResizable(True)
+        self.base_strip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.base_strip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.base_strip_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+        self.base_strip_widget = QWidget(self)
+        self.base_strip_layout = QHBoxLayout(self.base_strip_widget)
+        self.base_strip_layout.setContentsMargins(2, 2, 2, 2)
+        self.base_strip_layout.setSpacing(6)
+        self.base_strip_layout.addStretch(1)
+        self.base_strip_scroll.setWidget(self.base_strip_widget)
+        grp_base.layout().addWidget(self.base_strip_scroll)
+        sidebar_layout.addWidget(grp_base)
+
+        # View & Actions
+        grp_actions = _FineTuneGroup("View & Actions")
+        self.lbl_fuse_summary = QLabel(f"Processing {len(self.photo_paths)} shots...", self)
         self.lbl_fuse_summary.setStyleSheet("color: #555; font-size: 11px;")
         self.lbl_fuse_summary.setWordWrap(True)
         grp_actions.layout().addWidget(self.lbl_fuse_summary)
+
+        self.chk_show_boxes = QCheckBox("Show face boxes", self)
+        self.chk_show_boxes.setChecked(True)
+        self.chk_show_boxes.toggled.connect(self._on_show_boxes_toggled)
+        grp_actions.layout().addWidget(self.chk_show_boxes)
+
+        self.btn_compare_orig = QPushButton(" View Original Base", self)
+        self.btn_compare_orig.setCheckable(True)
+        self.btn_compare_orig.setToolTip("Toggle between the fused composite and the unmodified base shot")
+        self.btn_compare_orig.setStyleSheet("padding: 5px 10px; border: 1px solid #8ea4c8; border-radius: 3px; background: #f5f7fb;")
+        self.btn_compare_orig.toggled.connect(self._toggle_compare_original)
+        grp_actions.layout().addWidget(self.btn_compare_orig)
 
         self.btn_reset = QPushButton(" Reset to Base Shot 1", self)
         self.btn_reset.setIcon(make_wlpg_icon("undo", 16))
@@ -1391,6 +1555,18 @@ class PhotoFuseDialog(QDialog):
         self.btn_reset.clicked.connect(self._reset_to_base)
         grp_actions.layout().addWidget(self.btn_reset)
         sidebar_layout.addWidget(grp_actions)
+
+        # Instructions
+        grp_how = _FineTuneGroup("Tips")
+        lbl_how = QLabel(
+            "• Click a face box on the photo, then pick an expression below.\n"
+            "• Right-click a box to dismiss a false detection.",
+            self,
+        )
+        lbl_how.setWordWrap(True)
+        lbl_how.setStyleSheet("color: #444; font-size: 11px; line-height: 1.4;")
+        grp_how.layout().addWidget(lbl_how)
+        sidebar_layout.addWidget(grp_how)
 
         sidebar_layout.addStretch(1)
 
@@ -1478,47 +1654,222 @@ class PhotoFuseDialog(QDialog):
             self.zoom_bar.update_zoom_display(scale_val)
 
     def _align_and_detect(self) -> None:
-        """Loads and aligns all secondary burst photos to base frame 0."""
-        for p in self.photo_paths:
-            img = load_bgr_exif_safe(p)
-            if img is not None:
-                self.frames_bgr.append(img)
+        """Starts background loading, alignment, and face detection for Shot 1."""
+        if len(self.photo_paths) < 2:
+            self.lbl_status.setText("Need at least 2 photos to fuse.")
+            return
+        self._rebuild_from_base(0)
 
-        if len(self.frames_bgr) < 2:
-            self.lbl_status.setText("Failed: Need at least 2 photos to fuse.")
+    def _populate_base_strip(self) -> None:
+        """Populates visual thumbnail buttons for choosing the Base Shot."""
+        while self.base_strip_layout.count() > 1:
+            child = self.base_strip_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        self._base_buttons.clear()
+
+        for idx, frame in enumerate(self.frames_bgr):
+            h, w = frame.shape[:2]
+            scale = 52.0 / max(1, max(h, w))
+            tw = max(16, int(round(w * scale)))
+            th = max(16, int(round(h * scale)))
+            thumb_bgr = cv2.resize(frame, (tw, th), interpolation=cv2.INTER_AREA)
+            pm = _cv2_to_qpixmap(thumb_bgr)
+
+            btn = QToolButton(self)
+            btn.setIcon(QIcon(pm))
+            btn.setIconSize(QSize(54, 54))
+            btn.setText(f"Shot {idx + 1}")
+            btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            btn.setFixedSize(70, 82)
+            name = self.photo_paths[idx].name if idx < len(self.photo_paths) else f"Shot {idx + 1}"
+            btn.setToolTip(f"Use Shot {idx + 1} ({name}) as Base Photo")
+            btn.clicked.connect(lambda _, i=idx: self._on_base_shot_selected(i))
+            self._base_buttons.append(btn)
+            self.base_strip_layout.insertWidget(self.base_strip_layout.count() - 1, btn)
+
+        self._update_base_strip_styles()
+
+    def _update_base_strip_styles(self) -> None:
+        for idx, btn in enumerate(self._base_buttons):
+            is_cur = idx == self.base_shot_idx
+            if is_cur:
+                btn.setStyleSheet(
+                    "QToolButton { border: 2px solid #0078d4; background: #e8f2fc; "
+                    "border-radius: 4px; padding: 3px; font-size: 10px; font-weight: bold; color: #1e395b; }"
+                )
+            else:
+                btn.setStyleSheet(
+                    "QToolButton { border: 1px solid #b0c0d8; background: white; "
+                    "border-radius: 4px; padding: 3px; font-size: 10px; color: #1f2937; }"
+                    "QToolButton:hover { border: 2px solid #0078d4; background: #eef6fc; }"
+                )
+
+    def _on_base_shot_selected(self, base_idx: int) -> None:
+        if base_idx < 0 or base_idx >= len(self.frames_bgr):
+            return
+        if base_idx == self.base_shot_idx and self.aligned_frames_bgr:
+            return
+        self._rebuild_from_base(base_idx)
+
+    def _rebuild_from_base(self, base_idx: int) -> None:
+        """Restores cached alignment/detections for base_idx if available, else runs worker."""
+        if self._worker is not None and self._worker.isRunning():
             return
 
-        base = self.frames_bgr[0]
-        self.aligned_frames_bgr.append(base.copy())
+        self.base_shot_idx = base_idx
+        self.face_applied_shot.clear()
+        self._src_kps_cache.clear()
+        self._showing_original = False
+        self.lbl_preview_mode.setVisible(False)
+        if hasattr(self, "btn_compare_orig"):
+            self.btn_compare_orig.blockSignals(True)
+            self.btn_compare_orig.setChecked(False)
+            self.btn_compare_orig.setText(" View Original Base")
+            self.btn_compare_orig.blockSignals(False)
+
+        self._update_base_strip_styles()
+
+        # Instant cache hit when returning to a previously computed base shot
+        if base_idx in self._base_cache and self.frames_bgr:
+            aligned_frames, align_ok, detections = self._base_cache[base_idx]
+            self._apply_base_results(base_idx, self.frames_bgr, aligned_frames, align_ok, detections)
+            return
+
+        self.aligned_frames_bgr = []
+        self.alignment_ok = []
+        self.progress_bar.setVisible(True)
+        self.btn_save.setEnabled(False)
+        for b in self._base_buttons:
+            b.setEnabled(False)
+        self.btn_reset.setEnabled(False)
+        self.lbl_status.setText("Loading & aligning burst photos...")
+
+        self._worker = _PhotoFuseWorker(
+            photo_paths=self.photo_paths,
+            frames_bgr=self.frames_bgr,
+            base_idx=base_idx,
+        )
+        self._worker.progress_updated.connect(self.lbl_status.setText)
+        self._worker.finished_ok.connect(self._on_fuse_worker_finished)
+        self._worker.finished_err.connect(self._on_fuse_worker_error)
+        self._worker.start()
+
+    def _on_fuse_worker_error(self, msg: str) -> None:
+        self.progress_bar.setVisible(False)
+        for b in self._base_buttons:
+            b.setEnabled(True)
+        self.lbl_status.setText(msg)
+
+    def _on_fuse_worker_finished(
+        self,
+        base_idx: int,
+        frames: list[np.ndarray],
+        aligned_frames: list[np.ndarray],
+        align_ok: list[bool],
+        detections: list[dict[str, Any]],
+    ) -> None:
+        self.progress_bar.setVisible(False)
+        for b in self._base_buttons:
+            b.setEnabled(True)
+        self.btn_reset.setEnabled(True)
+
+        self._base_cache[base_idx] = (aligned_frames, align_ok, detections)
+        self._apply_base_results(base_idx, frames, aligned_frames, align_ok, detections)
+
+    def _apply_base_results(
+        self,
+        base_idx: int,
+        frames: list[np.ndarray],
+        aligned_frames: list[np.ndarray],
+        align_ok: list[bool],
+        detections: list[dict[str, Any]],
+    ) -> None:
+        first_populate = not self.frames_bgr
+        self.frames_bgr = frames
+        if first_populate or len(self._base_buttons) != len(frames):
+            self._populate_base_strip()
+
+        self.aligned_frames_bgr = aligned_frames
+        self.alignment_ok = align_ok
+        self.base_shot_idx = base_idx
+        self._update_base_strip_styles()
+
+        base = self.frames_bgr[base_idx]
         self.base_fused_bgr = base.copy()
 
-        for i, target in enumerate(self.frames_bgr[1:], start=2):
-            self.lbl_status.setText(f"Aligning burst shot {i} of {len(self.frames_bgr)}...")
-            success, aligned = align_burst_frame(base, target)
-            self.aligned_frames_bgr.append(aligned)
-
-        self.lbl_status.setText("Detecting faces...")
-        self.face_boxes = detect_faces_in_image(self.base_fused_bgr)
+        self.face_boxes = [d["rect"] for d in detections]
+        self.face_kps = [d["kps"] for d in detections]
 
         if not self.face_boxes:
             h, w = base.shape[:2]
             cx, cy = w // 2, h // 2
             fw, fh = int(w * 0.2), int(h * 0.25)
             self.face_boxes = [(cx - fw // 2, cy - fh // 2, fw, fh)]
+            self.face_kps = [None]
 
-        self.lbl_status.setText(f"Found {len(self.face_boxes)} faces across {len(self.frames_bgr)} shots. Ready to fuse.")
-        self.lbl_fuse_summary.setText(f"Aligned {len(self.frames_bgr)} burst shots. Detected {len(self.face_boxes)} faces.")
+        # Check alignment quality across other shots
+        failed_shots = [f"Shot {i + 1}" for i, ok in enumerate(align_ok) if i != base_idx and not ok]
+        other_count = max(0, len(frames) - 1)
+        if failed_shots:
+            if len(failed_shots) == other_count:
+                self.lbl_align_warning.setText(
+                    "Could not align the selected photos. Photo Fuse requires burst or tripod shots of the same scene."
+                )
+            else:
+                self.lbl_align_warning.setText(
+                    f"Could not align {', '.join(failed_shots)} to Shot {base_idx + 1}. "
+                    "Swapping faces from unaligned shots may not line up."
+                )
+            self.lbl_align_warning.setVisible(True)
+        else:
+            self.lbl_align_warning.setVisible(False)
+
+        self.btn_reset.setText(f" Reset to Base Shot {base_idx + 1}")
+        self.lbl_status.setText(
+            f"Base: Shot {base_idx + 1} — {len(self.face_boxes)} face(s) detected"
+        )
+        self.lbl_fuse_summary.setText(
+            f"Base: Shot {base_idx + 1} ({len(self.frames_bgr)} shots, {len(self.face_boxes)} face(s))."
+        )
         self.btn_save.setEnabled(True)
+
+        self.selected_face_idx = 0 if self.face_boxes else -1
         self._update_scene()
+        if self.selected_face_idx >= 0:
+            self._populate_face_strip(self.selected_face_idx)
+
         if self._is_fit_mode and self.scene.sceneRect().isValid():
             self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
             self._on_zoom_changed(self.view.transform().m11())
 
+    def _stop_worker(self) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.requestInterruption()
+            self._worker.wait(5000)
+
+    def reject(self) -> None:
+        self._stop_worker()
+        super().reject()
+
+    def closeEvent(self, event) -> None:
+        self._stop_worker()
+        super().closeEvent(event)
+
+    def _on_show_boxes_toggled(self, checked: bool) -> None:
+        self._show_face_boxes = bool(checked)
+        self._update_scene()
+
     def _update_scene(self) -> None:
-        if self.base_fused_bgr is None:
+        display_bgr = (
+            self.frames_bgr[self.base_shot_idx]
+            if self._showing_original and self.frames_bgr
+            else self.base_fused_bgr
+        )
+        if display_bgr is None:
             return
 
-        pm = _cv2_to_qpixmap(self.base_fused_bgr)
+        pm = _cv2_to_qpixmap(display_bgr)
         self.bg_item.setPixmap(pm)
         self.scene.setSceneRect(QRectF(pm.rect()))
 
@@ -1527,16 +1878,105 @@ class PhotoFuseDialog(QDialog):
             if isinstance(item, _InteractiveFaceItem):
                 self.scene.removeItem(item)
 
-        # Draw interactive face rectangles
-        for i, (fx, fy, fw, fh) in enumerate(self.face_boxes):
-            is_sel = (i == self.selected_face_idx)
-            rect_item = _InteractiveFaceItem(QRectF(fx, fy, fw, fh), i, self._select_face, is_selected=is_sel)
-            self.scene.addItem(rect_item)
+        # Draw interactive face rectangles only when enabled and not viewing original
+        if self._show_face_boxes and not self._showing_original:
+            for i, (fx, fy, fw, fh) in enumerate(self.face_boxes):
+                is_sel = (i == self.selected_face_idx)
+                is_swapped = i in self.face_applied_shot and self.face_applied_shot[i] != self.base_shot_idx
+                rect_item = _InteractiveFaceItem(
+                    QRectF(fx, fy, fw, fh),
+                    i,
+                    self._select_face,
+                    is_selected=is_sel,
+                    is_swapped=is_swapped,
+                    on_dismiss=self._dismiss_face,
+                )
+                self.scene.addItem(rect_item)
 
     def _select_face(self, face_idx: int) -> None:
+        if face_idx < 0 or face_idx >= len(self.face_boxes):
+            return
         self.selected_face_idx = face_idx
         self._update_scene()
         self._populate_face_strip(face_idx)
+
+    def _dismiss_face(self, face_idx: int) -> None:
+        if len(self.face_boxes) <= 1 or face_idx < 0 or face_idx >= len(self.face_boxes):
+            return
+        self.face_boxes.pop(face_idx)
+        if face_idx < len(self.face_kps):
+            self.face_kps.pop(face_idx)
+
+        new_applied: dict[int, int] = {}
+        for k, v in self.face_applied_shot.items():
+            if k < face_idx:
+                new_applied[k] = v
+            elif k > face_idx:
+                new_applied[k - 1] = v
+        self.face_applied_shot = new_applied
+        self._src_kps_cache.clear()
+
+        if self.selected_face_idx >= len(self.face_boxes):
+            self.selected_face_idx = len(self.face_boxes) - 1
+        elif self.selected_face_idx == face_idx:
+            self.selected_face_idx = min(face_idx, len(self.face_boxes) - 1)
+
+        self._recompute_composite()
+        self._update_scene()
+        if self.selected_face_idx >= 0:
+            self._populate_face_strip(self.selected_face_idx)
+        self.lbl_fuse_summary.setText(
+            f"Base: Shot {self.base_shot_idx + 1} ({len(self.frames_bgr)} shots, {len(self.face_boxes)} face(s))."
+        )
+        self.lbl_status.setText("Removed face box.")
+
+    def _toggle_compare_original(self, checked: bool) -> None:
+        self._showing_original = bool(checked)
+        self.btn_compare_orig.setText(" Viewing Original Base" if checked else " View Original Base")
+        if checked:
+            self.lbl_preview_mode.setText(f"ORIGINAL — Shot {self.base_shot_idx + 1} (Base)")
+            self.lbl_preview_mode.setVisible(True)
+            self.lbl_status.setText(f"Viewing original Shot {self.base_shot_idx + 1}")
+        else:
+            self.lbl_preview_mode.setVisible(False)
+            self.lbl_status.setText("Viewing fused composite")
+        self._update_scene()
+
+    def _get_aligned_face_kps(self, shot_idx: int, face_idx: int) -> np.ndarray | None:
+        key = (shot_idx, face_idx)
+        if key in self._src_kps_cache:
+            return self._src_kps_cache[key]
+
+        kps_found: np.ndarray | None = None
+        if 0 <= shot_idx < len(self.aligned_frames_bgr) and 0 <= face_idx < len(self.face_boxes):
+            aligned_img = self.aligned_frames_bgr[shot_idx]
+            h, w = aligned_img.shape[:2]
+            fx, fy, fw, fh = self.face_boxes[face_idx]
+            pad_x = int(fw * 0.45)
+            pad_y = int(fh * 0.45)
+            rx1 = max(0, fx - pad_x)
+            ry1 = max(0, fy - pad_y)
+            rx2 = min(w, fx + fw + pad_x)
+            ry2 = min(h, fy + fh + pad_y)
+            roi = aligned_img[ry1:ry2, rx1:rx2]
+            if roi.size > 0:
+                dets = detect_faces_with_landmarks(roi)
+                if dets:
+                    # Pick detection closest to expected center
+                    target_cx = (fx + fw * 0.5) - rx1
+                    target_cy = (fy + fh * 0.5) - ry1
+                    best = min(
+                        dets,
+                        key=lambda d: (
+                            (d["rect"][0] + d["rect"][2] * 0.5 - target_cx) ** 2
+                            + (d["rect"][1] + d["rect"][3] * 0.5 - target_cy) ** 2
+                        ),
+                    )
+                    if best["kps"] is not None:
+                        kps_found = best["kps"] + np.array([rx1, ry1], dtype=np.float32)
+
+        self._src_kps_cache[key] = kps_found
+        return kps_found
 
     def _populate_face_strip(self, face_idx: int) -> None:
         while self.strip_content_layout.count() > 1:
@@ -1544,13 +1984,17 @@ class PhotoFuseDialog(QDialog):
             if child.widget():
                 child.widget().deleteLater()
 
+        if face_idx < 0 or face_idx >= len(self.face_boxes):
+            return
+
         fx, fy, fw, fh = self.face_boxes[face_idx]
+        active_shot = self.face_applied_shot.get(face_idx, self.base_shot_idx)
         self.lbl_strip_info.setText(f"Expressions for Person {face_idx + 1} (Choose to replace in photo):")
 
         for shot_idx, aligned_img in enumerate(self.aligned_frames_bgr):
             h, w = aligned_img.shape[:2]
-            margin_x = int(fw * 0.2)
-            margin_y = int(fh * 0.2)
+            margin_x = int(fw * 0.25)
+            margin_y = int(fh * 0.25)
             x1 = max(0, fx - margin_x)
             y1 = max(0, fy - margin_y)
             x2 = min(w, fx + fw + margin_x)
@@ -1560,50 +2004,105 @@ class PhotoFuseDialog(QDialog):
             if crop_bgr.size == 0:
                 continue
 
-            crop_thumb = cv2.resize(crop_bgr, (72, 72), interpolation=cv2.INTER_AREA)
+            crop_thumb = cv2.resize(crop_bgr, (64, 64), interpolation=cv2.INTER_AREA)
             pm_thumb = _cv2_to_qpixmap(crop_thumb)
+
+            is_base = shot_idx == self.base_shot_idx
+            is_active = shot_idx == active_shot
+            is_aligned = shot_idx < len(self.alignment_ok) and self.alignment_ok[shot_idx]
+            label = f"Shot {shot_idx + 1}"
+            if is_base:
+                label += " (Base)"
+            elif not is_aligned:
+                label += " ⚠"
+            elif is_active:
+                label += " ✓"
 
             btn_card = QToolButton()
             btn_card.setIcon(QIcon(pm_thumb))
             btn_card.setIconSize(pm_thumb.size())
-            btn_card.setText(f"Shot {shot_idx + 1}")
+            btn_card.setText(label)
             btn_card.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-            btn_card.setStyleSheet("""
-                QToolButton {
-                    background: white; border: 1px solid #b0c0d8;
-                    border-radius: 4px; padding: 4px; font-size: 10px;
-                }
-                QToolButton:hover {
+            btn_card.setFixedSize(96, 98)
+            if not is_aligned and not is_base:
+                btn_card.setToolTip(f"Shot {shot_idx + 1} could not be aligned to Shot {self.base_shot_idx + 1}")
+                border_style = "1px solid #f59e0b; background: #fffbeb;"
+            elif is_active:
+                border_style = "2px solid #0078d4; background: #e8f2fc; font-weight: bold;"
+            else:
+                border_style = "1px solid #b0c0d8; background: white;"
+            btn_card.setStyleSheet(f"""
+                QToolButton {{
+                    border: {border_style}
+                    border-radius: 4px; padding: 4px; font-size: 10px; color: #1f2937;
+                }}
+                QToolButton:hover {{
                     border: 2px solid #0078d4; background: #eef6fc;
-                }
+                }}
             """)
             btn_card.clicked.connect(lambda _, s=shot_idx: self._apply_face_fuse(s))
             self.strip_content_layout.insertWidget(self.strip_content_layout.count() - 1, btn_card)
+
+    def _recompute_composite(self) -> None:
+        if not self.frames_bgr:
+            return
+        result = self.frames_bgr[self.base_shot_idx].copy()
+        for f_idx, s_idx in sorted(self.face_applied_shot.items()):
+            if s_idx == self.base_shot_idx or not (0 <= f_idx < len(self.face_boxes)):
+                continue
+            source_aligned = self.aligned_frames_bgr[s_idx]
+            face_rect = self.face_boxes[f_idx]
+            base_kps = self.face_kps[f_idx] if f_idx < len(self.face_kps) else None
+            src_kps = self._get_aligned_face_kps(s_idx, f_idx)
+            result = fuse_face(result, source_aligned, face_rect, base_kps=base_kps, src_kps=src_kps)
+        self.base_fused_bgr = result
 
     def _apply_face_fuse(self, shot_idx: int) -> None:
         if self.selected_face_idx < 0 or self.base_fused_bgr is None:
             return
 
-        source_aligned = self.aligned_frames_bgr[shot_idx]
-        face_rect = self.face_boxes[self.selected_face_idx]
+        if shot_idx == self.base_shot_idx:
+            self.face_applied_shot.pop(self.selected_face_idx, None)
+        else:
+            self.face_applied_shot[self.selected_face_idx] = shot_idx
 
-        self.lbl_status.setText(f"Blending face from Shot {shot_idx + 1} with Poisson seamless clone...")
-        fused = fuse_face(self.base_fused_bgr, source_aligned, face_rect)
-        self.base_fused_bgr = fused
+        self._showing_original = False
+        self.lbl_preview_mode.setVisible(False)
+        if hasattr(self, "btn_compare_orig") and self.btn_compare_orig.isChecked():
+            self.btn_compare_orig.blockSignals(True)
+            self.btn_compare_orig.setChecked(False)
+            self.btn_compare_orig.setText(" View Original Base")
+            self.btn_compare_orig.blockSignals(False)
+
+        self._recompute_composite()
         self._update_scene()
-        self.lbl_status.setText(f"✓ Face fused successfully from Shot {shot_idx + 1}!")
+        self._populate_face_strip(self.selected_face_idx)
+        if shot_idx == self.base_shot_idx:
+            self.lbl_status.setText(f"Person {self.selected_face_idx + 1}: using Base (Shot {shot_idx + 1})")
+        else:
+            self.lbl_status.setText(f"Person {self.selected_face_idx + 1}: using Shot {shot_idx + 1}")
 
     def _reset_to_base(self) -> None:
         if self.frames_bgr:
-            self.base_fused_bgr = self.frames_bgr[0].copy()
+            self.face_applied_shot.clear()
+            self._showing_original = False
+            self.lbl_preview_mode.setVisible(False)
+            if hasattr(self, "btn_compare_orig"):
+                self.btn_compare_orig.blockSignals(True)
+                self.btn_compare_orig.setChecked(False)
+                self.btn_compare_orig.setText(" View Original Base")
+                self.btn_compare_orig.blockSignals(False)
+            self.base_fused_bgr = self.frames_bgr[self.base_shot_idx].copy()
             self._update_scene()
-            self.lbl_status.setText("Reset to original Shot 1.")
+            if self.selected_face_idx >= 0:
+                self._populate_face_strip(self.selected_face_idx)
+            self.lbl_status.setText(f"Reset to Shot {self.base_shot_idx + 1}")
 
     def _save_fused_photo(self) -> None:
         if self.base_fused_bgr is None:
             return
 
-        first_path = self.photo_paths[0] if self.photo_paths else None
+        first_path = self.photo_paths[self.base_shot_idx] if self.base_shot_idx < len(self.photo_paths) else (self.photo_paths[0] if self.photo_paths else None)
         out_path = prompt_save_new_file(self, first_path, "photoFuse", ".jpg")
         if not out_path:
             return
@@ -2075,6 +2574,9 @@ class ColourPopDialog(QDialog):
 
         self.sld_tol = _AeroFineTuneSlider(5, 80, 25, grp_brush)
         self.sld_tol.setValue(int(self.color_tolerance * 100))
+        self._is_tol_sliding = False
+        self.sld_tol.sliderPressed.connect(self._on_tolerance_pressed)
+        self.sld_tol.sliderReleased.connect(self._on_tolerance_released)
         self.sld_tol.valueChanged.connect(self._on_tolerance_changed)
         grp_brush.vbox.addWidget(self.sld_tol)
 
@@ -2219,8 +2721,16 @@ class ColourPopDialog(QDialog):
 
     def _precompute_proxy_bw(self) -> None:
         gray = cv2.cvtColor(self.proxy_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
-        gray_adj = np.clip((gray - 128.0) * self.bg_contrast + 128.0 + self.bg_brightness, 0.0, 255.0)
-        self.proxy_bw = cv2.cvtColor(gray_adj.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+        gray -= 128.0
+        gray *= self.bg_contrast
+        gray += 128.0 + self.bg_brightness
+        np.clip(gray, 0.0, 255.0, out=gray)
+        self.proxy_bw = cv2.cvtColor(gray.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+        self._proxy_bw_f32 = self.proxy_bw.astype(np.float32)
+        if not hasattr(self, "_proxy_bgr_f32"):
+            self._proxy_bgr_f32 = self.proxy_bgr.astype(np.float32)
+        if not hasattr(self, "_proxy_lab_f32"):
+            self._proxy_lab_f32 = cv2.cvtColor(self.proxy_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
 
     def _toggle_eyedropper(self) -> None:
         self.brush_mode = "eyedropper"
@@ -2269,15 +2779,19 @@ class ColourPopDialog(QDialog):
             f"{action_desc} at ({sx}, {sy}). Active colours: {len(self.picked_colors)}. (Shift+Click to add, Alt/Ctrl+Click to remove)"
         )
 
-    def _recompute_picked_colors_mask(self) -> None:
+    def _recompute_picked_colors_mask(self, refine_edges: bool = True) -> None:
         if not self.picked_colors:
             self.proxy_mask = np.zeros(self.proxy_bgr.shape[:2], dtype=np.float32)
         else:
-            composite = np.zeros(self.proxy_bgr.shape[:2], dtype=np.float32)
-            for c in self.picked_colors:
-                m = compute_color_similarity_mask(self.proxy_bgr, target_bgr=c, tolerance=self.color_tolerance)
-                composite = np.maximum(composite, m)
-            self.proxy_mask = composite
+            if not hasattr(self, "_proxy_lab_f32"):
+                self._proxy_lab_f32 = cv2.cvtColor(self.proxy_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+            self.proxy_mask = compute_multi_color_similarity_mask(
+                self.proxy_bgr,
+                self.picked_colors,
+                tolerance=self.color_tolerance,
+                refine_edges=refine_edges,
+                lab_img=self._proxy_lab_f32,
+            )
         self._fast_refresh_proxy()
 
     def _update_color_swatches_ui(self) -> None:
@@ -2349,17 +2863,29 @@ class ColourPopDialog(QDialog):
         self._update_color_swatches_ui()
         self.lbl_status.setText("Cleared all picked colours. Eyedropper ready.")
 
+    def _on_tolerance_pressed(self) -> None:
+        self._is_tol_sliding = True
+
+    def _on_tolerance_released(self) -> None:
+        self._is_tol_sliding = False
+        self._on_tolerance_changed(self.sld_tol.value())
+
     def _on_tolerance_changed(self, val: int) -> None:
         self.color_tolerance = val / 100.0
         self.lbl_tol_val.setText(f"Colour Tolerance: {val}%")
+        refine = not getattr(self, "_is_tol_sliding", False)
         if self.picked_colors and self.brush_mode == "eyedropper":
-            self._recompute_picked_colors_mask()
+            self._recompute_picked_colors_mask(refine_edges=refine)
             self.lbl_status.setText(f"Adjusted colour tolerance to {val}% across {len(self.picked_colors)} colour(s).")
         elif self.last_picked_color is not None and self.brush_mode == "eyedropper":
-            self.proxy_mask = compute_color_similarity_mask(
+            if not hasattr(self, "_proxy_lab_f32"):
+                self._proxy_lab_f32 = cv2.cvtColor(self.proxy_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+            self.proxy_mask = compute_multi_color_similarity_mask(
                 self.proxy_bgr,
-                target_bgr=self.last_picked_color,
+                [self.last_picked_color],
                 tolerance=self.color_tolerance,
+                refine_edges=refine,
+                lab_img=self._proxy_lab_f32,
             )
             self._fast_refresh_proxy()
             self.lbl_status.setText(f"Adjusted colour tolerance to {val}%.")
@@ -2409,16 +2935,22 @@ class ColourPopDialog(QDialog):
             self._fast_refresh_proxy()
 
     def _fast_refresh_proxy(self) -> None:
-        if self.proxy_bw is None:
+        if self.proxy_bw is None or not hasattr(self, "_proxy_bw_f32"):
             self._precompute_proxy_bw()
+        if not hasattr(self, "_proxy_bgr_f32"):
+            self._proxy_bgr_f32 = self.proxy_bgr.astype(np.float32)
         m3 = self.proxy_mask[:, :, None]
-        blended = (self.proxy_bgr.astype(np.float32) * m3 + self.proxy_bw.astype(np.float32) * (1.0 - m3)).astype(np.uint8)
+        blended_f = self._proxy_bgr_f32 * m3
+        blended_f += self._proxy_bw_f32 * (1.0 - m3)
         if self.show_mask_overlay:
-            red_tint = np.zeros_like(blended)
-            red_tint[:, :, 2] = 230
-            bg_alpha = (1.0 - self.proxy_mask[:, :, None]) * 0.40
-            blended = (blended.astype(np.float32) * (1.0 - bg_alpha) + red_tint.astype(np.float32) * bg_alpha).astype(np.uint8)
-        self.bg_item.setPixmap(_cv2_to_qpixmap(blended))
+            bg_alpha = (1.0 - self.proxy_mask) * 0.40
+            inv_alpha = 1.0 - bg_alpha
+            blended_f[:, :, 0] *= inv_alpha
+            blended_f[:, :, 1] *= inv_alpha
+            blended_f[:, :, 2] *= inv_alpha
+            blended_f[:, :, 2] += 230.0 * bg_alpha
+        np.clip(blended_f, 0.0, 255.0, out=blended_f)
+        self.bg_item.setPixmap(_cv2_to_qpixmap(blended_f.astype(np.uint8)))
 
     def _refresh_canvas(self) -> None:
         self._fast_refresh_proxy()

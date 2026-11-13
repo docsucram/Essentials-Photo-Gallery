@@ -1397,6 +1397,7 @@ class ThumbnailGridView(QListView):
     viewport_range_changed = Signal(list)         # list[int] of visible + buffer media_ids
     selection_ids_changed = Signal(list, int)     # selected_media_ids, lead_media_id (-1 if none)
     media_activated = Signal(int)                 # media_id on double-click or Enter
+    compare_requested = Signal(list)              # list[int] selected media_ids on 'C' or context menu
     try_search_all_requested = Signal()           # user clicked 'Try searching all photos and videos'
     thumbnail_size_changed = Signal(int)          # emitted when thumbnail size changes (e.g. Ctrl+wheel)
     _active_drag_button: Qt.MouseButton = Qt.LeftButton
@@ -2474,6 +2475,12 @@ class ThumbnailGridView(QListView):
                     main_win.apply_rating_to_selection(rating_val)
                     event.accept()
                     return
+            if event.key() == Qt.Key_C:
+                sel_ids = self.selected_media_ids()
+                if sel_ids:
+                    self.compare_requested.emit(sel_ids)
+                    event.accept()
+                    return
         super().keyPressEvent(event)
 
     def leaveEvent(self, event: QEvent) -> None:
@@ -2804,6 +2811,11 @@ class ThumbnailGridView(QListView):
                 act_view.triggered.connect(lambda: main_win.open_single_viewer(media_id))
             else:
                 act_view.triggered.connect(lambda: self.media_activated.emit(media_id))
+
+            sel_ids_for_cmp = self.selected_media_ids()
+            if len(sel_ids_for_cmp) >= 2:
+                act_cmp = menu.addAction(make_wlpg_icon("layout_grid", 16), "Compare Selected Photos (C)")
+                act_cmp.triggered.connect(lambda _chk=False, ids=list(sel_ids_for_cmp): self.compare_requested.emit(ids))
 
             # 2. Open with ▸ (Populated with Windows registered apps)
             open_with_menu = menu.addMenu("Open with")

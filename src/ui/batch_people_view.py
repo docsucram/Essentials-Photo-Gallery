@@ -319,7 +319,8 @@ class _FaceCardDelegate(QStyledItemDelegate):
         # 4. Hover Action Overlay Buttons: [⇄] (Switch if swap outlier), [✓] (Confirm/Keep), and [✕] (Reject/Remove)
         show_action_buttons = (not getattr(rec, "is_confirmed", False)) or bool(getattr(rec, "outlier_reason", None)) or bool(getattr(rec, "is_boxless_match", False))
         if (is_hovered or is_selected) and show_action_buttons:
-            has_swap = bool(getattr(rec, "swap_person_name", None)) or ("Looks like" in getattr(rec, "outlier_reason", ""))
+            outlier_reason = getattr(rec, "outlier_reason", None) or ""
+            has_swap = bool(getattr(rec, "swap_person_name", None)) or ("Looks like" in outlier_reason)
             if has_swap:
                 # Switch person button (top right - 58px)
                 s_rect = QRect(thumb_x + THUMB_SIZE - 58, thumb_y + 3, 16, 16)
@@ -370,7 +371,8 @@ class _FaceCardDelegate(QStyledItemDelegate):
         if rec is None:
             return False
 
-        has_swap = bool(getattr(rec, "swap_person_name", None)) or ("Looks like" in getattr(rec, "outlier_reason", ""))
+        outlier_reason = getattr(rec, "outlier_reason", None) or ""
+        has_swap = bool(getattr(rec, "swap_person_name", None)) or ("Looks like" in outlier_reason)
         thumb_x = option.rect.x() + 4 + (option.rect.width() - 8 - THUMB_SIZE) // 2
         thumb_y = option.rect.y() + 8
         s_rect = QRect(thumb_x + THUMB_SIZE - 58, thumb_y + 3, 16, 16) if has_swap else QRect()
@@ -401,8 +403,8 @@ class _FaceCardDelegate(QStyledItemDelegate):
             if has_swap and s_rect.contains(pos):
                 t_pid = getattr(rec, "swap_person_id", None) or 0
                 t_name = getattr(rec, "swap_person_name", None) or ""
-                if not t_name and "Looks like" in getattr(rec, "outlier_reason", ""):
-                    inner = rec.outlier_reason.replace("Looks like", "").strip()
+                if not t_name and "Looks like" in outlier_reason:
+                    inner = outlier_reason.replace("Looks like", "").strip()
                     t_name = inner.split("(")[0].strip()
                 self.switch_clicked.emit(rec.face_id, t_pid, t_name)
                 return True
@@ -962,8 +964,9 @@ class _PersonGroupSectionWidget(QWidget):
             swap_target_pid = None
             for r in sel:
                 s_name = getattr(r, "swap_person_name", None)
-                if not s_name and "Looks like" in getattr(r, "outlier_reason", ""):
-                    inner = r.outlier_reason.replace("Looks like", "").strip()
+                reason_r = getattr(r, "outlier_reason", None) or ""
+                if not s_name and "Looks like" in reason_r:
+                    inner = reason_r.replace("Looks like", "").strip()
                     s_name = inner.split("(")[0].strip()
                 if s_name:
                     swap_target_name = s_name
@@ -1495,6 +1498,32 @@ class BatchPeopleView(QWidget):
         self.avatar_strip.rename_merge_requested.connect(self._on_rename_merge_person)
         main_layout.addWidget(self.avatar_strip)
 
+        # Active single-person filter banner (clear one-click reset to All People)
+        self.filter_banner = QFrame(self)
+        self.filter_banner.setObjectName("BatchFilterBanner")
+        self.filter_banner.setStyleSheet(
+            "QFrame#BatchFilterBanner { background-color: #EFF6FF; border-bottom: 1px solid #BFDBFE; }"
+        )
+        h_fbanner = QHBoxLayout(self.filter_banner)
+        h_fbanner.setContentsMargins(14, 5, 14, 5)
+        h_fbanner.setSpacing(10)
+        self.lbl_filter_status = QLabel("", self.filter_banner)
+        self.lbl_filter_status.setStyleSheet("color: #1E3A8A; font-size: 11px; font-weight: 600;")
+        h_fbanner.addWidget(self.lbl_filter_status)
+        self.btn_clear_filter = QPushButton("✕ Show All People", self.filter_banner)
+        self.btn_clear_filter.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_clear_filter.setFixedHeight(22)
+        self.btn_clear_filter.setStyleSheet(
+            "QPushButton { background-color: #FFFFFF; color: #1D4ED8; border: 1px solid #93C5FD; "
+            "border-radius: 11px; padding: 0px 10px; font-size: 11px; font-weight: 600; }"
+            "QPushButton:hover { background-color: #DBEAFE; border-color: #60A5FA; }"
+        )
+        self.btn_clear_filter.clicked.connect(lambda: self.filter_to_person(None))
+        h_fbanner.addWidget(self.btn_clear_filter)
+        h_fbanner.addStretch(1)
+        self.filter_banner.setVisible(False)
+        main_layout.addWidget(self.filter_banner)
+
         # ---------------------------------------------------------------------
         # 4. Scrollable Container for Group Sections
         # ---------------------------------------------------------------------
@@ -1572,6 +1601,16 @@ class BatchPeopleView(QWidget):
         if is_dark:
             self.action_bar.setStyleSheet("background-color: #1B1E24; border-bottom: 1px solid #2D323B;")
             self.avatar_strip.set_dark_mode(True)
+            if hasattr(self, "filter_banner"):
+                self.filter_banner.setStyleSheet(
+                    "QFrame#BatchFilterBanner { background-color: #172554; border-bottom: 1px solid #1E3A8A; }"
+                )
+                self.lbl_filter_status.setStyleSheet("color: #BFDBFE; font-size: 11px; font-weight: 600;")
+                self.btn_clear_filter.setStyleSheet(
+                    "QPushButton { background-color: #1E3A8A; color: #EFF6FF; border: 1px solid #3B82F6; "
+                    "border-radius: 11px; padding: 0px 10px; font-size: 11px; font-weight: 600; }"
+                    "QPushButton:hover { background-color: #2563EB; border-color: #60A5FA; }"
+                )
             self.scroll_area.setStyleSheet(
                 """
                 QScrollArea {
@@ -1598,6 +1637,16 @@ class BatchPeopleView(QWidget):
         else:
             self.action_bar.setStyleSheet("background-color: #F0F4F8; border-bottom: 1px solid #D0DBE5;")
             self.avatar_strip.set_dark_mode(False)
+            if hasattr(self, "filter_banner"):
+                self.filter_banner.setStyleSheet(
+                    "QFrame#BatchFilterBanner { background-color: #EFF6FF; border-bottom: 1px solid #BFDBFE; }"
+                )
+                self.lbl_filter_status.setStyleSheet("color: #1E3A8A; font-size: 11px; font-weight: 600;")
+                self.btn_clear_filter.setStyleSheet(
+                    "QPushButton { background-color: #FFFFFF; color: #1D4ED8; border: 1px solid #93C5FD; "
+                    "border-radius: 11px; padding: 0px 10px; font-size: 11px; font-weight: 600; }"
+                    "QPushButton:hover { background-color: #DBEAFE; border-color: #60A5FA; }"
+                )
             self.scroll_area.setStyleSheet(
                 """
                 QScrollArea {
@@ -1632,7 +1681,35 @@ class BatchPeopleView(QWidget):
         """Filters BatchPeopleView to a specific person_id (or None for All)."""
         self.avatar_strip._active_person_id = person_id
         self._filter_person_id = person_id
+        self._update_filter_banner()
         self.refresh_suggestions()
+
+    def _update_filter_banner(self, person_name: str | None = None) -> None:
+        """Shows a clear active-filter bar when narrowed to a single person or Unnamed group."""
+        if not hasattr(self, "filter_banner"):
+            return
+        pid = self._filter_person_id
+        if pid is None:
+            self.filter_banner.setVisible(False)
+            return
+        label_name = person_name
+        if not label_name:
+            if pid == -1:
+                label_name = "Unnamed Faces"
+            else:
+                btn = self.avatar_strip._buttons.get(pid)
+                if btn is not None and btn.toolTip():
+                    label_name = btn.toolTip().split(" (")[0]
+                else:
+                    try:
+                        row = self.engine.catalog_conn().execute(
+                            "SELECT name FROM people WHERE id = ?;", (int(pid),)
+                        ).fetchone()
+                        label_name = str(row["name"]) if row and row["name"] else "Selected Person"
+                    except Exception:
+                        label_name = "Selected Person"
+        self.lbl_filter_status.setText(f"Filtered to: {label_name}")
+        self.filter_banner.setVisible(True)
 
     def set_use_ribbon_mode(self, use_ribbon: bool) -> None:
         """Shows or hides the internal action bar when ribbon has a dedicated contextual tab."""
@@ -1693,6 +1770,11 @@ class BatchPeopleView(QWidget):
             self.lbl_empty_state.setText(
                 f"Finding people in your photos... ({self._scan_current:,} of {self._scan_total:,} photos scanned)\n\n"
                 "Detected face suggestions will appear here automatically as scanning progresses."
+            )
+        elif self._filter_person_id is not None:
+            self.lbl_empty_state.setText(
+                "No pending face suggestions for this person right now.\n\n"
+                "Click '✕ Show All People' above to view pending suggestions for everyone else."
             )
         else:
             self.lbl_empty_state.setText(
@@ -1775,6 +1857,18 @@ class BatchPeopleView(QWidget):
         else:
             conf_thresh = getattr(self, "_min_confidence_threshold", 0.52)
             raw_rows = self.repo.get_pending_face_suggestions(limit=5000, min_confidence=conf_thresh, include_unnamed=True)
+            # When filtered to a specific person (e.g. via "View all suggestions..."),
+            # always include all pending rows for that person even if the global 5000-row cap
+            # or confidence threshold would otherwise omit them.
+            if self._filter_person_id is not None and self._filter_person_id != -1:
+                seen_ids = {int(r["id"]) for r in raw_rows}
+                person_rows = self.repo.get_pending_face_suggestions(
+                    limit=5000, min_confidence=0.0, person_id=self._filter_person_id
+                )
+                for pr in person_rows:
+                    if int(pr["id"]) not in seen_ids:
+                        raw_rows.append(pr)
+                        seen_ids.add(int(pr["id"]))
             if getattr(self, "_show_tagged_faces", False):
                 target_pid = None if (self._filter_person_id is None or self._filter_person_id == -1) else self._filter_person_id
                 confirmed_rows = self.repo.get_confirmed_faces(limit=5000, person_id=target_pid)
@@ -1879,6 +1973,7 @@ class BatchPeopleView(QWidget):
                 sec.hide()
                 sec.deleteLater()
             self._sections.clear()
+            self._sections_filtered_at_build = self._filter_person_id
 
             # 1. Populate Named Person Sections
             named_grouped = {pid: recs for pid, recs in grouped.items() if pid is not None}
@@ -1989,6 +2084,9 @@ class BatchPeopleView(QWidget):
                     self._sections[sec_key] = sec
 
             self._update_empty_state_label()
+            self._update_filter_banner(
+                person_names.get(self._filter_person_id) if self._filter_person_id not in (None, -1) else None
+            )
         finally:
             self.scroll_content.setUpdatesEnabled(True)
         if v_scroll > 0 and hasattr(self, "scroll_area"):
@@ -1997,6 +2095,15 @@ class BatchPeopleView(QWidget):
     def _on_avatar_strip_filtered(self, person_id: int | None) -> None:
         """Filters section visibility when a chip is clicked on the avatar strip."""
         self._filter_person_id = person_id
+        self._update_filter_banner()
+        built_filter = getattr(self, "_sections_filtered_at_build", None)
+        needs_rebuild = (
+            (built_filter is not None and person_id != built_filter)
+            or (person_id not in (None, -1) and person_id not in self._sections)
+        )
+        if needs_rebuild:
+            self.refresh_suggestions()
+            return
         for sec in self._sections.values():
             if person_id is None:
                 sec.setVisible(True)
@@ -2186,8 +2293,9 @@ class BatchPeopleView(QWidget):
         if selected:
             for r in selected:
                 s_name = getattr(r, "swap_person_name", None)
-                if not s_name and "Looks like" in getattr(r, "outlier_reason", ""):
-                    inner = r.outlier_reason.replace("Looks like", "").strip()
+                reason_r = getattr(r, "outlier_reason", None) or ""
+                if not s_name and "Looks like" in reason_r:
+                    inner = reason_r.replace("Looks like", "").strip()
                     s_name = inner.split("(")[0].strip()
                 if s_name:
                     swap_name = s_name

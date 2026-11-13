@@ -1059,6 +1059,12 @@ class WorldMapView(QWidget):
         self._filter_year: int | None = None
         self._filter_person_id: int | None = None
         self._filter_min_rating: int | None = None
+        self._pending_thumb_ids: set[int] = set()
+        self._failed_thumb_ids: set[int] = set()
+        self._thumb_refresh_timer = QTimer(self)
+        self._thumb_refresh_timer.setSingleShot(True)
+        self._thumb_refresh_timer.setInterval(80)
+        self._thumb_refresh_timer.timeout.connect(self._push_updated_cluster_thumbnails)
 
         vbox = QVBoxLayout(self)
         vbox.setContentsMargins(0, 0, 0, 0)
@@ -1147,11 +1153,19 @@ class WorldMapView(QWidget):
             self._thumb_repo = thumb_repo
         self._emit_map_stats()
 
+    @staticmethod
+    def _apply_blob_to_cluster(cluster: dict[str, Any], blob: bytes) -> None:
+        b64 = base64.b64encode(blob).decode("ascii")
+        cluster["thumb_url"] = f"data:image/webp;base64,{b64}"
+        pix = QPixmap()
+        if pix.loadFromData(blob, "WEBP"):
+            cluster["pixmap"] = pix
+
     def _attach_cluster_thumbnails(self, clusters: list[dict[str, Any]]) -> None:
         """Enriches cluster dictionaries with thumbnail base64 data URIs and QPixmaps."""
         if not clusters or self._thumb_repo is None:
             return
-        # Collect candidate IDs from each cluster (checking up to 20 media items per cluster)
+        # Fast path: check up to 20 candidate media IDs per cluster in one batch
         all_candidate_ids: list[int] = []
         for c in clusters:
             mids = c.get("media_ids") or []
@@ -1160,26 +1174,145 @@ class WorldMapView(QWidget):
 
         if not all_candidate_ids:
             return
+        missing_sample_ids: list[int] = []
         try:
             blobs = self._thumb_repo.get_webp_blobs_batch(all_candidate_ids)
-            for c in clusters:
+
+            # Deep fallback: for larger clusters where none of the first 20 items are cached,
+            # check whether ANY item in the cluster already exists in thumbnails.db.
+            extra_matched_ids: dict[int, int] = {}
+            if hasattr(self._thumb_repo, "get_first_cached_media_id"):
+                for idx, c in enumerate(clusters):
+                    mids = c.get("media_ids") or []
+                    if len(mids) <= 20:
+                        continue
+                    if any(mid in blobs for mid in mids[:20]):
+                        continue
+                    cached_mid = self._thumb_repo.get_first_cached_media_id(mids[20:])
+                    if cached_mid is not None:
+                        extra_matched_ids[idx] = cached_mid
+                if extra_matched_ids:
+                    blobs.update(self._thumb_repo.get_webp_blobs_batch(list(extra_matched_ids.values())))
+
+            for idx, c in enumerate(clusters):
                 mids = c.get("media_ids") or []
                 if not mids:
                     continue
-                # Find the first item in the cluster with an existing cached thumbnail
                 blob = None
                 for mid in mids[:20]:
                     if mid in blobs:
                         blob = blobs[mid]
                         break
+                if blob is None and idx in extra_matched_ids:
+                    blob = blobs.get(extra_matched_ids[idx])
                 if blob:
-                    b64 = base64.b64encode(blob).decode("ascii")
-                    c["thumb_url"] = f"data:image/webp;base64,{b64}"
-                    pix = QPixmap()
-                    if pix.loadFromData(blob, "WEBP"):
-                        c["pixmap"] = pix
+                    self._apply_blob_to_cluster(c, blob)
+                else:
+                    sample_mid = int(mids[0])
+                    if sample_mid not in self._pending_thumb_ids and sample_mid not in self._failed_thumb_ids:
+                        missing_sample_ids.append(sample_mid)
         except Exception:
             pass
+
+        if missing_sample_ids:
+            self._schedule_cluster_thumbnail_decode(missing_sample_ids)
+
+    def _schedule_cluster_thumbnail_decode(self, sample_ids: list[int]) -> None:
+        """Asynchronously decodes 1 sample thumbnail from disk for clusters with no cached thumb."""
+        if self._repo is None or self._thumb_repo is None:
+            return
+        engine = getattr(self._repo, "engine", None)
+        get_info = getattr(self._repo, "get_media_decode_info_batch", None)
+        if engine is None or get_info is None:
+            return
+
+        # Cap per-viewport decode burst so rapid panning stays responsive
+        to_decode = [mid for mid in sample_ids if mid not in self._pending_thumb_ids and mid not in self._failed_thumb_ids][:24]
+        if not to_decode:
+            return
+
+        try:
+            rows = get_info(to_decode)
+        except Exception:
+            return
+        if not rows:
+            return
+
+        from pathlib import Path
+        from PySide6.QtCore import QThreadPool
+        from src.workers.scanner_thumb_worker import ThumbnailDecodeWorker
+
+        pool = QThreadPool.globalInstance()
+        for row in rows:
+            mid = int(row["id"])
+            file_path = Path(row["folder_path"]) / str(row["filename"])
+            self._pending_thumb_ids.add(mid)
+            worker = ThumbnailDecodeWorker(
+                engine=engine,
+                media_id=mid,
+                file_path=file_path,
+                mtime=int(row.get("mtime") or 0),
+                is_video=bool(row.get("is_video")),
+                orientation=int(row.get("orientation") or 1),
+            )
+            worker.signals.thumbnail_ready.connect(self._on_cluster_thumbnail_ready)
+            worker.signals.error.connect(self._on_cluster_thumbnail_error)
+            pool.start(worker)
+
+    @Slot(int, object)
+    def _on_cluster_thumbnail_ready(self, media_id: int, qimg: Any) -> None:
+        self._pending_thumb_ids.discard(int(media_id))
+        blob = None
+        if self._thumb_repo is not None and hasattr(self._thumb_repo, "get_webp_blob"):
+            try:
+                blob = self._thumb_repo.get_webp_blob(int(media_id))
+            except Exception:
+                blob = None
+
+        pix = QPixmap.fromImage(qimg) if qimg is not None and not qimg.isNull() else QPixmap()
+        if blob is None and not pix.isNull():
+            from PySide6.QtCore import QBuffer, QIODevice
+            buf = QBuffer()
+            buf.open(QIODevice.OpenModeFlag.WriteOnly)
+            if pix.save(buf, "WEBP", 80):
+                blob = bytes(buf.data())
+
+        if blob is None and pix.isNull():
+            return
+
+        b64_url = f"data:image/webp;base64,{base64.b64encode(blob).decode('ascii')}" if blob else None
+        updated = False
+        mid_int = int(media_id)
+        for c in self._current_clusters:
+            if c.get("thumb_url"):
+                continue
+            mids = c.get("media_ids") or []
+            if mid_int in mids:
+                if b64_url:
+                    c["thumb_url"] = b64_url
+                if not pix.isNull():
+                    c["pixmap"] = pix
+                updated = True
+
+        if updated and not self._thumb_refresh_timer.isActive():
+            self._thumb_refresh_timer.start()
+
+    @Slot(int, str)
+    def _on_cluster_thumbnail_error(self, media_id: int, _msg: str) -> None:
+        mid_int = int(media_id)
+        self._pending_thumb_ids.discard(mid_int)
+        self._failed_thumb_ids.add(mid_int)
+
+    def _push_updated_cluster_thumbnails(self) -> None:
+        if not self._current_clusters:
+            return
+        self.canvas.set_bounds_and_clusters(
+            self._min_lat, self._max_lat, self._min_lon, self._max_lon, self._current_clusters
+        )
+        if self._web_loaded and self.web_view is not None:
+            self.web_view.page().runJavaScript(
+                f"updateClusters({_clusters_to_json(self._current_clusters)});"
+            )
 
     @property
     def map_style(self) -> str:

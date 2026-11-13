@@ -441,39 +441,73 @@ def estimate_depth_map(
     return np.clip(depth_smooth, 0.0, 1.0).astype(np.float32)
 
 
+def compute_multi_color_similarity_mask(
+    image_bgr: np.ndarray,
+    target_bgrs: list[tuple[int, int, int] | np.ndarray] | tuple[tuple[int, int, int], ...],
+    tolerance: float = 0.25,
+    refine_edges: bool = True,
+    lab_img: np.ndarray | None = None,
+) -> np.ndarray:
+    """
+    Generates a unified smooth alpha mask [0.0, 1.0] isolating pixels similar to ANY colour in target_bgrs.
+    Computes the image LAB conversion once and runs guided_filter_matte at most once.
+    When refine_edges=False (e.g. during active slider scrubbing), skips guided_filter_matte for instant speed.
+    """
+    if image_bgr is None or not target_bgrs:
+        return np.zeros((10, 10) if image_bgr is None else image_bgr.shape[:2], dtype=np.float32)
+
+    if lab_img is None:
+        lab_img = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+    targets_arr = np.array([target_bgrs], dtype=np.uint8)
+    lab_targets = cv2.cvtColor(targets_arr, cv2.COLOR_BGR2LAB).astype(np.float32)[0]
+
+    L = lab_img[:, :, 0]
+    A = lab_img[:, :, 1]
+    B = lab_img[:, :, 2]
+
+    min_dist_sq: np.ndarray | None = None
+    for lab_t in lab_targets:
+        dl = (L - lab_t[0]) * 0.5
+        da = A - lab_t[1]
+        db = B - lab_t[2]
+        d2 = dl * dl + da * da + db * db
+        if min_dist_sq is None:
+            min_dist_sq = d2
+        else:
+            np.minimum(min_dist_sq, d2, out=min_dist_sq)
+
+    assert min_dist_sq is not None
+    dist = np.sqrt(min_dist_sq)
+    max_dist = max(10.0, float(tolerance) * 110.0)
+    raw_mask = np.clip(1.0 - (dist / max_dist), 0.0, 1.0)
+    smooth_mask = np.power(raw_mask, 1.5)
+
+    if not refine_edges:
+        return smooth_mask.astype(np.float32)
+    return guided_filter_matte(image_bgr, smooth_mask, radius=12, eps=1e-3, subsample=2)
+
+
 def compute_color_similarity_mask(
     image_bgr: np.ndarray,
     target_bgr: tuple[int, int, int] | np.ndarray,
     tolerance: float = 0.25,
+    refine_edges: bool = True,
 ) -> np.ndarray:
     """
     Generates a smooth alpha mask [0.0, 1.0] isolating pixels similar in color to target_bgr:
-    - Uses CIE LAB perceptual distance and HSV hue matching.
+    - Uses CIE LAB perceptual distance.
     - tolerance: in [0.05, 0.80].
-    - Edge-snapped using guided_filter_matte.
+    - Edge-snapped using guided_filter_matte when refine_edges=True.
     """
     if image_bgr is None:
         return np.zeros((10, 10), dtype=np.float32)
-
-    h, w = image_bgr.shape[:2]
-    target_pixel = np.array([[target_bgr]], dtype=np.uint8)
-
-    lab_img = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
-    lab_target = cv2.cvtColor(target_pixel, cv2.COLOR_BGR2LAB).astype(np.float32)[0, 0]
-
-    # Weighted Delta E distance (giving slightly higher weight to chroma a, b vs luminance L)
-    dl = (lab_img[:, :, 0] - lab_target[0]) * 0.5
-    da = lab_img[:, :, 1] - lab_target[1]
-    db = lab_img[:, :, 2] - lab_target[2]
-    dist = np.sqrt(dl * dl + da * da + db * db)
-
-    # Tolerance normalization
-    max_dist = max(10.0, float(tolerance) * 110.0)
-    raw_mask = np.clip(1.0 - (dist / max_dist), 0.0, 1.0)
-    # Smooth sigmoid curve
-    smooth_mask = np.power(raw_mask, 1.5)
-
-    return guided_filter_matte(image_bgr, smooth_mask, radius=12, eps=1e-3, subsample=2)
+    return compute_multi_color_similarity_mask(
+        image_bgr,
+        [target_bgr],
+        tolerance=tolerance,
+        refine_edges=refine_edges,
+    )
 
 
 def apply_color_pop(
@@ -492,14 +526,19 @@ def apply_color_pop(
 
     # Background B&W with contrast adjustment
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    gray_adj = np.clip((gray - 128.0) * bg_contrast + 128.0 + bg_brightness, 0.0, 255.0)
-    bw_bgr = cv2.cvtColor(gray_adj.astype(np.uint8), cv2.COLOR_GRAY2BGR).astype(np.float32)
+    gray -= 128.0
+    gray *= bg_contrast
+    gray += 128.0 + bg_brightness
+    np.clip(gray, 0.0, 255.0, out=gray)
+    bw_bgr = cv2.cvtColor(gray.astype(np.uint8), cv2.COLOR_GRAY2BGR).astype(np.float32)
 
     fg_bgr = image_bgr.astype(np.float32)
     m3 = mask[:, :, None]
-
-    blended = fg_bgr * m3 + bw_bgr * (1.0 - m3)
-    return np.clip(blended, 0.0, 255.0).astype(np.uint8)
+    fg_bgr *= m3
+    bw_bgr *= (1.0 - m3)
+    fg_bgr += bw_bgr
+    np.clip(fg_bgr, 0.0, 255.0, out=fg_bgr)
+    return fg_bgr.astype(np.uint8)
 
 
 def refine_mask_brush(
@@ -1099,25 +1138,98 @@ def inpaint_disocclusion_background(
     return cv2.inpaint(image_bgr, dilated_mask, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
 
 
+_CINEMATIC_SRGB_TO_LIN: np.ndarray = ((np.arange(256, dtype=np.float32) / 255.0) ** 2.2).astype(np.float32)
+_CINEMATIC_LIN_TO_SRGB: np.ndarray = np.clip(
+    (np.linspace(0.0, 1.0, 4096, dtype=np.float32) ** (1.0 / 2.2)) * 255.0 + 0.5, 0, 255
+).astype(np.uint8)
+
+
+def _decontaminate_foreground_edges(bgr: np.ndarray, alpha_matte: np.ndarray) -> np.ndarray:
+    """
+    Extends solid foreground colors slightly outward into semi-transparent matte edges
+    (hair, shoulders) so background colors do not bleed into the moving foreground cutout.
+    """
+    core_w = np.clip((alpha_matte - 0.55) / 0.35, 0.0, 1.0).astype(np.float32)
+    rim_mask = (alpha_matte > 0.02) & (alpha_matte < 0.92)
+    if not np.any(rim_mask) or not np.any(core_w > 0.1):
+        return bgr
+
+    h, w = bgr.shape[:2]
+    scale = max(1.0, max(h, w) / 720.0)
+    k = max(5, int(round(9 * scale)) | 1)
+    sigma = max(1.5, 3.0 * scale)
+
+    fg_f = bgr.astype(np.float32)
+    premult = fg_f * core_w[:, :, None]
+    num = cv2.GaussianBlur(premult, (k, k), sigmaX=sigma, sigmaY=sigma)
+    den = cv2.GaussianBlur(core_w, (k, k), sigmaX=sigma, sigmaY=sigma)[:, :, None]
+    valid = den[:, :, 0] > 1e-3
+    ext_fg = fg_f.copy()
+    ext_fg[valid] = num[valid] / den[valid]
+
+    # Blend extended foreground color into the soft matte rim only
+    rim_blend = np.where(rim_mask, np.clip(1.0 - core_w, 0.0, 1.0), 0.0)[:, :, None].astype(np.float32)
+    out_f = fg_f * (1.0 - rim_blend) + ext_fg * rim_blend
+    np.clip(out_f, 0.0, 255.0, out=out_f)
+    return out_f.astype(np.uint8)
+
+
+def _build_cinematic_bokeh_plate(
+    bg_canvas: np.ndarray,
+    depth_bg: np.ndarray,
+    focal_plane: float = 0.5,
+) -> np.ndarray:
+    """
+    Precomputes a linear-light optical bokeh background plate weighted by distance from focal_plane.
+    """
+    h_img, w_img = bg_canvas.shape[:2]
+    focus_z = float(np.clip(focal_plane, 0.0, 1.0))
+    defocus = np.clip(np.abs(depth_bg - focus_z) * 1.35, 0.0, 1.0)
+
+    # Blur in linear light on a <=640px buffer for photographic highlight bloom & speed
+    scale_blur = max(1.0, max(h_img, w_img) / 640.0)
+    bw = max(16, int(round(w_img / scale_blur)))
+    bh = max(16, int(round(h_img / scale_blur)))
+    small_bg = cv2.resize(bg_canvas, (bw, bh), interpolation=cv2.INTER_AREA) if scale_blur > 1.05 else bg_canvas
+    small_lin = _CINEMATIC_SRGB_TO_LIN[small_bg]
+
+    # Subtle specular highlight boost in linear space
+    lum = cv2.cvtColor(small_bg, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    glow = np.clip((lum - 195.0) / 60.0, 0.0, 1.0)[:, :, None]
+    small_lin = small_lin * (1.0 + glow * 0.6)
+
+    sigma_b = max(2.0, 6.0 / scale_blur) if scale_blur > 1.05 else 6.0
+    blurred_lin = cv2.GaussianBlur(small_lin, (0, 0), sigmaX=sigma_b, sigmaY=sigma_b)
+    indices = np.clip(blurred_lin * 4095.0, 0, 4095).astype(np.int32)
+    small_srgb = _CINEMATIC_LIN_TO_SRGB[indices]
+    blurred_srgb = (
+        cv2.resize(small_srgb, (w_img, h_img), interpolation=cv2.INTER_LINEAR)
+        if scale_blur > 1.05
+        else small_srgb
+    )
+
+    w_blend = (defocus * 0.72)[:, :, None]
+    bg_f = bg_canvas.astype(np.float32)
+    blur_f = blurred_srgb.astype(np.float32)
+    blur_f -= bg_f
+    blur_f *= w_blend
+    bg_f += blur_f
+    np.clip(bg_f, 0.0, 255.0, out=bg_f)
+    return bg_f.astype(np.uint8)
+
+
 def prepare_3d_parallax_layers(
     bgr_array: np.ndarray,
     face_rects: list[tuple[int, int, int, int]] | None = None,
 ) -> dict[str, np.ndarray]:
     """
     Precomputes hybrid 2.5D layered depth-mesh parallax layers:
-    1. Obtains (depth_map, alpha_matte) via DepthAndMatteEngine (Depth-Anything-V2 + MODNet with fallback).
-    2. Constructs a clean background plate (bg_plate) by dilating the foreground mask
-       (alpha_matte > 0.15) by int(18 * res_scale) pixels and inpainting disocclusions with cv2.inpaint.
-    3. Inpaints and smooths the background depth map (depth_bg) across the disocclusion zone so background
-       depth is continuous behind the subject.
-    Returns:
-       {
-           "fg_image": bgr_array,
-           "bg_plate": bg_plate,
-           "depth_map": depth_map,
-           "depth_bg": depth_bg,
-           "alpha_matte": alpha_matte,
-       }
+    1. Obtains (depth_map, alpha_matte) via DepthAndMatteEngine (Depth-Anything-V2 + MODNet with fallback),
+       fusing near-depth foreground cues when MODNet has low coverage (non-portrait scenes).
+    2. Decontaminates soft foreground edges so background colors do not bleed into moving cutouts.
+    3. Constructs a clean background plate (bg_plate) by dilating the foreground mask
+       (alpha_matte > 0.15) and inpainting disocclusions at up to 1024px resolution.
+    4. Inpaints and smooths the background depth map (depth_bg) across the disocclusion zone.
     """
     if bgr_array is None or bgr_array.size == 0:
         empty = np.zeros((10, 10, 3), dtype=np.uint8)
@@ -1135,17 +1247,26 @@ def prepare_3d_parallax_layers(
     depth_engine = get_depth_and_matte_engine()
     depth_map, alpha_matte = depth_engine.get_depth_and_matte(rgb)
 
+    # For non-portrait scenes where MODNet finds < 2% foreground, fuse near-depth foreground cues
+    if float(np.mean(alpha_matte > 0.25)) < 0.02:
+        depth_fg_cue = np.clip((0.40 - depth_map) / 0.18, 0.0, 1.0).astype(np.float32)
+        alpha_matte = np.maximum(alpha_matte, depth_fg_cue)
+
+    # Decontaminate foreground rim colors before warping
+    fg_clean = _decontaminate_foreground_edges(bgr_array, alpha_matte)
+
     # Clean foreground mask (threshold at 0.15)
+    inpaint_scale = max(1.0, max(h, w) / 1024.0)
     res_scale = max(1.0, max(h, w) / 600.0)
-    dilate_px = max(5, int(18 * res_scale))
+    dilate_px = max(5, int(14 * res_scale))
     ksize = dilate_px * 2 + 1
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
     bin_mask = (alpha_matte > 0.15).astype(np.uint8) * 255
     dilated_mask = cv2.dilate(bin_mask, kernel)
 
-    # Inpaint background plate and background depth map
-    if res_scale > 1.2:
-        sw, sh = max(16, int(w / res_scale)), max(16, int(h / res_scale))
+    # Inpaint background plate and background depth map at up to 1024px
+    if inpaint_scale > 1.15:
+        sw, sh = max(16, int(w / inpaint_scale)), max(16, int(h / inpaint_scale))
         small_img = cv2.resize(bgr_array, (sw, sh), interpolation=cv2.INTER_AREA)
         small_mask = cv2.resize(dilated_mask, (sw, sh), interpolation=cv2.INTER_NEAREST)
         inpainted_small = cv2.inpaint(small_img, small_mask, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
@@ -1169,7 +1290,7 @@ def prepare_3d_parallax_layers(
     depth_bg = depth_bg * (1.0 - blend_mask) + blurred_depth * blend_mask
 
     return {
-        "fg_image": bgr_array,
+        "fg_image": fg_clean,
         "bg_plate": bg_plate,
         "depth_map": depth_map,
         "depth_bg": depth_bg,
@@ -1229,31 +1350,47 @@ def render_3d_cinematic_motion_frame(
     if depth_bg_arr is None:
         depth_bg_arr = depth_fg.copy()
 
-    # Resize all layers to target canvas if dimensions differ
-    if depth_fg.shape[:2] != (th, tw):
-        depth_fg = cv2.resize(depth_fg, (tw, th), interpolation=cv2.INTER_LINEAR)
-    if depth_bg_arr.shape[:2] != (th, tw):
-        depth_bg_arr = cv2.resize(depth_bg_arr, (tw, th), interpolation=cv2.INTER_LINEAR)
-    if fg_src.shape[:2] != (th, tw):
-        fg_canvas = cv2.resize(fg_src, (tw, th), interpolation=cv2.INTER_LINEAR)
-    else:
-        fg_canvas = fg_src
-    if bg_src.shape[:2] != (th, tw):
-        bg_canvas = cv2.resize(bg_src, (tw, th), interpolation=cv2.INTER_LINEAR)
-    else:
-        bg_canvas = bg_src
-    if alpha_matte.shape[:2] != (th, tw):
-        alpha_canvas = cv2.resize(alpha_matte, (tw, th), interpolation=cv2.INTER_LINEAR)
-    else:
-        alpha_canvas = alpha_matte
-
     intensity = max(0.05, min(1.0, float(intensity)))
     max_disp = float(min(tw, th)) * 0.045 * intensity
     cx, cy = tw * 0.5, th * 0.5
 
-    # 1.04x overscan grid to eliminate outer border reflection artifacts
-    xs, ys = np.meshgrid(np.arange(tw, dtype=np.float32), np.arange(th, dtype=np.float32))
-    overscan = max(1.0, float(overscan_scale))
+    # Cache resized canvas layers & meshgrid inside dict when rendering multi-frame videos/previews
+    layers_dict = foreground_bgr if isinstance(foreground_bgr, dict) else None
+    canvas_cache = layers_dict.get("_canvas_cache") if layers_dict is not None else None
+    if canvas_cache is not None and canvas_cache[0] == (tw, th):
+        _, depth_fg, depth_bg_arr, fg_canvas, bg_canvas, alpha_canvas, xs, ys = canvas_cache
+    else:
+        if depth_fg.shape[:2] != (th, tw):
+            depth_fg = cv2.resize(depth_fg, (tw, th), interpolation=cv2.INTER_LINEAR)
+        if depth_bg_arr.shape[:2] != (th, tw):
+            depth_bg_arr = cv2.resize(depth_bg_arr, (tw, th), interpolation=cv2.INTER_LINEAR)
+        if fg_src.shape[:2] != (th, tw):
+            fg_canvas = cv2.resize(fg_src, (tw, th), interpolation=cv2.INTER_LINEAR)
+        else:
+            fg_canvas = fg_src
+        if bg_src.shape[:2] != (th, tw):
+            bg_canvas = cv2.resize(bg_src, (tw, th), interpolation=cv2.INTER_LINEAR)
+        else:
+            bg_canvas = bg_src
+        if alpha_matte.shape[:2] != (th, tw):
+            alpha_canvas = cv2.resize(alpha_matte, (tw, th), interpolation=cv2.INTER_LINEAR)
+        else:
+            alpha_canvas = alpha_matte
+        xs, ys = np.meshgrid(np.arange(tw, dtype=np.float32), np.arange(th, dtype=np.float32))
+        if layers_dict is not None:
+            layers_dict["_canvas_cache"] = (
+                (tw, th),
+                depth_fg,
+                depth_bg_arr,
+                fg_canvas,
+                bg_canvas,
+                alpha_canvas,
+                xs,
+                ys,
+            )
+
+    # Dynamic overscan eliminates outer border reflection artifacts even at intensity=1.0
+    overscan = max(float(overscan_scale), 1.0 + 0.065 * intensity)
     base_x = cx + (xs - cx) / overscan
     base_y = cy + (ys - cy) / overscan
 
@@ -1311,22 +1448,32 @@ def render_3d_cinematic_motion_frame(
         map_fg_x = cx + (base_x - cx) / zoom + cam_x * rel_fg
         map_fg_y = cy + (base_y - cy) / zoom + cam_y * rel_fg
 
-    # Optional depth-weighted optical blur on background plate
+    # Linear-light depth-weighted optical blur on background plate (precomputed once per focal_plane)
     if enable_bokeh:
-        bg_blur = cv2.GaussianBlur(bg_canvas, (13, 13), 0)
-        bokeh_weight = np.clip((depth_bg_arr - 0.25) / 0.75, 0.0, 1.0)[..., None]
-        bg_to_warp = (bg_canvas.astype(np.float32) * (1.0 - bokeh_weight * 0.65) + bg_blur.astype(np.float32) * (bokeh_weight * 0.65)).astype(np.uint8)
+        bokeh_key = (tw, th, round(float(focal_plane), 3))
+        bokeh_cache = layers_dict.get("_bokeh_cache") if layers_dict is not None else None
+        if bokeh_cache is not None and bokeh_cache[0] == bokeh_key:
+            bg_to_warp = bokeh_cache[1]
+        else:
+            bg_to_warp = _build_cinematic_bokeh_plate(bg_canvas, depth_bg_arr, focal_plane=focal_plane)
+            if layers_dict is not None:
+                layers_dict["_bokeh_cache"] = (bokeh_key, bg_to_warp)
     else:
         bg_to_warp = bg_canvas
 
-    # Warp background plate and foreground subject & matte independently
+    # Warp background plate and foreground subject & matte independently (INTER_CUBIC keeps subject sharp)
     warped_bg = cv2.remap(bg_to_warp, map_bg_x, map_bg_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
-    warped_fg = cv2.remap(fg_canvas, map_fg_x, map_fg_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+    warped_fg = cv2.remap(fg_canvas, map_fg_x, map_fg_y, cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT_101)
     warped_alpha = cv2.remap(alpha_canvas, map_fg_x, map_fg_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
 
     m3 = np.clip(warped_alpha, 0.0, 1.0)[..., None]
-    composite = warped_fg.astype(np.float32) * m3 + warped_bg.astype(np.float32) * (1.0 - m3)
-    return np.clip(composite, 0.0, 255.0).astype(np.uint8)
+    fg_f = warped_fg.astype(np.float32)
+    bg_f = warped_bg.astype(np.float32)
+    fg_f *= m3
+    bg_f *= (1.0 - m3)
+    fg_f += bg_f
+    np.clip(fg_f, 0.0, 255.0, out=fg_f)
+    return fg_f.astype(np.uint8)
 
 
 def render_3d_cinematic_motion_video(

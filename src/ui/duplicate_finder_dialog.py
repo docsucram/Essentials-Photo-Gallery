@@ -105,10 +105,17 @@ class _DuplicateScanWorker(QThread):
 class _GroupListCard(QFrame):
     """Visual list row widget for a duplicate/burst group."""
 
-    def __init__(self, group: DuplicateGroup, is_dark: bool = False, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        group: DuplicateGroup,
+        is_dark: bool = False,
+        thumb_pixmap: QPixmap | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.group = group
         self.is_dark = is_dark
+        self._thumb_pixmap = thumb_pixmap
         self.setFrameShape(QFrame.StyledPanel)
         self.setFixedHeight(68)
         self._init_ui()
@@ -119,10 +126,46 @@ class _GroupListCard(QFrame):
     def minimumSizeHint(self) -> QSize:
         return QSize(220, 68)
 
+    def set_thumbnail(self, pixmap: QPixmap | None) -> None:
+        self._thumb_pixmap = pixmap
+        if pixmap is not None and not pixmap.isNull():
+            scaled = pixmap.scaled(
+                52,
+                52,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            if scaled.width() > 52 or scaled.height() > 52:
+                sx = max(0, (scaled.width() - 52) // 2)
+                sy = max(0, (scaled.height() - 52) // 2)
+                scaled = scaled.copy(sx, sy, 52, 52)
+            self.lbl_thumb.setPixmap(scaled)
+            self.lbl_thumb.setText("")
+        else:
+            self.lbl_thumb.setPixmap(QPixmap())
+            self.lbl_thumb.setText("🖼")
+
     def _init_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(6, 6, 8, 6)
+        outer.setSpacing(8)
+
+        self.lbl_thumb = QLabel(self)
+        self.lbl_thumb.setFixedSize(52, 52)
+        self.lbl_thumb.setAlignment(Qt.AlignCenter)
+        thumb_bg = "#1E242E" if self.is_dark else "#E2E8F0"
+        thumb_bd = "#3E4B5B" if self.is_dark else "#CBD5E1"
+        thumb_fg = "#94A3B8" if self.is_dark else "#64748B"
+        self.lbl_thumb.setStyleSheet(
+            f"background-color: {thumb_bg}; border: 1px solid {thumb_bd}; border-radius: 4px; color: {thumb_fg};"
+        )
+        self.set_thumbnail(self._thumb_pixmap)
+        outer.addWidget(self.lbl_thumb, 0, Qt.AlignVCenter)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
+        outer.addLayout(layout, 1)
 
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
@@ -476,6 +519,7 @@ class DuplicateFinderView(QWidget):
         self.is_dark = is_dark
         self.groups: list[DuplicateGroup] = []
         self.active_group: DuplicateGroup | None = None
+        self._group_thumb_cache: dict[int, QPixmap] = {}
         self._scan_worker: _DuplicateScanWorker | None = None
         self._detection_engine: DuplicateDetectionEngine | None = None
 
@@ -515,14 +559,17 @@ class DuplicateFinderView(QWidget):
                 QComboBox, QLineEdit { background-color: #1E242C; border: 1px solid #334155; color: #F1F5F9; border-radius: 3px; padding: 4px; }
                 QPushButton { background-color: #252D37; border: 1px solid #3E4B5B; color: #F1F5F9; border-radius: 3px; padding: 4px 10px; }
                 QPushButton:hover { background-color: #2F3946; border-color: #60A5FA; }
+                QPushButton:disabled { background-color: #1B222C; border-color: #2D3748; color: #64748B; }
                 QPushButton#BackBtn { background-color: #1E3A5F; border: 1px solid #2563EB; color: #93C5FD; font-weight: bold; }
                 QPushButton#BackBtn:hover { background-color: #2563EB; color: #FFFFFF; }
                 QPushButton#PrimaryBtn { background-color: #0078D4; border-color: #0078D4; color: #FFFFFF; font-weight: bold; }
                 QPushButton#PrimaryBtn:hover { background-color: #1084D8; }
-                QPushButton#StopBtn { background-color: #475569; border-color: #64748B; color: #F1F5F9; }
-                QPushButton#StopBtn:hover { background-color: #64748B; }
+                QPushButton#PrimaryBtn:disabled { background-color: #1E3A5F; border-color: #2B4C7E; color: #94A3B8; }
+                QPushButton#StopBtn { background-color: #7F1D1D; border: 1px solid #DC2626; color: #FEE2E2; font-weight: bold; }
+                QPushButton#StopBtn:hover { background-color: #991B1B; border-color: #EF4444; }
                 QPushButton#DeleteBtn { background-color: #B91C1C; border-color: #B91C1C; color: #FFFFFF; font-weight: bold; }
                 QPushButton#DeleteBtn:hover { background-color: #DC2626; }
+                QPushButton#DeleteBtn:disabled { background-color: #3B2327; border-color: #5C2B32; color: #94A3B8; }
                 """
             )
         else:
@@ -537,16 +584,59 @@ class DuplicateFinderView(QWidget):
                 QComboBox, QLineEdit { background-color: #FFFFFF; border: 1px solid #CBD5E1; color: #1E293B; border-radius: 3px; padding: 4px; }
                 QPushButton { background-color: #F1F5F9; border: 1px solid #CBD5E1; color: #1E293B; border-radius: 3px; padding: 4px 10px; }
                 QPushButton:hover { background-color: #E2E8F0; border-color: #2A82DA; }
+                QPushButton:disabled { background-color: #E2E8F0; border-color: #CBD5E1; color: #64748B; }
                 QPushButton#BackBtn { background-color: #E0EEF9; border: 1px solid #B0D4F1; color: #005A9E; font-weight: bold; }
                 QPushButton#BackBtn:hover { background-color: #CCE4F7; border-color: #0078D4; }
                 QPushButton#PrimaryBtn { background-color: #0078D4; border-color: #0078D4; color: #FFFFFF; font-weight: bold; }
                 QPushButton#PrimaryBtn:hover { background-color: #1084D8; }
-                QPushButton#StopBtn { background-color: #E2E8F0; border-color: #94A3B8; color: #334155; }
-                QPushButton#StopBtn:hover { background-color: #CBD5E1; }
+                QPushButton#PrimaryBtn:disabled { background-color: #E2E8F0; border-color: #CBD5E1; color: #475569; }
+                QPushButton#StopBtn { background-color: #FEE2E2; border: 1px solid #DC2626; color: #991B1B; font-weight: bold; }
+                QPushButton#StopBtn:hover { background-color: #FECACA; border-color: #B91C1C; }
                 QPushButton#DeleteBtn { background-color: #D32F2F; border-color: #D32F2F; color: #FFFFFF; font-weight: bold; }
                 QPushButton#DeleteBtn:hover { background-color: #E53935; }
+                QPushButton#DeleteBtn:disabled { background-color: #E2E8F0; border-color: #CBD5E1; color: #64748B; }
                 """
             )
+
+        # Apply explicit widget-level styles on action buttons so ancestor theme QSS
+        # (e.g. modern.qss QPushButton { background-color: #FFFFFF; }) cannot override them.
+        if hasattr(self, "btn_scan"):
+            if is_dark:
+                self.btn_scan.setStyleSheet(
+                    "QPushButton { background-color: #0078D4; border: 1px solid #0078D4; color: #FFFFFF; font-weight: bold; border-radius: 3px; padding: 4px 12px; }"
+                    "QPushButton:hover { background-color: #1084D8; border-color: #1084D8; }"
+                    "QPushButton:disabled { background-color: #1E3A5F; border-color: #2B4C7E; color: #94A3B8; }"
+                )
+            else:
+                self.btn_scan.setStyleSheet(
+                    "QPushButton { background-color: #0078D4; border: 1px solid #0078D4; color: #FFFFFF; font-weight: bold; border-radius: 3px; padding: 4px 12px; }"
+                    "QPushButton:hover { background-color: #1084D8; border-color: #1084D8; }"
+                    "QPushButton:disabled { background-color: #E2E8F0; border-color: #CBD5E1; color: #475569; }"
+                )
+        if hasattr(self, "btn_stop"):
+            if is_dark:
+                self.btn_stop.setStyleSheet(
+                    "QPushButton { background-color: #7F1D1D; border: 1px solid #DC2626; color: #FEE2E2; font-weight: bold; border-radius: 3px; padding: 4px 12px; }"
+                    "QPushButton:hover { background-color: #991B1B; border-color: #EF4444; }"
+                )
+            else:
+                self.btn_stop.setStyleSheet(
+                    "QPushButton { background-color: #FEE2E2; border: 1px solid #DC2626; color: #991B1B; font-weight: bold; border-radius: 3px; padding: 4px 12px; }"
+                    "QPushButton:hover { background-color: #FECACA; border-color: #B91C1C; }"
+                )
+        if hasattr(self, "btn_delete"):
+            if is_dark:
+                self.btn_delete.setStyleSheet(
+                    "QPushButton { background-color: #B91C1C; border: 1px solid #B91C1C; color: #FFFFFF; font-weight: bold; border-radius: 3px; padding: 4px 12px; }"
+                    "QPushButton:hover { background-color: #DC2626; }"
+                    "QPushButton:disabled { background-color: #3B2327; border-color: #5C2B32; color: #94A3B8; }"
+                )
+            else:
+                self.btn_delete.setStyleSheet(
+                    "QPushButton { background-color: #D32F2F; border: 1px solid #D32F2F; color: #FFFFFF; font-weight: bold; border-radius: 3px; padding: 4px 12px; }"
+                    "QPushButton:hover { background-color: #E53935; }"
+                    "QPushButton:disabled { background-color: #E2E8F0; border-color: #CBD5E1; color: #64748B; }"
+                )
 
     def _init_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -990,6 +1080,58 @@ class DuplicateFinderView(QWidget):
         self.btn_filter_visual.setText(f"Visual ({cnt_visual})")
         self.btn_filter_burst.setText(f"Bursts ({cnt_burst})")
 
+    def _resolve_group_thumbs_batch(self, groups: Sequence[DuplicateGroup]) -> None:
+        if self.thumb_repo is None or not groups:
+            return
+        missing_ids: list[int] = []
+        for g in groups:
+            if g.items:
+                mid = int(g.items[0].media_id)
+                if mid not in self._group_thumb_cache:
+                    missing_ids.append(mid)
+        if not missing_ids:
+            return
+        try:
+            blobs = self.thumb_repo.get_webp_blobs_batch(missing_ids)
+            for mid, blob in blobs.items():
+                pm = QPixmap()
+                if pm.loadFromData(blob, "WEBP") and not pm.isNull():
+                    self._group_thumb_cache[int(mid)] = pm
+        except Exception:
+            pass
+
+    def _get_group_thumb(self, group: DuplicateGroup) -> QPixmap | None:
+        if not group.items:
+            return None
+        first_item = group.items[0]
+        mid = int(first_item.media_id)
+        if mid in self._group_thumb_cache:
+            return self._group_thumb_cache[mid]
+        if self.thumb_repo is not None:
+            try:
+                blob = self.thumb_repo.get_webp_blob(mid)
+                if blob:
+                    pm = QPixmap()
+                    if pm.loadFromData(blob, "WEBP") and not pm.isNull():
+                        self._group_thumb_cache[mid] = pm
+                        return pm
+            except Exception:
+                pass
+        fp = getattr(first_item, "full_path", None) or getattr(first_item, "file_path", None)
+        if fp and os.path.exists(fp):
+            try:
+                reader = QImageReader(str(fp))
+                reader.setAutoTransform(True)
+                reader.setScaledSize(QSize(64, 64))
+                img = reader.read()
+                if not img.isNull():
+                    pm = QPixmap.fromImage(img)
+                    self._group_thumb_cache[mid] = pm
+                    return pm
+            except Exception:
+                pass
+        return None
+
     def _add_group_to_list(self, g: DuplicateGroup) -> None:
         filter_mode = "all"
         if self.btn_filter_exact.isChecked():
@@ -1006,7 +1148,7 @@ class DuplicateFinderView(QWidget):
         item.setSizeHint(QSize(280, 68))
         item.setData(Qt.UserRole, g.group_id)
         self.list_groups.addItem(item)
-        card = _GroupListCard(g, is_dark=self.is_dark)
+        card = _GroupListCard(g, is_dark=self.is_dark, thumb_pixmap=self._get_group_thumb(g))
         self.list_groups.setItemWidget(item, card)
 
     def _populate_groups_list(self) -> None:
@@ -1022,13 +1164,14 @@ class DuplicateFinderView(QWidget):
             filter_mode = "burst"
 
         visible_groups = [g for g in self.groups if filter_mode == "all" or g.match_type == filter_mode]
+        self._resolve_group_thumbs_batch(visible_groups)
 
         for g in visible_groups:
             item = QListWidgetItem()
             item.setSizeHint(QSize(280, 68))
             item.setData(Qt.UserRole, g.group_id)
             self.list_groups.addItem(item)
-            card = _GroupListCard(g, is_dark=self.is_dark)
+            card = _GroupListCard(g, is_dark=self.is_dark, thumb_pixmap=self._get_group_thumb(g))
             self.list_groups.setItemWidget(item, card)
 
         if visible_groups:

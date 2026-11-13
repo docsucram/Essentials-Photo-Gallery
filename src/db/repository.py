@@ -4783,6 +4783,26 @@ class CatalogRepository:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_media_decode_info_batch(self, media_ids: Sequence[int]) -> list[dict[str, Any]]:
+        """Returns minimal file path and decode metadata for the requested media IDs."""
+        if not media_ids:
+            return []
+        conn = self.engine.catalog_conn()
+        results: list[dict[str, Any]] = []
+        for chunk in _iter_id_chunks(media_ids, 900):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT m.id, f.path AS folder_path, m.filename, m.mtime, m.is_video, m.orientation
+                FROM media m
+                JOIN folders f ON f.id = m.folder_id
+                WHERE m.id IN ({placeholders});
+                """,
+                list(chunk),
+            ).fetchall()
+            results.extend(dict(r) for r in rows)
+        return results
+
     def get_media_id_by_file_path(self, file_path: Path | str) -> int | None:
         """Finds media id by full file path."""
         p = Path(file_path).resolve()
@@ -5204,6 +5224,22 @@ class CatalogRepository:
             for r in rows
         ]
 
+    def get_album_preview_media_ids(self, album_id: int, limit: int = 3) -> list[int]:
+        """Return up to `limit` non-missing media IDs for an album's stack preview."""
+        conn = self.engine.catalog_conn()
+        rows = conn.execute(
+            """
+            SELECT m.id
+            FROM album_items ai
+            JOIN media m ON m.id = ai.media_id
+            WHERE ai.album_id = ? AND COALESCE(m.is_missing, 0) = 0
+            ORDER BY ai.sort_order ASC, m.date_taken DESC, m.id DESC
+            LIMIT ?;
+            """,
+            (int(album_id), int(limit)),
+        ).fetchall()
+        return [int(r["id"]) for r in rows]
+
     def create_smart_album(
         self, name: str, rules_dict: dict[str, Any] | str
     ) -> int:
@@ -5233,7 +5269,10 @@ class CatalogRepository:
         smart_album_id: int,
         name: str | None = None,
         rules_dict: dict[str, Any] | str | None = None,
+        rules: dict[str, Any] | str | None = None,
     ) -> None:
+        if rules_dict is None and rules is not None:
+            rules_dict = rules
         updates: list[str] = []
         params: list[Any] = []
         if name is not None:
@@ -5287,6 +5326,7 @@ class CatalogRepository:
             "name": str(row["name"]),
             "rules_json": raw_json,
             "rules_dict": rules_dict,
+            "rules": rules_dict,
             "created_at": int(row["created_at"]),
         }
 
@@ -5323,6 +5363,38 @@ class CatalogRepository:
                 }
             )
         return out
+
+    def get_smart_album_preview_media_ids(
+        self, rules_dict: dict[str, Any] | str, limit: int = 3
+    ) -> list[int]:
+        """Return up to `limit` non-missing media IDs matching a Smart Album's rules."""
+        where_sql, params = compile_smart_album_where(rules_dict, alias="m")
+        conn = self.engine.catalog_conn()
+        rows = conn.execute(
+            f"""
+            SELECT m.id
+            FROM media m
+            WHERE COALESCE(m.is_missing, 0) = 0 AND ({where_sql})
+            ORDER BY m.date_taken DESC, m.id DESC
+            LIMIT ?;
+            """,
+            (*params, int(limit)),
+        ).fetchall()
+        return [int(r["id"]) for r in rows]
+
+    def get_camera_makes(self) -> list[str]:
+        """Return distinct non-empty camera manufacturer strings for Smart Album autocomplete."""
+        conn = self.engine.catalog_conn()
+        rows = conn.execute(
+            """
+            SELECT DISTINCT TRIM(camera_make) AS make
+            FROM media
+            WHERE COALESCE(is_missing, 0) = 0
+              AND COALESCE(TRIM(camera_make), '') != ''
+            ORDER BY make COLLATE NOCASE ASC;
+            """
+        ).fetchall()
+        return [str(r["make"]) for r in rows if str(r["make"] or "").strip()]
 
     def get_camera_models(self) -> list[str]:
         """Return distinct non-empty camera make/model strings for Smart Album autocomplete."""
@@ -5434,6 +5506,23 @@ class ThumbnailRepository:
                 for mid_val, blob_val, _ in rows:
                     result[int(mid_val)] = bytes(blob_val)
         return result
+
+    def get_first_cached_media_id(self, media_ids: Sequence[int]) -> int | None:
+        """Returns the first media_id from media_ids that already has a cached thumbnail."""
+        if not media_ids:
+            return None
+        conn = self.engine.thumbnails_conn()
+        cur = conn.cursor()
+        cur.row_factory = None
+        for chunk in _iter_id_chunks(media_ids, 900):
+            placeholders = ",".join("?" for _ in chunk)
+            row = cur.execute(
+                f"SELECT media_id FROM thumbnails WHERE media_id IN ({placeholders}) LIMIT 1;",
+                list(chunk),
+            ).fetchone()
+            if row is not None:
+                return int(row[0])
+        return None
 
     def put_webp_blob(
         self,
@@ -5984,6 +6073,46 @@ def _compile_single_smart_rule(
             return f"NOT {joined}", params
         return joined, params
 
+    # 19. Camera Manufacturer (camera_make)
+    if raw_field in ("camera_make", "camera_manufacturer", "make"):
+        if op == "is_empty":
+            return f"COALESCE(TRIM({alias}.camera_make), '') = ''", []
+        if op == "is_not_empty":
+            return f"COALESCE(TRIM({alias}.camera_make), '') != ''", []
+        if not val_str:
+            return None
+        make_expr = f"LOWER(TRIM(COALESCE({alias}.camera_make, '')))"
+        if op in ("equals", "eq", "is"):
+            return f"{make_expr} = LOWER(?)", [val_str]
+        pat = f"%{_escape_like_term(val_str.lower())}%"
+        if op in ("not_contains", "excludes"):
+            return f"({make_expr} NOT LIKE ? ESCAPE '\\')", [pat]
+        return f"({make_expr} LIKE ? ESCAPE '\\')", [pat]
+
+    # 20. Number of Detected Faces (confirmed state=1 or unconfirmed suggestion state=0, excluding rejected state=2)
+    if raw_field in ("face_count", "detected_faces"):
+        face_cnt_expr = (
+            f"(SELECT COUNT(*) FROM media_people mp "
+            f"WHERE mp.media_id = {alias}.id AND COALESCE(mp.state, 0) IN (0, 1))"
+        )
+        if op == "between":
+            pair = _parse_numeric_pair(val)
+            if not pair:
+                return None
+            lo_f, hi_f = int(min(pair[0], pair[1])), int(max(pair[0], pair[1]))
+            return f"({face_cnt_expr} BETWEEN ? AND ?)", [max(0, lo_f), max(0, hi_f)]
+        m_fc = re.search(r"-?\d+", val_str)
+        if not m_fc:
+            return None
+        fc_num = max(0, int(m_fc.group(0)))
+        if op in ("gte", ">=", "at_least"):
+            return f"({face_cnt_expr} >= ?)", [fc_num]
+        if op in ("lte", "<=", "at_most"):
+            return f"({face_cnt_expr} <= ?)", [fc_num]
+        if op in ("neq", "!=", "is_not"):
+            return f"({face_cnt_expr} != ?)", [fc_num]
+        return f"({face_cnt_expr} = ?)", [fc_num]
+
     return None
 
 
@@ -6021,7 +6150,7 @@ def compile_smart_album_where(
             params.extend(p_part)
 
     if not compiled_sql:
-        return "1 = 1", []
+        return ("1 = 0" if raw_rules else "1 = 1"), []
 
     combiner = " OR " if match_mode == "any" else " AND "
     return combiner.join(compiled_sql), params

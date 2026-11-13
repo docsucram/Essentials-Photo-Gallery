@@ -159,12 +159,13 @@ class _AutoPopupLineEdit(QLineEdit):
 class _QuickFaceSuggestionCard(QFrame):
     """
     Square 66x66 face thumbnail card matching authentic WLPG.
-    Displays a clear 60x60 square face crop with hover [✓] and [✕] actions.
-    Clicking the card directly confirms the face suggestion.
+    Displays a clear 60x60 square face crop with explicit [✓] confirm and [✕] reject actions.
+    Clicking the face image itself opens the photo for inspection without silently confirming.
     """
 
-    confirmed = Signal(int)  # face_id
-    rejected = Signal(int)   # face_id
+    confirmed = Signal(int)         # face_id
+    rejected = Signal(int)          # face_id
+    preview_requested = Signal(int) # media_id
 
     def __init__(
         self,
@@ -172,14 +173,16 @@ class _QuickFaceSuggestionCard(QFrame):
         thumb_blob: bytes | None,
         confidence: float,
         parent: QWidget | None = None,
+        media_id: int = 0,
     ) -> None:
         super().__init__(parent)
         self.face_id = face_id
+        self.media_id = media_id
         self.thumb_blob = thumb_blob
         self.confidence = confidence
         self.setFixedSize(66, 66)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("Click to confirm this face, or click ✕ to reject")
+        self.setToolTip("Click photo to inspect • Click ✓ to confirm or ✕ to reject")
         self.setStyleSheet(
             "_QuickFaceSuggestionCard { background-color: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 4px; }"
             "_QuickFaceSuggestionCard:hover { border: 2px solid #2563EB; background-color: #F8FAFC; }"
@@ -228,9 +231,11 @@ class _QuickFaceSuggestionCard(QFrame):
 
     def mousePressEvent(self, event: Any) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self.confirmed.emit(self.face_id)
-        else:
-            super().mousePressEvent(event)
+            if self.media_id > 0:
+                self.preview_requested.emit(self.media_id)
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
 
 class PersonHeaderBar(QFrame):
@@ -245,6 +250,7 @@ class PersonHeaderBar(QFrame):
     person_renamed = Signal(int, str)           # (person_id, new_name)
     cover_face_changed = Signal(int)            # person_id
     unnamed_person_named = Signal(str, list)    # (name, face_ids)
+    open_media_requested = Signal(int)          # media_id
     geometry_changed = Signal()
 
     def __init__(
@@ -603,11 +609,13 @@ class PersonHeaderBar(QFrame):
 
         for s in suggestions[:8]:
             fid = int(s["face_id"])
+            mid = int(s.get("media_id") or 0)
             thumb_blob = self.thumb_repo.get_face_thumbnail(fid) if self.thumb_repo else None
             conf = float(s.get("confidence") or 0.0)
-            card = _QuickFaceSuggestionCard(fid, thumb_blob, conf, self.strip_content)
+            card = _QuickFaceSuggestionCard(fid, thumb_blob, conf, self.strip_content, media_id=mid)
             card.confirmed.connect(self._on_quick_confirm)
             card.rejected.connect(self._on_quick_reject)
+            card.preview_requested.connect(self.open_media_requested.emit)
             self.strip_layout.insertWidget(self.strip_layout.count() - 1, card)
 
     def _on_quick_confirm(self, face_id: int) -> None:
@@ -638,6 +646,9 @@ class PersonHeaderBar(QFrame):
             self.updateGeometry()
             self.geometry_changed.emit()
         else:
+            self.lbl_banner_title.setText(
+                f"Are these {self.current_person_name}? ({self.current_person_name} has {remaining} unconfirmed face suggestion{'s' if remaining != 1 else ''})"
+            )
             self.lbl_banner_count.setText(f"{remaining} suggestion{'s' if remaining != 1 else ''}")
 
     def _on_confirm_all_clicked(self) -> None:

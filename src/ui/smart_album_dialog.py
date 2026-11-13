@@ -49,6 +49,18 @@ SMART_FIELD_SPECS: list[tuple[str, str, list[tuple[str, str]], str, Any]] = [
         "Person name...",
     ),
     (
+        "face_count",
+        "Detected faces",
+        [
+            ("gte", "is at least (>=)"),
+            ("lte", "is at most (<=)"),
+            ("eq", "is exactly (=)"),
+            ("between", "is between (min-max)"),
+        ],
+        "text",
+        "e.g. 2 or 1-5",
+    ),
+    (
         "tag",
         "Descriptive tag",
         [
@@ -145,6 +157,19 @@ SMART_FIELD_SPECS: list[tuple[str, str, list[tuple[str, str]], str, Any]] = [
         ],
         "autocomplete",
         "e.g. X-S20 or Canon...",
+    ),
+    (
+        "camera_make",
+        "Camera Manufacturer",
+        [
+            ("contains", "contains"),
+            ("equals", "equals"),
+            ("not_contains", "does not contain"),
+            ("is_empty", "is unknown"),
+            ("is_not_empty", "is known"),
+        ],
+        "autocomplete",
+        "e.g. Fujifilm, Canon, Sony, Apple...",
     ),
     (
         "rating",
@@ -278,6 +303,9 @@ _FIELD_ALIASES: dict[str, str] = {
     "size_mb": "file_size_mb",
     "caption": "caption_filename",
     "filename": "caption_filename",
+    "camera_manufacturer": "camera_make",
+    "make": "camera_make",
+    "detected_faces": "face_count",
 }
 
 
@@ -319,9 +347,15 @@ class SmartRuleRowWidget(QWidget):
 
         self._value_widget: QWidget | None = None
 
-        self.remove_btn = QPushButton("-", self)
-        self.remove_btn.setFixedWidth(28)
-        self.remove_btn.setToolTip("Remove this condition")
+        self.remove_btn = QPushButton("✕", self)
+        self.remove_btn.setFixedSize(28, 28)
+        self.remove_btn.setToolTip("Remove condition")
+        self.remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.remove_btn.setStyleSheet(
+            "QPushButton { font-weight: bold; font-size: 11pt; color: #DC2626; border: 1px solid #D1D5DB; border-radius: 4px; background: #FFFFFF; } "
+            "QPushButton:hover { background: #FEE2E2; border-color: #EF4444; color: #B91C1C; } "
+            "QPushButton:disabled { color: #CBD5E1; border-color: #F1F5F9; background: #F8FAFC; }"
+        )
         layout.addWidget(self.remove_btn)
 
         self.field_combo.currentIndexChanged.connect(self._on_field_changed)
@@ -495,6 +529,36 @@ class SmartRuleRowWidget(QWidget):
             val = int(val)
         return {"field": fkey, "op": op, "value": val}
 
+    def validate_rule(self) -> tuple[bool, str]:
+        """Return (is_valid, error_message) for this condition row."""
+        from src.db.repository import _compile_single_smart_rule
+
+        fkey = self._current_field_key()
+        op = self._current_op_key()
+        label = str(_FIELD_SPEC_MAP.get(fkey, (fkey, fkey))[1])
+        if op in _UNARY_OPS or fkey == "on_this_day":
+            return True, ""
+
+        raw = self._read_raw_value()
+        val_str = "" if raw is None else str(raw).strip()
+        if not val_str:
+            return False, f"'{label}' cannot be blank."
+
+        if _compile_single_smart_rule(self.get_rule()) is None:
+            return False, f"'{label}' has an invalid value ('{val_str}')."
+        return True, ""
+
+    def set_invalid_highlight(self, invalid: bool, message: str = "") -> None:
+        w = self._value_widget
+        if w is not None:
+            w.setStyleSheet("border: 1.5px solid #DC2626;" if invalid else "")
+            w.setToolTip(message if invalid else "")
+
+    def focus_value_input(self) -> None:
+        w = self._value_widget
+        if w is not None:
+            w.setFocus()
+
 
 class SmartAlbumDialog(QDialog):
     """Interactive Boolean Smart Album rule builder with live match preview."""
@@ -579,6 +643,7 @@ class SmartAlbumDialog(QDialog):
             "tag": [],
             "place": [],
             "camera": [],
+            "camera_make": [],
             "file_ext": [],
             "folder": [],
         }
@@ -607,6 +672,10 @@ class SmartAlbumDialog(QDialog):
             pass
         try:
             out["camera"] = self._repo.get_camera_models()
+        except Exception:
+            pass
+        try:
+            out["camera_make"] = self._repo.get_camera_makes()
         except Exception:
             pass
         try:
@@ -695,12 +764,27 @@ class SmartAlbumDialog(QDialog):
         }
 
     def _update_live_preview(self) -> int:
+        invalid_count = 0
+        for row in self._rows:
+            ok, msg = row.validate_rule()
+            if not ok:
+                invalid_count += 1
+            else:
+                row.set_invalid_highlight(False)
+
         try:
             cnt = self._repo.count_smart_album_matches(self.get_rules_dict())
         except Exception:
             cnt = 0
         noun = "item" if cnt == 1 else "items"
-        self.live_preview_label.setText(f"Live Preview: {cnt:,} matching {noun}")
+        if invalid_count > 0:
+            self.live_preview_label.setText(
+                f"Live Preview: {cnt:,} matching {noun} ({invalid_count} incomplete condition{'s' if invalid_count != 1 else ''})"
+            )
+            self.live_preview_label.setStyleSheet("font-weight: 600; color: #B45309;")
+        else:
+            self.live_preview_label.setText(f"Live Preview: {cnt:,} matching {noun}")
+            self.live_preview_label.setStyleSheet("font-weight: 600; color: #1d4ed8;")
         return cnt
 
     def _on_accept(self) -> None:
@@ -711,5 +795,26 @@ class SmartAlbumDialog(QDialog):
                 "Please enter a name for this Smart Album.",
             )
             self.name_edit.setFocus()
+            return
+
+        first_bad_row: SmartRuleRowWidget | None = None
+        errors: list[str] = []
+        for idx, row in enumerate(self._rows, start=1):
+            ok, msg = row.validate_rule()
+            row.set_invalid_highlight(not ok, msg)
+            if not ok:
+                errors.append(f"Condition {idx}: {msg}")
+                if first_bad_row is None:
+                    first_bad_row = row
+
+        if errors:
+            QMessageBox.warning(
+                self,
+                "Incomplete Smart Album Condition",
+                "Please complete or remove the blank/invalid condition(s) before saving:\n\n"
+                + "\n".join(errors),
+            )
+            if first_bad_row is not None:
+                first_bad_row.focus_value_input()
             return
         self.accept()

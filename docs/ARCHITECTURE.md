@@ -61,7 +61,9 @@ Gallery/
 │   │   └── creative_effects.py                  # Depth & Light (bokeh, relight, haze), Color Pop, 3D Cinematic Motion MP4
 │   ├── ui/
 │   │   ├── __init__.py
+│   │   ├── albums_view.py                       # AlbumsView: Stack preview cards for static & smart albums
 │   │   ├── batch_people_view.py                 # Virtualised face confirmation grid & Spacebar full-photo preview popover
+│   │   ├── compare_view.py                      # CompareMediaView: Multi-photo Light Table (2-Up, 3-Up, Quad, Wipe slider, Sync zoom)
 │   │   ├── create_studio_dialogs.py             # Interactive Panorama, Collage, Photo Fuse, Colour Pop & 3D Motion studios
 │   │   ├── crop_tool.py                         # Interactive Rule-of-Thirds CropOverlayItem with aspect-ratio & Uncrop support
 │   │   ├── dialogs.py                           # Relative Δt Time Shift, File Properties, Merge People & maintenance dialogs
@@ -168,25 +170,26 @@ CREATE INDEX idx_album_items_media ON album_items(media_id);
 
 ```text
 +------------------------------------------------------------------------------------+
-| Ribbon [Home | Edit | Find | Create | View]  (or contextual [Map] / [Edit])        |
+| Ribbon [Home | Edit | Find | Create | View]  (or contextual [Map] / [Compare] / ...)   |
 +---------------------+------------------------------------------+-------------------+
 | Left Navigation:    | Center Workspace (QStackedWidget):       | Right Dock:       |
 | - Albums            | 1. Thumbnail Grid View (QListView)       | [Info (Ctrl+I)]   |
-|   • My Albums       |    - Virtualized 500k model, Polaroid    | - People tags     |
-|   • Smart Albums    |    - Add to Album / Remove from Album    | - Geotag & Places |
-| - Folders (Subrec)  | 2. Single Media Viewer (Non-destructive) | - Caption         |
-| - Date Taken Tree   | 3. Batch People Tag View (Face clusters) | - Tag chips/EXIF  |
-| - Places Hierarchy  | 4. People Directory (130px cards)        |                   |
-| - Tags (AND/OR/NOT) | 5. World Map View (Leaflet + R*Tree)     | [Fine Tune        |
-| - People & Ratings  | 6. Fullscreen Slideshow (Ken Burns)      |  & Depth (Ctrl+F)]|
+|   • My Albums       | 2. Albums View (Stack preview cards)     | - People tags     |
+|   • Smart Albums    | 3. Multi-Photo Compare / Light Table     | - Geotag & Places |
+| - Folders (Subrec)  | 4. Single Media Viewer (Non-destructive) | - Caption         |
+| - Date Taken Tree   | 5. Batch People Tag View (Face clusters) | - Tag chips/EXIF  |
+| - Places Hierarchy  | 6. People Directory (130px cards)        |                   |
+| - Tags (AND/OR/NOT) | 7. World Map View (Leaflet + R*Tree)     | [Fine Tune        |
+| - People & Ratings  | 8. Fullscreen Slideshow (Ken Burns)      |  & Depth (Ctrl+F)]|
 +---------------------+------------------------------------------+-------------------+
 | Status Bar: Item / Map Stats | Zoom Slider | Background Tasks Menu | Pause Workers |
 +------------------------------------------------------------------------------------+
 ```
 
 ### 3.1 Ribbon Toolbar & Integrated Title Bar (`src/ui/ribbon_toolbar.py`)
-- **Primary Tabs:** `Home`, `Edit`, `Find`, `Create`, `View` (with **People**, **Gallery**, **World Map**, and **Slide show** buttons in `View -> Views`).
+- **Primary Tabs:** `Home`, `Edit`, `Find`, `Create`, `View` (with **People**, **Gallery**, **World Map**, **Compare** with distinct `A | B` icon, and **Slide show** buttons in `View -> Views`).
 - **Contextual Map Ribbon Mode:** Switching into World Map View replaces the standard editing tabs with a dedicated **`Map`** tab containing **Location Search** (embedded gazetteer/Nominatim search box + `Go`), **Map Style** (`Clean (Light)`, `Street (OSM)`, `Satellite`), **Map Filters** (`Year`, `Person`, `Rating` dropdowns synchronized live with the `SearchScopeBar`), **Navigation / Fit** (`Fit to photos`, `View area in grid`), **Panes** toggles, and **`Close map` (`Esc`)** at the far right.
+- **Contextual Compare Ribbon Mode:** Triggering multi-photo comparison (`Compare` / `C`) activates the dedicated **`Compare`** tab providing **Layout** controls (`Side-by-Side`, `Top / Bottom`, `3-Up`, `2x2 Quad`, `Wipe Slider`, `Swap Panes`), **Inspect & Sync** (`Lock Pan & Zoom`, `Zoom to Face (F)`, `1:1 (100%)`, `Fit to Pane`, `Focus Peaking`, `Clipping Warnings`, and `Dark Backdrop` toggle), **Select & Cull** (`Auto-Advance`, `Open Selected in Editor`), and **`Close Compare` (`Esc`)** immediately adjacent.
 - **Integrated Custom Title Bar & QAT:** Merges window chrome, customizable Quick Access Toolbar actions (`QSettings`), and ribbon context menu (*Customize QAT*, *Above/Below Ribbon*, *Minimize* `Ctrl+F1`).
 - **Responsive Collapse & Themes:** Multi-stage width compaction (`>1550px` down to `<750px`) across **Classic Aero**, **Microsoft Fluent (Windows 11)**, and **Dark Studio**.
 - **Quick Find People, Effects & Tag Split Controls:** Expandable corner-resizable Quick Find People dropdown, 8 live photographic preset tiles, Save as Copy split button, and Tag management split button.
@@ -200,11 +203,13 @@ CREATE INDEX idx_album_items_media ON album_items(media_id);
 
 ### 3.3 Center Area (`QStackedWidget`)
 1. **Thumbnail Grid View (`grid_view.py`, `grid_model.py`):** Virtualized `QListView` in `IconMode`, $O(\log G)$ binary-searched collapsible section headers (all 19 `Group by` / `Arrange by` modes), Polaroid cards with interactive inline stars/flags, `Add to Album ▸` / `Remove from Album` context menu, self-healing paint queue, and browser-style `Alt+Left`/`Alt+Right` navigation history.
-2. **Single Media Viewer (`media_viewer.py`):** Hardware-accelerated full-res viewer + integrated video player, 1920px interactive proxy / full-res master adjustment pipeline, hover/click-to-rename face tagging overlay, Crop/Uncrop, Spot Fix, and Markup toolbars.
-3. **Batch People Tag View (`batch_people_view.py`):** $96 \times 96$ face crop confirmation grid, `Space` non-modal full-photo preview popover, `Enter`/`Del`/`I`/`Esc` shortcuts.
-4. **People Directory View (`people_directory_view.py`):** Immich-style 130px circular cards, unnamed clusters ($\ge 3$ faces) with inline naming, and horizontal person timeline strip (`person_header_bar.py`).
-5. **World Map View (`map_view.py`):** Full-height `QWebEngineView` Leaflet canvas driven by contextual Map Ribbon controls, R*Tree bounding-box clustering, drag-rectangle zoom, persistent disk tile caching (`Clean`, `Street`, `Satellite`), offline vector canvas fallback, and status bar geotagged/cluster reporting.
-6. **Fullscreen Slideshow (`slideshow_view.py`):** Ken Burns Pan/Zoom, cross-fades, and floating HUD controls.
+2. **Albums View (`albums_view.py`):** Visual stack preview cards displaying multi-photo fan/stack thumbnails for both static and smart albums with fast creation buttons (`New Album +`, `New Smart Album +`).
+3. **Multi-Photo Compare / Light Table View (`compare_view.py`):** Multi-pane split workspace (2-Up, 3-Up, 4-Up Quad, interactive Before/After Wipe Slider), candidate filmstrip with status badges (`P`, `⚑`, `★N`), synchronized normalized pan/zoom, 1-click zoom to face cycling, focus peaking, highlight/shadow clipping warnings, camera RAW decoding via `rawpy`, non-destructive ratings/flags/rotation, and auto-advance culling.
+4. **Single Media Viewer (`media_viewer.py`):** Hardware-accelerated full-res viewer + integrated video player, 1920px interactive proxy / full-res master adjustment pipeline, hover/click-to-rename face tagging overlay, Crop/Uncrop, Spot Fix, and Markup toolbars.
+5. **Batch People Tag View (`batch_people_view.py`):** $96 \times 96$ face crop confirmation grid, `Space` non-modal full-photo preview popover, `Enter`/`Del`/`I`/`Esc` shortcuts.
+6. **People Directory View (`people_directory_view.py`):** Immich-style 130px circular cards, unnamed clusters ($\ge 3$ faces) with inline naming, and horizontal person timeline strip (`person_header_bar.py`).
+7. **World Map View (`map_view.py`):** Full-height `QWebEngineView` Leaflet canvas driven by contextual Map Ribbon controls, R*Tree bounding-box clustering, drag-rectangle zoom, persistent disk tile caching (`Clean`, `Street`, `Satellite`), offline vector canvas fallback, and status bar geotagged/cluster reporting.
+8. **Fullscreen Slideshow (`slideshow_view.py`):** Ken Burns Pan/Zoom, cross-fades, and floating HUD controls.
 
 ### 3.4 Specialized Dialogs (`dialogs.py`, `smart_album_dialog.py`, `options_dialog.py`, `duplicate_finder_dialog.py`, `print_dialog.py`, `tag_hierarchy_dialog.py`)
 - **`SmartAlbumDialog`:** Name + Match Mode (`ALL`/`ANY`), scrollable dynamic condition rows across all 17+ dimensions with database-backed autocomplete and real-time `"Live Preview: X matching items"`.

@@ -27,9 +27,11 @@ from PySide6.QtCore import (
     QPoint,
     QPointF,
     QRectF,
+    QRunnable,
     QSize,
     QStringListModel,
     Qt,
+    QThreadPool,
     QTimer,
     QUrl,
     Signal,
@@ -83,6 +85,52 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+class _MasterRenderSignals(QObject):
+    """Signals emitted by _MasterRenderRunnable upon background completion."""
+
+    finished = Signal(int, object, object, object, bool)
+
+
+class _MasterRenderRunnable(QRunnable):
+    """Runs the full-resolution render_adjusted_image pass on a worker thread."""
+
+    def __init__(
+        self,
+        gen: int,
+        media_id: Any,
+        master_rgb: np.ndarray,
+        master_alpha: np.ndarray | None,
+        recipe: PhotoAdjustmentRecipe,
+        mask_overlay: bool,
+    ) -> None:
+        super().__init__()
+        self.setAutoDelete(True)
+        self.gen = gen
+        self.media_id = media_id
+        self.master_rgb = master_rgb
+        self.master_alpha = master_alpha
+        self.recipe = recipe
+        self.mask_overlay = mask_overlay
+        self.signals = _MasterRenderSignals()
+
+    def run(self) -> None:
+        try:
+            rendered_np = render_adjusted_image(
+                self.master_rgb, self.recipe, media_id=self.media_id
+            )
+            h, w, _c = rendered_np.shape
+            rendered_alpha = (
+                transform_alpha_for_recipe(self.master_alpha, self.recipe, target_hw=(h, w))
+                if self.master_alpha is not None
+                else None
+            )
+            self.signals.finished.emit(
+                self.gen, self.media_id, rendered_np, rendered_alpha, self.mask_overlay
+            )
+        except Exception:
+            pass
 
 from legacy_reference.imgBrowserv13 import (
     ClickableVideoWidget,
@@ -1319,10 +1367,15 @@ class SingleMediaViewer(QWidget):
         self.master_alpha: np.ndarray | None = None
         self.display_proxy_rgb: np.ndarray | None = None
         self.display_proxy_alpha: np.ndarray | None = None
+        self.scrub_proxy_rgb: np.ndarray | None = None
+        self.scrub_proxy_alpha: np.ndarray | None = None
         self._is_animated_image: bool = False
         self._anim_movie: QMovie | None = None
         self._proxy_scale: float = 1.0
+        self._scrub_proxy_scale: float = 1.0
         self._is_sliding: bool = False
+        self._master_render_gen: int = 0
+        self._master_render_dirty: bool = False
         self._master_render_timer = QTimer(self)
         self._master_render_timer.setSingleShot(True)
         self._master_render_timer.setInterval(250)
@@ -2198,10 +2251,15 @@ class SingleMediaViewer(QWidget):
                 )
 
     def _update_display_proxy(self) -> None:
+        self._master_render_gen += 1
+        self._master_render_dirty = False
         if self.master_np_rgb is None:
             self.display_proxy_rgb = None
             self.display_proxy_alpha = None
+            self.scrub_proxy_rgb = None
+            self.scrub_proxy_alpha = None
             self._proxy_scale = 1.0
+            self._scrub_proxy_scale = 1.0
             return
         h, w = self.master_np_rgb.shape[:2]
         max_dim = 1280
@@ -2220,6 +2278,24 @@ class SingleMediaViewer(QWidget):
             self.display_proxy_rgb = self.master_np_rgb
             self.display_proxy_alpha = self.master_alpha
             self._proxy_scale = 1.0
+
+        # Fast 960px scrub proxy for 120 FPS active slider dragging
+        scrub_dim = 960
+        if max(h, w) > scrub_dim:
+            self._scrub_proxy_scale = scrub_dim / float(max(h, w))
+            sw = max(1, int(round(w * self._scrub_proxy_scale)))
+            sh = max(1, int(round(h * self._scrub_proxy_scale)))
+            self.scrub_proxy_rgb = cv2.resize(self.display_proxy_rgb, (sw, sh), interpolation=cv2.INTER_AREA)
+            if self.display_proxy_alpha is not None:
+                self.scrub_proxy_alpha = cv2.resize(
+                    self.display_proxy_alpha, (sw, sh), interpolation=cv2.INTER_AREA
+                )
+            else:
+                self.scrub_proxy_alpha = None
+        else:
+            self.scrub_proxy_rgb = self.display_proxy_rgb
+            self.scrub_proxy_alpha = self.display_proxy_alpha
+            self._scrub_proxy_scale = self._proxy_scale
 
     def _scene_to_master(self, sx: float, sy: float) -> tuple[int, int]:
         if self.master_np_rgb is None:
@@ -2420,62 +2496,79 @@ class SingleMediaViewer(QWidget):
         self.update_revert_state()
         return True
 
+    def _render_proxy_to_viewport(
+        self,
+        proxy_rgb: np.ndarray,
+        proxy_alpha_src: np.ndarray | None,
+        proxy_scale: float,
+    ) -> None:
+        proxy_rec = self.current_recipe.copy()
+        if proxy_rec.crop_rect is not None and proxy_scale < 0.999:
+            l, t, r, b = proxy_rec.crop_rect
+            proxy_rec.crop_rect = (
+                int(round(l * proxy_scale)),
+                int(round(t * proxy_scale)),
+                int(round(r * proxy_scale)),
+                int(round(b * proxy_scale)),
+            )
+        rendered_np = render_adjusted_image(
+            proxy_rgb, proxy_rec, media_id=self.current_media_id
+        )
+        h, w = rendered_np.shape[:2]
+        proxy_alpha = (
+            transform_alpha_for_recipe(proxy_alpha_src, proxy_rec, target_hw=(h, w))
+            if proxy_alpha_src is not None
+            else None
+        )
+        # Apply ruby mask overlay if currently previewing subject boundary
+        if getattr(self, "_mask_overlay_preview", False):
+            try:
+                from src.imaging.creative_effects import (
+                    get_depth_and_matte_engine,
+                    apply_boundary_shift_and_feather,
+                )
+                engine = get_depth_and_matte_engine()
+                _, alpha_matte = engine.get_depth_and_matte(rendered_np, media_id=self.current_media_id)
+                if alpha_matte is not None:
+                    alpha_matte = apply_boundary_shift_and_feather(
+                        alpha_matte,
+                        boundary_shift=getattr(self.current_recipe, "boundary_shift", 0.0),
+                        boundary_feather=getattr(self.current_recipe, "boundary_feather", 0.0),
+                    )
+                    bg_mask = (1.0 - np.clip(alpha_matte, 0.0, 1.0))[:, :, None]
+                    overlay_color = np.array([220.0, 20.0, 60.0], dtype=np.float32)
+                    blended = rendered_np.astype(np.float32) * (1.0 - bg_mask * 0.45) + overlay_color * (bg_mask * 0.45)
+                    rendered_np = np.clip(blended, 0.0, 255.0).astype(np.uint8)
+            except Exception:
+                pass
+
+        pix = self._build_pixmap_from_rgb_and_alpha(rendered_np, proxy_alpha)
+        target_w = int(round(w / proxy_scale))
+        target_h = int(round(h / proxy_scale))
+        if target_w != w or target_h != h:
+            pix = pix.scaled(target_w, target_h, Qt.IgnoreAspectRatio, Qt.FastTransformation)
+        self.pixmap_item.setPixmap(pix)
+        self._update_alpha_backdrop(pix.width(), pix.height(), proxy_alpha is not None)
+        self._sync_animation_playback()
+
     def _render_current_recipe(self) -> None:
         """Renders self.master_np_rgb with self.current_recipe using OpenCV/NumPy float pipeline."""
         if self.master_np_rgb is None:
             return
 
-        if self._is_sliding and self.display_proxy_rgb is not None:
-            proxy_rec = self.current_recipe.copy()
-            if proxy_rec.crop_rect is not None and self._proxy_scale < 0.999:
-                l, t, r, b = proxy_rec.crop_rect
-                proxy_rec.crop_rect = (
-                    int(round(l * self._proxy_scale)),
-                    int(round(t * self._proxy_scale)),
-                    int(round(r * self._proxy_scale)),
-                    int(round(b * self._proxy_scale)),
-                )
-            rendered_np = render_adjusted_image(
-                self.display_proxy_rgb, proxy_rec, media_id=self.current_media_id
-            )
-            h, w = rendered_np.shape[:2]
-            proxy_alpha = (
-                transform_alpha_for_recipe(self.display_proxy_alpha, proxy_rec, target_hw=(h, w))
-                if self.display_proxy_alpha is not None
-                else None
-            )
-            # Apply ruby mask overlay if currently previewing subject boundary
-            if getattr(self, "_mask_overlay_preview", False):
-                try:
-                    from src.imaging.creative_effects import (
-                        get_depth_and_matte_engine,
-                        apply_boundary_shift_and_feather,
-                    )
-                    engine = get_depth_and_matte_engine()
-                    _, alpha_matte = engine.get_depth_and_matte(rendered_np, media_id=self.current_media_id)
-                    if alpha_matte is not None:
-                        alpha_matte = apply_boundary_shift_and_feather(
-                            alpha_matte,
-                            boundary_shift=getattr(self.current_recipe, "boundary_shift", 0.0),
-                            boundary_feather=getattr(self.current_recipe, "boundary_feather", 0.0),
-                        )
-                        bg_mask = (1.0 - np.clip(alpha_matte, 0.0, 1.0))[:, :, None]
-                        overlay_color = np.array([220.0, 20.0, 60.0], dtype=np.float32)
-                        blended = rendered_np.astype(np.float32) * (1.0 - bg_mask * 0.45) + overlay_color * (bg_mask * 0.45)
-                        rendered_np = np.clip(blended, 0.0, 255.0).astype(np.uint8)
-                except Exception:
-                    pass
-
-            pix = self._build_pixmap_from_rgb_and_alpha(rendered_np, proxy_alpha)
-            target_w = int(round(w / self._proxy_scale))
-            target_h = int(round(h / self._proxy_scale))
-            if target_w != w or target_h != h:
-                pix = pix.scaled(target_w, target_h, Qt.IgnoreAspectRatio, Qt.FastTransformation)
-            self.pixmap_item.setPixmap(pix)
-            self._update_alpha_backdrop(pix.width(), pix.height(), proxy_alpha is not None)
-            self._sync_animation_playback()
+        if self._is_sliding and (self.scrub_proxy_rgb is not None or self.display_proxy_rgb is not None):
+            self._master_render_dirty = True
+            self._master_render_gen += 1
+            use_scrub = self.scrub_proxy_rgb is not None
+            proxy_rgb = self.scrub_proxy_rgb if use_scrub else self.display_proxy_rgb
+            proxy_alpha_src = self.scrub_proxy_alpha if use_scrub else self.display_proxy_alpha
+            proxy_scale = self._scrub_proxy_scale if use_scrub else self._proxy_scale
+            assert proxy_rgb is not None
+            self._render_proxy_to_viewport(proxy_rgb, proxy_alpha_src, proxy_scale)
             return
 
+        self._master_render_gen += 1
+        self._master_render_dirty = False
         rendered_np = render_adjusted_image(
             self.master_np_rgb, self.current_recipe, media_id=self.current_media_id
         )
@@ -4310,6 +4403,8 @@ class SingleMediaViewer(QWidget):
     # -------------------------------------------------------------------------
     def begin_slider_adjustment(self) -> None:
         self._is_sliding = True
+        self._master_render_dirty = True
+        self._master_render_gen += 1
         if hasattr(self, "_master_render_timer") and self._master_render_timer.isActive():
             self._master_render_timer.stop()
         if self._recipe_before_slider is None:
@@ -4326,30 +4421,27 @@ class SingleMediaViewer(QWidget):
                 self.recipe_changed.emit(self.current_recipe)
             self._recipe_before_slider = None
 
-        # Debounce the heavy full-resolution master render (250ms) so rapid sequential slider
-        # adjustments remain instantaneous at 60 FPS without UI freezes.
+        # Immediately snap viewport to the crisp 1280px display proxy on slider release,
+        # then schedule the full-resolution master pass off the GUI thread after 250ms.
+        if self.display_proxy_rgb is not None and self.master_np_rgb is not None and not self.current_is_video:
+            self._render_proxy_to_viewport(
+                self.display_proxy_rgb, self.display_proxy_alpha, self._proxy_scale
+            )
+            self._master_render_dirty = True
+
         if hasattr(self, "_master_render_timer"):
             self._master_render_timer.start(250)
         else:
             self._render_current_recipe()
 
-    def _flush_master_render(self) -> None:
-        if hasattr(self, "_master_render_timer") and self._master_render_timer.isActive():
-            self._master_render_timer.stop()
-        if self.master_np_rgb is None or self.current_is_video:
-            return
-        rendered_np = render_adjusted_image(
-            self.master_np_rgb, self.current_recipe, media_id=self.current_media_id
-        )
+    def _apply_rendered_master_to_viewport(
+        self,
+        rendered_np: np.ndarray,
+        rendered_alpha: np.ndarray | None,
+        mask_overlay: bool,
+    ) -> None:
         self.current_pil_image = Image.fromarray(rendered_np)
-        h, w, _c = rendered_np.shape
-        rendered_alpha = (
-            transform_alpha_for_recipe(self.master_alpha, self.current_recipe, target_hw=(h, w))
-            if self.master_alpha is not None
-            else None
-        )
-        # Apply ruby mask overlay if currently previewing subject boundary
-        if getattr(self, "_mask_overlay_preview", False):
+        if mask_overlay:
             try:
                 from src.imaging.creative_effects import (
                     get_depth_and_matte_engine,
@@ -4382,6 +4474,62 @@ class SingleMediaViewer(QWidget):
         if hasattr(self, "_current_people_regions") and not self.current_is_video:
             self.render_face_regions(self._current_people_regions)
         self._sync_animation_playback()
+
+    def _on_master_render_finished(
+        self,
+        gen: int,
+        media_id: Any,
+        rendered_np: np.ndarray,
+        rendered_alpha: np.ndarray | None,
+        mask_overlay: bool,
+    ) -> None:
+        if gen != self._master_render_gen or media_id != self.current_media_id:
+            return
+        if self.master_np_rgb is None or self.current_is_video:
+            return
+        self._master_render_dirty = False
+        self._apply_rendered_master_to_viewport(rendered_np, rendered_alpha, mask_overlay)
+
+    def ensure_master_rendered(self) -> None:
+        """Synchronously ensures current_pil_image reflects the full-res master render before Save/Export."""
+        if hasattr(self, "_master_render_timer") and self._master_render_timer.isActive():
+            self._master_render_timer.stop()
+        if self.master_np_rgb is None or self.current_is_video:
+            return
+        if not getattr(self, "_master_render_dirty", False) and self.current_pil_image is not None:
+            return
+        self._master_render_gen += 1
+        self._master_render_dirty = False
+        rendered_np = render_adjusted_image(
+            self.master_np_rgb, self.current_recipe, media_id=self.current_media_id
+        )
+        h, w, _c = rendered_np.shape
+        rendered_alpha = (
+            transform_alpha_for_recipe(self.master_alpha, self.current_recipe, target_hw=(h, w))
+            if self.master_alpha is not None
+            else None
+        )
+        self._apply_rendered_master_to_viewport(
+            rendered_np, rendered_alpha, getattr(self, "_mask_overlay_preview", False)
+        )
+
+    def _flush_master_render(self) -> None:
+        if hasattr(self, "_master_render_timer") and self._master_render_timer.isActive():
+            self._master_render_timer.stop()
+        if self.master_np_rgb is None or self.current_is_video:
+            return
+        self._master_render_gen += 1
+        self._master_render_dirty = True
+        runnable = _MasterRenderRunnable(
+            gen=self._master_render_gen,
+            media_id=self.current_media_id,
+            master_rgb=self.master_np_rgb,
+            master_alpha=self.master_alpha,
+            recipe=self.current_recipe.copy(),
+            mask_overlay=getattr(self, "_mask_overlay_preview", False),
+        )
+        runnable.signals.finished.connect(self._on_master_render_finished)
+        QThreadPool.globalInstance().start(runnable)
 
     def set_exposure_parameters(
         self, brightness: int, contrast: int, shadows: int, highlights: int, clarity: int = 0
@@ -4853,10 +5001,13 @@ class SingleMediaViewer(QWidget):
         ):
             return None
 
+        self.ensure_master_rendered()
+
         # Never overwrite proprietary Camera RAW sensor files in-place; route safely to Save as Copy (.jpg)
         if self.current_file_path.suffix.lower() in RAW_DOT_EXT_SET:
             return self.save_as_copy()
 
+        self.ensure_master_rendered()
         self._stop_animated_image()
         backup_dir = self.current_file_path.parent / ".OriginalFiles"
         backup_dir.mkdir(parents=True, exist_ok=True)
@@ -4965,6 +5116,8 @@ class SingleMediaViewer(QWidget):
             or self.current_is_video
         ):
             return None
+
+        self.ensure_master_rendered()
 
         from PySide6.QtCore import QSettings
         from PySide6.QtWidgets import QFileDialog

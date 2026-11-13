@@ -16,11 +16,37 @@ Provides professional, non-destructive, floating-point image processing:
 from __future__ import annotations
 
 import math
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import cv2
 import numpy as np
+
+# Thread-safe bounded checkpoint cache for render_adjusted_image
+_STAGE_CACHE_LOCK = threading.Lock()
+_STAGE_CACHE: OrderedDict[tuple[Any, int, int], dict[str, Any]] = OrderedDict()
+_STAGE_CACHE_MAX_ENTRIES = 6
+
+
+def _get_stage_slot(cache_id: tuple[Any, int, int]) -> dict[str, Any]:
+    with _STAGE_CACHE_LOCK:
+        slot = _STAGE_CACHE.get(cache_id)
+        if slot is None:
+            slot = {}
+            _STAGE_CACHE[cache_id] = slot
+            while len(_STAGE_CACHE) > _STAGE_CACHE_MAX_ENTRIES:
+                _STAGE_CACHE.popitem(last=False)
+        else:
+            _STAGE_CACHE.move_to_end(cache_id)
+        return slot
+
+
+def clear_stage_cache() -> None:
+    """Clears the intermediate render stage cache."""
+    with _STAGE_CACHE_LOCK:
+        _STAGE_CACHE.clear()
 
 # Precomputed high-precision sRGB <-> Linear floating-point look-up tables
 _LUT_SRGB_TO_LIN: np.ndarray = ((np.arange(256, dtype=np.float32) / 255.0) ** 2.2).astype(np.float32)
@@ -292,276 +318,321 @@ def render_adjusted_image(
     h_orig, w_orig = img.shape[:2]
     res_scale = max(w_orig, h_orig) / 1280.0
 
-    if media_id is None:
-        media_id = (
-            img.shape,
-            int(img[0, 0, 0]),
-            int(img[-1, -1, 0]),
-            int(img[h_orig // 2, w_orig // 2, 0]),
-        )
-
-    # 1. Detail: Decoupled Chroma-Denoise + Edge-Aware Luma Filtering
-    if recipe.denoise >= 1.0:
-        dn = recipe.denoise
-        # Convert to LAB for perceptual luminance/chrominance separation
-        d_lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
-        L_ch = d_lab[:, :, 0]
-        A_ch = d_lab[:, :, 1]
-        B_ch = d_lab[:, :, 2]
-
-        # 1a. Aggressive high-speed chroma denoise: Clean color blotches where the eye
-        # is sensitive without affecting edge sharpness or hair details
-        d_chroma = max(3, int(round(7 * res_scale)) | 1)
-        sigma_c = float(dn * 0.9)
-        sigma_space_c = float(6.0 * res_scale)
-        dA = cv2.bilateralFilter(A_ch, d=d_chroma, sigmaColor=sigma_c, sigmaSpace=sigma_space_c)
-        dB = cv2.bilateralFilter(B_ch, d=d_chroma, sigmaColor=sigma_c, sigmaSpace=sigma_space_c)
-
-        # 1b. Edge-guided luma filtering: Use edge detection on L to preserve fine textures,
-        # skin pores, and eyelashes while smoothing flat grain in skies/shadows
-        sigma_luma_space = float(max(1.2, 3.0 * res_scale))
-        L_smooth = cv2.bilateralFilter(
-            L_ch,
-            d=max(3, int(round(5 * res_scale)) | 1),
-            sigmaColor=float(dn * 0.35),
-            sigmaSpace=sigma_luma_space,
-        )
-
-        # Detect high-contrast edges/detail on original L
-        edges = cv2.Sobel(L_ch, cv2.CV_32F, 1, 1, ksize=3)
-        edge_mag = cv2.convertScaleAbs(edges)
-        edge_weight = np.clip(edge_mag.astype(np.float32) / 32.0, 0.0, 1.0)
-
-        # Blend: Strong denoise in smooth flat areas; preserve crisp original details on edges
-        blend_factor = (dn / 100.0) * (1.0 - 0.75 * edge_weight)
-        dL = np.clip(L_ch.astype(np.float32) * (1.0 - blend_factor) + L_smooth.astype(np.float32) * blend_factor, 0, 255).astype(np.uint8)
-
-        d_lab[:, :, 0] = dL
-        d_lab[:, :, 1] = dA
-        d_lab[:, :, 2] = dB
-        img = cv2.cvtColor(d_lab, cv2.COLOR_LAB2RGB)
-
-    # 2. Dehaze (Atmospheric dark-channel prior with bilateral transmission map refinement)
-    if abs(recipe.dehaze) >= 0.1:
-        dh = recipe.dehaze / 100.0
-        if dh > 0:
-            dark = np.min(img, axis=2).astype(np.float32)
-            k = max(3, int(round(15 * res_scale)))
-            if k % 2 == 0:
-                k += 1
-            dark_smooth = cv2.blur(dark, (k, k))
-            A_atm = float(np.percentile(img, 99))
-            A_atm = max(A_atm, 100.0)
-            tx = np.clip(1.0 - 0.75 * dh * (dark_smooth / A_atm), 0.25, 1.0)
-            d_refine = max(3, int(round(7 * res_scale)) | 1)
-            tx_refined = cv2.bilateralFilter(
-                tx.astype(np.float32),
-                d=d_refine,
-                sigmaColor=0.15,
-                sigmaSpace=max(3.0, 7.0 * res_scale),
-            )
-            f_rad = img.astype(np.float32)
-            recovered = (f_rad - A_atm) / tx_refined[:, :, None] + A_atm
-            img = np.clip(recovered, 0, 255).astype(np.uint8)
-
-    # 3. Levels & Filmic Exposure (Black/White Point Clipping & Photographic Shoulder/Toe)
-    # Accelerated via 256-element uint8 LUT (1.5ms vs 55ms float math).
-    # When no other LAB parameters are active, filmic S-curve contrast is baked directly into the 1D LUT
-    # to bypass the 100ms RGB<->LAB conversion entirely.
-    has_levels = recipe.black_point >= 0.5 or recipe.white_point <= 254.5
-    has_exposure = abs(recipe.brightness) >= 0.1
-    has_contrast = abs(recipe.contrast) >= 0.1
-    has_lab_except_contrast = (
-        abs(recipe.shadows) >= 0.1
-        or abs(recipe.highlights) >= 0.1
-        or abs(recipe.clarity) >= 0.1
-        or abs(recipe.temperature) >= 0.1
-        or abs(recipe.tint) >= 0.1
-        or abs(recipe.saturation) >= 0.1
-        or recipe.sharpen >= 1.0
-        or len(recipe.selective_points) > 0
+    slot = _get_stage_slot((media_id, h_orig, w_orig)) if media_id is not None else None
+    dd_key = (round(recipe.denoise, 2), round(recipe.dehaze, 2))
+    selective_key = tuple(
+        (p.get("x"), p.get("y"), p.get("radius"), p.get("brightness"), p.get("contrast"), p.get("saturation"))
+        for p in recipe.selective_points
     )
-    bake_contrast_in_lut = has_contrast and not has_lab_except_contrast
+    tl_key = (
+        dd_key,
+        round(recipe.black_point, 2),
+        round(recipe.white_point, 2),
+        round(recipe.brightness, 2),
+        round(recipe.contrast, 2),
+        round(recipe.shadows, 2),
+        round(recipe.highlights, 2),
+        round(recipe.clarity, 2),
+        round(recipe.temperature, 2),
+        round(recipe.tint, 2),
+        round(recipe.saturation, 2),
+        round(recipe.sharpen, 2),
+        selective_key,
+    )
 
-    if has_levels or has_exposure or bake_contrast_in_lut:
-        lut = np.arange(256, dtype=np.float32) / 255.0
-        if has_levels:
-            bp = min(recipe.black_point, recipe.white_point - 2.0) / 255.0
-            wp = max(recipe.white_point, recipe.black_point + 2.0) / 255.0
-            lut = np.clip((lut - bp) / (wp - bp), 0.0, 1.0)
+    tl_hit = False
+    if slot is not None:
+        with _STAGE_CACHE_LOCK:
+            if slot.get("tl_key") == tl_key and slot.get("tl_img") is not None:
+                img = slot["tl_img"]
+                tl_hit = True
 
-        if has_exposure:
-            b = recipe.brightness / 100.0  # -1.0 .. +1.0
-            if b > 0.0:
-                exp_mult = 1.0 + b * 1.4
-                scaled = lut * exp_mult
-                knee = 0.65
-                over = np.maximum(0.0, scaled - knee)
-                scaled = np.where(scaled > knee, knee + over / (1.0 + over * 1.8), scaled)
-                lut = np.clip(scaled, 0.0, 1.0)
-            else:
-                stops = 2.0 ** (b * 1.5)
-                f_scaled = lut * stops
-                toe = 0.05 * abs(b) * lut * (1.0 - lut)
-                lut = np.clip(f_scaled + toe, 0.0, 1.0)
+    if not tl_hit:
+        dd_hit = False
+        if slot is not None:
+            with _STAGE_CACHE_LOCK:
+                if slot.get("dd_key") == dd_key and slot.get("dd_img") is not None:
+                    img = slot["dd_img"]
+                    dd_hit = True
 
-        if bake_contrast_in_lut:
-            c = recipe.contrast / 100.0
-            diff = (lut - 0.5) * 2.0
-            lut = np.clip(0.5 + 0.5 * (diff * (1.0 + c * 0.8) - (c * 0.25) * (diff ** 3)), 0.0, 1.0)
+        if not dd_hit:
+            # 1. Detail: Decoupled Chroma-Denoise + Edge-Aware Luma Filtering
+            if recipe.denoise >= 1.0:
+                dn = recipe.denoise
+                # Convert to LAB for perceptual luminance/chrominance separation
+                d_lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+                L_ch = d_lab[:, :, 0]
+                A_ch = d_lab[:, :, 1]
+                B_ch = d_lab[:, :, 2]
 
-        lut_uint8 = np.clip(lut * 255.0 + 0.5, 0, 255).astype(np.uint8)
-        img = cv2.LUT(img, lut_uint8)
+                # 1a. Aggressive high-speed chroma denoise: Clean color blotches where the eye
+                # is sensitive without affecting edge sharpness or hair details
+                d_chroma = max(3, int(round(7 * res_scale)) | 1)
+                sigma_c = float(dn * 0.9)
+                sigma_space_c = float(6.0 * res_scale)
+                dA = cv2.bilateralFilter(A_ch, d=d_chroma, sigmaColor=sigma_c, sigmaSpace=sigma_space_c)
+                dB = cv2.bilateralFilter(B_ch, d=d_chroma, sigmaColor=sigma_c, sigmaSpace=sigma_space_c)
 
-    # 4. Unified CIE LAB Pass (executed only if LAB adjustments or non-baked contrast active)
-    has_lab = has_lab_except_contrast or (has_contrast and not bake_contrast_in_lut)
-    if has_lab:
-        has_ab = (
-            abs(recipe.temperature) >= 0.1
-            or abs(recipe.tint) >= 0.1
-            or abs(recipe.saturation) >= 0.1
-            or bool(recipe.selective_points)
-        )
-        lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
-        L = lab[:, :, 0].astype(np.float32)
-        if has_ab:
-            A = lab[:, :, 1].astype(np.float32)
-            B = lab[:, :, 2].astype(np.float32)
-        h_i, w_i = L.shape
+                # 1b. Edge-guided luma filtering: Use edge detection on L to preserve fine textures,
+                # skin pores, and eyelashes while smoothing flat grain in skies/shadows
+                sigma_luma_space = float(max(1.2, 3.0 * res_scale))
+                L_smooth = cv2.bilateralFilter(
+                    L_ch,
+                    d=max(3, int(round(5 * res_scale)) | 1),
+                    sigmaColor=float(dn * 0.35),
+                    sigmaSpace=sigma_luma_space,
+                )
 
-        # Base / Detail decomposition if Shadows, Highlights, or Clarity active (4x hierarchical acceleration)
-        needs_decompose = (
+                # Detect high-contrast edges/detail on original L
+                edges = cv2.Sobel(L_ch, cv2.CV_32F, 1, 1, ksize=3)
+                edge_mag = cv2.convertScaleAbs(edges)
+                edge_weight = np.clip(edge_mag.astype(np.float32) / 32.0, 0.0, 1.0)
+
+                # Blend: Strong denoise in smooth flat areas; preserve crisp original details on edges
+                blend_factor = (dn / 100.0) * (1.0 - 0.75 * edge_weight)
+                dL = np.clip(L_ch.astype(np.float32) * (1.0 - blend_factor) + L_smooth.astype(np.float32) * blend_factor, 0, 255).astype(np.uint8)
+
+                d_lab[:, :, 0] = dL
+                d_lab[:, :, 1] = dA
+                d_lab[:, :, 2] = dB
+                img = cv2.cvtColor(d_lab, cv2.COLOR_LAB2RGB)
+
+            # 2. Dehaze (Atmospheric dark-channel prior with bilateral transmission map refinement)
+            if abs(recipe.dehaze) >= 0.1:
+                dh = recipe.dehaze / 100.0
+                if dh > 0:
+                    dark = np.min(img, axis=2).astype(np.float32)
+                    k = max(3, int(round(15 * res_scale)))
+                    if k % 2 == 0:
+                        k += 1
+                    dark_smooth = cv2.blur(dark, (k, k))
+                    A_atm = float(np.percentile(img, 99))
+                    A_atm = max(A_atm, 100.0)
+                    tx = np.clip(1.0 - 0.75 * dh * (dark_smooth / A_atm), 0.25, 1.0)
+                    d_refine = max(3, int(round(7 * res_scale)) | 1)
+                    tx_refined = cv2.bilateralFilter(
+                        tx.astype(np.float32),
+                        d=d_refine,
+                        sigmaColor=0.15,
+                        sigmaSpace=max(3.0, 7.0 * res_scale),
+                    )
+                    f_rad = img.astype(np.float32)
+                    f_rad -= A_atm
+                    f_rad /= tx_refined[:, :, None]
+                    f_rad += A_atm
+                    np.clip(f_rad, 0, 255, out=f_rad)
+                    img = f_rad.astype(np.uint8)
+
+            if slot is not None:
+                with _STAGE_CACHE_LOCK:
+                    slot["dd_key"] = dd_key
+                    slot["dd_img"] = img
+
+        # 3. Levels & Filmic Exposure (Black/White Point Clipping & Photographic Shoulder/Toe)
+        # Accelerated via 256-element uint8 LUT (1.5ms vs 55ms float math).
+        # When no other LAB parameters are active, filmic S-curve contrast is baked directly into the 1D LUT
+        # to bypass the 100ms RGB<->LAB conversion entirely.
+        has_levels = recipe.black_point >= 0.5 or recipe.white_point <= 254.5
+        has_exposure = abs(recipe.brightness) >= 0.1
+        has_contrast = abs(recipe.contrast) >= 0.1
+        has_lab_except_contrast = (
             abs(recipe.shadows) >= 0.1
             or abs(recipe.highlights) >= 0.1
             or abs(recipe.clarity) >= 0.1
+            or abs(recipe.temperature) >= 0.1
+            or abs(recipe.tint) >= 0.1
+            or abs(recipe.saturation) >= 0.1
+            or recipe.sharpen >= 1.0
+            or len(recipe.selective_points) > 0
         )
-        if needs_decompose:
-            sigma_base = max(3.0 * res_scale, min(14.0 * res_scale, min(h_i, w_i) / 90.0))
-            sw = max(16, w_i // 4)
-            sh = max(16, h_i // 4)
-            L_small = cv2.resize(L, (sw, sh), interpolation=cv2.INTER_AREA)
-            L_base_small = cv2.GaussianBlur(L_small, (0, 0), sigmaX=sigma_base / 4.0, sigmaY=sigma_base / 4.0)
-            L_base = cv2.resize(L_base_small, (w_i, h_i), interpolation=cv2.INTER_LINEAR)
-            L_detail = L - L_base
+        bake_contrast_in_lut = has_contrast and not has_lab_except_contrast
 
-            if abs(recipe.shadows) >= 0.1:
-                s_val = recipe.shadows / 100.0
-                s_norm = L_base / 255.0
-                if s_val > 0:
-                    s_mask = np.clip(1.0 - s_norm / 0.65, 0.0, 1.0) ** 1.8
-                    L_base = L_base + s_val * s_mask * (145.0 - L_base) * 0.72
-                    # Ambience boost: preserve crisp local micro-contrast in lifted shadows
-                    L_detail = L_detail * (1.0 + s_val * 0.35 * s_mask)
+        if has_levels or has_exposure or bake_contrast_in_lut:
+            lut = np.arange(256, dtype=np.float32) / 255.0
+            if has_levels:
+                bp = min(recipe.black_point, recipe.white_point - 2.0) / 255.0
+                wp = max(recipe.white_point, recipe.black_point + 2.0) / 255.0
+                lut = np.clip((lut - bp) / (wp - bp), 0.0, 1.0)
+
+            if has_exposure:
+                b = recipe.brightness / 100.0  # -1.0 .. +1.0
+                if b > 0.0:
+                    exp_mult = 1.0 + b * 1.4
+                    scaled = lut * exp_mult
+                    knee = 0.65
+                    over = np.maximum(0.0, scaled - knee)
+                    scaled = np.where(scaled > knee, knee + over / (1.0 + over * 1.8), scaled)
+                    lut = np.clip(scaled, 0.0, 1.0)
                 else:
-                    s_mask = np.clip(1.0 - s_norm / 0.5, 0.0, 1.0)
-                    L_base = L_base + s_val * s_mask * L_base * 0.5
+                    stops = 2.0 ** (b * 1.5)
+                    f_scaled = lut * stops
+                    toe = 0.05 * abs(b) * lut * (1.0 - lut)
+                    lut = np.clip(f_scaled + toe, 0.0, 1.0)
 
-            if abs(recipe.highlights) >= 0.1:
-                h_val = recipe.highlights / 100.0
-                h_norm = L_base / 255.0
-                h_mask = np.clip((h_norm - 0.42) / 0.58, 0.0, 1.0) ** 1.5
-                if h_val > 0:
-                    L_base = L_base + h_val * h_mask * (255.0 - L_base) * 0.5
-                else:
-                    L_base = L_base + h_val * h_mask * (L_base - 100.0) * 0.65
+            if bake_contrast_in_lut:
+                c = recipe.contrast / 100.0
+                diff = (lut - 0.5) * 2.0
+                lut = np.clip(0.5 + 0.5 * (diff * (1.0 + c * 0.8) - (c * 0.25) * (diff ** 3)), 0.0, 1.0)
 
-            if abs(recipe.clarity) >= 0.1:
-                c_amount = recipe.clarity / 100.0
-                mid_weight = 1.0 - 4.0 * ((L_base / 255.0) - 0.5) ** 2
-                mid_weight = np.clip(mid_weight, 0.0, 1.0)
-                L_detail = L_detail + c_amount * 0.45 * mid_weight * L_detail
+            lut_uint8 = np.clip(lut * 255.0 + 0.5, 0, 255).astype(np.uint8)
+            img = cv2.LUT(img, lut_uint8)
 
-            L = np.clip(L_base + L_detail, 0.0, 255.0)
+        # 4. Unified CIE LAB Pass (executed only if LAB adjustments or non-baked contrast active)
+        has_lab = has_lab_except_contrast or (has_contrast and not bake_contrast_in_lut)
+        if has_lab:
+            has_ab = (
+                abs(recipe.temperature) >= 0.1
+                or abs(recipe.tint) >= 0.1
+                or abs(recipe.saturation) >= 0.1
+                or bool(recipe.selective_points)
+            )
+            lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+            L = lab[:, :, 0].astype(np.float32)
+            if has_ab:
+                A = lab[:, :, 1].astype(np.float32)
+                B = lab[:, :, 2].astype(np.float32)
+            h_i, w_i = L.shape
 
-        # White Balance (Temperature & Tint)
-        if abs(recipe.temperature) >= 0.1 or abs(recipe.tint) >= 0.1:
-            t_shift = (recipe.temperature / 100.0) * 26.0
-            ti_shift = (recipe.tint / 100.0) * 20.0
-            B = np.clip(B + t_shift, 0.0, 255.0)
-            A = np.clip(A + ti_shift, 0.0, 255.0)
+            # Base / Detail decomposition if Shadows, Highlights, or Clarity active (4x hierarchical acceleration)
+            needs_decompose = (
+                abs(recipe.shadows) >= 0.1
+                or abs(recipe.highlights) >= 0.1
+                or abs(recipe.clarity) >= 0.1
+            )
+            if needs_decompose:
+                sigma_base = max(3.0 * res_scale, min(14.0 * res_scale, min(h_i, w_i) / 90.0))
+                sw = max(16, w_i // 4)
+                sh = max(16, h_i // 4)
+                L_small = cv2.resize(L, (sw, sh), interpolation=cv2.INTER_AREA)
+                L_base_small = cv2.GaussianBlur(L_small, (0, 0), sigmaX=sigma_base / 4.0, sigmaY=sigma_base / 4.0)
+                L_base = cv2.resize(L_base_small, (w_i, h_i), interpolation=cv2.INTER_LINEAR)
+                L_detail = L - L_base
 
-        # Filmic S-curve Contrast on Luminance (if not already baked into 1D LUT)
-        if has_contrast and not bake_contrast_in_lut:
-            c = recipe.contrast / 100.0
-            diff = (L - 128.0) / 128.0
-            L = np.clip(128.0 + 128.0 * (diff * (1.0 + c * 0.8) - (c * 0.25) * (diff ** 3)), 0.0, 255.0)
+                if abs(recipe.shadows) >= 0.1:
+                    s_val = recipe.shadows / 100.0
+                    s_norm = L_base / 255.0
+                    if s_val > 0:
+                        s_mask = np.clip(1.0 - s_norm / 0.65, 0.0, 1.0) ** 1.8
+                        L_base = L_base + s_val * s_mask * (145.0 - L_base) * 0.72
+                        # Ambience boost: preserve crisp local micro-contrast in lifted shadows
+                        L_detail = L_detail * (1.0 + s_val * 0.35 * s_mask)
+                    else:
+                        s_mask = np.clip(1.0 - s_norm / 0.5, 0.0, 1.0)
+                        L_base = L_base + s_val * s_mask * L_base * 0.5
 
-        # Selective Control Points (U-Point Bilateral Engine with normalized [0..1] support)
-        if recipe.selective_points:
-            y_coords, x_coords = np.ogrid[:h_i, :w_i]
-            for pt in recipe.selective_points:
-                pt_x = float(pt.get("x", 0))
-                pt_y = float(pt.get("y", 0))
-                pt_rad = float(pt.get("radius", 80))
-                b_shift = float(pt.get("brightness", 0.0))
-                c_shift = float(pt.get("contrast", 0.0))
-                s_shift = float(pt.get("saturation", 0.0))
+                if abs(recipe.highlights) >= 0.1:
+                    h_val = recipe.highlights / 100.0
+                    h_norm = L_base / 255.0
+                    h_mask = np.clip((h_norm - 0.42) / 0.58, 0.0, 1.0) ** 1.5
+                    if h_val > 0:
+                        L_base = L_base + h_val * h_mask * (255.0 - L_base) * 0.5
+                    else:
+                        L_base = L_base + h_val * h_mask * (L_base - 100.0) * 0.65
 
-                if 0.0 <= pt_x <= 1.0 and 0.0 <= pt_y <= 1.0:
-                    px = pt_x * w_i
-                    py = pt_y * h_i
-                else:
-                    px = pt_x
-                    py = pt_y
+                if abs(recipe.clarity) >= 0.1:
+                    c_amount = recipe.clarity / 100.0
+                    mid_weight = 1.0 - 4.0 * ((L_base / 255.0) - 0.5) ** 2
+                    mid_weight = np.clip(mid_weight, 0.0, 1.0)
+                    L_detail = L_detail + c_amount * 0.45 * mid_weight * L_detail
 
-                if 0.0 < pt_rad <= 1.0:
-                    rad = pt_rad * max(w_i, h_i)
-                else:
-                    rad = pt_rad * (res_scale if (0.0 <= pt_x <= 1.0) else 1.0)
-                rad = max(5.0 * res_scale, rad)
+                L = np.clip(L_base + L_detail, 0.0, 255.0)
 
-                px_int = int(np.clip(round(px), 0, w_i - 1))
-                py_int = int(np.clip(round(py), 0, h_i - 1))
-                target_l = L[py_int, px_int]
-                target_a = A[py_int, px_int]
-                target_b = B[py_int, px_int]
+            # White Balance (Temperature & Tint)
+            if abs(recipe.temperature) >= 0.1 or abs(recipe.tint) >= 0.1:
+                t_shift = (recipe.temperature / 100.0) * 26.0
+                ti_shift = (recipe.tint / 100.0) * 20.0
+                B += t_shift
+                np.clip(B, 0.0, 255.0, out=B)
+                A += ti_shift
+                np.clip(A, 0.0, 255.0, out=A)
 
-                d2 = (x_coords - px) ** 2 + (y_coords - py) ** 2
-                w_spatial = np.clip(1.0 - np.sqrt(d2) / rad, 0.0, 1.0) ** 2
-                delta_e = np.sqrt((L - target_l) ** 2 + (A - target_a) ** 2 + (B - target_b) ** 2)
-                w_color = np.exp(-(delta_e / 28.0) ** 2)
-                w_total = w_spatial * w_color
+            # Filmic S-curve Contrast on Luminance (if not already baked into 1D LUT)
+            if has_contrast and not bake_contrast_in_lut:
+                c = recipe.contrast / 100.0
+                diff = (L - 128.0) / 128.0
+                L = np.clip(128.0 + 128.0 * (diff * (1.0 + c * 0.8) - (c * 0.25) * (diff ** 3)), 0.0, 255.0)
 
-                if np.any(w_total > 0.01):
-                    if abs(b_shift) > 0.1:
-                        L = np.clip(L + w_total * (b_shift * 0.8), 0.0, 255.0)
-                    if abs(c_shift) > 0.1:
-                        diff_l = L - target_l
-                        L = np.clip(L + w_total * (diff_l * (c_shift / 100.0) * 0.5), 0.0, 255.0)
-                    if abs(s_shift) > 0.1:
-                        s_factor = 1.0 + w_total * (s_shift / 100.0)
-                        A = np.clip(128.0 + (A - 128.0) * s_factor, 0.0, 255.0)
-                        B = np.clip(128.0 + (B - 128.0) * s_factor, 0.0, 255.0)
+            # Selective Control Points (U-Point Bilateral Engine with normalized [0..1] support)
+            if recipe.selective_points:
+                y_coords, x_coords = np.ogrid[:h_i, :w_i]
+                for pt in recipe.selective_points:
+                    pt_x = float(pt.get("x", 0))
+                    pt_y = float(pt.get("y", 0))
+                    pt_rad = float(pt.get("radius", 80))
+                    b_shift = float(pt.get("brightness", 0.0))
+                    c_shift = float(pt.get("contrast", 0.0))
+                    s_shift = float(pt.get("saturation", 0.0))
 
-        # Skin-Safe Vibrance directly in LAB (chroma scaling with warm skin locus protection)
-        if abs(recipe.saturation) >= 0.1:
-            sat_gain = recipe.saturation / 100.0
-            da = A - 128.0
-            db = B - 128.0
-            chroma = np.sqrt(da * da + db * db)
-            d_a14 = (A - 146.0) * (1.0 / 14.0)
-            d_b18 = (B - 152.0) * (1.0 / 18.0)
-            skin_dist = np.sqrt(d_a14 * d_a14 + d_b18 * d_b18)
-            skin_mask = np.clip(1.0 - skin_dist, 0.0, 1.0)
-            c_idx = np.clip(chroma * (255.0 / 128.0), 0.0, 255.0).astype(np.int32)
-            vibrance_weight = (1.0 - _VIBRANCE_POW_LUT[c_idx]) * (1.0 - 0.6 * skin_mask)
-            scale = np.maximum(0.0, 1.0 + sat_gain * (0.8 + 0.6 * vibrance_weight))
-            A = np.clip(128.0 + da * scale, 0.0, 255.0)
-            B = np.clip(128.0 + db * scale, 0.0, 255.0)
+                    if 0.0 <= pt_x <= 1.0 and 0.0 <= pt_y <= 1.0:
+                        px = pt_x * w_i
+                        py = pt_y * h_i
+                    else:
+                        px = pt_x
+                        py = pt_y
 
-        # Halo-free Luminance Unsharp Mask with dead-zone soft thresholding
-        if recipe.sharpen >= 1.0:
-            sigma = 1.2 * res_scale
-            L_blur = cv2.GaussianBlur(L, (0, 0), sigmaX=sigma, sigmaY=sigma)
-            d = L - L_blur
-            d_soft = np.sign(d) * np.maximum(0.0, np.abs(d) - 3.0)
-            L = np.clip(L + (recipe.sharpen / 100.0) * 1.5 * d_soft, 0.0, 255.0)
+                    if 0.0 < pt_rad <= 1.0:
+                        rad = pt_rad * max(w_i, h_i)
+                    else:
+                        rad = pt_rad * (res_scale if (0.0 <= pt_x <= 1.0) else 1.0)
+                    rad = max(5.0 * res_scale, rad)
 
-        lab[:, :, 0] = np.clip(L + 0.5, 0.0, 255.0).astype(np.uint8)
-        if has_ab:
-            lab[:, :, 1] = np.clip(A + 0.5, 0.0, 255.0).astype(np.uint8)
-            lab[:, :, 2] = np.clip(B + 0.5, 0.0, 255.0).astype(np.uint8)
-        img = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+                    px_int = int(np.clip(round(px), 0, w_i - 1))
+                    py_int = int(np.clip(round(py), 0, h_i - 1))
+                    target_l = L[py_int, px_int]
+                    target_a = A[py_int, px_int]
+                    target_b = B[py_int, px_int]
+
+                    d2 = (x_coords - px) ** 2 + (y_coords - py) ** 2
+                    w_spatial = np.clip(1.0 - np.sqrt(d2) / rad, 0.0, 1.0) ** 2
+                    delta_e = np.sqrt((L - target_l) ** 2 + (A - target_a) ** 2 + (B - target_b) ** 2)
+                    w_color = np.exp(-(delta_e / 28.0) ** 2)
+                    w_total = w_spatial * w_color
+
+                    if np.any(w_total > 0.01):
+                        if abs(b_shift) > 0.1:
+                            L = np.clip(L + w_total * (b_shift * 0.8), 0.0, 255.0)
+                        if abs(c_shift) > 0.1:
+                            diff_l = L - target_l
+                            L = np.clip(L + w_total * (diff_l * (c_shift / 100.0) * 0.5), 0.0, 255.0)
+                        if abs(s_shift) > 0.1:
+                            s_factor = 1.0 + w_total * (s_shift / 100.0)
+                            A = np.clip(128.0 + (A - 128.0) * s_factor, 0.0, 255.0)
+                            B = np.clip(128.0 + (B - 128.0) * s_factor, 0.0, 255.0)
+
+            # Skin-Safe Vibrance directly in LAB (chroma scaling with warm skin locus protection)
+            if abs(recipe.saturation) >= 0.1:
+                sat_gain = recipe.saturation / 100.0
+                da = A - 128.0
+                db = B - 128.0
+                chroma = np.sqrt(da * da + db * db)
+                d_a14 = (A - 146.0) * (1.0 / 14.0)
+                d_b18 = (B - 152.0) * (1.0 / 18.0)
+                skin_dist = np.sqrt(d_a14 * d_a14 + d_b18 * d_b18)
+                skin_mask = np.clip(1.0 - skin_dist, 0.0, 1.0)
+                c_idx = np.clip(chroma * (255.0 / 128.0), 0.0, 255.0).astype(np.int32)
+                vibrance_weight = (1.0 - _VIBRANCE_POW_LUT[c_idx]) * (1.0 - 0.6 * skin_mask)
+                scale = np.maximum(0.0, 1.0 + sat_gain * (0.8 + 0.6 * vibrance_weight))
+                A = np.clip(128.0 + da * scale, 0.0, 255.0)
+                B = np.clip(128.0 + db * scale, 0.0, 255.0)
+
+            # Halo-free Luminance Unsharp Mask with dead-zone soft thresholding
+            if recipe.sharpen >= 1.0:
+                sigma = 1.2 * res_scale
+                L_blur = cv2.GaussianBlur(L, (0, 0), sigmaX=sigma, sigmaY=sigma)
+                d = L - L_blur
+                d_soft = np.sign(d) * np.maximum(0.0, np.abs(d) - 3.0)
+                L = np.clip(L + (recipe.sharpen / 100.0) * 1.5 * d_soft, 0.0, 255.0)
+
+            lab[:, :, 0] = np.clip(L + 0.5, 0.0, 255.0).astype(np.uint8)
+            if has_ab:
+                lab[:, :, 1] = np.clip(A + 0.5, 0.0, 255.0).astype(np.uint8)
+                lab[:, :, 2] = np.clip(B + 0.5, 0.0, 255.0).astype(np.uint8)
+            img = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+
+        if slot is not None:
+            with _STAGE_CACHE_LOCK:
+                slot["tl_key"] = tl_key
+                slot["tl_img"] = img
 
     # 5. Photographic Effects Preset with Intensity Blend
     if recipe.effect not in ("none", "", None):
@@ -628,56 +699,90 @@ def render_adjusted_image(
 
             # Portrait Bokeh & Focus Defocus Blur with Normalized Convolution (Zero Foreground Color Bleed)
             if abs(recipe.depth_blur) >= 0.1:
-                focus_z = float(recipe.focal_plane) / 100.0
-                subject_protect = alpha_matte * (1.0 if focus_z < 0.25 else 0.0)
-                defocus = np.clip(np.abs(depth_map - focus_z) * (1.0 - subject_protect), 0.0, 1.0)
-                w_bg = np.clip(1.0 - subject_protect, 1e-3, 1.0).astype(np.float32)
+                relight_key = (
+                    round(recipe.relight_near, 2),
+                    round(recipe.relight_far, 2),
+                    round(recipe.warmth_near, 2),
+                    round(recipe.warmth_far, 2),
+                )
+                bokeh_key = (
+                    tl_key,
+                    recipe.effect,
+                    round(recipe.effect_intensity, 2),
+                    relight_key,
+                    round(recipe.depth_blur, 2),
+                    round(recipe.focal_plane, 2),
+                    round(recipe.bokeh_glow, 2),
+                    round(recipe.boundary_shift, 2),
+                    round(recipe.boundary_feather, 2),
+                )
+                bokeh_cached = None
+                if slot is not None:
+                    with _STAGE_CACHE_LOCK:
+                        if slot.get("bokeh_key") == bokeh_key and slot.get("bokeh_data") is not None:
+                            bokeh_cached = slot["bokeh_data"]
 
-                blur_r = max(2, int(round((recipe.depth_blur / 100.0) * 28.0 * res_scale)))
-                h_img, w_img = img.shape[:2]
-
-                # Optical defocus blur has zero frequencies above 640px; blur on downscaled buffer for instant speed
-                scale_blur = max(1.0, max(h_img, w_img) / 640.0)
-                if scale_blur > 1.05:
-                    bw = max(16, int(round(w_img / scale_blur)))
-                    bh = max(16, int(round(h_img / scale_blur)))
-                    small_img = cv2.resize(img, (bw, bh), interpolation=cv2.INTER_AREA)
-                    small_w_bg = cv2.resize(w_bg, (bw, bh), interpolation=cv2.INTER_AREA)
-                    small_lin = _LUT_SRGB_TO_LIN[small_img]
-                    if recipe.bokeh_glow >= 0.1:
-                        lum_small = cv2.cvtColor(small_img, cv2.COLOR_RGB2GRAY)
-                        glow_factor = np.clip((lum_small.astype(np.float32) - 190.0) / 60.0, 0.0, 1.0)[:, :, None]
-                        small_lin = small_lin * (1.0 + glow_factor * (recipe.bokeh_glow / 50.0) * 2.5)
-                    small_r = max(2, int(round(blur_r / scale_blur)))
-                    sigma_b = max(1.0, small_r * 0.5)
-                    ksize = max(3, (2 * small_r + 1) | 1)
-                    premult_small = small_lin * small_w_bg[:, :, None]
-                    blurred_premult = cv2.GaussianBlur(premult_small, (ksize, ksize), sigmaX=sigma_b, sigmaY=sigma_b)
-                    blurred_w = cv2.GaussianBlur(small_w_bg, (ksize, ksize), sigmaX=sigma_b, sigmaY=sigma_b)[:, :, None]
-                    blurred_small = blurred_premult / np.maximum(blurred_w, 1e-4)
-                    indices = np.clip(blurred_small * 4095.0, 0, 4095).astype(np.int32)
-                    small_srgb = _LUT_LIN_TO_SRGB[indices]
-                    blurred_srgb = cv2.resize(small_srgb, (w_img, h_img), interpolation=cv2.INTER_LINEAR)
+                if bokeh_cached is not None:
+                    blurred_srgb, defocus = bokeh_cached
                 else:
-                    img_lin = _LUT_SRGB_TO_LIN[img]
-                    if recipe.bokeh_glow >= 0.1:
-                        lum = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-                        glow_factor = np.clip((lum.astype(np.float32) - 190.0) / 60.0, 0.0, 1.0)[:, :, None]
-                        img_lin = img_lin * (1.0 + glow_factor * (recipe.bokeh_glow / 50.0) * 2.5)
-                    sigma_b = max(1.0, blur_r * 0.5)
-                    ksize = max(3, (2 * blur_r + 1) | 1)
-                    premult_lin = img_lin * w_bg[:, :, None]
-                    blurred_premult = cv2.GaussianBlur(premult_lin, (ksize, ksize), sigmaX=sigma_b, sigmaY=sigma_b)
-                    blurred_w = cv2.GaussianBlur(w_bg, (ksize, ksize), sigmaX=sigma_b, sigmaY=sigma_b)[:, :, None]
-                    blurred_lin = blurred_premult / np.maximum(blurred_w, 1e-4)
-                    indices = np.clip(blurred_lin * 4095.0, 0, 4095).astype(np.int32)
-                    blurred_srgb = _LUT_LIN_TO_SRGB[indices]
+                    focus_z = float(recipe.focal_plane) / 100.0
+                    subject_protect = alpha_matte * (1.0 if focus_z < 0.25 else 0.0)
+                    defocus = np.clip(np.abs(depth_map - focus_z) * (1.0 - subject_protect), 0.0, 1.0)
+                    w_bg = np.clip(1.0 - subject_protect, 1e-3, 1.0).astype(np.float32)
+
+                    blur_r = max(2, int(round((recipe.depth_blur / 100.0) * 28.0 * res_scale)))
+                    h_img, w_img = img.shape[:2]
+
+                    # Optical defocus blur has zero frequencies above 640px; blur on downscaled buffer for instant speed
+                    scale_blur = max(1.0, max(h_img, w_img) / 640.0)
+                    if scale_blur > 1.05:
+                        bw = max(16, int(round(w_img / scale_blur)))
+                        bh = max(16, int(round(h_img / scale_blur)))
+                        small_img = cv2.resize(img, (bw, bh), interpolation=cv2.INTER_AREA)
+                        small_w_bg = cv2.resize(w_bg, (bw, bh), interpolation=cv2.INTER_AREA)
+                        small_lin = _LUT_SRGB_TO_LIN[small_img]
+                        if recipe.bokeh_glow >= 0.1:
+                            lum_small = cv2.cvtColor(small_img, cv2.COLOR_RGB2GRAY)
+                            glow_factor = np.clip((lum_small.astype(np.float32) - 190.0) / 60.0, 0.0, 1.0)[:, :, None]
+                            small_lin = small_lin * (1.0 + glow_factor * (recipe.bokeh_glow / 50.0) * 2.5)
+                        small_r = max(2, int(round(blur_r / scale_blur)))
+                        sigma_b = max(1.0, small_r * 0.5)
+                        ksize = max(3, (2 * small_r + 1) | 1)
+                        premult_small = small_lin * small_w_bg[:, :, None]
+                        blurred_premult = cv2.GaussianBlur(premult_small, (ksize, ksize), sigmaX=sigma_b, sigmaY=sigma_b)
+                        blurred_w = cv2.GaussianBlur(small_w_bg, (ksize, ksize), sigmaX=sigma_b, sigmaY=sigma_b)[:, :, None]
+                        blurred_small = blurred_premult / np.maximum(blurred_w, 1e-4)
+                        indices = np.clip(blurred_small * 4095.0, 0, 4095).astype(np.int32)
+                        small_srgb = _LUT_LIN_TO_SRGB[indices]
+                        blurred_srgb = cv2.resize(small_srgb, (w_img, h_img), interpolation=cv2.INTER_LINEAR)
+                    else:
+                        img_lin = _LUT_SRGB_TO_LIN[img]
+                        if recipe.bokeh_glow >= 0.1:
+                            lum = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                            glow_factor = np.clip((lum.astype(np.float32) - 190.0) / 60.0, 0.0, 1.0)[:, :, None]
+                            img_lin = img_lin * (1.0 + glow_factor * (recipe.bokeh_glow / 50.0) * 2.5)
+                        sigma_b = max(1.0, blur_r * 0.5)
+                        ksize = max(3, (2 * blur_r + 1) | 1)
+                        premult_lin = img_lin * w_bg[:, :, None]
+                        blurred_premult = cv2.GaussianBlur(premult_lin, (ksize, ksize), sigmaX=sigma_b, sigmaY=sigma_b)
+                        blurred_w = cv2.GaussianBlur(w_bg, (ksize, ksize), sigmaX=sigma_b, sigmaY=sigma_b)[:, :, None]
+                        blurred_lin = blurred_premult / np.maximum(blurred_w, 1e-4)
+                        indices = np.clip(blurred_lin * 4095.0, 0, 4095).astype(np.int32)
+                        blurred_srgb = _LUT_LIN_TO_SRGB[indices]
+
+                    if slot is not None:
+                        with _STAGE_CACHE_LOCK:
+                            slot["bokeh_key"] = bokeh_key
+                            slot["bokeh_data"] = (blurred_srgb, defocus)
 
                 blend_w = np.clip(defocus * (recipe.depth_blur / 100.0) * 1.5, 0.0, 1.0)[:, :, None]
                 f_base = img.astype(np.float32)
                 f_blur = blurred_srgb.astype(np.float32)
-                f_base += (f_blur - f_base) * blend_w
-                img = np.clip(f_base, 0.0, 255.0).astype(np.uint8)
+                f_blur -= f_base
+                f_blur *= blend_w
+                f_base += f_blur
+                np.clip(f_base, 0.0, 255.0, out=f_base)
+                img = f_base.astype(np.uint8)
 
             # Atmospheric Depth Haze / Fog (Luminar-style optical scattering, soft veiling & horizon depth layering)
             if abs(recipe.depth_haze) >= 0.1:
@@ -726,9 +831,12 @@ def render_adjusted_image(
                 img_f = img.astype(np.float32)
                 # Distance-based slight chroma desaturation in deep mist for photographic realism
                 gray_f = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY).astype(np.float32)[:, :, None]
-                desat_img = img_f * 0.75 + gray_f * 0.25
-                veiled = desat_img * (1.0 - haze_factor * 0.55) + airlight * haze_factor
-                img = np.clip(veiled, 0.0, 255.0).astype(np.uint8)
+                img_f *= 0.75
+                img_f += gray_f * 0.25
+                img_f *= (1.0 - haze_factor * 0.55)
+                img_f += airlight * haze_factor
+                np.clip(img_f, 0.0, 255.0, out=img_f)
+                img = img_f.astype(np.uint8)
         except Exception as ex:
             logger.debug("Depth and light processing failed: %s", ex)
 
@@ -744,7 +852,10 @@ def render_adjusted_image(
         v_mask = np.clip(dist_sq * 0.75, 0.0, 1.5)
         falloff = np.clip(1.0 - v_mask, 0.0, 1.0)
         v_gain = 1.0 + v_amount * (1.0 - falloff)
-        img = np.clip(img.astype(np.float32) * v_gain[:, :, None], 0, 255).astype(np.uint8)
+        img_f = img.astype(np.float32)
+        img_f *= v_gain[:, :, None]
+        np.clip(img_f, 0, 255, out=img_f)
+        img = img_f.astype(np.uint8)
 
     # 7. Straighten & Crop
     if abs(recipe.straighten_deg) >= 0.05:

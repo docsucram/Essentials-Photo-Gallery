@@ -258,16 +258,47 @@ def stitch_panorama_raw(
     if not images_bgr or len(images_bgr) < 2:
         return False, np.empty((0, 0, 3), dtype=np.uint8), "Select at least 2 photos to stitch a panorama."
 
+    # Disable OpenCL inside Stitcher to prevent Windows GPU driver crashes on worker QThreads
+    try:
+        cv2.ocl.setUseOpenCL(False)
+    except Exception:
+        pass
+
+    # Cap input frame dimensions to prevent OOM/C++ crashes on 24MP-60MP+ photos
+    max_input_edge = 2400
+    work_images: list[np.ndarray] = []
+    for img in images_bgr:
+        if img is None or img.size == 0:
+            continue
+        ih, iw = img.shape[:2]
+        long_edge = max(ih, iw)
+        if long_edge > max_input_edge:
+            scale = max_input_edge / float(long_edge)
+            work_images.append(
+                cv2.resize(img, (max(1, int(round(iw * scale))), max(1, int(round(ih * scale)))), interpolation=cv2.INTER_AREA)
+            )
+        else:
+            work_images.append(img)
+
+    if len(work_images) < 2:
+        return False, np.empty((0, 0, 3), dtype=np.uint8), "Select at least 2 valid photos to stitch a panorama."
+
     is_planar = projection_mode.lower() in ("planar", "perspective", "scans", "scan")
     stitcher_mode = cv2.Stitcher_SCANS if is_planar else cv2.Stitcher_PANORAMA
 
-    stitcher = cv2.Stitcher_create(stitcher_mode)
-    status, stitched = stitcher.stitch(images_bgr)
+    status = -1
+    stitched = None
+    try:
+        stitcher = cv2.Stitcher_create(stitcher_mode)
+        status, stitched = stitcher.stitch(work_images)
+    except Exception:
+        status = -1
+        stitched = None
 
     used_fallback = False
     if status != cv2.Stitcher_OK or stitched is None or stitched.size == 0:
         try:
-            stitched = fallback_homography_stitch(images_bgr)
+            stitched = fallback_homography_stitch(work_images)
             used_fallback = True
         except Exception as e:
             return False, np.empty((0, 0, 3), dtype=np.uint8), f"Stitching failed: {e}"
@@ -1100,59 +1131,163 @@ def align_burst_frame(base_bgr: np.ndarray, target_bgr: np.ndarray) -> tuple[boo
         if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance:
             good.append(pair[0])
 
-    if len(good) < 4:
+    if len(good) < 6:
         return False, cv2.resize(target_bgr, (w, h))
 
     src_pts = np.float32([kp2[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
     dst_pts = np.float32([kp1[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
 
-    H, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-    if H is None:
+    H, inlier_mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+    if H is None or inlier_mask is None:
+        return False, cv2.resize(target_bgr, (w, h))
+
+    inliers = int(np.sum(inlier_mask))
+    det = float(np.linalg.det(H[:2, :2]))
+    if inliers < 6 or not (0.25 <= abs(det) <= 4.0):
         return False, cv2.resize(target_bgr, (w, h))
 
     aligned = cv2.warpPerspective(target_bgr, H, (w, h))
     return True, aligned
 
 
-def detect_faces_in_image(image_bgr: np.ndarray) -> list[tuple[int, int, int, int]]:
+_FUSE_FACE_DETECTOR: Any = None
+
+
+def _get_fuse_face_detector() -> Any:
     """
-    Detects faces in image using FaceEngine or Haar cascade fallback.
-    Returns list of (x, y, w, h) sorted left-to-right.
+    Lazily initializes a lightweight CPU-only InsightFace *detection-only* app.
+    Avoids DmlExecutionProvider (DirectML) on the Qt GUI thread and avoids loading
+    heavy recognition/3D/genderage models that Photo Fuse does not use.
+    """
+    global _FUSE_FACE_DETECTOR
+    if _FUSE_FACE_DETECTOR is not None:
+        return _FUSE_FACE_DETECTOR if _FUSE_FACE_DETECTOR is not False else None
+
+    try:
+        import os
+        models_dir = os.path.expanduser("~/.insightface/models")
+        if not os.path.exists(models_dir):
+            _FUSE_FACE_DETECTOR = False
+            return None
+
+        from src.core.face_engine import _ensure_insightface_frozen_objects
+        _ensure_insightface_frozen_objects()
+        from insightface.app import FaceAnalysis  # type: ignore[import-not-found]
+
+        for model_name in ("buffalo_l", "buffalo_s"):
+            if not os.path.isdir(os.path.join(models_dir, model_name)):
+                continue
+            try:
+                app = FaceAnalysis(
+                    name=model_name,
+                    allowed_modules=["detection"],
+                    providers=["CPUExecutionProvider"],
+                )
+                app.prepare(ctx_id=0, det_size=(640, 640))
+                _FUSE_FACE_DETECTOR = app
+                return app
+            except Exception:
+                continue
+    except BaseException:
+        pass
+
+    _FUSE_FACE_DETECTOR = False
+    return None
+
+
+def detect_faces_with_landmarks(image_bgr: np.ndarray) -> list[dict[str, Any]]:
+    """
+    Detects faces and optional 5-point landmarks in image_bgr.
+    Prefers CPU-only InsightFace detection with confidence & landmark geometry gates
+    to eliminate false positives on textured backgrounds/clothing; falls back to strict Haar.
+    Returns list of dicts: {"rect": (x, y, w, h), "kps": np.ndarray | None, "score": float}
+    sorted left-to-right.
     """
     if image_bgr is None or image_bgr.size == 0:
         return []
 
     h, w = image_bgr.shape[:2]
-    # Fast-path downscale for responsive interactive preview
     scale = 1.0
-    if max(h, w) > 960:
-        scale = 960.0 / max(h, w)
+    if max(h, w) > 1280:
+        scale = 1280.0 / max(h, w)
         det_img = cv2.resize(image_bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
     else:
         det_img = image_bgr
+    inv = 1.0 / scale if scale != 1.0 else 1.0
 
+    # 1. Primary: CPU-only InsightFace detection-only model (accurate bbox + 5-point landmarks)
     try:
-        from src.imaging.creative_effects import _detect_faces_for_mask
-        boxes = _detect_faces_for_mask(det_img)
-        if boxes:
-            if scale != 1.0:
-                inv = 1.0 / scale
-                boxes = [(int(bx * inv), int(by * inv), int(bw * inv), int(bh * inv)) for bx, by, bw, bh in boxes]
-            return sorted(boxes, key=lambda rect: rect[0])
+        insight_app = _get_fuse_face_detector()
+        if insight_app is not None:
+            raw_faces = insight_app.get(det_img)
+            results: list[dict[str, Any]] = []
+            for f in raw_faces:
+                score = float(getattr(f, "det_score", 0.0) or 0.0)
+                if score < 0.55:
+                    continue
+                bbox = getattr(f, "bbox", None)
+                if bbox is None or len(bbox) < 4:
+                    continue
+                x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+                bw_s, bh_s = x2 - x1, y2 - y1
+                if bw_s < 24 or bh_s < 24:
+                    continue
+
+                kps_raw = getattr(f, "kps", None)
+                kps_out: np.ndarray | None = None
+                if kps_raw is not None and len(kps_raw) >= 5:
+                    le_x, le_y = float(kps_raw[0][0]), float(kps_raw[0][1])
+                    re_x, re_y = float(kps_raw[1][0]), float(kps_raw[1][1])
+                    lm_x, lm_y = float(kps_raw[3][0]), float(kps_raw[3][1])
+                    rm_x, rm_y = float(kps_raw[4][0]), float(kps_raw[4][1])
+                    if le_y >= lm_y or re_y >= rm_y or max(le_y, re_y) >= min(lm_y, rm_y):
+                        continue
+                    if math.hypot(re_x - le_x, re_y - le_y) < 0.15 * bw_s:
+                        continue
+                    kps_out = np.asarray(kps_raw[:5], dtype=np.float32) * inv
+
+                bx = max(0, min(w - 1, int(round(x1 * inv))))
+                by = max(0, min(h - 1, int(round(y1 * inv))))
+                bx2 = max(bx + 1, min(w, int(round(x2 * inv))))
+                by2 = max(by + 1, min(h, int(round(y2 * inv))))
+                results.append({
+                    "rect": (bx, by, bx2 - bx, by2 - by),
+                    "kps": kps_out,
+                    "score": score,
+                })
+            if results:
+                return sorted(results, key=lambda d: d["rect"][0])
     except Exception:
         pass
 
+    # 2. Fallback: Strict OpenCV Haar Cascade (minimizes false positives on brick/clothing)
     cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     if not Path(cascade_path).exists():
         return []
 
     classifier = cv2.CascadeClassifier(cascade_path)
     gray = cv2.cvtColor(det_img, cv2.COLOR_BGR2GRAY)
-    faces = classifier.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(25, 25))
+    min_px = max(36, int(min(det_img.shape[:2]) * 0.04))
+    faces = classifier.detectMultiScale(gray, scaleFactor=1.12, minNeighbors=6, minSize=(min_px, min_px))
 
-    inv = 1.0 / scale if scale != 1.0 else 1.0
-    sorted_faces = sorted([tuple(map(int, (f[0] * inv, f[1] * inv, f[2] * inv, f[3] * inv))) for f in faces], key=lambda rect: rect[0])
-    return sorted_faces
+    results = []
+    for f in faces:
+        rect = (
+            max(0, min(w - 1, int(round(f[0] * inv)))),
+            max(0, min(h - 1, int(round(f[1] * inv)))),
+            max(16, int(round(f[2] * inv))),
+            max(16, int(round(f[3] * inv))),
+        )
+        results.append({"rect": rect, "kps": None, "score": 0.5})
+    return sorted(results, key=lambda d: d["rect"][0])
+
+
+def detect_faces_in_image(image_bgr: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """
+    Detects faces in image using InsightFace (preferred) or strict Haar cascade fallback.
+    Returns list of (x, y, w, h) sorted left-to-right.
+    """
+    return [d["rect"] for d in detect_faces_with_landmarks(image_bgr)]
 
 
 def _blend_laplacian_pyramid(
@@ -1213,15 +1348,105 @@ def _blend_laplacian_pyramid(
     return res
 
 
+def _align_face_patch_local(
+    base_patch: np.ndarray,
+    src_patch: np.ndarray,
+    base_kps_patch: np.ndarray | None = None,
+    src_kps_patch: np.ndarray | None = None,
+) -> np.ndarray:
+    """
+    Locally aligns src_patch to base_patch so eyes/nose/mouth/glasses line up even when
+    the subject shifted or tilted their head relative to the background homography.
+    Uses 5-point facial landmarks when available, falling back to local Euclidean ECC.
+    """
+    ph, pw = base_patch.shape[:2]
+    if ph < 20 or pw < 20:
+        return src_patch
+
+    # 1. Landmark similarity transform (scale + rotation + translation)
+    if (
+        base_kps_patch is not None
+        and src_kps_patch is not None
+        and len(base_kps_patch) >= 5
+        and len(src_kps_patch) >= 5
+    ):
+        try:
+            M, _ = cv2.estimateAffinePartial2D(
+                np.asarray(src_kps_patch[:5], dtype=np.float32),
+                np.asarray(base_kps_patch[:5], dtype=np.float32),
+                method=cv2.LMEDS,
+            )
+            if M is not None:
+                sx = math.hypot(float(M[0, 0]), float(M[1, 0]))
+                ang = abs(math.degrees(math.atan2(float(M[1, 0]), float(M[0, 0]))))
+                if 0.75 <= sx <= 1.35 and ang <= 25.0:
+                    return cv2.warpAffine(
+                        src_patch,
+                        M,
+                        (pw, ph),
+                        flags=cv2.INTER_LANCZOS4,
+                        borderMode=cv2.BORDER_REFLECT_101,
+                    )
+        except Exception:
+            pass
+
+    # 2. Fallback: local Euclidean ECC on downscaled grayscale inner face region
+    try:
+        g_base = cv2.cvtColor(base_patch, cv2.COLOR_BGR2GRAY)
+        g_src = cv2.cvtColor(src_patch, cv2.COLOR_BGR2GRAY)
+        if float(np.std(g_base)) < 4.0 or float(np.std(g_src)) < 4.0:
+            return src_patch
+
+        ecc_scale = min(1.0, 160.0 / max(ph, pw))
+        ew = max(24, int(round(pw * ecc_scale)))
+        eh = max(24, int(round(ph * ecc_scale)))
+        gb_s = cv2.resize(g_base, (ew, eh), interpolation=cv2.INTER_AREA)
+        gs_s = cv2.resize(g_src, (ew, eh), interpolation=cv2.INTER_AREA)
+
+        # Weight mask focusing on central face features (avoiding outer background)
+        ecc_mask = np.zeros((eh, ew), dtype=np.uint8)
+        cv2.ellipse(ecc_mask, (ew // 2, eh // 2), (max(4, int(ew * 0.34)), max(4, int(eh * 0.38))), 0, 0, 360, 255, -1)
+
+        warp_mat = np.eye(2, 3, dtype=np.float32)
+        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 40, 1e-4)
+        _, warp_mat = cv2.findTransformECC(gb_s, gs_s, warp_mat, cv2.MOTION_EUCLIDEAN, criteria, ecc_mask, 3)
+
+        # Scale translation back to full patch coordinates
+        tx_full = float(warp_mat[0, 2]) / ecc_scale
+        ty_full = float(warp_mat[1, 2]) / ecc_scale
+        ang = abs(math.degrees(math.atan2(float(warp_mat[1, 0]), float(warp_mat[0, 0]))))
+        max_shift = 0.18 * min(pw, ph)
+        if abs(tx_full) <= max_shift and abs(ty_full) <= max_shift and ang <= 12.0:
+            M_full = warp_mat.copy()
+            M_full[0, 2] = tx_full
+            M_full[1, 2] = ty_full
+            # ECC returns template->input warp; WARP_INVERSE_MAP maps input(src) into template(base)
+            return cv2.warpAffine(
+                src_patch,
+                M_full,
+                (pw, ph),
+                flags=cv2.INTER_LANCZOS4 | cv2.WARP_INVERSE_MAP,
+                borderMode=cv2.BORDER_REFLECT_101,
+            )
+    except Exception:
+        pass
+
+    return src_patch
+
+
 def fuse_face(
     base_bgr: np.ndarray,
     aligned_source_bgr: np.ndarray,
     face_rect: tuple[int, int, int, int],
     expand_margin: float = 0.25,
+    base_kps: np.ndarray | None = None,
+    src_kps: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Seamlessly blends a face patch from aligned_source_bgr into base_bgr:
-    - Pre-matches CIE LAB color mean and std so lighting and skin tones blend naturally.
+    - Locally aligns the face patch via 5-point landmarks (or local Euclidean ECC fallback)
+      so eyes, glasses, and mouth line up with the base head despite head motion/parallax.
+    - Pre-matches CIE LAB color mean and std strictly inside the masked inner face region.
     - Uses multi-band Laplacian pyramid blending to preserve 100% of the base background
       free of smudges, halos, Poisson bleed, or warping.
     """
@@ -1231,7 +1456,7 @@ def fuse_face(
     h, w = base_bgr.shape[:2]
     fx, fy, fw, fh = face_rect
 
-    # Expand box slightly to include chin, hair, and jawline smoothly
+    # Expand box slightly to include chin, forehead, and blending margin
     dx = int(fw * expand_margin)
     dy = int(fh * expand_margin)
 
@@ -1249,39 +1474,44 @@ def fuse_face(
     src_patch = aligned_source_bgr[y1:y2, x1:x2].copy()
     base_patch = base_bgr[y1:y2, x1:x2].copy()
 
-    # Pre-match CIE LAB color mean & std on inner facial core to avoid color shifting
+    # Local per-face alignment (landmarks if provided, otherwise ECC)
+    base_kps_p = (np.asarray(base_kps, dtype=np.float32) - np.array([x1, y1], dtype=np.float32)) if base_kps is not None else None
+    src_kps_p = (np.asarray(src_kps, dtype=np.float32) - np.array([x1, y1], dtype=np.float32)) if src_kps is not None else None
+    src_patch = _align_face_patch_local(base_patch, src_patch, base_kps_p, src_kps_p)
+
+    # Build face-centered elliptical mask (tighter horizontally to avoid background/hair bleed)
+    fc_x = (fx + fw // 2) - x1
+    fc_y = (fy + int(fh * 0.52)) - y1
+    axis_x = max(4, int(fw * 0.44))
+    axis_y = max(4, int(fh * 0.52))
+
+    mask_patch = np.zeros((patch_h, patch_w), dtype=np.uint8)
+    cv2.ellipse(mask_patch, (fc_x, fc_y), (axis_x, axis_y), 0, 0, 360, 255, -1)
+
+    # Pre-match CIE LAB color mean & std strictly inside the elliptical face core
     try:
         lab_src = cv2.cvtColor(src_patch, cv2.COLOR_BGR2LAB).astype(np.float32)
         lab_base = cv2.cvtColor(base_patch, cv2.COLOR_BGR2LAB).astype(np.float32)
-        ih, iw = patch_h, patch_w
-        c_y1, c_y2 = int(ih * 0.25), int(ih * 0.75)
-        c_x1, c_x2 = int(iw * 0.25), int(iw * 0.75)
-        core_src = lab_src[c_y1:c_y2, c_x1:c_x2]
-        core_base = lab_base[c_y1:c_y2, c_x1:c_x2]
-        if core_src.size > 0 and core_base.size > 0:
+        core_mask = mask_patch > 128
+        if int(np.count_nonzero(core_mask)) > 25:
             for ch in range(3):
-                m_s, s_s = float(np.mean(core_src[:, :, ch])), float(np.std(core_src[:, :, ch])) + 1e-4
-                m_b, s_b = float(np.mean(core_base[:, :, ch])), float(np.std(core_base[:, :, ch])) + 1e-4
-                lab_src[:, :, ch] = (lab_src[:, :, ch] - m_s) * (s_b / s_s) + m_b
+                vals_s = lab_src[:, :, ch][core_mask]
+                vals_b = lab_base[:, :, ch][core_mask]
+                m_s, s_s = float(np.mean(vals_s)), float(np.std(vals_s)) + 1e-4
+                m_b, s_b = float(np.mean(vals_b)), float(np.std(vals_b)) + 1e-4
+                ratio = max(0.65, min(1.5, s_b / s_s))
+                lab_src[:, :, ch] = (lab_src[:, :, ch] - m_s) * ratio + m_b
             lab_src = np.clip(lab_src, 0.0, 255.0).astype(np.uint8)
             src_patch = cv2.cvtColor(lab_src, cv2.COLOR_LAB2BGR)
     except Exception:
         pass
 
-    # Build face-centered elliptical feathered mask
-    fc_x = (fx + fw // 2) - x1
-    fc_y = (fy + fh // 2) - y1
-    axis_x = max(4, int(fw * 0.50))
-    axis_y = max(4, int(fh * 0.56))
-
-    mask_patch = np.zeros((patch_h, patch_w), dtype=np.uint8)
-    cv2.ellipse(mask_patch, (fc_x, fc_y), (axis_x, axis_y), 0, 0, 360, 255, -1)
-
-    ksize = max(5, int(min(fw, fh) * 0.25) | 1)
+    ksize = max(5, int(min(fw, fh) * 0.30) | 1)
     blurred_mask = cv2.GaussianBlur(mask_patch, (ksize, ksize), 0).astype(np.float32) / 255.0
 
+    levels = min(5, max(2, int(math.log2(max(16, min(patch_w, patch_h)))) - 2))
     try:
-        blended_patch = _blend_laplacian_pyramid(src_patch, base_patch, blurred_mask, levels=3)
+        blended_patch = _blend_laplacian_pyramid(src_patch, base_patch, blurred_mask, levels=levels)
     except Exception:
         # Graceful fallback: Feathered Alpha Blending
         base_roi = base_patch.astype(np.float32)

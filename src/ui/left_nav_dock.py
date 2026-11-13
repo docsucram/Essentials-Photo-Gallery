@@ -480,6 +480,8 @@ class LeftNavigationDock(QDockWidget):
     favourite_path_selected = Signal(str)
     files_dropped_on_folder = Signal(int, str, list, bool)
     people_directory_requested = Signal()
+    albums_view_requested = Signal()
+    section_order_changed = Signal(list)
     tag_hierarchy_changed = Signal()
     place_selected = Signal(str, str, str)  # country, state, city
     new_album_requested = Signal()
@@ -531,11 +533,22 @@ class LeftNavigationDock(QDockWidget):
         self._smart_album_rules: str | None = None
 
         # Section visibility state (Options dialog)
+        self._show_albums: bool = True
         self._show_dates: bool = True
         self._show_tags: bool = True
         self._show_people: bool = True
         self._show_ratings: bool = True
         self._show_places: bool = True
+        self._default_section_order: tuple[str, ...] = (
+            "all_media",
+            "section_albums",
+            "section_dates",
+            "section_people",
+            "section_tags",
+            "section_ratings",
+            "section_places",
+        )
+        self._section_order: list[str] = list(self._default_section_order)
 
         # Fast lookup maps for tree items
         self._album_items: dict[int, QTreeWidgetItem] = {}
@@ -838,78 +851,96 @@ class LeftNavigationDock(QDockWidget):
             sec_font = QFont("Segoe UI", 9, QFont.Bold)
             section_color = QBrush(QColor("#1E395B"))
 
-            # 0. Albums (Static Albums + Dynamic Smart Albums)
-            self.root_albums = QTreeWidgetItem(self.tree, ["Albums"])
-            self.root_albums.setData(0, _NODE_TYPE_ROLE, "section_albums")
-            self.root_albums.setIcon(0, make_wlpg_icon("pictures_library", 16))
-            self.root_albums.setFont(0, sec_font)
-            self.root_albums.setForeground(0, section_color)
-            self.root_albums.setExpanded(True)
+            def _build_albums() -> None:
+                self.root_albums = QTreeWidgetItem(self.tree, ["Albums"])
+                self.root_albums.setData(0, _NODE_TYPE_ROLE, "section_albums")
+                self.root_albums.setIcon(0, make_wlpg_icon("pictures_library", 16))
+                self.root_albums.setFont(0, sec_font)
+                self.root_albums.setForeground(0, section_color)
+                self.root_albums.setExpanded(True)
 
-            self.root_my_albums = QTreeWidgetItem(self.root_albums, ["My Albums"])
-            self.root_my_albums.setData(0, _NODE_TYPE_ROLE, "section_my_albums")
-            self.root_my_albums.setIcon(0, make_wlpg_icon("folder", 16))
-            self.root_my_albums.setFont(0, sec_font)
-            self.root_my_albums.setForeground(0, section_color)
-            self.root_my_albums.setExpanded(True)
+                self.root_my_albums = QTreeWidgetItem(self.root_albums, ["My Albums"])
+                self.root_my_albums.setData(0, _NODE_TYPE_ROLE, "section_my_albums")
+                self.root_my_albums.setIcon(0, make_wlpg_icon("folder", 16))
+                self.root_my_albums.setFont(0, sec_font)
+                self.root_my_albums.setForeground(0, section_color)
+                self.root_my_albums.setExpanded(True)
 
-            self.root_smart_albums = QTreeWidgetItem(self.root_albums, ["Smart Albums"])
-            self.root_smart_albums.setData(0, _NODE_TYPE_ROLE, "section_smart_albums")
-            self.root_smart_albums.setIcon(0, make_wlpg_icon("star_filled", 16))
-            self.root_smart_albums.setFont(0, sec_font)
-            self.root_smart_albums.setForeground(0, section_color)
-            self.root_smart_albums.setExpanded(True)
+                self.root_smart_albums = QTreeWidgetItem(self.root_albums, ["Smart Albums"])
+                self.root_smart_albums.setData(0, _NODE_TYPE_ROLE, "section_smart_albums")
+                self.root_smart_albums.setIcon(0, make_wlpg_icon("star_filled", 16))
+                self.root_smart_albums.setFont(0, sec_font)
+                self.root_smart_albums.setForeground(0, section_color)
+                self.root_smart_albums.setExpanded(True)
 
-            # 1. All photos and videos (Top-level folder root - matches WLPG screenshot)
-            self.root_all = QTreeWidgetItem(self.tree, ["All photos and videos"])
-            self.root_all.setData(0, _NODE_TYPE_ROLE, "all_media")
-            self.root_all.setIcon(0, make_wlpg_icon("all_media", 16))
-            self.root_all.setFont(0, sec_font)
-            self.root_all.setForeground(0, section_color)
-            self.root_all.setExpanded(True)
-            self.root_folders = self.root_all  # All photos and videos is the top level of folders
+            def _build_all() -> None:
+                self.root_all = QTreeWidgetItem(self.tree, ["All photos and videos"])
+                self.root_all.setData(0, _NODE_TYPE_ROLE, "all_media")
+                self.root_all.setIcon(0, make_wlpg_icon("all_media", 16))
+                self.root_all.setFont(0, sec_font)
+                self.root_all.setForeground(0, section_color)
+                self.root_all.setExpanded(True)
+                self.root_folders = self.root_all
 
-            # 2. Date taken root (matches order in docs/reference_ui/main_ui.png)
-            self.root_dates = QTreeWidgetItem(self.tree, ["Date taken"])
-            self.root_dates.setData(0, _NODE_TYPE_ROLE, "section_dates")
-            self.root_dates.setIcon(0, make_wlpg_icon("calendar", 16))
-            self.root_dates.setFont(0, sec_font)
-            self.root_dates.setForeground(0, section_color)
-            self.root_dates.setExpanded(True)
+            def _build_dates() -> None:
+                self.root_dates = QTreeWidgetItem(self.tree, ["Date taken"])
+                self.root_dates.setData(0, _NODE_TYPE_ROLE, "section_dates")
+                self.root_dates.setIcon(0, make_wlpg_icon("calendar", 16))
+                self.root_dates.setFont(0, sec_font)
+                self.root_dates.setForeground(0, section_color)
+                self.root_dates.setExpanded(True)
 
-            # 3. People root (collapsed by default unless user explicitly clicks arrow)
-            self.root_people = QTreeWidgetItem(self.tree, ["People"])
-            self.root_people.setData(0, _NODE_TYPE_ROLE, "section_people")
-            self.root_people.setIcon(0, make_wlpg_icon("person", 16))
-            self.root_people.setFont(0, sec_font)
-            self.root_people.setForeground(0, section_color)
-            self.root_people.setExpanded(False)
+            def _build_people() -> None:
+                self.root_people = QTreeWidgetItem(self.tree, ["People"])
+                self.root_people.setData(0, _NODE_TYPE_ROLE, "section_people")
+                self.root_people.setIcon(0, make_wlpg_icon("person", 16))
+                self.root_people.setFont(0, sec_font)
+                self.root_people.setForeground(0, section_color)
+                self.root_people.setExpanded(False)
 
-            # 4. Descriptive tags root
-            self.root_tags = QTreeWidgetItem(self.tree, ["Descriptive tags"])
-            self.root_tags.setData(0, _NODE_TYPE_ROLE, "section_tags")
-            self.root_tags.setIcon(0, make_wlpg_icon("tag", 16))
-            self.root_tags.setFont(0, sec_font)
-            self.root_tags.setForeground(0, section_color)
-            self.root_tags.setExpanded(True)
+            def _build_tags() -> None:
+                self.root_tags = QTreeWidgetItem(self.tree, ["Descriptive tags"])
+                self.root_tags.setData(0, _NODE_TYPE_ROLE, "section_tags")
+                self.root_tags.setIcon(0, make_wlpg_icon("tag", 16))
+                self.root_tags.setFont(0, sec_font)
+                self.root_tags.setForeground(0, section_color)
+                self.root_tags.setExpanded(True)
 
-            # 5. Ratings root
-            self.root_ratings = QTreeWidgetItem(self.tree, ["Ratings"])
-            self.root_ratings.setData(0, _NODE_TYPE_ROLE, "section_ratings")
-            self.root_ratings.setIcon(0, make_wlpg_icon("star_filled", 16))
-            self.root_ratings.setFont(0, sec_font)
-            self.root_ratings.setForeground(0, section_color)
-            self.root_ratings.setExpanded(False)
+            def _build_ratings() -> None:
+                self.root_ratings = QTreeWidgetItem(self.tree, ["Ratings"])
+                self.root_ratings.setData(0, _NODE_TYPE_ROLE, "section_ratings")
+                self.root_ratings.setIcon(0, make_wlpg_icon("star_filled", 16))
+                self.root_ratings.setFont(0, sec_font)
+                self.root_ratings.setForeground(0, section_color)
+                self.root_ratings.setExpanded(False)
 
-            # 6. Places root
-            self.root_places = QTreeWidgetItem(self.tree, ["Places"])
-            self.root_places.setData(0, _NODE_TYPE_ROLE, "section_places")
-            self.root_places.setIcon(0, make_wlpg_icon("geotag", 16))
-            self.root_places.setFont(0, sec_font)
-            self.root_places.setForeground(0, section_color)
-            self.root_places.setExpanded(False)
+            def _build_places() -> None:
+                self.root_places = QTreeWidgetItem(self.tree, ["Places"])
+                self.root_places.setData(0, _NODE_TYPE_ROLE, "section_places")
+                self.root_places.setIcon(0, make_wlpg_icon("geotag", 16))
+                self.root_places.setFont(0, sec_font)
+                self.root_places.setForeground(0, section_color)
+                self.root_places.setExpanded(False)
+
+            builders = {
+                "all_media": _build_all,
+                "section_albums": _build_albums,
+                "section_dates": _build_dates,
+                "section_people": _build_people,
+                "section_tags": _build_tags,
+                "section_ratings": _build_ratings,
+                "section_places": _build_places,
+            }
+            for key in self._section_order:
+                if key in builders:
+                    builders[key]()
+            for key, fn in builders.items():
+                if key not in self._section_order:
+                    fn()
 
             # Apply user-configured navigation section visibilities
+            if hasattr(self, "_show_albums"):
+                self.root_albums.setHidden(not self._show_albums)
             if hasattr(self, "_show_dates"):
                 self.root_dates.setHidden(not self._show_dates)
             if hasattr(self, "_show_people"):
@@ -930,13 +961,17 @@ class LeftNavigationDock(QDockWidget):
         show_people: bool = True,
         show_ratings: bool = True,
         show_places: bool = True,
+        show_albums: bool = True,
     ) -> None:
         """Shows or hides top-level navigation sections per Photo Gallery Options dialog."""
+        self._show_albums = bool(show_albums)
         self._show_dates = bool(show_dates)
         self._show_tags = bool(show_tags)
         self._show_people = bool(show_people)
         self._show_ratings = bool(show_ratings)
         self._show_places = bool(show_places)
+        if hasattr(self, "root_albums"):
+            self.root_albums.setHidden(not self._show_albums)
         if hasattr(self, "root_dates"):
             self.root_dates.setHidden(not self._show_dates)
         if hasattr(self, "root_tags"):
@@ -949,9 +984,13 @@ class LeftNavigationDock(QDockWidget):
             self.root_places.setHidden(not self._show_places)
 
     def set_section_visible(self, section_name: str, visible: bool) -> None:
-        """Toggles visibility of an individual section by name ('dates', 'tags', 'people', 'ratings', 'places')."""
+        """Toggles visibility of an individual section by name ('albums', 'dates', 'tags', 'people', 'ratings', 'places')."""
         sec = section_name.lower()
-        if "date" in sec:
+        if "album" in sec:
+            self._show_albums = bool(visible)
+            if hasattr(self, "root_albums"):
+                self.root_albums.setHidden(not self._show_albums)
+        elif "date" in sec:
             self._show_dates = bool(visible)
             if hasattr(self, "root_dates"):
                 self.root_dates.setHidden(not self._show_dates)
@@ -971,6 +1010,74 @@ class LeftNavigationDock(QDockWidget):
             self._show_places = bool(visible)
             if hasattr(self, "root_places"):
                 self.root_places.setHidden(not self._show_places)
+
+    def get_section_order(self) -> list[str]:
+        """Return the current top-level navigation section order."""
+        return list(self._section_order)
+
+    def set_section_order(self, order: Sequence[str]) -> None:
+        """Apply a saved top-level section order and reorder existing tree roots in place."""
+        valid = set(self._default_section_order)
+        cleaned = [s for s in order if s in valid]
+        for s in self._default_section_order:
+            if s not in cleaned:
+                cleaned.append(s)
+        if cleaned == self._section_order:
+            return
+        self._section_order = cleaned
+        self._apply_section_order_to_tree()
+
+    def move_section(self, section_type: str, delta: int) -> None:
+        """Move a top-level section up (-1) or down (+1) in the navigation tree."""
+        if section_type not in self._section_order:
+            return
+        idx = self._section_order.index(section_type)
+        new_idx = idx + delta
+        if not (0 <= new_idx < len(self._section_order)):
+            return
+        self._section_order[idx], self._section_order[new_idx] = (
+            self._section_order[new_idx],
+            self._section_order[idx],
+        )
+        self._apply_section_order_to_tree()
+        self.section_order_changed.emit(list(self._section_order))
+
+    def reset_section_order(self) -> None:
+        """Restore the default navigation section order (Albums directly under All photos and videos)."""
+        self._section_order = list(self._default_section_order)
+        self._apply_section_order_to_tree()
+        self.section_order_changed.emit(list(self._section_order))
+
+    def _apply_section_order_to_tree(self) -> None:
+        """Reorder existing top-level QTreeWidgetItems in place without losing children or expanded state."""
+        root_map = {
+            "all_media": getattr(self, "root_all", None),
+            "section_albums": getattr(self, "root_albums", None),
+            "section_dates": getattr(self, "root_dates", None),
+            "section_people": getattr(self, "root_people", None),
+            "section_tags": getattr(self, "root_tags", None),
+            "section_ratings": getattr(self, "root_ratings", None),
+            "section_places": getattr(self, "root_places", None),
+        }
+        self.tree.blockSignals(True)
+        try:
+            target_pos = 0
+            for key in self._section_order:
+                item = root_map.get(key)
+                if item is None:
+                    continue
+                cur_idx = self.tree.indexOfTopLevelItem(item)
+                if cur_idx < 0:
+                    continue
+                if cur_idx != target_pos:
+                    was_exp = item.isExpanded()
+                    taken = self.tree.takeTopLevelItem(cur_idx)
+                    if taken is not None:
+                        self.tree.insertTopLevelItem(target_pos, taken)
+                        taken.setExpanded(was_exp)
+                target_pos += 1
+        finally:
+            self.tree.blockSignals(False)
 
     # -------------------------------------------------------------------------
     # Populate / Refresh from CatalogRepository
@@ -1640,7 +1747,10 @@ class LeftNavigationDock(QDockWidget):
         if ntype == "all_media":
             self.clear_all_filters()
             return
-        if ntype in ("section_albums", "section_my_albums", "section_smart_albums"):
+        if ntype == "section_albums":
+            self.albums_view_requested.emit()
+            return
+        if ntype in ("section_my_albums", "section_smart_albums"):
             item.setExpanded(not item.isExpanded())
             return
         if ntype == "album" and isinstance(payload, tuple):
@@ -2018,6 +2128,25 @@ class LeftNavigationDock(QDockWidget):
             act_del = QAction("Delete Smart Album", menu)
             act_del.triggered.connect(lambda _c=False, i=sid, n=sname: self.delete_smart_album_requested.emit(i, n))
             menu.addAction(act_del)
+
+        if ntype in self._section_order:
+            if not menu.isEmpty():
+                menu.addSeparator()
+            idx = self._section_order.index(ntype)
+            act_up = QAction("Move Section Up", menu)
+            act_up.setEnabled(idx > 0)
+            act_up.triggered.connect(lambda _c=False, st=ntype: self.move_section(st, -1))
+            menu.addAction(act_up)
+
+            act_down = QAction("Move Section Down", menu)
+            act_down.setEnabled(idx < len(self._section_order) - 1)
+            act_down.triggered.connect(lambda _c=False, st=ntype: self.move_section(st, 1))
+            menu.addAction(act_down)
+
+            if self._section_order != list(self._default_section_order):
+                act_reset = QAction("Reset Default Section Order", menu)
+                act_reset.triggered.connect(self.reset_section_order)
+                menu.addAction(act_reset)
 
         return menu
 

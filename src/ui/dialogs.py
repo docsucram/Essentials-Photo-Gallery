@@ -355,6 +355,7 @@ class AppSettingsDialog(QDialog):
         show_people: bool = True,
         show_ratings: bool = True,
         show_places: bool = True,
+        show_albums: bool = True,
         find_people_enabled: bool = False,
         tooltip_previews: bool = True,
         jpeg_quality: int = 83,
@@ -376,6 +377,7 @@ class AppSettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Photo Gallery Options")
         self.engine = engine
+        self._is_dark: bool = current_theme == "dark"
         self.resize(600, 550)
         self.setMinimumSize(560, 500)
 
@@ -403,38 +405,73 @@ class AppSettingsDialog(QDialog):
         self.tab_widget = QTabWidget(self)
         self.tabs = self.tab_widget  # Compatibility alias
         self.tab_widget.setFont(QFont("Segoe UI", 9))
-        self.tab_widget.setStyleSheet(
-            """
-            QTabWidget::pane {
-                border: 1px solid #9EB6CE;
-                background: #FFFFFF;
-                top: -1px;
-            }
-            QTabBar::tab {
-                background: #F0F4F9;
-                border: 1px solid #9EB6CE;
-                border-top-left-radius: 3px;
-                border-top-right-radius: 3px;
-                padding: 4px 12px;
-                margin-right: 2px;
-                color: #1E395B;
-                font-family: 'Segoe UI';
-                font-size: 9pt;
-            }
-            QTabBar::tab:hover {
-                background: #E5EEF8;
-                border-color: #7DA2CE;
-            }
-            QTabBar::tab:selected {
-                background: #FFFFFF;
-                border: 1px solid #9EB6CE;
-                border-bottom: 1px solid #FFFFFF;
-                margin-bottom: -1px;
-                font-weight: 600;
-                color: #000000;
-            }
-            """
-        )
+        if self._is_dark:
+            self.tab_widget.setStyleSheet(
+                """
+                QTabWidget::pane {
+                    border: 1px solid #3E4756;
+                    background: #1E222A;
+                    top: -1px;
+                }
+                QTabBar::tab {
+                    background: #262B35;
+                    border: 1px solid #3E4756;
+                    border-top-left-radius: 3px;
+                    border-top-right-radius: 3px;
+                    padding: 4px 12px;
+                    margin-right: 2px;
+                    color: #CBD5E1;
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                }
+                QTabBar::tab:hover {
+                    background: #303744;
+                    border-color: #4B5563;
+                    color: #FFFFFF;
+                }
+                QTabBar::tab:selected {
+                    background: #1E222A;
+                    border: 1px solid #3E4756;
+                    border-bottom: 1px solid #1E222A;
+                    margin-bottom: -1px;
+                    font-weight: 600;
+                    color: #FFFFFF;
+                }
+                """
+            )
+        else:
+            self.tab_widget.setStyleSheet(
+                """
+                QTabWidget::pane {
+                    border: 1px solid #9EB6CE;
+                    background: #FFFFFF;
+                    top: -1px;
+                }
+                QTabBar::tab {
+                    background: #F0F4F9;
+                    border: 1px solid #9EB6CE;
+                    border-top-left-radius: 3px;
+                    border-top-right-radius: 3px;
+                    padding: 4px 12px;
+                    margin-right: 2px;
+                    color: #1E395B;
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                }
+                QTabBar::tab:hover {
+                    background: #E5EEF8;
+                    border-color: #7DA2CE;
+                }
+                QTabBar::tab:selected {
+                    background: #FFFFFF;
+                    border: 1px solid #9EB6CE;
+                    border-bottom: 1px solid #FFFFFF;
+                    margin-bottom: -1px;
+                    font-weight: 600;
+                    color: #000000;
+                }
+                """
+            )
 
         # -------------------------------------------------------------
         # Tab 1: General (docs: screenshot 2)
@@ -491,6 +528,10 @@ class AppSettingsDialog(QDialog):
         self.chk_show_places = QCheckBox("Show Places", tab_general)
         self.chk_show_places.setChecked(show_places)
         nav_grid.addWidget(self.chk_show_places, 2, 0)
+
+        self.chk_show_albums = QCheckBox("Show Albums", tab_general)
+        self.chk_show_albums.setChecked(show_albums)
+        nav_grid.addWidget(self.chk_show_albums, 2, 1)
 
         v_gen.addLayout(nav_grid)
 
@@ -887,7 +928,9 @@ class AppSettingsDialog(QDialog):
         v_unsaved.setSpacing(6)
 
         lbl_unsaved_desc = QLabel("When closing or navigating away from a photo with unsaved adjustments:")
-        lbl_unsaved_desc.setStyleSheet("color: #1E395B; font-size: 9pt;")
+        lbl_unsaved_desc.setStyleSheet(
+            f"color: {'#94A3B8' if self._is_dark else '#1E395B'}; font-size: 9pt;"
+        )
         v_unsaved.addWidget(lbl_unsaved_desc)
 
         self.cmb_unsaved_action = QComboBox(self.grp_unsaved)
@@ -1183,6 +1226,9 @@ class AppSettingsDialog(QDialog):
 
     def show_places(self) -> bool:
         return self.chk_show_places.isChecked()
+
+    def show_albums(self) -> bool:
+        return self.chk_show_albums.isChecked()
 
     def tooltip_previews_enabled(self) -> bool:
         return True
@@ -1563,7 +1609,7 @@ class AboutDialog(QDialog):
         lbl_title.setStyleSheet("font-family: 'Segoe UI', sans-serif; font-size: 13pt; font-weight: bold; color: #1E395B;")
         info_vbox.addWidget(lbl_title)
 
-        lbl_ver = QLabel("Version 0.11.0 (64-bit)", self)
+        lbl_ver = QLabel("Version 0.12.0 (64-bit)", self)
         lbl_ver.setStyleSheet("font-family: 'Segoe UI', sans-serif; font-size: 8.5pt; color: #55687D;")
         info_vbox.addWidget(lbl_ver)
 
