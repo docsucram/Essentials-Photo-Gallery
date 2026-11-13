@@ -1,0 +1,69 @@
+name: Build & Release Windows Installer
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach installer to (e.g. v0.12.0)"
+        required: true
+        default: "v0.12.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build PyInstaller bundle
+        run: python build_exe.py
+
+      - name: Ensure Inno Setup 6 is available
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and -not (Test-Path "C:\Program Files (x86)\Inno Setup 6\iscc.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Compile Inno Setup installer
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue)?.Source
+          if (-not $iscc) { $iscc = "C:\Program Files (x86)\Inno Setup 6\iscc.exe" }
+          if (-not (Test-Path $iscc)) { $iscc = "C:\Program Files\Inno Setup 6\iscc.exe" }
+          & $iscc "installer.iss"
+
+      - name: Upload installer to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ github.event.inputs.tag }}" } else { "${{ github.ref_name }}" }
+          $exe = "dist_installer/EssentialsPhotoGallery_Setup_x64.exe"
+          if (-not (Test-Path $exe)) { throw "Installer not found at $exe" }
+          $exists = gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $exe --clobber
+          } else {
+            gh release create $tag $exe --title "Essentials Photo Gallery $($tag.TrimStart('v'))" --generate-notes
+          }
