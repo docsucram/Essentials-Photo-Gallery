@@ -78,13 +78,13 @@ class FaceRecognitionOptionsTab(QWidget):
         self.lbl_hw_provider.setWordWrap(True)
 
         try:
-            fe = FaceEngine()
-            if fe.is_available:
-                m_name = getattr(fe, "model_name", "buffalo_l")
-                p_name = getattr(fe, "active_provider", "CPUExecutionProvider")
+            st = FaceEngine.probe_status()
+            if st.get("available"):
+                m_name = str(st.get("model_name") or "buffalo_l")
+                p_name = str(st.get("active_provider") or "CPUExecutionProvider")
                 self.lbl_status_badge.setText("●  Engine Status: Ready (High Accuracy Model)")
                 self.lbl_status_badge.setStyleSheet("color: #16A34A; font-weight: bold; font-size: 9.5pt;")
-                hw_desc = "GPU Accelerated" if any(k in p_name for k in ("CUDA", "DirectML", "Tensorrt")) else f"Standard CPU ({p_name})"
+                hw_desc = "GPU Accelerated" if any(k in p_name for k in ("CUDA", "DirectML", "Tensorrt", "Dml")) else f"Standard CPU ({p_name})"
                 self.lbl_hw_provider.setText(f"Hardware Processing: {hw_desc}")
                 self.lbl_hw_provider.setStyleSheet("color: #475569; font-size: 8.5pt;")
                 tech_text = (
@@ -93,11 +93,11 @@ class FaceRecognitionOptionsTab(QWidget):
                     f"Active Execution Provider: {p_name}"
                 )
             else:
-                self.lbl_status_badge.setText("●  Engine Status: Unavailable (Models Missing)")
-                self.lbl_status_badge.setStyleSheet("color: #DC2626; font-weight: bold; font-size: 9.5pt;")
-                self.lbl_hw_provider.setText("Background face detection is offline.")
+                self.lbl_status_badge.setText("●  Engine Status: Not Downloaded / Offline")
+                self.lbl_status_badge.setStyleSheet("color: #D97706; font-weight: bold; font-size: 9.5pt;")
+                self.lbl_hw_provider.setText("Models will be initialized on demand when face scanning runs.")
                 self.lbl_hw_provider.setStyleSheet("color: #475569; font-size: 8.5pt;")
-                tech_text = "InsightFace models not found in standard asset directory."
+                tech_text = f"InsightFace models not yet cached in {st.get('models_root', '~/.insightface/models')}."
         except Exception as ex:
             self.lbl_status_badge.setText("●  Engine Status: Error Checking Status")
             self.lbl_status_badge.setStyleSheet("color: #DC2626; font-weight: bold; font-size: 9.5pt;")

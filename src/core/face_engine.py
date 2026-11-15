@@ -295,6 +295,42 @@ class FaceEngine:
 
         self._init_backend()
 
+    @staticmethod
+    def probe_status() -> dict[str, Any]:
+        """
+        Lightweight status probe for UI dialogs without loading ONNX models or
+        initializing DirectML/CPU inference sessions on the GUI thread.
+        """
+        import importlib.util
+
+        insightface_installed = importlib.util.find_spec("insightface") is not None
+        models_root = Path.home() / ".insightface" / "models"
+        detected_model = ""
+        if insightface_installed:
+            for candidate in ("buffalo_l", "buffalo_s"):
+                model_dir = models_root / candidate
+                if model_dir.is_dir() and any(model_dir.glob("*.onnx")):
+                    detected_model = candidate
+                    break
+
+        avail_providers: list[str] = []
+        try:
+            import onnxruntime
+            avail_providers = list(onnxruntime.get_available_providers() or [])
+        except Exception:
+            pass
+
+        preferred = [p for p in ("DmlExecutionProvider", "CPUExecutionProvider") if p in avail_providers]
+        active_provider = preferred[0] if preferred else "CPUExecutionProvider"
+
+        return {
+            "available": bool(insightface_installed and detected_model),
+            "insightface_installed": insightface_installed,
+            "model_name": detected_model,
+            "active_provider": active_provider,
+            "models_root": str(models_root),
+        }
+
     def _init_backend(self) -> None:
         """Initializes primary InsightFace backend or falls back to OpenCV Haar cascade only if allow_fallback=True."""
         if self.backend_name in ("auto", "insightface"):
