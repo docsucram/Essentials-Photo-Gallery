@@ -23,6 +23,7 @@ import numpy as np
 from PIL import Image, ImageOps
 from PySide6.QtCore import (
     QEvent,
+    QMetaObject,
     QObject,
     QPoint,
     QPointF,
@@ -35,6 +36,7 @@ from PySide6.QtCore import (
     QTimer,
     QUrl,
     Signal,
+    Slot,
 )
 from PySide6.QtGui import (
     QBrush,
@@ -57,6 +59,7 @@ from PySide6.QtGui import (
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QCompleter,
     QFrame,
@@ -144,6 +147,7 @@ from src.imaging.image_loader import (
     RAW_EXT_SET,
     build_save_pil_image,
     decode_pil_to_srgb_and_alpha,
+    decode_raw_embedded_preview,
     decode_raw_to_srgb,
     is_animated_image_file,
     transform_alpha_for_recipe,
@@ -1244,8 +1248,10 @@ class PixelArrayUndoCommand(QUndoCommand):
             self.before_patch = before_np.copy()
             self.after_patch = after_np.copy()
             self.bbox = None
+        self._first_redo = True
 
     def undo(self) -> None:
+        self._first_redo = False
         if self.full_frame:
             self.viewer.master_np_rgb = self.before_patch.copy()
         elif self.bbox and self.viewer.master_np_rgb is not None:
@@ -1254,8 +1260,13 @@ class PixelArrayUndoCommand(QUndoCommand):
                 self.viewer.master_np_rgb[y1:y2, x1:x2] = self.before_patch.copy()
         self.viewer._update_display_proxy()
         self.viewer._render_current_recipe()
+        if self.full_frame:
+            self.viewer.set_zoom_mode("fit")
 
     def redo(self) -> None:
+        if self._first_redo:
+            self._first_redo = False
+            return
         if self.full_frame:
             self.viewer.master_np_rgb = self.after_patch.copy()
         elif self.bbox and self.viewer.master_np_rgb is not None:
@@ -1264,6 +1275,8 @@ class PixelArrayUndoCommand(QUndoCommand):
                 self.viewer.master_np_rgb[y1:y2, x1:x2] = self.after_patch.copy()
         self.viewer._update_display_proxy()
         self.viewer._render_current_recipe()
+        if self.full_frame:
+            self.viewer.set_zoom_mode("fit")
 
 
 class _AlphaCutoutUndoCommand(QUndoCommand):
@@ -1285,18 +1298,107 @@ class _AlphaCutoutUndoCommand(QUndoCommand):
         self.before_alpha = before_alpha.copy() if before_alpha is not None else None
         self.after_rgb = after_rgb.copy()
         self.after_alpha = after_alpha.copy() if after_alpha is not None else None
+        self._first_redo = True
 
     def undo(self) -> None:
+        self._first_redo = False
         self.viewer.master_np_rgb = self.before_rgb.copy()
         self.viewer.master_alpha = self.before_alpha.copy() if self.before_alpha is not None else None
         self.viewer._update_display_proxy()
         self.viewer._render_current_recipe()
 
     def redo(self) -> None:
+        if self._first_redo:
+            self._first_redo = False
+            return
         self.viewer.master_np_rgb = self.after_rgb.copy()
         self.viewer.master_alpha = self.after_alpha.copy() if self.after_alpha is not None else None
         self.viewer._update_display_proxy()
         self.viewer._render_current_recipe()
+
+
+class RevertToOriginalUndoCommand(QUndoCommand):
+    """Undoable/Redoable command for Reverting a photo to its original state."""
+
+    def __init__(
+        self,
+        viewer: SingleMediaViewer,
+        before_rgb: np.ndarray | None,
+        before_alpha: np.ndarray | None,
+        before_recipe: PhotoAdjustmentRecipe,
+        before_orientation: int,
+        before_crop_committed: bool,
+        backup_path: Path | None = None,
+        edited_file_bytes: bytes | None = None,
+        original_file_bytes: bytes | None = None,
+        description: str = "Revert to Original",
+        parent=None,
+    ) -> None:
+        super().__init__(description, parent)
+        self.viewer = viewer
+        self.before_rgb = before_rgb.copy() if before_rgb is not None else None
+        self.before_alpha = before_alpha.copy() if before_alpha is not None else None
+        self.before_recipe = before_recipe.copy()
+        self.before_orientation = int(before_orientation or 1)
+        self.before_crop_committed = bool(before_crop_committed)
+        self.backup_path = backup_path
+        self.edited_file_bytes = edited_file_bytes
+        self.original_file_bytes = original_file_bytes
+
+    def undo(self) -> None:
+        v = self.viewer
+        if (
+            self.edited_file_bytes is not None
+            and self.original_file_bytes is not None
+            and self.backup_path is not None
+            and v.current_file_path is not None
+        ):
+            try:
+                self.backup_path.parent.mkdir(parents=True, exist_ok=True)
+                self.backup_path.write_bytes(self.original_file_bytes)
+                v.current_file_path.write_bytes(self.edited_file_bytes)
+            except OSError:
+                pass
+            if hasattr(v, "catalog_repo") and v.catalog_repo and v.current_media_id is not None:
+                try:
+                    st = v.current_file_path.stat()
+                    dims = (
+                        (int(self.before_rgb.shape[1]), int(self.before_rgb.shape[0]))
+                        if self.before_rgb is not None
+                        else (None, None)
+                    )
+                    v.catalog_repo.update_media_metadata(
+                        int(v.current_media_id),
+                        orientation=self.before_orientation,
+                        width=dims[0],
+                        height=dims[1],
+                        mtime=int(st.st_mtime),
+                        size=int(st.st_size),
+                    )
+                except Exception:
+                    pass
+            if v.current_media_id is not None:
+                v.pixel_edit_saved.emit(int(v.current_media_id), str(self.backup_path))
+
+        if self.before_rgb is not None:
+            v.master_np_rgb = self.before_rgb.copy()
+            v.master_alpha = self.before_alpha.copy() if self.before_alpha is not None else None
+            v.master_pil_image = Image.fromarray(v.master_np_rgb)
+        v.current_orientation = self.before_orientation
+        v._crop_committed = self.before_crop_committed
+        v.current_recipe = self.before_recipe.copy()
+        v._original_pixmap = None
+        v._update_display_proxy()
+        v._render_current_recipe()
+        v.set_zoom_mode("fit")
+        v.recipe_changed.emit(v.current_recipe)
+        v.update_revert_state()
+
+    def redo(self) -> None:
+        self.viewer._execute_revert_to_original(
+            backup_path=self.backup_path,
+            original_file_bytes=self.original_file_bytes,
+        )
 
 
 
@@ -1403,8 +1505,11 @@ class SingleMediaViewer(QWidget):
         self._red_eye_item: QGraphicsRectItem | None = None
 
         self.undo_stack = QUndoStack(self)
+        self.undo_stack.setUndoLimit(30)
+        self._preserve_undo_on_load: bool = False
         self.undo_stack.canUndoChanged.connect(lambda _: self.update_revert_state())
         self.undo_stack.cleanChanged.connect(lambda _: self.update_revert_state())
+        self.undo_stack.indexChanged.connect(lambda _: self.update_revert_state())
         self._face_overlay_items: list[QGraphicsItem] = []
         self._current_people_regions: list[dict] = []
         self._face_target_item: _FaceTagTargetBoxItem | None = None
@@ -1670,6 +1775,14 @@ class SingleMediaViewer(QWidget):
         self.slider_straighten.setValue(0)
         fix_vbox.addWidget(self.slider_straighten)
 
+        self.chk_straighten_ai_fill = QCheckBox("Fill rotated corners (AI)", self.fix_pane)
+        self.chk_straighten_ai_fill.setChecked(False)
+        self.chk_straighten_ai_fill.setToolTip(
+            "Optional: Keep the full frame and fill rotated corner wedges with AI "
+            "(or built-in texture fill if the AI model is not installed) instead of cropping inward."
+        )
+        fix_vbox.addWidget(self.chk_straighten_ai_fill)
+
         self.btn_apply_straighten = QPushButton("Apply straighten", self.fix_pane)
         self.btn_apply_straighten.clicked.connect(
             lambda: self.apply_straighten(float(self.slider_straighten.value()))
@@ -1688,11 +1801,15 @@ class SingleMediaViewer(QWidget):
         # Undo / Redo Row
         undo_row = QHBoxLayout()
         self.btn_undo = QPushButton("↶ Undo", self.fix_pane)
+        self.btn_undo.setEnabled(False)
         self.btn_undo.clicked.connect(self.undo_stack.undo)
+        self.undo_stack.canUndoChanged.connect(self.btn_undo.setEnabled)
         undo_row.addWidget(self.btn_undo)
 
         self.btn_redo = QPushButton("↷ Redo", self.fix_pane)
+        self.btn_redo.setEnabled(False)
         self.btn_redo.clicked.connect(self.undo_stack.redo)
+        self.undo_stack.canRedoChanged.connect(self.btn_redo.setEnabled)
         undo_row.addWidget(self.btn_redo)
         fix_vbox.addLayout(undo_row)
 
@@ -1917,10 +2034,58 @@ class SingleMediaViewer(QWidget):
         """)
         btn_crop_cancel.clicked.connect(lambda: self.set_crop_mode(False))
 
+        self.btn_crop_ai_expand = QPushButton("AI Expand", self.crop_toolbar)
+        self.btn_crop_ai_expand.setCheckable(True)
+        self.btn_crop_ai_expand.setChecked(False)
+        self.btn_crop_ai_expand.setToolTip(
+            "Optional: Drag crop handles slightly outside the photo (up to 25%) and fill new margins with AI "
+            "(or built-in texture fill if the AI model is not installed)."
+        )
+        self.btn_crop_ai_expand.setStyleSheet("""
+            QPushButton {
+                background: #F8F9FA;
+                border: 1px solid #CBD5E1;
+                border-radius: 3px;
+                padding: 3px 7px;
+                font-size: 11px;
+                color: #1E293B;
+            }
+            QPushButton:checked {
+                background: #DBEAFE;
+                border: 1px solid #3B82F6;
+                color: #1E3A8A;
+                font-weight: bold;
+            }
+        """)
+        self.btn_crop_ai_expand.toggled.connect(self._on_crop_ai_expand_toggled)
+
+        self.btn_crop_clear_ratio = QPushButton("Clear", self.crop_toolbar)
+        self.btn_crop_clear_ratio.setFixedHeight(24)
+        self.btn_crop_clear_ratio.setToolTip("Clear aspect ratio lock (Freeform crop)")
+        self.btn_crop_clear_ratio.setStyleSheet("""
+            QPushButton {
+                border: 1px solid #CBD5E1;
+                border-radius: 4px;
+                background: #F8FAFC;
+                color: #334155;
+                font-size: 11px;
+                padding: 2px 7px;
+            }
+            QPushButton:hover {
+                background: #E2E8F0;
+                border-color: #94A3B8;
+            }
+        """)
+        self.btn_crop_clear_ratio.clicked.connect(
+            lambda: self.combo_crop_ratio.setCurrentText("Custom")
+        )
+
         ct_layout.addWidget(self.combo_crop_ratio)
+        ct_layout.addWidget(self.btn_crop_clear_ratio)
         ct_layout.addWidget(self.txt_crop_w)
         ct_layout.addWidget(self.btn_crop_swap)
         ct_layout.addWidget(self.txt_crop_h)
+        ct_layout.addWidget(self.btn_crop_ai_expand)
         ct_layout.addWidget(sep)
         ct_layout.addWidget(btn_crop_apply)
         ct_layout.addWidget(btn_crop_cancel)
@@ -1931,6 +2096,7 @@ class SingleMediaViewer(QWidget):
         self.retouch_toolbar = _DraggableFloatingToolbar(self.graphics_view)
         self.retouch_toolbar.setStyleSheet(tb_style)
         rt_layout = QHBoxLayout(self.retouch_toolbar)
+        rt_layout.setSizeConstraint(rt_layout.SizeConstraint.SetFixedSize)
         rt_layout.setContentsMargins(6, 4, 8, 4)
         rt_layout.setSpacing(6)
 
@@ -1991,6 +2157,14 @@ class SingleMediaViewer(QWidget):
         self.slider_retouch_size.setFixedWidth(85)
         self.slider_retouch_size.valueChanged.connect(self._on_retouch_size_changed)
 
+        self.btn_lama_model = QPushButton("Enable AI (208 MB)", self.retouch_toolbar)
+        self.btn_lama_model.setToolTip(
+            "Download optional LaMa neural inpainting model (~208 MB) to AppData, or uninstall it"
+        )
+        self.btn_lama_model.clicked.connect(self._on_lama_model_clicked)
+        self.btn_lama_model.setVisible(False)
+        self._lama_dl_thread = None
+
         btn_retouch_done = QPushButton("Done (Esc)", self.retouch_toolbar)
         btn_retouch_done.setIcon(make_symbol_icon("check", 14))
         btn_retouch_done.setIconSize(QSize(14, 14))
@@ -2001,6 +2175,7 @@ class SingleMediaViewer(QWidget):
         rt_layout.addWidget(self.btn_spot_red_eye)
         rt_layout.addWidget(lbl_brush)
         rt_layout.addWidget(self.slider_retouch_size)
+        rt_layout.addWidget(self.btn_lama_model)
         rt_layout.addWidget(btn_retouch_done)
         self.retouch_toolbar.hide()
 
@@ -2397,7 +2572,8 @@ class SingleMediaViewer(QWidget):
         self.current_orientation = int(orientation or 1)
         self._stop_animated_image()
         self._update_alpha_backdrop(0, 0, False)
-        self.undo_stack.clear()
+        if not getattr(self, "_preserve_undo_on_load", False):
+            self.undo_stack.clear()
         self.stop_face_tagging_mode()
         self.set_crop_mode(False)
         self.set_retouch_mode(False)
@@ -2431,12 +2607,15 @@ class SingleMediaViewer(QWidget):
         loaded = False
         is_anim = False
         delta_angle = 0
+        self._raw_needs_full_demosaic = False
+        self._raw_upgrade_in_progress = False
         if ext in RAW_EXT_SET:
-            rgb_raw = decode_raw_to_srgb(self.current_file_path)
+            rgb_raw, is_preview = decode_raw_embedded_preview(self.current_file_path)
             if rgb_raw is not None:
                 self.master_np_rgb = rgb_raw
                 self.master_alpha = None
                 self.master_pil_image = Image.fromarray(self.master_np_rgb)
+                self._raw_needs_full_demosaic = bool(is_preview)
                 loaded = True
 
         if not loaded:
@@ -2483,7 +2662,8 @@ class SingleMediaViewer(QWidget):
         self._original_pixmap = None
         self._adjusted_pixmap = None
         self.current_recipe = PhotoAdjustmentRecipe()
-        self.undo_stack.clear()
+        if not getattr(self, "_preserve_undo_on_load", False):
+            self.undo_stack.clear()
         self._render_current_recipe()
         if is_anim and delta_angle == 0:
             self._start_animated_image(self.current_file_path)
@@ -2653,6 +2833,11 @@ class SingleMediaViewer(QWidget):
         if hasattr(self, "_inline_name_popup") and hasattr(self._inline_name_popup, "set_dark_mode"):
             self._inline_name_popup.set_dark_mode(is_dark)
 
+        if hasattr(self, "markup_toolbar") and hasattr(self.markup_toolbar, "set_dark_mode"):
+            self.markup_toolbar.set_dark_mode(is_dark)
+
+        self._apply_floating_toolbar_theme(is_dark)
+
         if hasattr(self, "video_transport"):
             if is_dark:
                 self.video_transport.setStyleSheet(
@@ -2700,6 +2885,138 @@ class SingleMediaViewer(QWidget):
                     }
                     """
                 )
+
+    def _apply_floating_toolbar_theme(self, is_dark: bool) -> None:
+        if is_dark:
+            tb_style = """
+                QFrame {
+                    background: #1E242C;
+                    border: 1px solid #3B4252;
+                    border-radius: 6px;
+                }
+                QLabel {
+                    color: #E2E8F0;
+                    background: transparent;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                QCheckBox {
+                    color: #E2E8F0;
+                    background: transparent;
+                    font-size: 11px;
+                }
+                QComboBox, QLineEdit {
+                    background: #14171C;
+                    border: 1px solid #3B4252;
+                    border-radius: 3px;
+                    padding: 2px 6px;
+                    color: #E2E8F0;
+                    font-size: 11px;
+                }
+                QPushButton {
+                    background: #262B34;
+                    border: 1px solid #3B4252;
+                    border-radius: 3px;
+                    color: #E2E8F0;
+                    padding: 3px 10px;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                QPushButton:hover {
+                    background: #2E3440;
+                    border: 1px solid #60A5FA;
+                }
+                QPushButton:checked {
+                    background: #1E3A5F;
+                    border: 1px solid #3B82F6;
+                    color: #FFFFFF;
+                }
+            """
+            spot_btn_style = """
+                QPushButton {
+                    background: #262B34;
+                    border: 1px solid #3B4252;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                    font-weight: bold;
+                    color: #E2E8F0;
+                }
+                QPushButton:hover {
+                    background: #2E3440;
+                    border-color: #60A5FA;
+                }
+                QPushButton:checked {
+                    background: #1E3A5F;
+                    border: 1px solid #3B82F6;
+                    color: #FFFFFF;
+                }
+            """
+        else:
+            tb_style = """
+                QFrame {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FBFDFF, stop:1 #E8F1FA);
+                    border: 1px solid #7DA2CE;
+                    border-radius: 6px;
+                }
+                QLabel {
+                    color: #1E395B;
+                    background: transparent;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                QCheckBox {
+                    color: #1E395B;
+                    background: transparent;
+                    font-size: 11px;
+                }
+                QComboBox, QLineEdit {
+                    background: #FFFFFF;
+                    border: 1px solid #7DA2CE;
+                    border-radius: 3px;
+                    padding: 2px 6px;
+                    color: #1E395B;
+                    font-size: 11px;
+                }
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FBFDFF, stop:1 #E0ECF8);
+                    border: 1px solid #7DA2CE;
+                    border-radius: 3px;
+                    color: #1E395B;
+                    padding: 3px 10px;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #EAF4FD, stop:1 #C6E0F8);
+                    border: 1px solid #3C7FB1;
+                }
+            """
+            spot_btn_style = """
+                QPushButton {
+                    background: #F0F4F9;
+                    border: 1px solid #70A6E8;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                    font-weight: bold;
+                    color: #1E395B;
+                }
+                QPushButton:checked {
+                    background: #CBE2F8;
+                    border: 1px solid #3388E8;
+                    color: #0E294B;
+                }
+            """
+
+        if hasattr(self, "crop_toolbar"):
+            self.crop_toolbar.setStyleSheet(tb_style)
+        if hasattr(self, "retouch_toolbar"):
+            self.retouch_toolbar.setStyleSheet(tb_style)
+        for b_name in ("btn_spot_retouch", "btn_spot_erase", "btn_spot_redeye"):
+            btn = getattr(self, b_name, None)
+            if btn is not None:
+                btn.setStyleSheet(spot_btn_style)
 
     # -------------------------------------------------------------------------
     # Zoom & Crop Modes
@@ -2803,6 +3120,9 @@ class SingleMediaViewer(QWidget):
                 self._show_status("Crop Tool: Drag handles or crop rectangle to adjust • Enter to commit, Esc to cancel", 5000)
         else:
             self.crop_toolbar.hide()
+            if hasattr(self, "btn_crop_ai_expand"):
+                self.btn_crop_ai_expand.setChecked(False)
+            self.scene.set_allow_ai_expand(False)
             self.scene.clear_crop_rect()
             if self.pixmap_item:
                 self.pixmap_item.setRotation(0.0)
@@ -2987,6 +3307,23 @@ class SingleMediaViewer(QWidget):
                 return
         self.combo_crop_ratio.setCurrentText("Custom")
 
+    def _on_crop_ai_expand_toggled(self, checked: bool) -> None:
+        if checked:
+            from src.ui.dialogs import prompt_and_download_lama_addon
+            if not prompt_and_download_lama_addon(self, "Crop AI Expand"):
+                if hasattr(self, "btn_crop_ai_expand"):
+                    self.btn_crop_ai_expand.blockSignals(True)
+                    self.btn_crop_ai_expand.setChecked(False)
+                    self.btn_crop_ai_expand.blockSignals(False)
+                self.scene.set_allow_ai_expand(False)
+                return
+        self.scene.set_allow_ai_expand(bool(checked))
+        if checked:
+            self._show_status(
+                "AI Expand enabled: drag crop handles outside the photo (up to 25%) to extend the canvas.",
+                4500,
+            )
+
     def apply_crop(self) -> bool:
         """Applies the active CropScene rectangle and rotation angle non-destructively to the recipe."""
         if self.master_np_rgb is None:
@@ -3001,15 +3338,60 @@ class SingleMediaViewer(QWidget):
             self.pixmap_item.setRotation(0.0)
 
         master_h, master_w = self.master_np_rgb.shape[:2]
-        ml = int(round(rect.left()))
-        mt = int(round(rect.top()))
-        mr = int(round(rect.right()))
-        mb = int(round(rect.bottom()))
+        raw_l = int(round(rect.left()))
+        raw_t = int(round(rect.top()))
+        raw_r = int(round(rect.right()))
+        raw_b = int(round(rect.bottom()))
 
-        ml = max(0, min(master_w - 1, ml))
-        mt = max(0, min(master_h - 1, mt))
-        mr = max(ml + 1, min(master_w, mr))
-        mb = max(mt + 1, min(master_h, mb))
+        ai_expand_on = bool(
+            hasattr(self, "btn_crop_ai_expand") and self.btn_crop_ai_expand.isChecked()
+        )
+        extends_outside = raw_l < 0 or raw_t < 0 or raw_r > master_w or raw_b > master_h
+
+        if ai_expand_on and (extends_outside or abs(rot_deg) >= 0.05):
+            max_px_x = max(16, master_w // 4)
+            max_px_y = max(16, master_h // 4)
+            el = max(-max_px_x, min(master_w - 1, raw_l))
+            et = max(-max_px_y, min(master_h - 1, raw_t))
+            er = max(el + 4, min(master_w + max_px_x, raw_r))
+            eb = max(et + 4, min(master_h + max_px_y, raw_b))
+
+            from PySide6.QtWidgets import QApplication
+            from src.imaging.opencv_engine import expand_canvas_with_ai_fill, straighten_with_ai_fill
+
+            before_px = self.master_np_rgb.copy()
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                work_rgb = self.master_np_rgb
+                if abs(rot_deg) >= 0.05:
+                    work_rgb = straighten_with_ai_fill(work_rgb, rot_deg)
+                if extends_outside:
+                    self.master_np_rgb = expand_canvas_with_ai_fill(work_rgb, el, et, er, eb)
+                elif not (el <= 3 and et <= 3 and er >= master_w - 3 and eb >= master_h - 3):
+                    self.master_np_rgb = work_rgb[max(0, et):min(master_h, eb), max(0, el):min(master_w, er)].copy()
+                else:
+                    self.master_np_rgb = work_rgb
+            finally:
+                QApplication.restoreOverrideCursor()
+
+            self.current_recipe.crop_rect = None
+            self._crop_committed = True
+            self._original_pixmap = None
+            cmd = PixelArrayUndoCommand(self, before_px, self.master_np_rgb.copy(), "AI Expand Canvas")
+            self.undo_stack.push(cmd)
+            self.set_crop_mode(False)
+            self._update_display_proxy()
+            self._render_current_recipe()
+            self.set_zoom_mode("fit")
+            if self.current_media_id is not None:
+                self.pixel_edit_saved.emit(self.current_media_id, "")
+            self._show_status("AI Expand applied", 3000)
+            return True
+
+        ml = max(0, min(master_w - 1, raw_l))
+        mt = max(0, min(master_h - 1, raw_t))
+        mr = max(ml + 1, min(master_w, raw_r))
+        mb = max(mt + 1, min(master_h, raw_b))
 
         # Check if crop covers virtually the entire image (within 3px margin): Uncrop!
         if ml <= 3 and mt <= 3 and mr >= master_w - 3 and mb >= master_h - 3:
@@ -3022,6 +3404,29 @@ class SingleMediaViewer(QWidget):
 
         if abs(rot_deg) >= 0.05:
             self.current_recipe.straighten_deg = float(self.current_recipe.straighten_deg + rot_deg)
+            # Without AI Expand, clamp any explicit crop box inside the rotated inscribed rect
+            # so mirrored/blank corner wedges never leak into the cropped result.
+            if new_crop is not None and not getattr(self.current_recipe, "straighten_ai_fill", False):
+                import math
+                rad = math.radians(abs(self.current_recipe.straighten_deg))
+                sin_a = math.sin(rad)
+                cos_a = math.cos(rad)
+                fw, fh = float(master_w), float(master_h)
+                factor = 1.0 / (cos_a + (fw / fh) * sin_a if fw > fh else cos_a + (fh / fw) * sin_a)
+                in_w = max(10, int(fw * factor * 0.985))
+                in_h = max(10, int(fh * factor * 0.985))
+                ix1 = max(0, (master_w - in_w) // 2)
+                iy1 = max(0, (master_h - in_h) // 2)
+                ix2 = min(master_w, ix1 + in_w)
+                iy2 = min(master_h, iy1 + in_h)
+                cl = max(ix1, new_crop[0])
+                ct = max(iy1, new_crop[1])
+                cr = min(ix2, new_crop[2])
+                cb = min(iy2, new_crop[3])
+                if cr > cl + 4 and cb > ct + 4:
+                    new_crop = (cl, ct, cr, cb)
+                else:
+                    new_crop = None
 
         self.current_recipe.crop_rect = new_crop
         self._crop_committed = True
@@ -3075,6 +3480,10 @@ class SingleMediaViewer(QWidget):
             self.is_red_eye_mode = False
             self._show_status("Spot Fix (Blemish): Click or brush blemishes to heal with authentic texture transfer • [ / ] to resize", 5000)
         elif mode == "erase":
+            from src.ui.dialogs import prompt_and_download_lama_addon
+            if not prompt_and_download_lama_addon(self, "Object Eraser"):
+                self._set_spot_fix_sub_mode("retouch")
+                return
             self.is_retouch_mode = True
             self.is_red_eye_mode = False
             self._show_status("Spot Fix (Object Eraser): Paint over unwanted objects or people to erase with AI inpainting • [ / ] to resize", 5000)
@@ -3083,7 +3492,160 @@ class SingleMediaViewer(QWidget):
             self.is_red_eye_mode = True
             self._show_status("Spot Fix (Red Eye): Click pupil or drag over eyes to neutralize flash glare • [ / ] to resize", 5000)
 
+        if hasattr(self, "btn_lama_model"):
+            self.btn_lama_model.setVisible(mode == "erase")
+            if mode == "erase":
+                from src.imaging.creative_effects import get_lama_model_status, is_lama_enabled
+
+                status = get_lama_model_status()
+                if not status["installed"] or not is_lama_enabled():
+                    self._refresh_lama_model_button()
+                elif getattr(self, "_lama_warmup_in_progress", False):
+                    self.btn_lama_model.setText("AI Loading...")
+                    self.btn_lama_model.setEnabled(False)
+                elif getattr(self, "_lama_warmup_done", False):
+                    self._refresh_lama_model_button()
+                else:
+                    self.btn_lama_model.setText("AI Loading...")
+                    self.btn_lama_model.setEnabled(False)
+                    self._warmup_lama_async()
+            if hasattr(self, "retouch_toolbar"):
+                self.retouch_toolbar.adjustSize()
+                self._position_floating_toolbars()
+
         self._update_retouch_cursor()
+
+    def _warmup_lama_async(self) -> None:
+        """Pre-load LaMa ONNX session on a daemon thread so Object Eraser never stalls the UI."""
+        if getattr(self, "_lama_warmup_started", False):
+            return
+        self._lama_warmup_started = True
+        self._lama_warmup_in_progress = True
+        import threading
+
+        def _worker() -> None:
+            try:
+                from src.imaging.creative_effects import get_lama_inpaint_engine, get_lama_model_status, is_lama_enabled
+
+                if get_lama_model_status().get("installed") and is_lama_enabled():
+                    get_lama_inpaint_engine()
+            except Exception:
+                pass
+            finally:
+                self._lama_warmup_in_progress = False
+                self._lama_warmup_done = True
+                # Marshal back onto the GUI thread (QTimer.singleShot from a raw Python thread has no Qt event loop)
+                QMetaObject.invokeMethod(self, "_on_lama_warmup_finished", Qt.QueuedConnection)
+
+        threading.Thread(target=_worker, daemon=True, name="LaMaWarmup").start()
+
+    @Slot()
+    def _on_lama_warmup_finished(self) -> None:
+        if hasattr(self, "btn_lama_model") and getattr(self, "spot_fix_sub_mode", "retouch") == "erase":
+            self._refresh_lama_model_button()
+            if hasattr(self, "retouch_toolbar"):
+                self.retouch_toolbar.adjustSize()
+                self._position_floating_toolbars()
+
+    def _refresh_lama_model_button(self) -> None:
+        if not hasattr(self, "btn_lama_model"):
+            return
+        if self._lama_dl_thread is not None and self._lama_dl_thread.isRunning():
+            return
+        from src.imaging.creative_effects import get_lama_model_status, is_lama_enabled
+
+        status = get_lama_model_status()
+        if status["installed"]:
+            if is_lama_enabled():
+                self.btn_lama_model.setText("AI Model ✓")
+                self.btn_lama_model.setToolTip(
+                    "Neural LaMa AI model is active. Click to disable and use basic inpainting (uninstall in Options → Add-ons)."
+                )
+            else:
+                self.btn_lama_model.setText("AI Model (Off)")
+                self.btn_lama_model.setToolTip(
+                    "Neural LaMa AI model is disabled (using basic inpainting). Click to re-enable."
+                )
+            self.btn_lama_model.setEnabled(True)
+        else:
+            self.btn_lama_model.setText(f"Enable AI ({status['size_mb']} MB)")
+            self.btn_lama_model.setToolTip(
+                f"Download optional LaMa neural model (~{status['size_mb']} MB) to AppData for higher-quality object removal"
+            )
+            self.btn_lama_model.setEnabled(True)
+
+    def _on_lama_model_clicked(self) -> None:
+        from PySide6.QtCore import QThread, Signal
+        from src.imaging.creative_effects import (
+            download_lama_model,
+            get_lama_model_status,
+            is_lama_enabled,
+            set_lama_enabled,
+        )
+
+        if self._lama_dl_thread is not None and self._lama_dl_thread.isRunning():
+            return
+
+        status = get_lama_model_status()
+        if status["installed"]:
+            new_state = not is_lama_enabled()
+            set_lama_enabled(new_state)
+            self._refresh_lama_model_button()
+            if hasattr(self, "retouch_toolbar"):
+                self.retouch_toolbar.adjustSize()
+                self._position_floating_toolbars()
+            if new_state:
+                self._show_status("AI Object Eraser (LaMa) enabled.", 4000)
+            else:
+                self._show_status("AI Object Eraser (LaMa) disabled. Using basic inpainting.", 4000)
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Enable AI Object Eraser",
+            f"Download the optional LaMa neural inpainting model (~{status['size_mb']} MB) "
+            "to your local AppData folder?\n\n"
+            "This also upgrades 3D Cinematic Motion background fill and Panorama corner gap filling. "
+            "You can uninstall it anytime from this button.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        class _LamaDownloadThread(QThread):
+            progress = Signal(int, int)
+            finished_ok = Signal(bool)
+
+            def run(self) -> None:
+                res = download_lama_model(
+                    progress_cb=lambda done, total: self.progress.emit(done, total)
+                )
+                self.finished_ok.emit(res is not None)
+
+        self.btn_lama_model.setEnabled(False)
+        self.btn_lama_model.setText("Downloading 0%...")
+        worker = _LamaDownloadThread(self)
+
+        def _on_prog(done: int, total: int) -> None:
+            if total > 0:
+                pct = int(min(99, (done * 100) // total))
+                self.btn_lama_model.setText(f"Downloading {pct}%...")
+            else:
+                self.btn_lama_model.setText(f"Downloading {done // (1024 * 1024)} MB...")
+
+        def _on_done(ok: bool) -> None:
+            self._lama_dl_thread = None
+            self._refresh_lama_model_button()
+            if ok:
+                self._show_status("AI Object Eraser (LaMa) downloaded and enabled.", 5000)
+            else:
+                self._show_status("AI model download failed or cancelled. Using built-in synthesizer.", 5000)
+
+        worker.progress.connect(_on_prog)
+        worker.finished_ok.connect(_on_done)
+        self._lama_dl_thread = worker
+        worker.start()
 
     def set_retouch_mode(self, enabled: bool) -> None:
         self.is_retouch_mode = bool(enabled)
@@ -3100,6 +3662,7 @@ class SingleMediaViewer(QWidget):
             self.retouch_toolbar.show()
             self._position_floating_toolbars()
             self.retouch_toolbar.raise_()
+            QTimer.singleShot(150, self._warmup_lama_async)
         else:
             if not getattr(self, "is_red_eye_mode", False):
                 self.retouch_toolbar.hide()
@@ -3152,6 +3715,13 @@ class SingleMediaViewer(QWidget):
         p.drawEllipse(center - 1.5, center - 1.5, 3.0, 3.0)
         p.end()
 
+        pos_vp = self.graphics_view.viewport().mapFromGlobal(QCursor.pos())
+        if self.graphics_view.viewport().rect().contains(pos_vp):
+            sp = self.graphics_view.mapToScene(pos_vp)
+            if not self._is_scene_pos_on_canvas(sp):
+                self.graphics_view.viewport().setCursor(Qt.ArrowCursor)
+                return
+
         self.graphics_view.viewport().setCursor(QCursor(pm, int(center), int(center)))
 
     def _on_retouch_size_changed(self, val: int) -> None:
@@ -3173,8 +3743,19 @@ class SingleMediaViewer(QWidget):
         self._retouch_mask = None
         self._retouch_active = False
 
-    def _start_retouch(self, scene_pos: QPointF) -> None:
+    def _is_scene_pos_on_canvas(self, scene_pos: QPointF) -> bool:
+        """Returns True only when scene_pos falls within the displayed photo canvas."""
         if self.master_np_rgb is None:
+            return False
+        if self.pixmap_item is not None:
+            rect = self.pixmap_item.sceneBoundingRect()
+            if not rect.isEmpty():
+                return rect.contains(scene_pos)
+        mh, mw = self.master_np_rgb.shape[:2]
+        return 0.0 <= scene_pos.x() < float(mw) and 0.0 <= scene_pos.y() < float(mh)
+
+    def _start_retouch(self, scene_pos: QPointF) -> None:
+        if not self._is_scene_pos_on_canvas(scene_pos):
             return
         mx, my = self._scene_to_master(scene_pos.x(), scene_pos.y())
         self._retouch_mask = np.zeros(self.master_np_rgb.shape[:2], dtype=np.uint8)
@@ -3197,6 +3778,9 @@ class SingleMediaViewer(QWidget):
 
     def _drag_retouch(self, scene_pos: QPointF) -> None:
         if not self._retouch_active or self._retouch_mask is None or self.master_np_rgb is None:
+            return
+        if not self._is_scene_pos_on_canvas(scene_pos):
+            self._retouch_last_master_pt = None
             return
         mx, my = self._scene_to_master(scene_pos.x(), scene_pos.y())
         r_scene, r_master = self._get_effective_brush_radius()
@@ -3232,13 +3816,17 @@ class SingleMediaViewer(QWidget):
 
         # If in Object Eraser mode, use LaMa ONNX / Multi-Scale Structure-Texture Inpainting
         if getattr(self, "spot_fix_sub_mode", "retouch") == "erase":
+            from PySide6.QtWidgets import QApplication
             from src.imaging.creative_effects import inpaint_object_lama
-            self.master_np_rgb = inpaint_object_lama(self.master_np_rgb, mask_dilated)
-            self._update_display_proxy()
+
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                self.master_np_rgb = inpaint_object_lama(self.master_np_rgb, mask_dilated)
+            finally:
+                QApplication.restoreOverrideCursor()
             self._clear_retouch_overlay()
             cmd = PixelArrayUndoCommand(self, before, self.master_np_rgb.copy(), "Erase Object")
-            self.undo_stack.push(cmd)
-            self._render_current_recipe()
+            self.undo_stack.push(cmd)  # calls redo() -> _update_display_proxy() + _render_current_recipe()
             if self.current_media_id is not None:
                 self.pixel_edit_saved.emit(self.current_media_id, "")
             return
@@ -3250,8 +3838,6 @@ class SingleMediaViewer(QWidget):
         pts_y, pts_x = np.where(mask_dilated > 0)
         bw = int(np.max(pts_x) - np.min(pts_x)) + 1
         bh = int(np.max(pts_y) - np.min(pts_y)) + 1
-        shift_x = max(8, int(bw * 1.15))
-        shift_y = max(8, int(bh * 1.15))
 
         pad = max(32, int(max(bw, bh) * 1.5))
         y1 = max(0, int(np.min(pts_y)) - pad)
@@ -3286,38 +3872,12 @@ class SingleMediaViewer(QWidget):
         )
         donor_ring = cv2.dilate(roi_mask, outer_k, iterations=1) - roi_mask
 
-        # 4. Multi-directional donor texture transfer from the unblemished perimeter
-        h_roi, w_roi = roi_mask.shape
-        if np.count_nonzero(donor_ring) >= 16:
-            offsets = [
-                (0, shift_x), (0, -shift_x),
-                (shift_y, 0), (-shift_y, 0),
-                (shift_y, shift_x), (-shift_y, -shift_x),
-                (shift_y, -shift_x), (-shift_y, shift_x),
-            ]
-            valid_shifts = []
-            for dy, dx in offsets:
-                M = np.float32([[1, 0, dx], [0, 1, dy]])
-                shifted_mask = cv2.warpAffine(
-                    roi_mask, M, (w_roi, h_roi), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0
-                )
-                overlap = np.count_nonzero((shifted_mask > 0) & (roi_mask > 0))
-                if overlap == 0:
-                    shifted_high = cv2.warpAffine(
-                        roi_high, M, (w_roi, h_roi), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT
-                    )
-                    valid_shifts.append(shifted_high)
+        # 4. Best-match directional donor texture transfer from the unblemished perimeter
+        from src.imaging.creative_effects import transfer_best_donor_texture
 
-            if valid_shifts:
-                transferred_high = np.mean(valid_shifts, axis=0)
-                donor_std = float(np.std(roi_high[donor_ring > 0]))
-                trans_std = float(np.std(transferred_high[roi_mask > 0]))
-                if trans_std > 0.05 and donor_std > 0.1:
-                    transferred_high = transferred_high * (donor_std / trans_std)
-            else:
-                transferred_high = np.zeros_like(roi_high)
-        else:
-            transferred_high = np.zeros_like(roi_high)
+        transferred_high, _ = transfer_best_donor_texture(
+            roi_img, roi_high, roi_mask, donor_ring, bw, bh
+        )
 
         # 5. Frequency Recombination: Base Low + Transferred High
         restored_roi = np.clip(
@@ -3362,6 +3922,7 @@ class SingleMediaViewer(QWidget):
             self.retouch_toolbar.show()
             self._position_floating_toolbars()
             self.retouch_toolbar.raise_()
+            QTimer.singleShot(150, self._warmup_lama_async)
         else:
             if not getattr(self, "is_retouch_mode", False):
                 self.retouch_toolbar.hide()
@@ -3473,7 +4034,7 @@ class SingleMediaViewer(QWidget):
 
     def _apply_brush_red_eye(self, scene_pos: QPointF) -> None:
         """Applies pupil detection and neutral dark replacement using the circular brush area."""
-        if self.master_np_rgb is None:
+        if not self._is_scene_pos_on_canvas(scene_pos):
             return
         _, r_master = self._get_effective_brush_radius()
         mx, my = self._scene_to_master(scene_pos.x(), scene_pos.y())
@@ -4513,11 +5074,43 @@ class SingleMediaViewer(QWidget):
             rendered_np, rendered_alpha, getattr(self, "_mask_overlay_preview", False)
         )
 
+    def _upgrade_raw_to_full_demosaic_async(self) -> None:
+        """Upgrades an embedded-JPEG RAW preview to full 16-bit/8-bit linear demosaic in the background."""
+        if not getattr(self, "_raw_needs_full_demosaic", False) or getattr(self, "_raw_upgrade_in_progress", False):
+            return
+        target_path = self.current_file_path
+        if target_path is None:
+            return
+        self._raw_upgrade_in_progress = True
+        import threading
+
+        def _worker() -> None:
+            rgb_full = None
+            try:
+                rgb_full = decode_raw_to_srgb(target_path)
+            except Exception:
+                rgb_full = None
+
+            def _apply_on_ui() -> None:
+                self._raw_upgrade_in_progress = False
+                if rgb_full is not None and self.current_file_path == target_path:
+                    self.master_np_rgb = rgb_full
+                    self.master_pil_image = Image.fromarray(rgb_full)
+                    self._raw_needs_full_demosaic = False
+                    self._update_display_proxy()
+                    self._render_current_recipe()
+
+            QTimer.singleShot(0, _apply_on_ui)
+
+        threading.Thread(target=_worker, daemon=True, name="RawFullDemosaic").start()
+
     def _flush_master_render(self) -> None:
         if hasattr(self, "_master_render_timer") and self._master_render_timer.isActive():
             self._master_render_timer.stop()
         if self.master_np_rgb is None or self.current_is_video:
             return
+        if getattr(self, "_raw_needs_full_demosaic", False):
+            self._upgrade_raw_to_full_demosaic_async()
         self._master_render_gen += 1
         self._master_render_dirty = True
         runnable = _MasterRenderRunnable(
@@ -4744,22 +5337,28 @@ class SingleMediaViewer(QWidget):
         if self.master_np_rgb is None or self.current_is_video:
             return {}
         target_np = self.display_proxy_rgb if self.display_proxy_rgb is not None else self.master_np_rgb
+        return self.build_effect_preview_pixmaps_from_rgb(target_np, width=width, height=height)
+
+    @staticmethod
+    def build_effect_preview_pixmaps_from_rgb(
+        target_np: np.ndarray, width: int = 46, height: int = 64
+    ) -> dict[str, QPixmap]:
+        """Generates live mini-thumbnails from an RGB uint8 array for ribbon effect buttons."""
+        if target_np is None or target_np.size == 0:
+            return {}
         th, tw = target_np.shape[:2]
         if th <= 0 or tw <= 0 or width <= 0 or height <= 0:
             return {}
 
-        # Generate crisp 2x resolution (at least 92x128) for high DPI and sharp dropdown menu previews
         render_w = max(width * 2, 92)
         render_h = max(height * 2, 128)
         target_aspect = render_w / float(render_h)
         src_aspect = tw / float(th)
         if src_aspect > target_aspect:
-            # Source is wider than target: center crop horizontally
             crop_w = max(1, int(round(th * target_aspect)))
             x0 = max(0, (tw - crop_w) // 2)
             cropped = target_np[:, x0 : x0 + crop_w]
         else:
-            # Source is taller than target (portrait): center crop vertically
             crop_h = max(1, int(round(tw / target_aspect)))
             y0 = max(0, (th - crop_h) // 2)
             cropped = target_np[y0 : y0 + crop_h, :]
@@ -4775,7 +5374,7 @@ class SingleMediaViewer(QWidget):
             "cool_cinema",
             "sepia",
         ]
-        result = {}
+        result: dict[str, QPixmap] = {}
         for eff in effect_keys:
             rec = PhotoAdjustmentRecipe(effect=eff)
             rendered = render_adjusted_image(thumb, rec)
@@ -4806,11 +5405,12 @@ class SingleMediaViewer(QWidget):
         small_patch = cv2.resize(patch, (down_w, down_h), interpolation=cv2.INTER_LINEAR)
         pixelated = cv2.resize(small_patch, (pw, ph), interpolation=cv2.INTER_NEAREST)
         self.master_np_rgb[t:b, l:r] = pixelated
-        cmd = _PixelEditUndoCommand(self, before_arr, self.master_np_rgb.copy(), "Redact / Pixelate")
+        cmd = PixelArrayUndoCommand(self, before_arr, self.master_np_rgb.copy(), "Redact / Pixelate")
         self.undo_stack.push(cmd)
         self._update_display_proxy()
         self._render_current_recipe()
-        self.pixel_edit_saved.emit()
+        if self.current_media_id is not None:
+            self.pixel_edit_saved.emit(int(self.current_media_id), "")
 
     def set_straighten(self, angle_deg: float) -> None:
         if self._recipe_before_slider is None:
@@ -4847,6 +5447,9 @@ class SingleMediaViewer(QWidget):
         angle = detect_auto_straighten_angle(self.master_np_rgb)
         before = self.current_recipe.copy()
         self.current_recipe.straighten_deg = angle
+        self.current_recipe.straighten_ai_fill = bool(
+            hasattr(self, "chk_straighten_ai_fill") and self.chk_straighten_ai_fill.isChecked()
+        )
         cmd = RecipeUndoCommand(self, before, self.current_recipe.copy(), "Auto Straighten")
         self.undo_stack.push(cmd)
         self._render_current_recipe()
@@ -4873,6 +5476,9 @@ class SingleMediaViewer(QWidget):
     def apply_straighten(self, angle_deg: float) -> None:
         before = self.current_recipe.copy()
         self.current_recipe.straighten_deg = float(angle_deg)
+        self.current_recipe.straighten_ai_fill = bool(
+            hasattr(self, "chk_straighten_ai_fill") and self.chk_straighten_ai_fill.isChecked()
+        )
         cmd = RecipeUndoCommand(self, before, self.current_recipe.copy(), "Straighten Photo")
         self.undo_stack.push(cmd)
         self._render_current_recipe()
@@ -4892,6 +5498,9 @@ class SingleMediaViewer(QWidget):
     def preview_recipe(self, recipe: PhotoAdjustmentRecipe | None) -> None:
         """Previews an adjustment recipe in real-time on the viewer without modifying undo stack or current_recipe."""
         if self.master_np_rgb is None or self.current_is_video:
+            return
+        if getattr(self, "_raw_needs_full_demosaic", False) and recipe is not None and not recipe.is_default():
+            self._upgrade_raw_to_full_demosaic_async()
             return
         if recipe is None:
             self._render_current_recipe()
@@ -4982,7 +5591,11 @@ class SingleMediaViewer(QWidget):
         """Returns True if the current photo has uncommitted recipe adjustments or undoable edits."""
         recipe_dirty = self.current_recipe is not None and not self.current_recipe.is_default()
         try:
-            undo_dirty = hasattr(self, "undo_stack") and self.undo_stack is not None and self.undo_stack.canUndo()
+            idx = self.undo_stack.index() if hasattr(self, "undo_stack") and self.undo_stack is not None else 0
+            top_is_revert = idx > 0 and isinstance(
+                self.undo_stack.command(idx - 1), RevertToOriginalUndoCommand
+            )
+            undo_dirty = idx > 0 and not top_is_revert
         except RuntimeError:
             undo_dirty = False
         return recipe_dirty or undo_dirty
@@ -5473,12 +6086,17 @@ class SingleMediaViewer(QWidget):
             if bpath.exists():
                 has_backup = True
         try:
-            can_undo = hasattr(self, "undo_stack") and self.undo_stack is not None and self.undo_stack.canUndo()
+            idx = self.undo_stack.index() if hasattr(self, "undo_stack") and self.undo_stack is not None else 0
+            can_undo = idx > 0
+            top_is_revert = can_undo and isinstance(
+                self.undo_stack.command(idx - 1), RevertToOriginalUndoCommand
+            )
         except RuntimeError:
             can_undo = False
+            top_is_revert = False
         has_recipe_edits = (
             self.current_recipe is not None and not self.current_recipe.is_default()
-        ) or can_undo
+        ) or (can_undo and not top_is_revert)
         can_revert = has_backup or has_recipe_edits
         if hasattr(self, "btn_revert"):
             self.btn_revert.setEnabled(can_revert)
@@ -5489,10 +6107,105 @@ class SingleMediaViewer(QWidget):
         except RuntimeError:
             pass
 
+    def _execute_revert_to_original(
+        self,
+        backup_path: Path | None = None,
+        original_file_bytes: bytes | None = None,
+    ) -> bool:
+        """Performs the actual revert to original (called by RevertToOriginalUndoCommand.redo())."""
+        bpath = backup_path
+        has_backup = bpath is not None and (bpath.exists() or original_file_bytes is not None)
+        target_fpath = bpath if (bpath is not None and bpath.exists()) else self.current_file_path
+        fallback_orient = 1 if has_backup else int(getattr(self, "current_orientation", 1) or 1)
+        disk_orient = fallback_orient
+        restored_dims: tuple[int, int] | None = None
+        if target_fpath is not None and target_fpath.exists():
+            try:
+                with Image.open(target_fpath) as f_img:
+                    exif_val = f_img.getexif().get(0x0112)
+                    disk_orient = int(exif_val) if exif_val is not None else fallback_orient
+                    restored_dims = (int(f_img.width), int(f_img.height))
+            except Exception:
+                pass
+
+        if has_backup and self.current_file_path is not None:
+            if original_file_bytes is not None:
+                self.current_file_path.write_bytes(original_file_bytes)
+            elif bpath is not None and bpath.exists():
+                shutil.copy2(bpath, self.current_file_path)
+            if bpath is not None and bpath.exists():
+                try:
+                    bpath.unlink()
+                except OSError:
+                    pass
+            try:
+                with Image.open(self.current_file_path) as f_img:
+                    exif_val = f_img.getexif().get(0x0112)
+                    disk_orient = int(exif_val) if exif_val is not None else fallback_orient
+                    restored_dims = (int(f_img.width), int(f_img.height))
+            except Exception:
+                pass
+            if hasattr(self, "catalog_repo") and self.catalog_repo and self.current_media_id is not None:
+                try:
+                    st = self.current_file_path.stat()
+                    self.catalog_repo.update_media_metadata(
+                        int(self.current_media_id),
+                        orientation=disk_orient,
+                        width=restored_dims[0] if restored_dims else None,
+                        height=restored_dims[1] if restored_dims else None,
+                        mtime=int(st.st_mtime),
+                        size=int(st.st_size),
+                    )
+                except Exception:
+                    pass
+            self._preserve_undo_on_load = True
+            try:
+                self.load_media(
+                    self.current_media_id, self.current_file_path, is_video=False, orientation=disk_orient
+                )
+            finally:
+                self._preserve_undo_on_load = False
+        elif self.current_file_path is not None and self.current_file_path.exists():
+            if hasattr(self, "catalog_repo") and self.catalog_repo and self.current_media_id is not None:
+                try:
+                    st = self.current_file_path.stat()
+                    self.catalog_repo.update_media_metadata(
+                        int(self.current_media_id),
+                        orientation=disk_orient,
+                        width=restored_dims[0] if restored_dims else None,
+                        height=restored_dims[1] if restored_dims else None,
+                        mtime=int(st.st_mtime),
+                        size=int(st.st_size),
+                    )
+                except Exception:
+                    pass
+            self._preserve_undo_on_load = True
+            try:
+                self.load_media(
+                    self.current_media_id, self.current_file_path, is_video=False, orientation=disk_orient
+                )
+            finally:
+                self._preserve_undo_on_load = False
+        else:
+            start_master = getattr(self, "_markup_session_start_master", None)
+            if start_master is not None:
+                self.master_np_rgb = start_master.copy()
+                self._update_display_proxy()
+            self.current_recipe = PhotoAdjustmentRecipe()
+            self._render_current_recipe()
+            self.recipe_changed.emit(self.current_recipe)
+
+        self._purge_all_transient_scene_items()
+        self.set_zoom_mode("fit")
+        self.update_revert_state()
+        if self.current_media_id is not None:
+            self.pixel_edit_reverted.emit(int(self.current_media_id))
+        return True
+
     def revert_to_original(self, backup_path: str | Path | None = None) -> bool:
         """
-        Restores the unedited photo:
-        1. If a disk backup in '.OriginalFiles' exists, restores the original file.
+        Restores the unedited photo and pushes the operation onto the Undo/Redo stack:
+        1. If a disk backup in '.OriginalFiles' exists, restores the original file (undoable via Ctrl+Z).
         2. If uncommitted in-memory pixel edits or adjustments exist, reloads the pristine photo from disk.
         """
         if self.current_file_path is None and not hasattr(self, "_markup_session_start_master"):
@@ -5509,70 +6222,45 @@ class SingleMediaViewer(QWidget):
         else:
             bpath = None
 
-        # Determine pristine camera/disk EXIF orientation & file dimensions from the file being restored
-        target_fpath = bpath if (bpath is not None and bpath.exists()) else self.current_file_path
-        disk_orient = 1
-        restored_dims: tuple[int, int] | None = None
-        if target_fpath is not None and target_fpath.exists():
-            try:
-                with Image.open(target_fpath) as f_img:
-                    exif_val = f_img.getexif().get(0x0112)
-                    disk_orient = int(exif_val or 1)
-                    restored_dims = (int(f_img.width), int(f_img.height))
-            except Exception:
-                pass
+        has_backup = bpath is not None and bpath.exists()
+        idx = self.undo_stack.index() if hasattr(self, "undo_stack") and self.undo_stack is not None else 0
+        top_is_revert = idx > 0 and isinstance(
+            self.undo_stack.command(idx - 1), RevertToOriginalUndoCommand
+        )
+        has_recipe = self.current_recipe is not None and not self.current_recipe.is_default()
+        if top_is_revert and not has_backup and not has_recipe:
+            return False
 
-        if bpath is not None and bpath.exists() and self.current_file_path is not None:
-            shutil.copy2(bpath, self.current_file_path)
+        before_rgb = self.master_np_rgb.copy() if self.master_np_rgb is not None else None
+        before_alpha = self.master_alpha.copy() if self.master_alpha is not None else None
+        before_recipe = (
+            self.current_recipe.copy() if self.current_recipe is not None else PhotoAdjustmentRecipe()
+        )
+        before_orient = int(getattr(self, "current_orientation", 1) or 1)
+        before_crop_committed = bool(getattr(self, "_crop_committed", False))
+
+        edited_bytes: bytes | None = None
+        original_bytes: bytes | None = None
+        if has_backup and self.current_file_path is not None and self.current_file_path.exists():
             try:
-                bpath.unlink()
+                edited_bytes = self.current_file_path.read_bytes()
+                original_bytes = bpath.read_bytes()
             except OSError:
-                pass
-            if hasattr(self, "catalog_repo") and self.catalog_repo and self.current_media_id is not None:
-                try:
-                    st = self.current_file_path.stat()
-                    self.catalog_repo.update_media_metadata(
-                        int(self.current_media_id),
-                        orientation=disk_orient,
-                        width=restored_dims[0] if restored_dims else None,
-                        height=restored_dims[1] if restored_dims else None,
-                        mtime=int(st.st_mtime),
-                        size=int(st.st_size),
-                    )
-                except Exception:
-                    pass
-            self.load_media(self.current_media_id, self.current_file_path, is_video=False, orientation=disk_orient)
-        else:
-            if self.current_file_path is not None and self.current_file_path.exists():
-                if hasattr(self, "catalog_repo") and self.catalog_repo and self.current_media_id is not None:
-                    try:
-                        st = self.current_file_path.stat()
-                        self.catalog_repo.update_media_metadata(
-                            int(self.current_media_id),
-                            orientation=disk_orient,
-                            width=restored_dims[0] if restored_dims else None,
-                            height=restored_dims[1] if restored_dims else None,
-                            mtime=int(st.st_mtime),
-                            size=int(st.st_size),
-                        )
-                    except Exception:
-                        pass
-                self.load_media(self.current_media_id, self.current_file_path, is_video=False, orientation=disk_orient)
-            else:
-                start_master = getattr(self, "_markup_session_start_master", None)
-                if start_master is not None:
-                    self.master_np_rgb = start_master.copy()
-                    self._update_display_proxy()
-                self.current_recipe = PhotoAdjustmentRecipe()
-                self.undo_stack.clear()
-                self._render_current_recipe()
-                self.recipe_changed.emit(self.current_recipe)
+                edited_bytes = None
+                original_bytes = None
 
-        self._purge_all_transient_scene_items()
-        self.set_zoom_mode("fit")
-        self.update_revert_state()
-        if self.current_media_id is not None:
-            self.pixel_edit_reverted.emit(int(self.current_media_id))
+        cmd = RevertToOriginalUndoCommand(
+            self,
+            before_rgb=before_rgb,
+            before_alpha=before_alpha,
+            before_recipe=before_recipe,
+            before_orientation=before_orient,
+            before_crop_committed=before_crop_committed,
+            backup_path=bpath if has_backup else None,
+            edited_file_bytes=edited_bytes,
+            original_file_bytes=original_bytes,
+        )
+        self.undo_stack.push(cmd)
         return True
 
     # -------------------------------------------------------------------------
@@ -6969,32 +7657,33 @@ class SingleMediaViewer(QWidget):
         if self.current_media_id is None:
             return
 
-        # Check if right-click was on a face region (confirmed, suggestion, or unknown face)
-        scene_pos = self.graphics_view.mapToScene(pos)
-        items_under = self.scene.items(scene_pos)
-        face_sensor = None
-        for item in items_under:
-            if isinstance(item, _FaceHoverRegionItem):
-                face_sensor = item
-                break
-            elif isinstance(item, _FaceNameBadgeItem):
-                fid = item.face_id
-                for sit in self._face_overlay_items:
-                    if isinstance(sit, _FaceHoverRegionItem) and (
-                        sit.region_data.get("face_id") == fid or sit.region_data.get("region_id") == fid
-                    ):
-                        face_sensor = sit
-                        break
-                if face_sensor:
+        # Check if right-click was on a face region (suppressed while an interactive edit tool is active)
+        if not self.is_in_edit_mode():
+            scene_pos = self.graphics_view.mapToScene(pos)
+            items_under = self.scene.items(scene_pos)
+            face_sensor = None
+            for item in items_under:
+                if isinstance(item, _FaceHoverRegionItem):
+                    face_sensor = item
                     break
+                elif isinstance(item, _FaceNameBadgeItem):
+                    fid = item.face_id
+                    for sit in self._face_overlay_items:
+                        if isinstance(sit, _FaceHoverRegionItem) and (
+                            sit.region_data.get("face_id") == fid or sit.region_data.get("region_id") == fid
+                        ):
+                            face_sensor = sit
+                            break
+                    if face_sensor:
+                        break
 
-        if face_sensor is not None:
-            self.show_face_region_context_menu(
-                self.graphics_view.mapToGlobal(pos),
-                face_sensor.region_data,
-                face_sensor.person_id,
-            )
-            return
+            if face_sensor is not None:
+                self.show_face_region_context_menu(
+                    self.graphics_view.mapToGlobal(pos),
+                    face_sensor.region_data,
+                    face_sensor.person_id,
+                )
+                return
 
         menu = self._build_viewer_context_menu()
         if menu is not None and not getattr(self, "_suppress_menu_exec", False):

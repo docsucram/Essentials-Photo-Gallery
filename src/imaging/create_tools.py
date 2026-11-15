@@ -133,15 +133,160 @@ def inpaint_minor_border_gaps(stitched_bgr: np.ndarray, mask: np.ndarray) -> np.
             clean_inpaint_mask[labels == lbl] = 255
 
     if np.any(clean_inpaint_mask > 0):
-        # Inpaint with radius 3
+        # Use neural LaMa when downloaded for crisp scenery/sky/grass corner fill;
+        # fall back to fast Telea inpainting otherwise.
+        try:
+            from src.imaging.creative_effects import get_lama_inpaint_engine, inpaint_object_lama
+
+            if get_lama_inpaint_engine().has_neural_model():
+                stitched_rgb = cv2.cvtColor(stitched_bgr, cv2.COLOR_BGR2RGB)
+                filled_rgb = inpaint_object_lama(stitched_rgb, clean_inpaint_mask)
+                return cv2.cvtColor(filled_rgb, cv2.COLOR_RGB2BGR)
+        except Exception:
+            pass
         return cv2.inpaint(stitched_bgr, clean_inpaint_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
 
     return stitched_bgr
 
 
+def _find_learned_matcher_models() -> tuple[str, Path, Path] | None:
+    """
+    Locates optional OpenCV 5.0 learned feature extractor + LightGlue ONNX models
+    under `models/` (supports ALIKED or DISK paired with LightGlue).
+    """
+    from src.utils.paths import get_resource_path
+
+    candidates = [
+        ("aliked", "models/aliked.onnx", "models/lightglue_aliked.onnx"),
+        ("aliked", "models/aliked-n16.onnx", "models/aliked_lightglue.onnx"),
+        ("disk", "models/disk.onnx", "models/lightglue_disk.onnx"),
+        ("disk", "models/disk.onnx", "models/disk_lightglue.onnx"),
+        ("aliked", "models/aliked.onnx", "models/lightglue.onnx"),
+        ("disk", "models/disk.onnx", "models/lightglue.onnx"),
+    ]
+    for kind, feat_rel, lg_rel in candidates:
+        feat_path = get_resource_path(feat_rel)
+        lg_path = get_resource_path(lg_rel)
+        if feat_path.is_file() and lg_path.is_file():
+            return (kind, feat_path, lg_path)
+    return None
+
+
+def _match_with_learned_features(
+    base_bgr: np.ndarray,
+    target_bgr: np.ndarray,
+    min_matches: int = 6,
+) -> tuple[np.ndarray | None, int]:
+    """
+    OpenCV 5.0 ALIKED / DISK + LightGlue learned feature matcher fallback for tricky
+    night, indoor, or low-texture panoramas and burst alignment frames.
+    Returns (H, inlier_count) or (None, 0).
+    """
+    if not hasattr(cv2, "LightGlueMatcher_create"):
+        return None, 0
+    found = _find_learned_matcher_models()
+    if found is None:
+        return None, 0
+
+    kind, feat_path, lg_path = found
+    try:
+        if kind == "aliked" and hasattr(cv2, "ALIKED_create"):
+            extractor = cv2.ALIKED_create(str(feat_path))
+        elif kind == "disk" and hasattr(cv2, "DISK_create"):
+            extractor = cv2.DISK_create(str(feat_path))
+        else:
+            return None, 0
+
+        matcher = cv2.LightGlueMatcher_create(str(lg_path))
+        kp1, des1 = extractor.detectAndCompute(base_bgr, None)
+        kp2, des2 = extractor.detectAndCompute(target_bgr, None)
+        if des1 is None or des2 is None or len(kp1) < min_matches or len(kp2) < min_matches:
+            return None, 0
+
+        matches = matcher.match(des2, des1)
+        if len(matches) < min_matches:
+            return None, 0
+
+        src_pts = np.float32([kp2[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+        dst_pts = np.float32([kp1[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+        homography_method = getattr(cv2, "USAC_MAGSAC", cv2.RANSAC)
+        H, inlier_mask = cv2.findHomography(src_pts, dst_pts, homography_method, 5.0)
+        if H is None or inlier_mask is None:
+            return None, 0
+        return H, int(np.sum(inlier_mask))
+    except Exception:
+        return None, 0
+
+
+def _match_with_detector(
+    gray_base: np.ndarray,
+    gray_target: np.ndarray,
+    min_matches: int = 6,
+) -> tuple[np.ndarray | None, int]:
+    """Runs SIFT (or ORB) + BFMatcher + Lowe ratio test + USAC_MAGSAC homography."""
+    try:
+        detector: Any = cv2.SIFT_create(nfeatures=2500)
+        norm = cv2.NORM_L2
+    except Exception:
+        detector = cv2.ORB_create(nfeatures=3000)
+        norm = cv2.NORM_HAMMING
+
+    kp1, des1 = detector.detectAndCompute(gray_base, None)
+    kp2, des2 = detector.detectAndCompute(gray_target, None)
+    if des1 is None or des2 is None or len(kp1) < 10 or len(kp2) < 10:
+        return None, 0
+
+    matcher = cv2.BFMatcher(norm)
+    raw_matches = matcher.knnMatch(des2, des1, k=2)
+    good = [pair[0] for pair in raw_matches if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance]
+    if len(good) < min_matches:
+        return None, 0
+
+    src_pts = np.float32([kp2[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+    dst_pts = np.float32([kp1[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+    homography_method = getattr(cv2, "USAC_MAGSAC", cv2.RANSAC)
+    H, inlier_mask = cv2.findHomography(src_pts, dst_pts, homography_method, 5.0)
+    if H is None or inlier_mask is None:
+        return None, 0
+    return H, int(np.sum(inlier_mask))
+
+
+def estimate_homography_with_fallback(
+    base_bgr: np.ndarray,
+    target_bgr: np.ndarray,
+    min_matches: int = 6,
+) -> tuple[np.ndarray | None, int]:
+    """
+    Estimates homography warping `target_bgr` into `base_bgr` coordinates:
+    1. SIFT/ORB + Lowe ratio + USAC_MAGSAC.
+    2. Fallback to OpenCV 5.0 ALIKED/DISK + LightGlue learned matcher (if ONNX models exist).
+    3. Fallback to CLAHE contrast-boosted SIFT + USAC_MAGSAC for dark/low-texture scenes.
+    """
+    gray_base = cv2.cvtColor(base_bgr, cv2.COLOR_BGR2GRAY)
+    gray_target = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2GRAY)
+
+    H, inliers = _match_with_detector(gray_base, gray_target, min_matches=min_matches)
+    if H is not None and inliers >= min_matches:
+        return H, inliers
+
+    H_lg, inliers_lg = _match_with_learned_features(base_bgr, target_bgr, min_matches=min_matches)
+    if H_lg is not None and inliers_lg >= min_matches:
+        return H_lg, inliers_lg
+
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    H_cl, inliers_cl = _match_with_detector(
+        clahe.apply(gray_base), clahe.apply(gray_target), min_matches=min_matches
+    )
+    if H_cl is not None and inliers_cl >= min_matches:
+        return H_cl, inliers_cl
+
+    return None, 0
+
+
 def fallback_homography_stitch(images_bgr: list[np.ndarray]) -> np.ndarray:
     """
-    Fallback feature-based stitcher using SIFT/ORB + RANSAC Homography + linear multi-band feathering.
+    Fallback feature-based stitcher using SIFT/ORB + ALIKED/DISK/LightGlue fallback
+    + USAC_MAGSAC Homography + linear multi-band feathering.
     Used when standard OpenCV Stitcher returns an error code on tricky sequences.
     """
     if not images_bgr:
@@ -151,39 +296,9 @@ def fallback_homography_stitch(images_bgr: list[np.ndarray]) -> np.ndarray:
 
     result = images_bgr[0].copy()
 
-    # Try SIFT first, fallback to ORB
-    detector: Any = None
-    try:
-        detector = cv2.SIFT_create(nfeatures=2500)
-    except Exception:
-        detector = cv2.ORB_create(nfeatures=3000)
-
     for next_img in images_bgr[1:]:
-        gray1 = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
-        gray2 = cv2.cvtColor(next_img, cv2.COLOR_BGR2GRAY)
-
-        kp1, des1 = detector.detectAndCompute(gray1, None)
-        kp2, des2 = detector.detectAndCompute(gray2, None)
-
-        if des1 is None or des2 is None or len(kp1) < 10 or len(kp2) < 10:
-            # Cannot match, simply append side-by-side horizontally
-            h1, w1 = result.shape[:2]
-            h2, w2 = next_img.shape[:2]
-            target_h = max(h1, h2)
-            pad1 = cv2.copyMakeBorder(result, 0, target_h - h1, 0, 0, cv2.BORDER_CONSTANT, value=(0, 0, 0))
-            pad2 = cv2.copyMakeBorder(next_img, 0, target_h - h2, 0, 0, cv2.BORDER_CONSTANT, value=(0, 0, 0))
-            result = np.hstack([pad1, pad2])
-            continue
-
-        matcher = cv2.BFMatcher(cv2.NORM_L2 if "SIFT" in str(type(detector)) else cv2.NORM_HAMMING)
-        raw_matches = matcher.knnMatch(des2, des1, k=2)
-
-        good_matches = []
-        for m_pair in raw_matches:
-            if len(m_pair) == 2 and m_pair[0].distance < 0.75 * m_pair[1].distance:
-                good_matches.append(m_pair[0])
-
-        if len(good_matches) < 4:
+        H, _ = estimate_homography_with_fallback(result, next_img, min_matches=4)
+        if H is None:
             # Fallback horizontal concatenation
             h1, w1 = result.shape[:2]
             h2, w2 = next_img.shape[:2]
@@ -191,13 +306,6 @@ def fallback_homography_stitch(images_bgr: list[np.ndarray]) -> np.ndarray:
             pad1 = cv2.copyMakeBorder(result, 0, target_h - h1, 0, 0, cv2.BORDER_CONSTANT, value=(0, 0, 0))
             pad2 = cv2.copyMakeBorder(next_img, 0, target_h - h2, 0, 0, cv2.BORDER_CONSTANT, value=(0, 0, 0))
             result = np.hstack([pad1, pad2])
-            continue
-
-        pts2 = np.float32([kp2[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-        pts1 = np.float32([kp1[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-
-        H, mask_h = cv2.findHomography(pts2, pts1, cv2.RANSAC, 5.0)
-        if H is None:
             continue
 
         h1, w1 = result.shape[:2]
@@ -427,45 +535,26 @@ def _apply_rounded_corners(img_bgr: np.ndarray, radius: int) -> np.ndarray:
     return cv2.merge([b, g, r, mask_np])
 
 
-def create_grid_collage(
-    images_bgr: list[np.ndarray],
+def compute_grid_slots(
+    count: int,
     layout: str = "2x2",
     border_thickness: int = 12,
-    corner_radius: int = 8,
-    bg_color: tuple[int, int, int] = (245, 245, 247),  # Light clean canvas
     target_size: tuple[int, int] = (2560, 1440),
-) -> np.ndarray:
+) -> list[tuple[int, int, int, int]]:
     """
-    Renders a high-resolution grid/masonry collage:
-    - Layouts: '2x1', '2x2', '3x2', 'center_hero', 'masonry'.
-    - Border thickness and corner rounding.
+    Computes slot rectangles [(x, y, w, h)] for grid/masonry collages.
+    Supports 'CxR' grids (e.g. '1x1', '2x1', '1x2', '3x1', '1x3', '2x2', '3x2', '2x3', '4x2', '3x3'),
+    'center_hero', and 'masonry'.
     """
-    if not images_bgr:
-        return np.full((target_size[1], target_size[0], 3), bg_color, dtype=np.uint8)
+    if count <= 0:
+        return []
 
     tw, th = target_size
-    canvas = np.full((th, tw, 3), bg_color, dtype=np.uint8)
-
-    count = len(images_bgr)
-
-    # Calculate slot rectangles [(x, y, w, h)]
-    slots: list[tuple[int, int, int, int]] = []
     bt = border_thickness
+    norm_layout = (layout or "").strip().lower().replace(" ", "_")
+    slots: list[tuple[int, int, int, int]] = []
 
-    if layout == "2x1" or (count == 2 and layout != "center_hero"):
-        cell_w = (tw - 3 * bt) // 2
-        cell_h = th - 2 * bt
-        slots = [(bt, bt, cell_w, cell_h), (2 * bt + cell_w, bt, cell_w, cell_h)]
-
-    elif layout == "3x2" or count >= 5 and layout != "center_hero":
-        cols, rows = 3, 2
-        cell_w = (tw - (cols + 1) * bt) // cols
-        cell_h = (th - (rows + 1) * bt) // rows
-        for r in range(rows):
-            for c in range(cols):
-                slots.append((bt + c * (cell_w + bt), bt + r * (cell_h + bt), cell_w, cell_h))
-
-    elif layout == "center_hero" and count >= 3:
+    if norm_layout == "center_hero" and count >= 3:
         # Left 60% hero, right 40% stacked
         hero_w = int((tw - 3 * bt) * 0.60)
         hero_h = th - 2 * bt
@@ -476,10 +565,10 @@ def create_grid_collage(
         sub_w = tw - hero_w - 3 * bt
         for i in range(sub_count):
             slots.append((hero_w + 2 * bt, bt + i * (sub_h + bt), sub_w, sub_h))
+        return slots
 
-    elif layout == "masonry":
-        # 3 columns with alternating heights
-        cols = 3 if count >= 3 else 2
+    if norm_layout == "masonry":
+        cols = 1 if count == 1 else (3 if count >= 3 else 2)
         col_w = (tw - (cols + 1) * bt) // cols
         col_heights = [bt] * cols
         rem_h = th - 2 * bt
@@ -490,17 +579,52 @@ def create_grid_collage(
             slot_h = (rem_h - (slots_in_col - 1) * bt) // slots_in_col
             slots.append((bt + c_idx * (col_w + bt), col_heights[c_idx], col_w, slot_h))
             col_heights[c_idx] += slot_h + bt
+        return slots
 
+    # Parse general CxR layout (e.g. '3x1', '1x3', '2x2', '3x2', '2x3', '4x2', '3x3')
+    parts = norm_layout.split("x")
+    if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+        cols = max(1, int(parts[0]))
+        rows = max(1, int(parts[1]))
+    elif count == 1:
+        cols, rows = 1, 1
+    elif count == 2:
+        cols, rows = 2, 1
+    elif count >= 5:
+        cols, rows = 3, 2
     else:
-        # Default 2x2
-        cell_w = (tw - 3 * bt) // 2
-        cell_h = (th - 3 * bt) // 2
-        slots = [
-            (bt, bt, cell_w, cell_h),
-            (2 * bt + cell_w, bt, cell_w, cell_h),
-            (bt, 2 * bt + cell_h, cell_w, cell_h),
-            (2 * bt + cell_w, 2 * bt + cell_h, cell_w, cell_h),
-        ]
+        cols, rows = 2, 2
+
+    cell_w = (tw - (cols + 1) * bt) // cols
+    cell_h = (th - (rows + 1) * bt) // rows
+    for r in range(rows):
+        for c in range(cols):
+            slots.append((bt + c * (cell_w + bt), bt + r * (cell_h + bt), cell_w, cell_h))
+    return slots
+
+
+def create_grid_collage(
+    images_bgr: list[np.ndarray],
+    layout: str = "2x2",
+    border_thickness: int = 12,
+    corner_radius: int = 8,
+    bg_color: tuple[int, int, int] = (245, 245, 247),  # Light clean canvas
+    target_size: tuple[int, int] = (2560, 1440),
+    focus_centers: list[tuple[float, float] | None] | None = None,
+) -> np.ndarray:
+    """
+    Renders a high-resolution grid/masonry collage:
+    - Layouts: '1x1', '2x1', '1x2', '3x1', '1x3', '2x2', '3x2', '2x3', '4x1', '4x2', '3x3', 'center_hero', 'masonry'.
+    - Border thickness and corner rounding.
+    """
+    if not images_bgr:
+        return np.full((target_size[1], target_size[0], 3), bg_color, dtype=np.uint8)
+
+    tw, th = target_size
+    canvas = np.full((th, tw, 3), bg_color, dtype=np.uint8)
+
+    count = len(images_bgr)
+    slots = compute_grid_slots(count, layout=layout, border_thickness=border_thickness, target_size=target_size)
 
     # Place and render photos into slots
     for i, slot in enumerate(slots):
@@ -510,7 +634,8 @@ def create_grid_collage(
         if sw <= 0 or sh <= 0:
             continue
 
-        cropped = _crop_to_aspect(images_bgr[i], sw, sh)
+        fc = focus_centers[i] if focus_centers and i < len(focus_centers) else None
+        cropped = _crop_to_aspect(images_bgr[i], sw, sh, focus_center=fc)
         if corner_radius > 0:
             rounded_bgra = _apply_rounded_corners(cropped, corner_radius)
             alpha = rounded_bgra[:, :, 3].astype(np.float32) / 255.0
@@ -621,6 +746,7 @@ def create_blended_seamless_collage(
     blend_feather: float = 0.22,
     faces_per_image: list[list[tuple[int, int, int, int]]] | None = None,
     prioritize_faces: bool = True,
+    focus_centers: list[tuple[float, float] | None] | None = None,
 ) -> np.ndarray:
     """
     Renders an authentic Windows Live Photo Gallery seamless merged collage:
@@ -660,6 +786,9 @@ def create_blended_seamless_collage(
         else:
             prominence = 0.0
             fc_x, fc_y = 0.50, 0.42
+
+        if focus_centers and i < len(focus_centers) and focus_centers[i] is not None:
+            fc_x, fc_y = focus_centers[i]  # type: ignore[misc]
 
         photo_info.append({
             "index": i,
@@ -787,6 +916,47 @@ def create_blended_seamless_collage(
     return np.clip(canvas, 0, 255).astype(np.uint8)
 
 
+def compute_polaroid_card_size(target_size: tuple[int, int] = (2560, 1440)) -> tuple[int, int]:
+    """Returns (card_w, card_h) for a Polaroid card on the given canvas size."""
+    tw, th = target_size
+    card_w = min(int(tw * 0.35), int(th * 0.55))
+    photo_w = card_w - 32
+    photo_h = int(photo_w * 0.85)
+    card_h = photo_h + 32 + 56  # 16 margin top/sides, 56 margin bottom for caption
+    return card_w, card_h
+
+
+def default_polaroid_positions_norm(count: int) -> list[tuple[float, float]]:
+    """Returns default normalized (nx, ny) center coordinates in [0.0, 1.0] for Polaroid scatter."""
+    if count <= 0:
+        return []
+    if count == 1:
+        return [(0.5, 0.5)]
+    if count == 2:
+        return [(0.35, 0.5), (0.65, 0.5)]
+    if count <= 4:
+        return [
+            (0.30, 0.38),
+            (0.70, 0.38),
+            (0.40, 0.68),
+            (0.68, 0.68),
+        ][:count]
+
+    cols = 3
+    rows = (count + cols - 1) // cols
+    positions: list[tuple[float, float]] = []
+    for i in range(count):
+        cr = i // cols
+        cc = i % cols
+        nx = 0.22 + cc * 0.28
+        if rows <= 2:
+            ny = 0.28 + cr * 0.38
+        else:
+            ny = 0.22 + cr * (0.56 / max(1, rows - 1))
+        positions.append((nx, ny))
+    return positions
+
+
 def create_polaroid_scatter_collage(
     images_data: list[dict[str, Any]],
     target_size: tuple[int, int] = (2560, 1440),
@@ -831,34 +1001,12 @@ def create_polaroid_scatter_collage(
     preset_angles = [-8.0, 6.0, -12.0, 10.0, -4.0, 8.0, -10.0, 12.0]
 
     # Calculate polaroid card dimensions based on count
-    card_w = min(int(tw * 0.35), int(th * 0.55))
+    card_w, card_h = compute_polaroid_card_size(target_size)
     photo_w = card_w - 32
     photo_h = int(photo_w * 0.85)
-    card_h = photo_h + 32 + 56  # 16 margin top/sides, 56 margin bottom for caption
 
-    # Determine positions across canvas
-    positions: list[tuple[int, int]] = []
-    if count == 1:
-        positions = [(tw // 2, th // 2)]
-    elif count == 2:
-        positions = [(int(tw * 0.35), th // 2), (int(tw * 0.65), th // 2)]
-    elif count <= 4:
-        positions = [
-            (int(tw * 0.30), int(th * 0.38)),
-            (int(tw * 0.70), int(th * 0.38)),
-            (int(tw * 0.40), int(th * 0.68)),
-            (int(tw * 0.68), int(th * 0.68)),
-        ]
-    else:
-        # Multi-row scatter
-        cols = 3
-        rows = (count + cols - 1) // cols
-        for i in range(count):
-            cr = i // cols
-            cc = i % cols
-            cx = int(tw * (0.22 + cc * 0.28))
-            cy = int(th * (0.28 + cr * 0.38))
-            positions.append((cx, cy))
+    # Determine positions across canvas (normalized centers, overridable per item via 'center_norm')
+    default_positions = default_polaroid_positions_norm(count)
 
     for idx, item in enumerate(images_data):
         img_bgr = item.get("image_bgr")
@@ -866,14 +1014,20 @@ def create_polaroid_scatter_collage(
             continue
 
         angle = preset_angles[idx % len(preset_angles)]
-        cx, cy = positions[idx % len(positions)]
+        custom_pos = item.get("center_norm")
+        if custom_pos is not None and len(custom_pos) == 2:
+            nx = max(0.05, min(0.95, float(custom_pos[0])))
+            ny = max(0.05, min(0.95, float(custom_pos[1])))
+        else:
+            nx, ny = default_positions[idx % len(default_positions)]
+        cx, cy = int(round(tw * nx)), int(round(th * ny))
 
         # 1. Create clean white Polaroid Card
         card = Image.new("RGBA", (card_w, card_h), (252, 252, 250, 255))
         draw_card = ImageDraw.Draw(card)
 
         # 2. Add aspect-filled photo
-        cropped_bgr = _crop_to_aspect(img_bgr, photo_w, photo_h)
+        cropped_bgr = _crop_to_aspect(img_bgr, photo_w, photo_h, focus_center=item.get("focus_center"))
         photo_pil = Image.fromarray(cv2.cvtColor(cropped_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
         card.paste(photo_pil, (16, 16))
 
@@ -1101,47 +1255,16 @@ def create_then_and_now_card(
 def align_burst_frame(base_bgr: np.ndarray, target_bgr: np.ndarray) -> tuple[bool, np.ndarray]:
     """
     Aligns target burst frame to base frame coordinate space using
-    ORB/SIFT feature detection, Lowe ratio matching, and RANSAC Homography warping.
+    SIFT/ORB + ALIKED/DISK/LightGlue fallback + USAC_MAGSAC Homography warping.
     """
     if base_bgr is None or target_bgr is None:
         return False, target_bgr
 
     h, w = base_bgr.shape[:2]
-
-    detector: Any = None
-    try:
-        detector = cv2.SIFT_create(nfeatures=2500)
-    except Exception:
-        detector = cv2.ORB_create(nfeatures=3000)
-
-    gray_base = cv2.cvtColor(base_bgr, cv2.COLOR_BGR2GRAY)
-    gray_target = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2GRAY)
-
-    kp1, des1 = detector.detectAndCompute(gray_base, None)
-    kp2, des2 = detector.detectAndCompute(gray_target, None)
-
-    if des1 is None or des2 is None or len(kp1) < 10 or len(kp2) < 10:
+    H, inliers = estimate_homography_with_fallback(base_bgr, target_bgr, min_matches=6)
+    if H is None:
         return False, cv2.resize(target_bgr, (w, h))
 
-    matcher = cv2.BFMatcher(cv2.NORM_L2 if "SIFT" in str(type(detector)) else cv2.NORM_HAMMING)
-    raw_matches = matcher.knnMatch(des2, des1, k=2)
-
-    good = []
-    for pair in raw_matches:
-        if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance:
-            good.append(pair[0])
-
-    if len(good) < 6:
-        return False, cv2.resize(target_bgr, (w, h))
-
-    src_pts = np.float32([kp2[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
-    dst_pts = np.float32([kp1[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
-
-    H, inlier_mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-    if H is None or inlier_mask is None:
-        return False, cv2.resize(target_bgr, (w, h))
-
-    inliers = int(np.sum(inlier_mask))
     det = float(np.linalg.det(H[:2, :2]))
     if inliers < 6 or not (0.25 <= abs(det) <= 4.0):
         return False, cv2.resize(target_bgr, (w, h))

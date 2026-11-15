@@ -152,6 +152,7 @@ class _AlbumStackCard(QFrame):
     rename_requested = Signal(int, str)
     delete_requested = Signal(int, str)
     edit_rules_requested = Signal(int)
+    set_cover_requested = Signal(int, str)
 
     def __init__(
         self,
@@ -227,6 +228,8 @@ class _AlbumStackCard(QFrame):
         menu = QMenu(self)
         act_open = menu.addAction("Open Album" if not self.is_smart else "Open Smart Album")
         act_edit = menu.addAction("Edit Rules...") if self.is_smart else None
+        act_set_cover = menu.addAction("Set Album Cover...")
+        act_set_cover.setEnabled(self.item_count > 0)
         act_rename = menu.addAction("Rename Album..." if not self.is_smart else "Rename Smart Album...")
         menu.addSeparator()
         act_delete = menu.addAction("Delete Album" if not self.is_smart else "Delete Smart Album")
@@ -238,6 +241,8 @@ class _AlbumStackCard(QFrame):
             self.open_requested.emit(self.album_id)
         elif act_edit is not None and chosen == act_edit:
             self.edit_rules_requested.emit(self.album_id)
+        elif act_set_cover is not None and chosen == act_set_cover:
+            self.set_cover_requested.emit(self.album_id, self.album_name)
         elif chosen == act_rename:
             self.rename_requested.emit(self.album_id, self.album_name)
         elif chosen == act_delete:
@@ -308,8 +313,10 @@ class AlbumsView(QWidget):
     new_album_requested = Signal()
     rename_album_requested = Signal(int, str)
     delete_album_requested = Signal(int, str)
+    set_album_cover_requested = Signal(int, str)
     new_smart_album_requested = Signal()
     edit_smart_album_requested = Signal(int)
+    set_smart_album_cover_requested = Signal(int, str)
     rename_smart_album_requested = Signal(int, str)
     delete_smart_album_requested = Signal(int, str)
 
@@ -319,6 +326,7 @@ class AlbumsView(QWidget):
         self.repo = CatalogRepository(engine)
         self.thumb_repo = ThumbnailRepository(engine)
         self._is_dark: bool = False
+        self._section_filter: str = "all"
         self._static_albums: list[dict[str, Any]] = []
         self._smart_albums: list[dict[str, Any]] = []
         self._last_cols: int = 0
@@ -410,6 +418,28 @@ class AlbumsView(QWidget):
 
         self._apply_theme()
 
+    def set_section_filter(self, section: str = "all") -> None:
+        """Shows 'all' sections, only 'my' (My Albums), or only 'smart' (Smart Albums)."""
+        sec = section if section in ("all", "my", "smart") else "all"
+        self._section_filter = sec
+        show_static = sec in ("all", "my")
+        show_smart = sec in ("all", "smart")
+        self.lbl_static_hdr.setVisible(show_static)
+        self.btn_new_album.setVisible(show_static)
+        self.static_grid_host.setVisible(show_static)
+        self.lbl_smart_hdr.setVisible(show_smart)
+        self.btn_new_smart_album.setVisible(show_smart)
+        self.smart_grid_host.setVisible(show_smart)
+        if sec == "my":
+            self.lbl_title.setText("My Albums")
+        elif sec == "smart":
+            self.lbl_title.setText("Smart Albums")
+        else:
+            self.lbl_title.setText("Albums")
+
+    def section_filter(self) -> str:
+        return self._section_filter
+
     def set_dark_mode(self, is_dark: bool) -> None:
         self._is_dark = bool(is_dark)
         self._apply_theme()
@@ -496,7 +526,9 @@ class AlbumsView(QWidget):
             self._smart_albums = self.repo.get_smart_albums_with_counts()
             for s in self._smart_albums:
                 preview_ids = self.repo.get_smart_album_preview_media_ids(
-                    s.get("rules_dict") or s.get("rules_json") or {}, limit=3
+                    s.get("rules_dict") or s.get("rules_json") or {},
+                    limit=3,
+                    cover_media_id=s.get("cover_media_id"),
                 )
                 s["_thumbs"] = self._load_preview_pixmaps(preview_ids)
         except Exception as exc:
@@ -546,6 +578,7 @@ class AlbumsView(QWidget):
                 parent=self.static_grid_host,
             )
             card.open_requested.connect(lambda _aid, n=aname: self.album_selected.emit(_aid, n))
+            card.set_cover_requested.connect(self.set_album_cover_requested.emit)
             card.rename_requested.connect(self.rename_album_requested.emit)
             card.delete_requested.connect(self.delete_album_requested.emit)
             self.static_grid.addWidget(card, idx // cols, idx % cols)
@@ -574,6 +607,7 @@ class AlbumsView(QWidget):
             )
             card.open_requested.connect(lambda _sid, n=sname: self.smart_album_selected.emit(_sid, n))
             card.edit_rules_requested.connect(self.edit_smart_album_requested.emit)
+            card.set_cover_requested.connect(self.set_smart_album_cover_requested.emit)
             card.rename_requested.connect(self.rename_smart_album_requested.emit)
             card.delete_requested.connect(self.delete_smart_album_requested.emit)
             self.smart_grid.addWidget(card, s_idx // cols, s_idx % cols)

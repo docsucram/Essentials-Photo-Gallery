@@ -32,10 +32,13 @@ Standalone 64-bit Windows installers (`EssentialsPhotoGallery_Setup_x64.exe`) ar
 - **Built for Large Libraries (64-Bit Architecture)**
   WLPG was a 32-bit app that would frequently hit out-of-memory errors on large collections or high-megapixel cameras. Essentials Photo Gallery is native 64-bit with virtualised grid scrolling and separate SQLite catalog and thumbnail databases, designed to stay snappy even with **500,000+ photos and videos**.
 
-- **Next-Generation Image Formats & Camera RAW**
-  Alongside JPEG, PNG, BMP, TIFF, WebP, animated GIFs, and video playback, includes native support for **HEIC / HEIF / HIF**, **AVIF**, **JPEG XL (`.jxl`)**, and proprietary camera **RAW** formats—complete with automatic Display P3 ICC-to-sRGB colour management and sidecar-safe metadata handling.
+- **Next-Generation Image Formats, RAW Fast-Path & USB Import**
+  Alongside JPEG, PNG, BMP, TIFF, WebP, animated GIFs, and video playback, includes native support for **HEIC / HEIF / HIF**, **AVIF**, **JPEG XL (`.jxl`)**, and proprietary camera **RAW** formats (with embedded JPEG fast-path for instant browsing before full 16-bit demosaicing), Display P3 ICC-to-sRGB colour management, and native Windows **MTP/PTP** camera & smartphone import.
 
-- **Static Albums & 17-Dimension Boolean Smart Albums**
+- **Folder Manager, Private Mode & Offline Text-in-Photo OCR**
+  Control per-folder scanning (*Scan Always*, *Scan Once*, *Exclude*), opt in to offline **Text-in-Photo OCR** (`Tesseract` / `RapidOCR` / `Windows OCR` with SQLite `FTS5` search and copyable OCR text), and protect sensitive folders with **Private Mode** (PIN lock & idle auto-lock).
+
+- **Multi-Photo Compare Mode, Static Albums & 17-Dimension Boolean Smart Albums**
   Organise photos manually into curated **My Albums** (non-destructive links; removing an item leaves original files untouched), or build live **Smart Albums** using multi-condition **ALL (AND)** / **ANY (OR)** rule builders across People, Tags, Places, Time of Day, Date / On This Day, Camera Make/Model, Rating, Flag, File Type, Orientation, Megapixels, Size, Folder, and Caption/Filename—plus one-click *Save Current Filter as Smart Album...*.
 
 - **WLPG Hierarchical Tagging**

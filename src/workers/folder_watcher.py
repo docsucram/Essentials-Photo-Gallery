@@ -49,6 +49,7 @@ class StartupReconciliationSignals(QObject):
     """Signals emitted by StartupReconciliationWorker upon checking offline changes."""
 
     reconciliation_completed = Signal(int, int, int, int)  # added, modified, deleted, folders_changed
+    missing_roots_detected = Signal(list)                  # list[{"id": int, "path": str, "name": str}]
     error = Signal(str)
 
 
@@ -493,13 +494,45 @@ class StartupReconciliationWorker(QRunnable):
         try:
             conn = self.engine.catalog_conn()
             folder_rows = conn.execute(
-                "SELECT id, path, name, parent_id, mtime FROM folders ORDER BY path ASC;"
+                """
+                SELECT id, path, name, parent_id, mtime
+                FROM folders
+                WHERE COALESCE(monitor_mode, 'always') = 'always'
+                ORDER BY path ASC;
+                """
             ).fetchall()
             db_folders = {
                 os.path.normcase(os.path.normpath(r["path"])): dict(r) for r in folder_rows
             }
 
-            # 1. Prune missing folders that were deleted on disk while offline
+            # 1. Identify missing root folders (do NOT auto-delete them — prompt user to locate or remove)
+            missing_roots: list[dict[str, object]] = []
+            missing_root_prefixes: tuple[str, ...] = ()
+            for path_nc, f_data in list(db_folders.items()):
+                if f_data["parent_id"] is None:
+                    f_path = f_data["path"]
+                    if not os.path.exists(f_path) or not os.path.isdir(f_path):
+                        missing_roots.append(
+                            {
+                                "id": int(f_data["id"]),
+                                "path": f_path,
+                                "name": str(f_data["name"]),
+                            }
+                        )
+            if missing_roots:
+                missing_root_prefixes = tuple(
+                    os.path.normcase(os.path.normpath(str(m["path"])).rstrip("/\\") + os.sep)
+                    for m in missing_roots
+                )
+                missing_root_ncs = {
+                    os.path.normcase(os.path.normpath(str(m["path"])))
+                    for m in missing_roots
+                }
+                for path_nc in list(db_folders.keys()):
+                    if path_nc in missing_root_ncs or path_nc.startswith(missing_root_prefixes):
+                        del db_folders[path_nc]
+
+            # 1b. Prune missing child subfolders whose root folder is still online
             for path_nc, f_data in list(db_folders.items()):
                 if self.cancel_flag.is_set:
                     return
@@ -511,6 +544,7 @@ class StartupReconciliationWorker(QRunnable):
                     folders_changed += 1
                     del db_folders[path_nc]
 
+            excluded_paths = repo.get_excluded_folder_paths()
             # 2. Check root/library folders for untracked child subdirectories on disk
             root_folders = [f for f in db_folders.values() if f["parent_id"] is None]
             for root_f in root_folders:
@@ -526,6 +560,9 @@ class StartupReconciliationWorker(QRunnable):
                                 break
                             if entry.is_dir(follow_symlinks=False):
                                 if entry.name.lower() in IGNORED_DIR_NAMES:
+                                    continue
+                                e_norm = str(Path(entry.path)).replace("\\", "/").rstrip("/").lower()
+                                if e_norm in excluded_paths:
                                     continue
                                 e_path = os.path.normpath(entry.path)
                                 e_path_nc = os.path.normcase(e_path)
@@ -578,6 +615,8 @@ class StartupReconciliationWorker(QRunnable):
                     folders_changed += 1
 
             if not self.cancel_flag.is_set:
+                if missing_roots:
+                    self.signals.missing_roots_detected.emit(missing_roots)
                 self.signals.reconciliation_completed.emit(
                     total_added, total_modified, total_deleted, folders_changed
                 )
@@ -598,6 +637,7 @@ class FolderWatcherDaemon(QObject):
 
     delta_completed = Signal(str, int, int, int, int)  # folder_path, added, modified, deleted, folders_changed
     reconciliation_completed = Signal(int, int, int, int)  # added, modified, deleted, folders_changed
+    missing_roots_detected = Signal(list)                  # list[{"id": int, "path": str, "name": str}]
 
     def __init__(
         self,
@@ -622,6 +662,7 @@ class FolderWatcherDaemon(QObject):
     def start_startup_reconciliation(self) -> None:
         """Launches non-blocking background startup reconciliation for offline filesystem changes."""
         worker = StartupReconciliationWorker(self.engine, cancel_flag=self._cancel_flag)
+        worker.signals.missing_roots_detected.connect(self.missing_roots_detected.emit)
         worker.signals.reconciliation_completed.connect(self._on_reconciliation_completed)
         QThreadPool.globalInstance().start(worker)
 
@@ -635,11 +676,11 @@ class FolderWatcherDaemon(QObject):
     def update_watched_paths(self) -> list[str]:
         """Synchronizes watcher directories with currently registered library folders in catalog.db."""
         repo = CatalogRepository(self.engine)
-        folders = repo.get_folders()
+        monitored_paths = repo.get_monitored_folder_paths()
         disk_paths: set[str] = {
-            os.path.normpath(f["path"])
-            for f in folders
-            if f.get("path") and os.path.exists(f["path"]) and os.path.isdir(f["path"])
+            os.path.normpath(p)
+            for p in monitored_paths
+            if p and os.path.exists(p) and os.path.isdir(p)
         }
 
         current_watched = set(self.watcher.directories())
@@ -670,6 +711,21 @@ class FolderWatcherDaemon(QObject):
             self.watcher.removePath(norm_p)
             return True
         return False
+
+    def release_watched_subtree(self, folder_path: str) -> list[str]:
+        """Removes folder_path and all watched descendant directories so Windows releases directory handles."""
+        norm_root = os.path.normpath(folder_path)
+        norm_root_ci = os.path.normcase(norm_root)
+        prefix_ci = norm_root_ci.rstrip("\\/") + os.sep
+        to_remove = [
+            d
+            for d in self.watcher.directories()
+            if os.path.normcase(os.path.normpath(d)) == norm_root_ci
+            or os.path.normcase(os.path.normpath(d)).startswith(prefix_ci)
+        ]
+        if to_remove:
+            self.watcher.removePaths(to_remove)
+        return to_remove
 
     def _on_directory_changed(self, path: str) -> None:
         """Invoked by QFileSystemWatcher whenever kernel detects a file change."""

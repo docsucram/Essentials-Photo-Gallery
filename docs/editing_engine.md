@@ -33,10 +33,11 @@ The **Edit & Create Engine** pairs deterministic floating-point / LUT-accelerate
                                      v
 +-------------------------------------------------------------------------+
 |                    Computer Vision & AI Runtime Layer                   |
-|  - OpenCV (cv2): SIFT/ORB, Homography, Telea/NS Inpainting, CIE LAB     |
+|  - OpenCV 5.0 (cv2): SIFT/ORB, ALIKED/DISK+LightGlue, USAC_MAGSAC,      |
+|    Telea/NS Inpainting, CIE LAB                                         |
 |  - ONNX Runtime: Depth-Anything-V2 / MiDaS & MODNet / RMBG matting      |
-|  - NumPy: Vectorized floating-point / 4x hierarchical Laplacian math    |
-|  - Pillow (PIL): Next-gen codecs (HEIC/AVIF/JXL), ICC & EXIF handling   |
+|  - NumPy 2.5.4: Vectorized AVX2/AVX-512 float / Laplacian math          |
+|  - Pillow 13.0.0: Next-gen codecs (HEIC/AVIF/JXL), ICC & EXIF handling  |
 +-------------------------------------------------------------------------+
 ```
 
@@ -45,6 +46,8 @@ The **Edit & Create Engine** pairs deterministic floating-point / LUT-accelerate
 2. **Background Master Commit & Dirty-Stage Cache (`_MasterRenderRunnable` & `_STAGE_CACHE`):** Releasing sliders schedules a debounced (`250ms` `_master_render_timer`) full-resolution `master_np_rgb` pass on `QThreadPool` with generation-counter cancellation (and synchronous `ensure_master_rendered()` before Save/Export). `render_adjusted_image()` caches intermediate `dd_img`, `tl_img`, and `bokeh_data` checkpoints per `(media_id, H, W)` so downstream sliders skip upstream passes.
 3. **Precomputed Look-Up Tables (`cv2.LUT`):** Levels, Filmic Exposure, and Filmic Contrast combine into a single 256-entry `uint8` LUT executing in **`1.1 ms`**, paired with precomputed sRGB/linear (`_LUT_SRGB_TO_LIN`, `_LUT_LIN_TO_SRGB`, `_VIBRANCE_POW_LUT`) and 4x downsampled base/detail illumination decomposition.
 4. **Non-Destructive File Protocol (`.OriginalFiles/`):** Saving over an original file stashes a byte-identical untouched copy inside `<folder>/.OriginalFiles/<filename>` (never overwriting an existing backup), enabling exact **Revert to original** and preserving EXIF/XMP blocks and spatial face coordinates.
+5. **Embedded JPEG Fast-Path for Camera RAW Files (`decode_raw_embedded_preview`):** Thumbnails and initial Single Image View opens extract the camera's embedded JPEG/bitmap preview (`raw.extract_thumb()` with EXIF orientation) for instant browsing, deferring full `rawpy` demosaicing (`_upgrade_raw_to_full_demosaic_async()`) until active slider editing.
+6. **Focus-Aware Fine Tune Ergonomics & Live RGB Histogram:** `_AeroFineTuneSlider` uses `Qt.StrongFocus` (ignoring wheel events when unfocused unless `Alt` is held, stepping `±1` or `±5` with `Shift`), while `HistogramWidget` renders translucent `R`, `G`, and `B` channel histograms behind the Luminance curve.
 
 ---
 
@@ -108,6 +111,7 @@ Resolution-scaled bilateral smoothing runs with $\text{res\_scale} = \max(W, H) 
 - **Positive Exposure Shoulder:** $f_{\text{scaled}} = f \cdot (1 + 1.4 b)$, asymptotically compressed above $\text{knee} = 0.65$ via $f_{\text{compressed}} = \text{knee} + \frac{\Delta}{1 + 1.8\Delta}$ to avoid harsh highlight clipping.
 - **Negative Exposure Toe:** Attenuates in stops ($2^{1.5 b}$) with subtle shadow toe lift $0.05 |b| f (1 - f)$ preserving deep shadow detail.
 - **CIE LAB Shadows/Highlights + Ambience:** Bilateral base/detail separation ($L = L_{\text{base}} + L_{\text{detail}}$) lifts dark regions ($L_{\text{base}}/255 < 0.65$) while boosting micro-contrast on $L_{\text{detail}}$ so lifted shadows stay punchy rather than muddy.
+- **AgX-Style Highlight Chroma Roll-Off:** Inside the CIE $L^*a^*b^*$ tonal pass (`need_tone_lab`), extreme highlights ($L^* > 220$) smoothly desaturate toward paper-white via $w_{\text{desat}} = \text{clip}((L^* - 220)/35, 0, 1)^2$ and $\text{rolloff} = 1 - 0.65 w_{\text{desat}}$ so boosted highlights do not clip to harsh yellow/magenta.
 - **Clarity:** Midtone bell-curve weight $w_{\text{mid}} = \text{clip}(1 - 4(L_{\text{base}}/255 - 0.5)^2, 0, 1)$ modulates $L_{\text{detail}}$ selectively in midtones.
 
 ### 3.3 Color Temperature, Tint & Skin-Safe Vibrance in CIE LAB
@@ -147,7 +151,7 @@ All presets blend continuously from $0\%$ to $100\%$ intensity.
 ## 5. Interactive Spot Fix (Retouch & Red Eye) and WYSIWYG Markup
 
 ### 5.1 Unified Spot Fix (`src/ui/media_viewer.py`)
-- **Mutual-Exclusion Modes:** Compact floating toolbar toggles **Blemish** healing and **Red eye** reduction sharing a continuous $6\text{px}..80\text{px}$ slider and `[` / `]` keyboard sizing.
+- **Mutual-Exclusion Modes:** Compact floating toolbar toggles **Blemish** healing, **Object eraser** (optional neural LaMa ONNX inpainting via `LaMaInpaintEngine`, also available as an optional AI Generative Fill toggle in Crop & Straighten and manageable/disableable under *Options → AI Downloads*), and **Red eye** reduction sharing a continuous $6\text{px}..80\text{px}$ slider and `[` / `]` keyboard sizing. `get_lama_model_status()` inspects disk state without eagerly loading ONNX Runtime into memory.
 - **Exact 1:1 View-Scale Geometry:** Brush radius maps dynamically through graphics transform scale $M_{11}$ ($r_{\text{scene}} = r_{\text{screen}} / \text{scale}$, $r_{\text{master}} = \max(2, \text{round}(r_{\text{scene}}))$) paired with a dual-ring high-contrast cursor.
 - **Frequency-Separation Texture Transfer (Blemish):** Splits local illumination via Gaussian blur ($L_{\text{low}}$ inpainted via Telea), extracts high-frequency pores/grain ($I_{\text{high}} = I - I_{\text{low}}$), copies unblemished texture from an 8-direction surrounding donor ring via `cv2.warpAffine`, variance-normalizes ($\sigma_{\text{donor}} / \sigma_{\text{transferred}}$), and recombines cleanly without smudging.
 - **Dual-Mode Red Eye:** Connected-component pupil detection (`r_ratio >= 1.25`, morphological closing to protect white corneal glints, neutral dark replacement) triggered either by brush click/stroke or legacy box drag.
@@ -173,9 +177,9 @@ All presets blend continuously from $0\%$ to $100\%$ intensity.
 
 ## 7. Multi-Photo Creation Studio (`src/imaging/create_tools.py`, `src/ui/create_studio_dialogs.py`)
 
-1. **ICE-Style Panorama Stitcher (`PanoramaDialog`):** Background `PanoramaWorker` loads EXIF-safe frames and runs SIFT (`2,500` keypoints) + FLANN Lowe's ratio ($0.75$) / cylindrical bundle adjustment or affine scan homography with OpenCL disabled (`cv2.ocl.setUseOpenCL(False)`) and a `2400px` input long-edge cap for stability, plus exposure compensation, multi-band Laplacian feathering, Navier-Stokes/Telea corner gap fill, and **Largest Interior Rectangle Auto-Crop** (`find_largest_interior_rectangle`) via 2D histogram monotonic stacks.
+1. **ICE-Style Panorama Stitcher (`PanoramaDialog`):** Background `PanoramaWorker` loads EXIF-safe frames and runs OpenCV `Stitcher` (or `estimate_homography_with_fallback`: SIFT/ORB → OpenCV 5.0 ALIKED/DISK + LightGlue learned matcher when ONNX weights are present → CLAHE-boosted SIFT, all solved with `USAC_MAGSAC` homography) with OpenCL disabled (`cv2.ocl.setUseOpenCL(False)`) and a `2400px` input long-edge cap for stability, plus exposure compensation, multi-band Laplacian feathering, Navier-Stokes/Telea corner gap fill, and **Largest Interior Rectangle Auto-Crop** (`find_largest_interior_rectangle`) via 2D histogram monotonic stacks.
 2. **Interactive Collage & "Then & Now" (`CollageDialog`):** Smart hero face slot protection (`>94%` opacity lock, $40\%$ upward headroom crop) guaranteeing $100\%$ gapless grid/masonry coverage (1–35 photos), tactile **Polaroid Table Scatter** with drop shadows and date/caption stamping, and chronological **Then & Now** comparison cards.
-3. **Photo Fuse (`PhotoFuseDialog`):** Background `_PhotoFuseWorker` loads frames, aligns burst shots via SIFT/ORB + RANSAC homography ($\ge 6$ inliers, determinant sanity gate, and warning banner for unalignable shots), and detects faces with a CPU-only InsightFace detection session (`allowed_modules=["detection"]`, `det_score >= 0.55`, 5-point landmark gate, strict Haar fallback). Features a visual Base Shot thumbnail picker with per-base caching (`_base_cache`), per-face local alignment (`_align_face_patch_local` via 5-point landmark `estimateAffinePartial2D` or Euclidean ECC fallback), mask-aware CIE LAB color matching, multi-band Laplacian pyramid blending (up to 5 levels), a **Show face boxes** toggle, and a **View Original Base** comparison banner.
+3. **Photo Fuse (`PhotoFuseDialog`):** Background `_PhotoFuseWorker` loads frames, aligns burst shots via `estimate_homography_with_fallback` (SIFT/ORB + `USAC_MAGSAC` homography with OpenCV 5.0 ALIKED/DISK + LightGlue and CLAHE fallbacks, $\ge 6$ inliers, determinant sanity gate, and warning banner for unalignable shots), and detects faces with a CPU-only InsightFace detection session (`allowed_modules=["detection"]`, `det_score >= 0.55`, 5-point landmark gate, strict Haar fallback). Features a visual Base Shot thumbnail picker with per-base caching (`_base_cache`), per-face local alignment (`_align_face_patch_local` via 5-point landmark `estimateAffinePartial2D` or Euclidean ECC fallback), mask-aware CIE LAB color matching, multi-band Laplacian pyramid blending (up to 5 levels), a **Show face boxes** toggle, and a **View Original Base** comparison banner.
 4. **Colour Pop (`ColourPopDialog`):** Subject mask seeded from face detections or center saliency + Photoshop-style multi-color eyedropper (`Click` set, `Shift+Click` add, `Right/Alt+Click` remove) refined with He et al. Joint Guided Filter edge snapping.
 5. **3D Cinematic Motion (`CinematicMotionDialog`):** Telea disocclusion background inpainting behind foreground masks + `cv2.remap` bicubic camera parallax profiles (*Dolly Zoom*, *Drift*, *Orbit*, *Pan*) exported to 1080p 30 FPS MP4.
 
@@ -194,7 +198,7 @@ All presets blend continuously from $0\%$ to $100\%$ intensity.
 
 | Subsystem | Test Suite | Verified Coverage |
 | :--- | :--- | :--- |
-| **Core Edit & OpenCV** | [`tests/test_modern_opencv_engine.py`](../tests/test_modern_opencv_engine.py), [`tests/test_modern_editor_pipeline.py`](../tests/test_modern_editor_pipeline.py) | LUT parity, exposure shoulder/toe, CIE LAB ambience, vibrance skin locus, U-Point, auto-straighten |
+| **Core Edit & OpenCV** | [`tests/test_modern_opencv_engine.py`](../tests/test_modern_opencv_engine.py), [`tests/test_modern_editor_pipeline.py`](../tests/test_modern_editor_pipeline.py), [`tests/test_raw_fastpath_and_finetune_ux.py`](../tests/test_raw_fastpath_and_finetune_ux.py) | LUT parity, exposure shoulder/toe, AgX highlight chroma roll-off, CIE LAB ambience, vibrance skin locus, U-Point, auto-straighten, RAW embedded JPEG fast-path, focus-aware sliders & RGB histogram |
 | **Markup & Callouts** | [`tests/test_markup_wysiwyg_and_tools.py`](../tests/test_markup_wysiwyg_and_tools.py), [`tests/test_markup_interactive_move_and_crop.py`](../tests/test_markup_interactive_move_and_crop.py) | 8 tools, inline text WYSIWYG, shape swap, dual color swatches, `PixelArrayUndoCommand`, `.OriginalFiles` save & clear |
 | **Spot Fix & Brush** | [`tests/test_spot_fix_consolidation_and_brush_scale.py`](../tests/test_spot_fix_consolidation_and_brush_scale.py) | Frequency separation transfer, 1:1 cursor view scale, `[`/`]` shortcuts, dual-mode red eye, `Esc` cascade |
 | **Depth & Light** | [`tests/test_depth_light_and_save_workflow.py`](../tests/test_depth_light_and_save_workflow.py) | `DepthAndMatteEngine` proxy/master cache, bokeh, relight, haze, Save vs Save as Copy, dock bindings |

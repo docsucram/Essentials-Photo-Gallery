@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import calendar
 import os
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
@@ -411,22 +412,7 @@ class _LeftNavTree(QTreeWidget):
 
                 if is_right:
                     menu = QMenu(self)
-                    menu.setStyleSheet("""
-                        QMenu {
-                            background-color: #FFFFFF;
-                            border: 1px solid #7192BF;
-                            font-family: 'Segoe UI';
-                            font-size: 9pt;
-                            padding: 2px;
-                        }
-                        QMenu::item {
-                            padding: 4px 22px 4px 18px;
-                        }
-                        QMenu::item:selected {
-                            background-color: #CCE8FF;
-                            color: #000000;
-                        }
-                    """)
+                    self._apply_context_menu_style(menu)
                     act_move = menu.addAction("Move here")
                     f = act_move.font()
                     f.setBold(True)
@@ -474,6 +460,7 @@ class LeftNavigationDock(QDockWidget):
     filter_changed = Signal()
     folder_add_requested = Signal()
     folder_remove_requested = Signal(int, str, str)  # folder_id, folder_path, folder_name
+    folder_about_to_rename = Signal(str)  # old_path (release watcher handles before os.rename)
     folder_renamed = Signal(str, str, str)  # old_path, new_path, new_name
     folder_created = Signal(str)  # new_folder_path
     folder_deleted = Signal(int, str)  # folder_id, folder_path
@@ -481,6 +468,8 @@ class LeftNavigationDock(QDockWidget):
     files_dropped_on_folder = Signal(int, str, list, bool)
     people_directory_requested = Signal()
     albums_view_requested = Signal()
+    albums_section_requested = Signal(str)  # "all" | "my" | "smart"
+    dates_section_requested = Signal()
     section_order_changed = Signal(list)
     tag_hierarchy_changed = Signal()
     place_selected = Signal(str, str, str)  # country, state, city
@@ -492,6 +481,8 @@ class LeftNavigationDock(QDockWidget):
     rename_smart_album_requested = Signal(int, str)
     delete_smart_album_requested = Signal(int, str)
     save_filter_as_smart_album_requested = Signal()
+    folder_options_requested = Signal(int)  # folder_id
+    private_mode_toggled = Signal(bool)  # include_private
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Navigation", parent)
@@ -531,6 +522,7 @@ class LeftNavigationDock(QDockWidget):
         self._smart_album_id: int | None = None
         self._smart_album_name: str = ""
         self._smart_album_rules: str | None = None
+        self._dates_section_active: bool = False
 
         # Section visibility state (Options dialog)
         self._show_albums: bool = True
@@ -570,6 +562,14 @@ class LeftNavigationDock(QDockWidget):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+
+        # Keep btn_private_mode attribute for signal/API compatibility, but keep it hidden
+        # (Private Mode is controlled cleanly from the File menu).
+        self.btn_private_mode = QPushButton("🔒 Private: Locked", container)
+        self.btn_private_mode.setCheckable(True)
+        self.btn_private_mode.setChecked(False)
+        self.btn_private_mode.setVisible(False)
+        self.btn_private_mode.toggled.connect(self._on_private_btn_toggled)
 
         # Unified QTreeWidget occupying the primary vertical area (matches main_ui.png)
         self.tree = _LeftNavTree(container)
@@ -639,9 +639,18 @@ class LeftNavigationDock(QDockWidget):
                     outline: none;
                 }
                 QTreeWidget#LeftNavTree::item {
-                    padding: 2px 4px;
+                    padding: 0px 4px;
+                    min-height: 18px;
                     border: 1px solid transparent;
                     border-radius: 3px;
+                    color: #1F2937;
+                }
+                QTreeWidget#LeftNavTree QLineEdit {
+                    padding: 0px 2px;
+                    margin: 0px;
+                    border: 1px solid #60A5FA;
+                    border-radius: 2px;
+                    background: #FFFFFF;
                     color: #1F2937;
                 }
                 QTreeWidget#LeftNavTree::item:hover {
@@ -681,9 +690,18 @@ class LeftNavigationDock(QDockWidget):
                 outline: none;
             }
             QTreeWidget#LeftNavTree::item {
-                padding: 2px 4px;
+                padding: 0px 4px;
+                min-height: 18px;
                 border: 1px solid transparent;
                 border-radius: 2px;
+            }
+            QTreeWidget#LeftNavTree QLineEdit {
+                padding: 0px 2px;
+                margin: 0px;
+                border: 1px solid #5B9BD5;
+                border-radius: 2px;
+                background: #FFFFFF;
+                color: #1E395B;
             }
             QTreeWidget#LeftNavTree::item:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -724,10 +742,19 @@ class LeftNavigationDock(QDockWidget):
                     outline: none;
                 }
                 QTreeWidget#LeftNavTree::item {
-                    padding: 2px 4px;
+                    padding: 0px 4px;
+                    min-height: 18px;
                     border: 1px solid transparent;
                     border-radius: 2px;
                     color: #E2E8F0;
+                }
+                QTreeWidget#LeftNavTree QLineEdit {
+                    padding: 0px 2px;
+                    margin: 0px;
+                    border: 1px solid #3B82F6;
+                    border-radius: 2px;
+                    background: #0F172A;
+                    color: #F8FAFC;
                 }
                 QTreeWidget#LeftNavTree::item:hover {
                     background: #262C36;
@@ -1133,13 +1160,15 @@ class LeftNavigationDock(QDockWidget):
                 else:
                     f_icon = folder_icon
 
-                item = QTreeWidgetItem([fname])
+                is_priv = int(f.get("is_private") or 0) == 1
+                display_name = f"🔒 {fname}" if is_priv else fname
+                item = QTreeWidgetItem([display_name])
                 item.setData(0, _NODE_TYPE_ROLE, "folder")
                 item.setData(0, _NODE_PAYLOAD_ROLE, fid)
                 item.setData(0, _OLD_NAME_ROLE, fname)
                 item.setData(0, _OLD_PATH_ROLE, fpath_str)
                 item.setIcon(0, f_icon)
-                item.setToolTip(0, fpath_str)
+                item.setToolTip(0, f"{fpath_str} (Private)" if is_priv else fpath_str)
                 self._folder_items[fid] = item
 
             for f in folders:
@@ -1460,6 +1489,10 @@ class LeftNavigationDock(QDockWidget):
         """Return currently selected Static Album id, or None."""
         return self._album_id
 
+    def active_smart_album_id(self) -> int | None:
+        """Return currently selected Smart Album id, or None."""
+        return self._smart_album_id
+
     def _apply_tag_item_visual_state(
         self, item: QTreeWidgetItem, state: Literal["neutral", "include", "exclude"]
     ) -> None:
@@ -1583,18 +1616,57 @@ class LeftNavigationDock(QDockWidget):
             for r_val, r_item in self._rating_items.items():
                 r_item.setCheckState(0, Qt.Checked if r_val in self._ratings else Qt.Unchecked)
 
+            # 6b. Places
+            has_place = False
+            if (
+                (self._location_country or self._location_state or self._location_city)
+                and hasattr(self, "root_places")
+                and self.root_places is not None
+            ):
+                target_place = (
+                    self._location_country or "",
+                    self._location_state or "",
+                    self._location_city or "",
+                )
+
+                def find_place_item(parent_item: QTreeWidgetItem) -> QTreeWidgetItem | None:
+                    for i in range(parent_item.childCount()):
+                        child = parent_item.child(i)
+                        if child is not None:
+                            if child.data(0, _NODE_PAYLOAD_ROLE) == target_place:
+                                return child
+                            found = find_place_item(child)
+                            if found is not None:
+                                return found
+                    return None
+
+                matched_place = find_place_item(self.root_places)
+                if matched_place is not None:
+                    matched_place.setSelected(True)
+                    self.tree.setCurrentItem(matched_place)
+                    p = matched_place.parent()
+                    while p:
+                        p.setExpanded(True)
+                        p = p.parent()
+                    self.tree.scrollToItem(matched_place)
+                    has_place = True
+
             # 7. All photos and videos (highlighted whenever no specific facet filter is active)
             is_all_media = (
                 not has_album
                 and not has_folder
                 and not has_date
+                and not has_place
                 and not self._include_tag_ids
                 and not self._exclude_tag_ids
                 and not self._untagged_only
                 and not self._person_ids
                 and not self._ratings
             )
-            if hasattr(self, "root_all") and self.root_all is not None:
+            if is_all_media and self._dates_section_active and hasattr(self, "root_dates") and self.root_dates is not None:
+                self.root_dates.setSelected(True)
+                self.tree.setCurrentItem(self.root_dates)
+            elif hasattr(self, "root_all") and self.root_all is not None:
                 self.root_all.setSelected(is_all_media)
                 if is_all_media:
                     self.tree.setCurrentItem(self.root_all)
@@ -1730,6 +1802,7 @@ class LeftNavigationDock(QDockWidget):
                 self.root_all.setSelected(False)
 
         if changed:
+            self._dates_section_active = False
             self._update_summary_label()
             self.filter_changed.emit()
 
@@ -1748,10 +1821,17 @@ class LeftNavigationDock(QDockWidget):
             self.clear_all_filters()
             return
         if ntype == "section_albums":
+            item.setExpanded(True)
             self.albums_view_requested.emit()
+            self.albums_section_requested.emit("all")
             return
-        if ntype in ("section_my_albums", "section_smart_albums"):
-            item.setExpanded(not item.isExpanded())
+        if ntype == "section_my_albums":
+            item.setExpanded(True)
+            self.albums_section_requested.emit("my")
+            return
+        if ntype == "section_smart_albums":
+            item.setExpanded(True)
+            self.albums_section_requested.emit("smart")
             return
         if ntype == "album" and isinstance(payload, tuple):
             self._select_album_scope(album_id=int(payload[0]), album_name=str(payload[1]))
@@ -1768,12 +1848,23 @@ class LeftNavigationDock(QDockWidget):
             self.filter_changed.emit()
             return
         if ntype == "section_dates":
-            self._date_year = None
-            self._date_month = None
-            self._date_day = None
-            self._sync_tree_selection()
+            self._updating_tree = True
+            try:
+                self._album_id = None
+                self._album_name = ""
+                self._smart_album_id = None
+                self._smart_album_name = ""
+                self._smart_album_rules = None
+                self._reset_non_album_facets()
+                self._dates_section_active = True
+                if item.childCount() > 0:
+                    item.setExpanded(True)
+                self._sync_tree_selection()
+            finally:
+                self._updating_tree = False
             self._update_summary_label()
             self.filter_changed.emit()
+            self.dates_section_requested.emit()
             return
         if ntype == "section_tags":
             self._updating_tree = True
@@ -1852,7 +1943,11 @@ class LeftNavigationDock(QDockWidget):
             # User committed a new name: finish editing
             old_path = self._editing_folder_old_path
             self._editing_folder_item = None
-            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            self._updating_tree = True
+            try:
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            finally:
+                self._updating_tree = False
 
             if not new_name:
                 self._updating_tree = True
@@ -1892,18 +1987,31 @@ class LeftNavigationDock(QDockWidget):
                 )
                 return
 
-            try:
-                os.rename(str(old_p), str(new_p))
-            except Exception as exc:
+            self.folder_about_to_rename.emit(str(old_p))
+            rename_err: Exception | None = None
+            for attempt in range(4):
+                try:
+                    os.rename(str(old_p), str(new_p))
+                    rename_err = None
+                    break
+                except PermissionError as exc:
+                    rename_err = exc
+                    QApplication.processEvents()
+                    time.sleep(0.05)
+                except Exception as exc:
+                    rename_err = exc
+                    break
+            if rename_err is not None:
+                logger.warning("Could not rename folder '%s' -> '%s': %s", old_p, new_p, rename_err)
                 self._updating_tree = True
                 try:
                     item.setText(0, old_name)
                 finally:
                     self._updating_tree = False
-                QToolTip.showText(
-                    QCursor.pos(),
-                    f"Could not rename folder: {exc}",
-                    self.tree,
+                QMessageBox.warning(
+                    self,
+                    "Rename Folder",
+                    f"Could not rename folder:\n{rename_err}",
                 )
                 return
 
@@ -1911,6 +2019,8 @@ class LeftNavigationDock(QDockWidget):
             try:
                 item.setText(0, new_name)
                 item.setToolTip(0, str(new_p))
+                item.setData(0, _OLD_NAME_ROLE, new_name)
+                item.setData(0, _OLD_PATH_ROLE, str(new_p))
             finally:
                 self._updating_tree = False
 
@@ -1957,38 +2067,78 @@ class LeftNavigationDock(QDockWidget):
         self._update_summary_label()
         self.filter_changed.emit()
 
+    def _apply_context_menu_style(self, menu: QMenu) -> None:
+        is_dark = bool(getattr(self, "_is_dark", False) or getattr(self, "_dark_mode", False))
+        if is_dark:
+            menu.setStyleSheet(
+                """
+                QMenu {
+                    background-color: #1F242D;
+                    border: 1px solid #3E4756;
+                    border-radius: 6px;
+                    padding: 4px;
+                    color: #E2E8F0;
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 12px;
+                }
+                QMenu::item {
+                    color: #E2E8F0;
+                    padding: 6px 20px 6px 12px;
+                    border-radius: 4px;
+                }
+                QMenu::item:selected {
+                    background-color: #2D3748;
+                    color: #FFFFFF;
+                }
+                QMenu::item:disabled {
+                    color: #64748B;
+                }
+                QMenu::separator {
+                    height: 1px;
+                    background-color: #334155;
+                    margin: 4px 6px;
+                }
+                """
+            )
+        else:
+            menu.setStyleSheet(
+                """
+                QMenu {
+                    background-color: #FFFFFF;
+                    border: 1px solid #CBD5E1;
+                    border-radius: 6px;
+                    padding: 4px;
+                    color: #0F172A;
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 12px;
+                }
+                QMenu::item {
+                    color: #0F172A;
+                    padding: 6px 20px 6px 12px;
+                    border-radius: 4px;
+                }
+                QMenu::item:selected {
+                    background-color: #F1F5F9;
+                    color: #0F172A;
+                }
+                QMenu::item:disabled {
+                    color: #94A3B8;
+                }
+                QMenu::separator {
+                    height: 1px;
+                    background-color: #E2E8F0;
+                    margin: 4px 6px;
+                }
+                """
+            )
+
     def _build_context_menu(self, item: QTreeWidgetItem) -> QMenu:
         """Constructs the QMenu corresponding to the given navigation item."""
         ntype = item.data(0, _NODE_TYPE_ROLE)
         payload = item.data(0, _NODE_PAYLOAD_ROLE)
 
         menu = QMenu(self)
-        menu.setStyleSheet(
-            """
-            QMenu {
-                background-color: #FFFFFF;
-                border: 1px solid #CBD5E1;
-                border-radius: 6px;
-                padding: 4px;
-                color: #0F172A;
-                font-family: 'Segoe UI', sans-serif;
-                font-size: 12px;
-            }
-            QMenu::item {
-                padding: 6px 20px 6px 12px;
-                border-radius: 4px;
-            }
-            QMenu::item:selected {
-                background-color: #F1F5F9;
-                color: #0F172A;
-            }
-            QMenu::separator {
-                height: 1px;
-                background-color: #E2E8F0;
-                margin: 4px 6px;
-            }
-            """
-        )
+        self._apply_context_menu_style(menu)
         if ntype == "section_tags":
             act_clean = QAction("Delete unused tags", menu)
             act_clean.triggered.connect(self._on_delete_unused_tags)
@@ -2029,6 +2179,10 @@ class LeftNavigationDock(QDockWidget):
                 act_open_loc = QAction("Open folder location", menu)
                 act_open_loc.triggered.connect(lambda _c=False, fp=folder_path: self._open_folder_location(fp))
                 menu.addAction(act_open_loc)
+
+            act_folder_opts = QAction("Folder Options...", menu)
+            act_folder_opts.triggered.connect(lambda _c=False, folder_id=fid: self.folder_options_requested.emit(folder_id))
+            menu.addAction(act_folder_opts)
 
             menu.addSeparator()
 
@@ -2158,6 +2312,19 @@ class LeftNavigationDock(QDockWidget):
         if not menu.isEmpty():
             menu.exec(self.tree.viewport().mapToGlobal(pos))
 
+    def _on_private_btn_toggled(self, checked: bool) -> None:
+        self.btn_private_mode.setText("🔓 Private: Shown" if checked else "🔒 Private: Locked")
+        self.private_mode_toggled.emit(bool(checked))
+
+    def set_private_mode_state(self, enabled: bool) -> None:
+        """Synchronize the Private Mode toggle button without re-emitting signals."""
+        if not hasattr(self, "btn_private_mode"):
+            return
+        self.btn_private_mode.blockSignals(True)
+        self.btn_private_mode.setChecked(bool(enabled))
+        self.btn_private_mode.setText("🔓 Private: Shown" if enabled else "🔒 Private: Locked")
+        self.btn_private_mode.blockSignals(False)
+
     def _on_delete_unused_tags(self) -> None:
         if not hasattr(self, "_repo") or self._repo is None:
             return
@@ -2265,9 +2432,17 @@ class LeftNavigationDock(QDockWidget):
     def _start_inline_rename(self, item: QTreeWidgetItem) -> None:
         """Starts in-place inline renaming on the tree item, exactly like Windows File Explorer."""
         self._editing_folder_item = item
-        self._editing_folder_old_name = item.text(0)
-        self._editing_folder_old_path = item.toolTip(0)
-        item.setFlags(item.flags() | Qt.ItemIsEditable)
+        raw_name = item.data(0, _OLD_NAME_ROLE) or item.text(0)
+        raw_path = item.data(0, _OLD_PATH_ROLE) or item.toolTip(0)
+        self._editing_folder_old_name = str(raw_name)
+        self._editing_folder_old_path = str(raw_path)
+        self._updating_tree = True
+        try:
+            if item.text(0) != self._editing_folder_old_name:
+                item.setText(0, self._editing_folder_old_name)
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
+        finally:
+            self._updating_tree = False
         self.tree.setCurrentItem(item)
         self.tree.editItem(item, 0)
 
@@ -2293,6 +2468,8 @@ class LeftNavigationDock(QDockWidget):
         child = QTreeWidgetItem(parent_item, [candidate])
         child.setData(0, _NODE_TYPE_ROLE, "folder")
         child.setData(0, _NODE_PAYLOAD_ROLE, None)
+        child.setData(0, _OLD_NAME_ROLE, candidate)
+        child.setData(0, _OLD_PATH_ROLE, str(new_dir))
         child.setToolTip(0, str(new_dir))
         child.setIcon(0, make_wlpg_icon("folder", 16))
         parent_item.setExpanded(True)
@@ -2301,7 +2478,11 @@ class LeftNavigationDock(QDockWidget):
         self._editing_folder_item = child
         self._editing_folder_old_name = candidate
         self._editing_folder_old_path = str(new_dir)
-        child.setFlags(child.flags() | Qt.ItemIsEditable)
+        self._updating_tree = True
+        try:
+            child.setFlags(child.flags() | Qt.ItemIsEditable)
+        finally:
+            self._updating_tree = False
         self.tree.editItem(child, 0)
 
         self.folder_created.emit(str(new_dir))
@@ -2406,6 +2587,46 @@ class LeftNavigationDock(QDockWidget):
         if self._folder_id is not None:
             return self._folder_name
         return None
+
+    def select_place(
+        self,
+        country: str | None = None,
+        state: str | None = None,
+        city: str | None = None,
+        *,
+        clear_scope: bool = True,
+    ) -> None:
+        """Filters the gallery to a place from the Places hierarchy."""
+        if clear_scope:
+            self._album_id = None
+            self._album_name = ""
+            self._smart_album_id = None
+            self._smart_album_name = ""
+            self._smart_album_rules = None
+            self._folder_id = None
+            self._folder_name = "All folders"
+        self._location_country = (country or "").strip() or None
+        self._location_state = (state or "").strip() or None
+        self._location_city = (city or "").strip() or None
+        self._sync_tree_selection()
+        self._update_summary_label()
+        self.filter_changed.emit()
+
+    def clear_place_filter(self, *, emit_signal: bool = True) -> None:
+        """Clears the active Places hierarchy filter."""
+        if (
+            self._location_country is None
+            and self._location_state is None
+            and self._location_city is None
+        ):
+            return
+        self._location_country = None
+        self._location_state = None
+        self._location_city = None
+        self._sync_tree_selection()
+        self._update_summary_label()
+        if emit_signal:
+            self.filter_changed.emit()
 
     def select_date(
         self,
@@ -2556,11 +2777,15 @@ class LeftNavigationDock(QDockWidget):
         self.filter_changed.emit()
 
     def _reset_non_album_facets(self) -> None:
+        self._dates_section_active = False
         self._folder_id = None
         self._folder_name = "All folders"
         self._date_year = None
         self._date_month = None
         self._date_day = None
+        self._location_country = None
+        self._location_state = None
+        self._location_city = None
         self._include_tag_ids.clear()
         self._exclude_tag_ids.clear()
         self._untagged_only = False
@@ -2660,6 +2885,9 @@ class LeftNavigationDock(QDockWidget):
             parts.append("Not tagged")
         if self._person_ids:
             parts.append(f"People: {len(self._person_ids)}")
+        if self._location_country or self._location_state or self._location_city:
+            loc_parts = [p for p in (self._location_city, self._location_state, self._location_country) if p]
+            parts.append(f"Place: {', '.join(loc_parts)}")
         if self._ratings:
             parts.append(f"Ratings: {sorted(self._ratings, reverse=True)}")
         if self._flagged_only:
@@ -2708,6 +2936,9 @@ class LeftNavigationDock(QDockWidget):
             "edited_filter": getattr(self, "_edited_filter", (1 if self._edited_only else None)),
             "media_type": self._media_type,
             "orientation_filter": getattr(self, "_orientation_filter", "all"),
+            "location_country": self._location_country,
+            "location_state": self._location_state,
+            "location_city": self._location_city,
         }
 
     def restore_filter_state(self, state: dict[str, Any]) -> None:
@@ -2734,6 +2965,9 @@ class LeftNavigationDock(QDockWidget):
         self._edited_only = (self._edited_filter == 1)
         self._media_type = state.get("media_type", "all")
         self._orientation_filter = state.get("orientation_filter", "all")
+        self._location_country = state.get("location_country")
+        self._location_state = state.get("location_state")
+        self._location_city = state.get("location_city")
 
         self._updating_tree = True
         try:
@@ -2796,6 +3030,9 @@ class LeftNavigationDock(QDockWidget):
             search_text=search_text,
             bbox=bbox,
             media_ids=media_ids,
+            location_country=self._location_country,
+            location_state=self._location_state,
+            location_city=self._location_city,
             arrange_by=arrange_by,
             reverse_sort=reverse_sort,
             group_by=group_by,

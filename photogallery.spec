@@ -16,8 +16,13 @@ datas = [
     (str(project_root / "resources"), "resources"),
     (str(project_root / "db" / "schema.sql"), "db"),
 ]
-if (project_root / "models").exists():
-    datas.append((str(project_root / "models"), "models"))
+_models_dir = project_root / "models"
+if _models_dir.exists():
+    # Bundle lightweight core models (e.g. u2netp.onnx); keep optional 208 MB LaMa ONNX
+    # weights out of the installer so users can download them on demand to AppData.
+    for _mfile in _models_dir.iterdir():
+        if _mfile.is_file() and not _mfile.name.lower().startswith("lama"):
+            datas.append((str(_mfile), "models"))
 
 # 2. Collect library data files & binaries
 datas += collect_data_files("cv2")
@@ -41,6 +46,7 @@ for pkg in ("pillow_heif", "pillow_jxl", "pillow_avif"):
         pass
 
 binaries = []
+binaries += collect_dynamic_libs("cv2")
 binaries += collect_dynamic_libs("onnxruntime")
 
 for pkg in ("pillow_heif", "pillow_jxl", "pillow_avif"):
@@ -60,6 +66,9 @@ hiddenimports = [
     "PySide6.QtMultimedia",
     "PySide6.QtMultimediaWidgets",
     "PySide6.QtXml",
+    "PySide6.QtWebEngineWidgets",
+    "PySide6.QtWebEngineCore",
+    "PySide6.QtWebChannel",
     
     # Core Data & Image Libraries
     "sqlite3",

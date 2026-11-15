@@ -1161,7 +1161,8 @@ class PeopleDirectoryView(QWidget):
 
             filtered_named = [
                 p for p in self._all_named_people
-                if not search_filter or search_filter in p["name"].lower()
+                if (int(p.get("photo_count") or 0) > 0 or int(p.get("suggestion_count") or 0) > 0)
+                and (not search_filter or search_filter in p["name"].lower())
             ]
             self.lbl_sec1_title.setText(f"Named People ({len(filtered_named)})")
             self.sec1_container.setVisible(bool(filtered_named))

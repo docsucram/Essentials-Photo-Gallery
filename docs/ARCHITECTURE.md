@@ -1,6 +1,6 @@
 # Essentials Photo Gallery — System Specification & Architecture (`docs/ARCHITECTURE.md`)
 
-**Target System:** High-Performance 64-Bit Desktop Photo Management & Non-Destructive Editing Workstation (Python 3.11–3.13, PySide6)  
+**Target System:** High-Performance 64-Bit Desktop Photo Management & Non-Destructive Editing Workstation (Python 3.13, PySide6 / Qt 6.12.0, OpenCV 5.0, NumPy 2.5.4, Pillow 13.0.0)  
 **Inspiration & Heritage:** Authentic Windows Live Photo Gallery (WLPG) Wave 4 (2012) UX elevated with modern computer vision, biometric face clustering, interactive world map geotagging, 17-dimension Boolean Smart Albums, multi-photo creation studio, and 32-bit perceptual image processing  
 **Companion Documentation:**
 - **[Image Editing & Multi-Photo Studio Engine (`editing_engine.md`)](editing_engine.md)**
@@ -48,7 +48,8 @@ Gallery/
 │   │   ├── face_engine.py                       # InsightFace SCRFD + ArcFace ONNX wrapper & OpenCV fallback
 │   │   ├── face_matcher.py                      # NumPy N×512 BLAS cosine similarity & incremental cluster centroids
 │   │   ├── gazetteer_data.py                    # Built-in offline gazetteer (3,500+ world cities & UK settlements)
-│   │   └── geotag_resolver.py                   # Offline reverse geocoding, KD-tree nearest search & Nominatim SQLite cache
+│   │   ├── geotag_resolver.py                   # Offline reverse geocoding, KD-tree nearest search & Nominatim SQLite cache
+│   │   └── ocr_engine.py                        # Multi-backend offline OCR (Tesseract, RapidOCR, Windows OCR)
 │   ├── db/
 │   │   ├── __init__.py
 │   │   ├── connection.py                        # DualDatabaseEngine: WAL connections, schema migrations, online backups
@@ -68,10 +69,11 @@ Gallery/
 │   │   ├── crop_tool.py                         # Interactive Rule-of-Thirds CropOverlayItem with aspect-ratio & Uncrop support
 │   │   ├── dialogs.py                           # Relative Δt Time Shift, File Properties, Merge People & maintenance dialogs
 │   │   ├── duplicate_finder_dialog.py           # Side-by-side comparison workspace, auto-select rules, safe Recycle Bin delete
+│   │   ├── folder_manager_dialog.py             # Picasa-style Folder Manager (Scan Always/Once/Exclude, Faces/OCR, Private PIN)
 │   │   ├── grid_model.py                        # CatalogListModel (O(log G) binary-searched collapsible section headers)
 │   │   ├── grid_view.py                         # ThumbnailGridView (QListView IconMode) & Polaroid MediaCardDelegate
 │   │   ├── icon_provider.py                     # Multi-theme vector/raster icon provider (Aero, Fluent, Minimalist)
-│   │   ├── import_dialog.py                     # Device scanning, folder structure presets, progress monitor
+│   │   ├── import_dialog.py                     # MTP/PTP WPD device + drive/DCIM scanning, folder presets, progress monitor
 │   │   ├── left_nav_dock.py                     # LeftNavigationDock: Albums, Folders, Dates, Places, Tags (AND/OR/NOT), People, Ratings
 │   │   ├── main_window.py                       # PhotoGalleryMainWindow: Central coordinator, thread pools, status bar & shortcuts
 │   │   ├── map_view.py                          # WorldMapView: QWebEngineView + Leaflet + R*Tree clustering + drag-zoom + vector fallback
@@ -92,11 +94,13 @@ Gallery/
 │   │   ├── __init__.py
 │   │   ├── geotag_resolver.py                   # Compatibility bridge to src.core.geotag_resolver
 │   │   ├── paths.py                             # AppData, user libraries, temp caches & frozen bundle resource resolver
-│   │   └── scan_logger.py                       # Persistent scan & crash diagnostics logger
+│   │   ├── scan_logger.py                       # Persistent scan & crash diagnostics logger
+│   │   └── wpd_mtp.py                           # Native Windows Portable Devices (WPD) COM MTP/PTP camera & smartphone I/O
 │   └── workers/
 │       ├── __init__.py
 │       ├── face_worker.py                       # 3-stage ONNX face detector, 96x96 WebP crop extractor & backfill
 │       ├── folder_watcher.py                    # QFileSystemWatcher & startup delta reconciliation
+│       ├── ocr_worker.py                        # Background OCR FTS5 indexing worker respecting per-folder policies
 │       ├── scanner_thumb_worker.py              # FolderSyncWorker & ThumbnailDecodeWorker (QImageReader, RAW, Next-Gen, OpenCV)
 │       └── xmp_sync_worker.py                   # MetadataSyncDaemon: Safe-mode-aware XMP/EXIF write-back & mtime preservation
 └── tests/                                       # Automated pytest regression suites (70+ suites) & scale benchmark harness

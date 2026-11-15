@@ -282,6 +282,18 @@ SMART_FIELD_SPECS: list[tuple[str, str, list[tuple[str, str]], str, Any]] = [
         "text",
         "Search text...",
     ),
+    (
+        "ocr_text",
+        "OCR Text (Text in Photo)",
+        [
+            ("contains", "contains"),
+            ("not_contains", "does not contain"),
+            ("is_empty", "is empty"),
+            ("is_not_empty", "is not empty"),
+        ],
+        "text",
+        "Text inside photo (e.g. Claygate Station)...",
+    ),
 ]
 
 _FIELD_SPEC_MAP: dict[str, tuple[str, str, list[tuple[str, str]], str, Any]] = {

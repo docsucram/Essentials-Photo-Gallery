@@ -312,8 +312,6 @@ def search_places_offline(
 
         seen_addresses.add(fmt)
         matches.append((score, rec))
-        if len(matches) >= limit * 3:
-            break
 
     # Sort by score ascending, then by name length
     matches.sort(key=lambda item: (item[0], len(item[1].name), item[1].name))
@@ -361,7 +359,7 @@ def save_place_to_db(db_engine: Any, place_dict: dict[str, Any]) -> None:
 def search_places_online(
     query: str,
     db_engine: Any = None,
-    timeout: float = 2.0,
+    timeout: float = 4.0,
     limit: int = 6,
 ) -> list[dict[str, Any]]:
     """
@@ -373,10 +371,16 @@ def search_places_online(
         return []
 
     encoded = urllib.parse.quote(clean)
-    url = f"https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit={limit}&q={encoded}"
+    url = (
+        f"https://nominatim.openstreetmap.org/search"
+        f"?format=jsonv2&addressdetails=1&accept-language=en&limit={limit}&q={encoded}"
+    )
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "PhotoGallery64/1.0 (Desktop Gallery Geotagger)"},
+        headers={
+            "User-Agent": "PhotoGallery64/1.0 (Desktop Gallery Geotagger)",
+            "Accept-Language": "en",
+        },
     )
 
     results: list[dict[str, Any]] = []

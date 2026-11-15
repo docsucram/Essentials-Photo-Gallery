@@ -40,9 +40,17 @@ def create_app(argv: list[str] | None = None) -> QApplication:
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     register_nextgen_codecs()
     app = QApplication(argv if argv is not None else sys.argv)
-    app.setApplicationName("Essentials Photo Gallery")
-    app.setOrganizationName("Essentials Photo Gallery")
-    app.setApplicationVersion("0.12.0")
+    from src.version import APP_MUTEX_NAME, APP_NAME, APP_VERSION
+
+    app.setApplicationName(APP_NAME)
+    app.setOrganizationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            app._instance_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, APP_MUTEX_NAME)
+        except Exception:
+            pass
     ico_path = get_resource_path("resources/icons/essentials_photo_gallery.ico")
     if not ico_path.exists():
         ico_path = get_resource_path("resources/icons/photogallery_live.ico")

@@ -328,12 +328,17 @@ class FaceEngine:
             self.backend_name = "opencv_haar"
             self.model_name = "OpenCV Haar Cascade"
             self.active_provider = "CPU (Haar Cascade Fallback)"
-            cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            if os.path.exists(cascade_path):
-                self._haar_cascade = cv2.CascadeClassifier(cascade_path)
+            cascade_dir = getattr(getattr(cv2, "data", None), "haarcascades", "")
+            cascade_path = os.path.join(cascade_dir, "haarcascade_frontalface_default.xml") if cascade_dir else ""
+            if hasattr(cv2, "CascadeClassifier"):
+                if cascade_path and os.path.exists(cascade_path):
+                    self._haar_cascade = cv2.CascadeClassifier(cascade_path)
+                else:
+                    self._haar_cascade = cv2.CascadeClassifier()
+                self.is_available = True
             else:
-                self._haar_cascade = cv2.CascadeClassifier()
-            self.is_available = True
+                self._haar_cascade = None
+                self.is_available = False
         else:
             logger.warning(
                 "InsightFace models unavailable and allow_fallback=False; "

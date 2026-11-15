@@ -4,6 +4,70 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 
 ---
 
+## Essentials Photo Gallery v0.13.0
+
+Welcome to **Essentials Photo Gallery 0.13.0**! This release upgrades the core imaging and UI engine for faster everyday browsing, introduces a **Folder Manager & Private Folders** system, adds opt-in **Offline Text-in-Photo Search (OCR)**, and polishes **AI Inpainting** across **Crop AI Expand** and **Object Eraser**.
+
+### Core Stack Upgrade, Faster RAWs & Cleaner Highlights
+
+Under the hood, **0.13.0** moves to a newer runtime (**OpenCV 5.0**, **Qt 6.12**, **NumPy 2.5**, and **Pillow 13**) with noticeable speed and image-quality gains:
+
+- **Instant RAW Browsing & Thumbnails:** Opening folders of camera RAW files (`.CR2`, `.CR3`, `.NEF`, `.ARW`, `.RAF`, `.DNG`) now extracts the camera's embedded JPEG preview for immediate thumbnails and Single Image View opening, only running full 16-bit demosaicing in the background when you actively edit sliders.
+- **Natural Highlight Roll-Off in Fine Tune & Auto-Adjust:** Pushing **Exposure**, **Highlights**, or **Auto-Adjust** no longer clips bright skies or skin highlights into harsh yellow or magenta—extreme highlights now desaturate smoothly toward natural white.
+
+### Inpainting: Crop AI Expand & Object Eraser
+
+- **Cleaner Crop AI Expand & Straighten:** Expanding a photo's canvas or straightening crooked horizons now blends seamlessly into the edges and corners without leaving dark seam lines or edge artifacts.
+- **Contextual AI Object Eraser:** Painting over unwanted objects in **Spot Fix -> Object Eraser** (or using **Crop AI Expand**) now offers a one-time contextual prompt to download the optional **LaMa Neural Inpainting** add-on (~208 MB), while keeping built-in basic inpainting ready out of the box.
+
+![Object Eraser removing a boat cleanly using AI Neural Inpainting](docs/images/release-0.13.0/inpainting-object-eraser.jpg)
+
+### Offline Text-in-Photo Search (OCR)
+
+Find receipts, street signs, documents, and screenshots by the words inside them—completely offline:
+
+- **Opt-In Per Folder:** Text recognition is off by default; enable it on any folder from **Folder Manager** (or run an on-demand **Scan Folder for Text Now**). If no OCR engine is installed yet, you'll be prompted to download **RapidOCR (~15 MB)** in one click, or point to an existing **Tesseract** or **Windows Native OCR** setup in **Options -> Add-ons**.
+- **Search & Copy:** Extracted text is indexed in the local database for instant search and Smart Albums, and appears selectable/copyable right in the **Information** pane.
+
+![Text in Photo OCR detecting and displaying copyable text from a parking ticket](docs/images/release-0.13.0/ocr-text-in-photo.png)
+
+### Folder Manager & Private Folders
+
+- **Folder Manager:** Open **Folder Manager** to add or remove catalog folders, filter the folder tree, switch folders between **Scan Always**, **Scan Once**, and **Exclude from catalog**, toggle Face Recognition and Text (OCR) per folder, and cascade settings to subfolders.
+- **Private Folders & Flexible Unlock:** Mark sensitive folders as **Private** to hide their photos, people, tags, and places until unlocked from the **File** menu (hidden automatically when no private folders are in use). Protect unlocking with a **PIN / Passcode**, **Windows Login / Windows Hello**, or 1-click unlock, with optional idle auto-lock.
+
+![Folder Manager showing monitoring policies, AI indexing toggles, and Private Folders](docs/images/release-0.13.0/folder-manager.jpg)
+
+### Other Notable Improvements
+
+- **USB Smartphone & Camera Import:** Native Windows **MTP/PTP** import with thumbnail previews, duplicate detection, and streamed transfers for iPhones, Android phones, and cameras.
+- **Auto Collage Polish:** Reorder photos manually in all collage styles (including **Blended Collage**), drag cropped photos with the **Hand** tool to adjust framing, drag **Polaroids** freely across the canvas, and get count-aware Grid layouts (e.g. `3x1` / `1x3` for 3 photos).
+- **Add-ons & In-App Update Check:** Renamed **Options -> Add-ons** with clearer status for LaMa and OCR, plus a **Check for Updates...** button in **About**.
+
+<details>
+<summary>Full Technical Changelog</summary>
+
+- **Folder Manager, Private Mode, Missing Folder Recovery & Windows Rename Fix (`src/ui/folder_manager_dialog.py`, `src/ui/left_nav_dock.py`, `src/workers/folder_watcher.py`, `src/db/repository.py`, `src/ui/main_window.py`):**
+  - Added `FolderManagerDialog` with `monitor_mode` (`always` / `once` / `excluded`), `scan_faces`, `scan_ocr` (default `0`), `is_private`, folder search/expand/collapse, and add/remove folder actions; PBKDF2 PIN hashing, Windows Login / Windows Hello (`UserConsentVerifier`) unlock mode, idle auto-lock, and conditional File menu Unlock visibility (`repo.has_private_folders()`).
+  - Added guided *Locate* / *Remove* prompt when a library root folder is missing on startup, fixed `FolderWatcherDaemon.release_watched_subtree()` so Windows inline folder renaming succeeds without `QFileSystemWatcher` handle locks, and fixed clicking **Date taken** in the Navigation bar.
+- **Offline OCR & Add-ons Management (`src/core/ocr_engine.py`, `src/workers/ocr_worker.py`, `src/ui/dialogs.py`, `src/ui/right_tag_dock.py`, `src/version.py`):**
+  - Added multi-backend OCR (`rapidocr` via bundled `onnxruntime` runner or `rapidocr_onnxruntime`, `pytesseract`, `windows_media_ocr` / `winocr`) with 1-click AppData RapidOCR (~15 MB) download, FTS5 `media_ocr_fts` indexing, Smart Album `OCR Text` rule, and selectable/copyable OCR box in the Information pane.
+  - Renamed Options tab to **Add-ons**, fixed `QMessageBox` import in `dialogs.py`, replaced editable-looking path boxes with selectable `QLabel`s, added contextual first-use prompts for LaMa (~208 MB) and RapidOCR (~15 MB), and added `AboutDialog` GitHub Releases update checking (`src/version.py`).
+- **RAW Fast-Path, Highlight Roll-Off & Fine Tune Ergonomics (`src/imaging/image_loader.py`, `src/imaging/opencv_engine.py`, `src/ui/media_viewer.py`, `src/ui/right_tag_dock.py`):**
+  - Added `decode_raw_embedded_preview()` + `_upgrade_raw_to_full_demosaic_async()`, CIE $L^*a^*b^*$ highlight chroma roll-off, focus-aware mouse-wheel sliders, live RGB/Luminance histogram, and Dark Studio bug fixes across Edit tools, Folder Manager, and Information pane.
+- **Crop, AI Expand, Auto Collage & UI Polish (`src/ui/crop_tool.py`, `src/imaging/opencv_engine.py`, `src/imaging/create_tools.py`, `src/ui/create_studio_dialogs.py`, `src/ui/grid_view.py`, `src/ui/people_directory_view.py`):**
+  - Fixed `straighten_with_ai_fill` (`BORDER_REPLICATE` + dilated mask + eroded feather) and `expand_canvas_with_ai_fill` seam lines, rotated inscribed crop bounds & rotated dimmed overlay, accidental grey-border click guard, quick *Clear Ratio* button, Auto Collage count-aware grids (`compute_grid_slots`), manual photo reordering across all styles, Hand-tool crop framing (`focus_center`), draggable Polaroids, view-aware title bar (`Map`, `People`, `Albums`, `Compare`), and hiding 0-photo entries in People View.
+- **Core Stack, Alignment & Installer (`photogallery.spec`, `installer.iss`, `main.py`):**
+  - Upgraded to **OpenCV 5.0.0**, **NumPy 2.5.4**, **PySide6 / Qt 6.12.0**, and **Pillow 13.0.0** (`pillow-heif 1.8.1`, `pillow-jxl-plugin 1.3.8`); upgraded burst/panorama alignment to `cv2.USAC_MAGSAC`; fixed OpenCV 5.0 `cv2.HoughLinesP` `(N, 4)` shape handling; hardened `installer.iss` with `AppMutex=EssentialsPhotoGallery_Mutex`, `CloseApplications=yes`, and optional uninstall AppData cleanup prompt.
+- **Geotagging, Undo/Redo & Polish:**
+  - Updated offline gazetteer and Geotagging fixes.
+  - Added Revert to original into undo/redo queue.
+  - Various UI refinements and bug fixes.
+
+</details>
+
+---
+
 ## Essentials Photo Gallery v0.12.0
 
 Welcome to **Essentials Photo Gallery 0.12.0**! This release focuses on two of the most-requested ways to organize and cull a growing photo library: **Albums & Smart Albums** for curating collections without duplicating files, and a dedicated **Compare & Light Table Mode** for picking your best shots side by side. Alongside those headline additions, you'll also find smoother live photo editing, a much smarter **Photo Fuse**, a contextual World Map ribbon, and native Windows window snapping.

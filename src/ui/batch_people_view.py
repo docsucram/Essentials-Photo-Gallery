@@ -325,22 +325,24 @@ class _FaceCardDelegate(QStyledItemDelegate):
                 # Switch person button (top right - 58px)
                 s_rect = QRect(thumb_x + THUMB_SIZE - 58, thumb_y + 3, 16, 16)
                 s_hover = (is_hovered and self.hover_btn == "switch")
+                s_draw = s_rect.adjusted(-1, -1, 1, 1) if s_hover else s_rect
                 s_bg = QColor("#0284C7") if s_hover else QColor(0, 0, 0, 160)
                 painter.setBrush(QBrush(s_bg))
-                painter.setPen(Qt.NoPen)
-                painter.drawEllipse(s_rect)
+                painter.setPen(QPen(QColor("#FFFFFF"), 1.5) if s_hover else Qt.NoPen)
+                painter.drawEllipse(s_draw)
                 painter.setPen(QColor("#FFFFFF"))
                 painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
-                painter.drawText(s_rect, Qt.AlignCenter, "⇄")
+                painter.drawText(s_draw, Qt.AlignCenter, "⇄")
 
             # Checkmark button (top right - 38px)
             c_rect = QRect(thumb_x + THUMB_SIZE - 38, thumb_y + 3, 16, 16)
             c_hover = (is_hovered and self.hover_btn == "confirm")
-            c_bg = QColor("#2E8B57") if c_hover else QColor(0, 0, 0, 150)
+            c_draw = c_rect.adjusted(-1, -1, 1, 1) if c_hover else c_rect
+            c_bg = QColor("#16A34A") if c_hover else QColor(0, 0, 0, 150)
             painter.setBrush(QBrush(c_bg))
-            painter.setPen(Qt.NoPen)
-            painter.drawEllipse(c_rect)
-            painter.setPen(QPen(QColor("#FFFFFF"), 1.8))
+            painter.setPen(QPen(QColor("#FFFFFF"), 1.5) if c_hover else Qt.NoPen)
+            painter.drawEllipse(c_draw)
+            painter.setPen(QPen(QColor("#FFFFFF"), 2.0 if c_hover else 1.8))
             # Draw checkmark
             cx = c_rect.x()
             cy = c_rect.y()
@@ -350,11 +352,12 @@ class _FaceCardDelegate(QStyledItemDelegate):
             # Reject cross button (top right - 18px)
             r_rect = QRect(thumb_x + THUMB_SIZE - 18, thumb_y + 3, 16, 16)
             r_hover = (is_hovered and self.hover_btn == "reject")
-            r_bg = QColor("#D32F2F") if r_hover else QColor(0, 0, 0, 150)
+            r_draw = r_rect.adjusted(-1, -1, 1, 1) if r_hover else r_rect
+            r_bg = QColor("#DC2626") if r_hover else QColor(0, 0, 0, 150)
             painter.setBrush(QBrush(r_bg))
-            painter.setPen(Qt.NoPen)
-            painter.drawEllipse(r_rect)
-            painter.setPen(QPen(QColor("#FFFFFF"), 1.8))
+            painter.setPen(QPen(QColor("#FFFFFF"), 1.5) if r_hover else Qt.NoPen)
+            painter.drawEllipse(r_draw)
+            painter.setPen(QPen(QColor("#FFFFFF"), 2.0 if r_hover else 1.8))
             # Draw cross
             rx = r_rect.x()
             ry = r_rect.y()
@@ -381,20 +384,38 @@ class _FaceCardDelegate(QStyledItemDelegate):
 
         if event.type() == QEvent.MouseMove:
             pos = event.pos()
-            self.hovered_row = index.row()
-            if has_swap and s_rect.contains(pos):
-                self.hover_btn = "switch"
-            elif c_rect.contains(pos):
-                self.hover_btn = "confirm"
-            elif r_rect.contains(pos):
-                self.hover_btn = "reject"
+            new_row = index.row()
+            if has_swap and s_rect.adjusted(-2, -2, 2, 2).contains(pos):
+                new_btn = "switch"
+            elif c_rect.adjusted(-2, -2, 2, 2).contains(pos):
+                new_btn = "confirm"
+            elif r_rect.adjusted(-2, -2, 2, 2).contains(pos):
+                new_btn = "reject"
             else:
-                self.hover_btn = None
-            if hasattr(option, "widget") and option.widget:
-                if hasattr(option.widget, "viewport") and option.widget.viewport():
-                    option.widget.viewport().update()
-                else:
-                    option.widget.update(index)
+                new_btn = None
+
+            changed = (new_row != self.hovered_row or new_btn != self.hover_btn)
+            self.hovered_row = new_row
+            self.hover_btn = new_btn
+            w = getattr(option, "widget", None)
+            if w is not None:
+                vp = w.viewport() if hasattr(w, "viewport") else w
+                if vp is not None:
+                    if new_btn is not None:
+                        vp.setCursor(Qt.CursorShape.PointingHandCursor)
+                        tip = (
+                            "Confirm person"
+                            if new_btn == "confirm"
+                            else ("Dismiss suggestion" if new_btn == "reject" else "Switch to suggested person")
+                        )
+                        if vp.toolTip() != tip:
+                            vp.setToolTip(tip)
+                    else:
+                        vp.unsetCursor()
+                        if vp.toolTip():
+                            vp.setToolTip("")
+                    if changed:
+                        vp.update()
             return False
 
         elif event.type() == QEvent.MouseButtonRelease:
@@ -560,6 +581,17 @@ class _AutoHeightListView(QListView):
         super().resizeEvent(event)
         self.update_height()
 
+    def leaveEvent(self, event: QEvent) -> None:
+        delegate = self.itemDelegate()
+        if delegate is not None and hasattr(delegate, "hovered_row"):
+            if delegate.hovered_row != -1 or delegate.hover_btn is not None:
+                delegate.hovered_row = -1
+                delegate.hover_btn = None
+                self.viewport().unsetCursor()
+                self.viewport().setToolTip("")
+                self.viewport().update()
+        super().leaveEvent(event)
+
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.key() == Qt.Key_Escape:
             p = self.parent()
@@ -707,6 +739,8 @@ class _PersonGroupSectionWidget(QWidget):
         self.delegate.switch_clicked.connect(self._on_delegate_switch)
 
         self.list_view = _AutoHeightListView(self)
+        self.list_view.setMouseTracking(True)
+        self.list_view.viewport().setMouseTracking(True)
         self.list_view.setModel(self.model)
         self.list_view.setItemDelegate(self.delegate)
         self.list_view.setViewMode(QListView.IconMode)
@@ -952,6 +986,8 @@ class _PersonGroupSectionWidget(QWidget):
         is_outlier = any(getattr(r, "outlier_reason", None) for r in sel)
 
         act_switch = None
+        swap_target_name = None
+        swap_target_pid = None
         act_confirm = None
         act_reject = None
         act_not_a_face = None
@@ -960,8 +996,6 @@ class _PersonGroupSectionWidget(QWidget):
 
         if is_outlier:
             # Check for swap suggestion
-            swap_target_name = None
-            swap_target_pid = None
             for r in sel:
                 s_name = getattr(r, "swap_person_name", None)
                 reason_r = getattr(r, "outlier_reason", None) or ""
@@ -1006,7 +1040,7 @@ class _PersonGroupSectionWidget(QWidget):
         parent_view = self.parent()
         repo = getattr(parent_view, "repo", None)
 
-        if chosen == act_switch and swap_target_name and repo:
+        if chosen is not None and chosen == act_switch and swap_target_name and repo:
             for r in sel:
                 dest = getattr(r, "swap_person_id", None) or getattr(r, "swap_person_name", None) or swap_target_pid or swap_target_name
                 if dest:
@@ -1356,10 +1390,15 @@ class BatchPeopleView(QWidget):
     open_media_requested = Signal(int)         # (media_id)
     card_selection_changed = Signal(str, object, str)  # (mode, swap_suggested_name, person_name)
 
-    def __init__(self, engine: DualDatabaseEngine, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        engine: DualDatabaseEngine,
+        parent: QWidget | None = None,
+        repo: CatalogRepository | None = None,
+    ) -> None:
         super().__init__(parent)
         self.engine = engine
-        self.repo = CatalogRepository(engine)
+        self.repo = repo if repo is not None else CatalogRepository(engine)
         self.thumb_repo = ThumbnailRepository(engine)
         self.pixmap_cache = LruCache(5000)
 
@@ -2479,6 +2518,13 @@ class BatchPeopleView(QWidget):
         self._remove_faces_from_view(set(face_ids))
         self.faces_confirmed.emit(face_ids, person_id)
         self.refresh_suggestions()
+
+    def sync_external_face_change(self, face_ids: list[int] | set[int] | None = None) -> None:
+        """Immediately reflects face confirmations/dismissals made in other views (e.g. SingleMediaViewer)."""
+        self._last_render_signature = None
+        self._needs_external_refresh = True
+        if face_ids and self._sections:
+            self._remove_faces_from_view(set(int(fid) for fid in face_ids))
 
     def _remove_faces_from_view(self, face_ids: set[int]) -> None:
         """Removes the given face_ids from all sections and prunes empty sections."""

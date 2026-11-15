@@ -5275,6 +5275,7 @@ class RibbonToolbar(QWidget):
 
     # Authentic WLPG Find Tab Filter Signals
     date_filter_selected = Signal(object, object, object)   # (year, month, day)
+    date_preset_selected = Signal(str)                     # preset code e.g. 'today', 'yesterday', 'this_week'
     rating_filter_selected = Signal(object)                 # tuple of ratings
     tag_filter_selected = Signal(object, str)              # (tag_id, boolean_mode)
     untagged_filter_selected = Signal(bool)
@@ -5690,10 +5691,18 @@ class RibbonToolbar(QWidget):
         self._apply_file_menu_stylesheet(False)
         file_menu.addAction(make_wlpg_icon("import", 16), "Import from camera or scanner...", lambda: self.action_triggered.emit("import_media"))
         file_menu.addAction(make_wlpg_icon("folder_add", 16), "Include folder...", lambda: self.action_triggered.emit("add_folder"))
+        file_menu.addAction(make_wlpg_icon("folder", 16), "Folder Manager...", lambda: self.action_triggered.emit("open_folder_manager"))
+        from src.ui.folder_manager_dialog import _make_feature_icon
+
+        self.act_show_private_folders = QAction(_make_feature_icon("private", True), "Show Private Folders (🔒 Locked)", self)
+        self.act_show_private_folders.setCheckable(True)
+        self.act_show_private_folders.setChecked(False)
+        self.act_show_private_folders.triggered.connect(lambda: self.action_triggered.emit("toggle_private_folders"))
+        file_menu.addAction(self.act_show_private_folders)
         file_menu.addAction(make_wlpg_icon("print", 16), "Print...\tCtrl+P", lambda: self.action_triggered.emit("print"))
         file_menu.addSeparator()
-        file_menu.addAction("Backup Catalog...", lambda: self.action_triggered.emit("backup_catalog"))
-        self.act_pause_write_back = QAction("Pause Background File Write-Back", self)
+        file_menu.addAction(make_wlpg_icon("save", 16), "Backup Catalog...", lambda: self.action_triggered.emit("backup_catalog"))
+        self.act_pause_write_back = QAction(make_wlpg_icon("pause", 16), "Pause Background File Write-Back", self)
         self.act_pause_write_back.setCheckable(True)
         self.act_pause_write_back.setChecked(True)
         self.act_pause_write_back.triggered.connect(lambda: self.action_triggered.emit("toggle_pause_write_back"))
@@ -5702,7 +5711,7 @@ class RibbonToolbar(QWidget):
         file_menu.addAction(make_wlpg_icon("options", 16), "Options...", lambda: self.action_triggered.emit("open_settings"))
         file_menu.addAction(make_wlpg_icon("app_logo", 16), "About Essentials Photo Gallery", lambda: self.action_triggered.emit("about_photo_gallery"))
         file_menu.addSeparator()
-        file_menu.addAction("Exit", lambda: self.action_triggered.emit("exit_app"))
+        file_menu.addAction(make_wlpg_icon("cross", 16), "Exit", lambda: self.action_triggered.emit("exit_app"))
         self.btn_file.setMenu(file_menu)
         self.tab_widget.setCornerWidget(self.btn_file, Qt.TopLeftCorner)
 
@@ -5865,6 +5874,10 @@ class RibbonToolbar(QWidget):
                   self.tab_map):
             w.installEventFilter(self)
 
+        self._custom_qat_buttons: dict[str, QToolButton] = {}
+        self._custom_qat_sources: dict[str, QAbstractButton] = {}
+        self._source_to_custom_key: dict[QAbstractButton, str] = {}
+        self._index_custom_qat_sources()
         self._load_qat_settings()
         self._apply_aero_stylesheet()
 
@@ -6668,6 +6681,7 @@ class RibbonToolbar(QWidget):
                 if act and act.isChecked():
                     visible.append(key)
             settings.setValue("qat_visible_actions", ",".join(visible))
+            settings.setValue("qat_custom_buttons", ",".join(self._custom_qat_buttons.keys()))
             settings.setValue("qat_below_ribbon", bool(getattr(self, "_qat_below_ribbon", False)))
             settings.setValue("ribbon_minimized", bool(self.tab_widget.height() <= 36))
         except Exception:
@@ -6692,6 +6706,8 @@ class RibbonToolbar(QWidget):
         for key, act in action_map.items():
             if act:
                 act.setChecked(key in ("back", "forward", "undo", "redo"))
+        for c_key in list(self._custom_qat_buttons.keys()):
+            self._remove_custom_qat_button(c_key)
         self._save_qat_settings()
 
     def _load_qat_settings(self) -> None:
@@ -6738,8 +6754,116 @@ class RibbonToolbar(QWidget):
             if minimized is not None:
                 min_bool = str(minimized).lower() in ("true", "1")
                 self.set_ribbon_collapsed(min_bool)
+
+            raw_custom = settings.value("qat_custom_buttons", None)
+            if raw_custom:
+                custom_keys = (
+                    [k for k in raw_custom.split(",") if k]
+                    if isinstance(raw_custom, str)
+                    else list(raw_custom)
+                )
+                for c_key in custom_keys:
+                    src = self._custom_qat_sources.get(c_key)
+                    if src is not None:
+                        self._add_custom_qat_button(c_key, src)
         except Exception:
             pass
+
+    def _index_custom_qat_sources(self) -> None:
+        """Indexes all clickable ribbon buttons so any ribbon icon can be added directly to the QAT."""
+        self._custom_qat_sources.clear()
+        self._source_to_custom_key.clear()
+        excluded_attrs = {
+            "btn_file", "btn_qat_menu", "btn_ribbon_toggle", "btn_help",
+            "btn_print", "btn_back", "btn_forward", "btn_undo", "btn_redo",
+            "btn_close_scope",
+        }
+        for attr_name, obj in self.__dict__.items():
+            if not attr_name.startswith("btn_") or attr_name in excluded_attrs or attr_name.startswith("btn_qat_") or attr_name.startswith("btn_win_"):
+                continue
+            if isinstance(obj, QAbstractButton) and self.tab_widget.isAncestorOf(obj):
+                if self._get_qat_key_for_widget(obj) is None:
+                    key = f"attr:{attr_name}"
+                    self._custom_qat_sources[key] = obj
+                    self._source_to_custom_key[obj] = key
+
+        for btn in self.tab_widget.findChildren(QAbstractButton):
+            if btn in self._source_to_custom_key:
+                continue
+            if self._get_qat_key_for_widget(btn) is not None:
+                continue
+            if btn.icon().isNull() and not btn.text().strip():
+                continue
+            # Skip internal QTabBar scroll buttons or spinbox/lineedit buttons
+            p = btn.parentWidget()
+            skip = False
+            while p and p != self.tab_widget:
+                if isinstance(p, (QTabBar, QLineEdit)):
+                    skip = True
+                    break
+                p = p.parentWidget()
+            if skip:
+                continue
+            label = (btn.toolTip() or btn.text() or btn.objectName() or "action").replace("\n", " ").strip()
+            safe = "".join(ch if ch.isalnum() else "_" for ch in label.lower()).strip("_") or "action"
+            key = f"btn:{safe}"
+            idx = 2
+            while key in self._custom_qat_sources:
+                key = f"btn:{safe}_{idx}"
+                idx += 1
+            self._custom_qat_sources[key] = btn
+            self._source_to_custom_key[btn] = key
+
+    def _find_custom_qat_for_widget(self, w: QWidget | None) -> tuple[str, QAbstractButton] | None:
+        target = w
+        while target and target != self:
+            for c_key, qat_btn in self._custom_qat_buttons.items():
+                if target is qat_btn:
+                    src = self._custom_qat_sources.get(c_key)
+                    if src is not None:
+                        return (c_key, src)
+            if isinstance(target, QAbstractButton) and target in self._source_to_custom_key:
+                c_key = self._source_to_custom_key[target]
+                return (c_key, target)
+            target = target.parentWidget()
+        return None
+
+    def _add_custom_qat_button(self, key: str, source_btn: QAbstractButton) -> None:
+        if key in self._custom_qat_buttons:
+            return
+        qat_btn = QToolButton(self.qat_container)
+        qat_btn.setObjectName("QATBtn")
+        ico = source_btn.icon()
+        if ico.isNull():
+            ico = make_wlpg_icon("options", 18)
+        qat_btn.setIcon(ico)
+        qat_btn.setIconSize(QSize(18, 18))
+        qat_btn.setFixedSize(24, 24)
+        tip = (source_btn.toolTip() or source_btn.text() or key).replace("\n", " ").strip()
+        qat_btn.setToolTip(tip)
+        qat_btn.setCursor(Qt.PointingHandCursor)
+
+        def _on_clicked(_checked: bool = False, src: QAbstractButton = source_btn) -> None:
+            if not src.isEnabled():
+                return
+            if isinstance(src, QToolButton) and src.menu() is not None and src.popupMode() == QToolButton.InstantPopup:
+                src.showMenu()
+            else:
+                src.click()
+
+        qat_btn.clicked.connect(_on_clicked)
+        idx = self.qat_layout.indexOf(self.btn_qat_menu)
+        if idx >= 0:
+            self.qat_layout.insertWidget(idx, qat_btn)
+        else:
+            self.qat_layout.addWidget(qat_btn)
+        self._custom_qat_buttons[key] = qat_btn
+
+    def _remove_custom_qat_button(self, key: str) -> None:
+        qat_btn = self._custom_qat_buttons.pop(key, None)
+        if qat_btn is not None:
+            self.qat_layout.removeWidget(qat_btn)
+            qat_btn.deleteLater()
 
     def _get_qat_key_for_widget(self, w: QWidget | None) -> str | None:
         target = w
@@ -6802,8 +6926,18 @@ class RibbonToolbar(QWidget):
                 a_toggle = menu.addAction("Add to Quick Access Toolbar")
                 a_toggle.triggered.connect(lambda: act.setChecked(True))
         else:
-            a_dummy = menu.addAction("Add to Quick Access Toolbar")
-            a_dummy.setEnabled(False)
+            custom = self._find_custom_qat_for_widget(target)
+            if custom is not None:
+                c_key, c_btn = custom
+                if c_key in self._custom_qat_buttons:
+                    a_toggle = menu.addAction("Remove from Quick Access Toolbar")
+                    a_toggle.triggered.connect(lambda _c=False, k=c_key: (self._remove_custom_qat_button(k), self._save_qat_settings()))
+                else:
+                    a_toggle = menu.addAction("Add to Quick Access Toolbar")
+                    a_toggle.triggered.connect(lambda _c=False, k=c_key, b=c_btn: (self._add_custom_qat_button(k, b), self._save_qat_settings()))
+            else:
+                a_dummy = menu.addAction("Add to Quick Access Toolbar")
+                a_dummy.setEnabled(False)
 
         menu.addSeparator()
 
@@ -7867,28 +8001,7 @@ class RibbonToolbar(QWidget):
         btn.setMenu(menu)
 
     def _on_date_code_selected(self, code: str) -> None:
-        now = datetime.datetime.now()
-        if code == "today":
-            self.date_filter_selected.emit(now.year, now.month, now.day)
-        elif code == "yesterday":
-            y = now - datetime.timedelta(days=1)
-            self.date_filter_selected.emit(y.year, y.month, y.day)
-        elif code == "this_week":
-            start = now - datetime.timedelta(days=now.weekday())
-            self.date_filter_selected.emit(start.year, start.month, start.day)
-        elif code == "last_week":
-            start = now - datetime.timedelta(days=now.weekday() + 7)
-            self.date_filter_selected.emit(start.year, start.month, start.day)
-        elif code == "this_month":
-            self.date_filter_selected.emit(now.year, now.month, None)
-        elif code == "last_month":
-            month = now.month - 1 if now.month > 1 else 12
-            year = now.year if now.month > 1 else now.year - 1
-            self.date_filter_selected.emit(year, month, None)
-        elif code == "this_year":
-            self.date_filter_selected.emit(now.year, None, None)
-        elif code == "last_year":
-            self.date_filter_selected.emit(now.year - 1, None, None)
+        self.date_preset_selected.emit(str(code))
 
     def _build_months_menu(self, btn: QToolButton) -> None:
         menu = QMenu(btn)

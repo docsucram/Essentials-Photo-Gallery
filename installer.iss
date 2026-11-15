@@ -2,7 +2,7 @@
 ; Essentials Photo Gallery (PhotoGallery64) Windows x64 Installer
 
 #define MyAppName "Essentials Photo Gallery"
-#define MyAppVersion "0.12.0"
+#define MyAppVersion "0.13.0"
 #define MyAppPublisher "Essentials Software"
 #define MyAppURL "https://github.com/docsucram/Essentials-Photo-Gallery"
 #define MyAppExeName "EssentialsPhotoGallery.exe"
@@ -31,6 +31,9 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 ChangesAssociations=yes
+AppMutex=EssentialsPhotoGallery_Mutex
+CloseApplications=yes
+RestartApplications=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -83,3 +86,26 @@ Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.tiff\OpenWithProgid
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  DataDir: String;
+begin
+  if (CurUninstallStep = usPostUninstall) and (not UninstallSilent) then
+  begin
+    DataDir := ExpandConstant('{localappdata}\PhotoGallery');
+    if DirExists(DataDir) then
+    begin
+      if MsgBox(
+        'Do you also want to remove your local photo catalog database, cached thumbnails, and downloaded AI/OCR add-ons?' + #13#10 + #13#10 +
+        'Location: ' + DataDir + #13#10 + #13#10 +
+        '(Choose No if you plan to reinstall or upgrade later.)',
+        mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+      begin
+        DelTree(DataDir, True, True, True);
+        RegDeleteKeyIncludingSubkeys(HKCU, 'Software\PhotoGallery64');
+      end;
+    end;
+  end;
+end;

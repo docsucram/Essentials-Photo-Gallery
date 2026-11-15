@@ -26,6 +26,7 @@ from PySide6.QtCore import (
     QDate,
     QDateTime,
     QEvent,
+    QMetaObject,
     QObject,
     QPoint,
     QPointF,
@@ -37,12 +38,14 @@ from PySide6.QtCore import (
     QTimer,
     Qt,
     Signal,
+    Slot,
 )
 from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
     QIcon,
+    QKeySequence,
     QLinearGradient,
     QMouseEvent,
     QPainter,
@@ -51,6 +54,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QPolygonF,
+    QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -103,6 +107,7 @@ class _AeroFineTuneSlider(QSlider):
         self.setRange(min_val, max_val)
         self.setValue(default_val)
         self.setFixedHeight(18)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.setStyleSheet(
             """
             QSlider::groove:horizontal {
@@ -141,6 +146,19 @@ class _AeroFineTuneSlider(QSlider):
         self.setValue(self.default_val)
         event.accept()
 
+    def wheelEvent(self, event: Any) -> None:
+        """Ignore wheel events when unfocused so sidebar scrolling never nudges sliders."""
+        if not (self.hasFocus() or (event.modifiers() & Qt.AltModifier)):
+            event.ignore()
+            return
+        delta = event.angleDelta().y()
+        if delta == 0:
+            event.ignore()
+            return
+        step = 5 if (event.modifiers() & Qt.ShiftModifier) else 1
+        self.setValue(self.value() + (step if delta > 0 else -step))
+        event.accept()
+
 
 class HistogramWidget(QWidget):
     """Renders the authentic WLPG dark luminance histogram with interactive Black/White point markers."""
@@ -153,6 +171,9 @@ class HistogramWidget(QWidget):
         super().__init__(parent)
         self.setFixedHeight(94)
         self._counts: list[int] = [0] * 256
+        self._r_counts: list[int] = [0] * 256
+        self._g_counts: list[int] = [0] * 256
+        self._b_counts: list[int] = [0] * 256
         self.black_point: int = 0      # 0 .. 255
         self.white_point: int = 255    # 0 .. 255
         self._drag_handle: str | None = None
@@ -160,25 +181,57 @@ class HistogramWidget(QWidget):
         self.setMouseTracking(True)
 
     def set_histogram_data(self, image_data: Any) -> None:
+        empty = [0] * 256
         if image_data is None:
-            self._counts = [0] * 256
+            self._counts = list(empty)
+            self._r_counts = list(empty)
+            self._g_counts = list(empty)
+            self._b_counts = list(empty)
             self.update()
             return
         try:
             if isinstance(image_data, np.ndarray):
-                gray = cv2.cvtColor(image_data, cv2.COLOR_RGB2GRAY) if image_data.ndim == 3 else image_data
+                if image_data.ndim == 3 and image_data.shape[2] >= 3:
+                    rgb = image_data[:, :, :3]
+                    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+                    r_h = cv2.calcHist([rgb], [0], None, [256], [0, 256]).flatten()
+                    g_h = cv2.calcHist([rgb], [1], None, [256], [0, 256]).flatten()
+                    b_h = cv2.calcHist([rgb], [2], None, [256], [0, 256]).flatten()
+                    max_rgb = max(float(r_h.max()), float(g_h.max()), float(b_h.max()), 1.0)
+                    self._r_counts = [int((val / max_rgb) * 1000) for val in r_h]
+                    self._g_counts = [int((val / max_rgb) * 1000) for val in g_h]
+                    self._b_counts = [int((val / max_rgb) * 1000) for val in b_h]
+                else:
+                    gray = image_data if image_data.ndim <= 2 else image_data[:, :, 0]
+                    self._r_counts = list(empty)
+                    self._g_counts = list(empty)
+                    self._b_counts = list(empty)
                 hist = cv2.calcHist([gray], [0], None, [256], [0, 256]).flatten()
                 max_val = float(hist.max()) if hist.max() > 0 else 1.0
                 self._counts = [int((val / max_val) * 1000) for val in hist]
             elif isinstance(image_data, Image.Image):
-                thumb = image_data.resize((160, 120), Image.Resampling.BILINEAR).convert("L")
-                hist = thumb.histogram()
+                thumb_rgb = image_data.resize((160, 120), Image.Resampling.BILINEAR).convert("RGB")
+                rgb_arr = np.asarray(thumb_rgb)
+                r_h = cv2.calcHist([rgb_arr], [0], None, [256], [0, 256]).flatten()
+                g_h = cv2.calcHist([rgb_arr], [1], None, [256], [0, 256]).flatten()
+                b_h = cv2.calcHist([rgb_arr], [2], None, [256], [0, 256]).flatten()
+                max_rgb = max(float(r_h.max()), float(g_h.max()), float(b_h.max()), 1.0)
+                self._r_counts = [int((val / max_rgb) * 1000) for val in r_h]
+                self._g_counts = [int((val / max_rgb) * 1000) for val in g_h]
+                self._b_counts = [int((val / max_rgb) * 1000) for val in b_h]
+                hist = thumb_rgb.convert("L").histogram()
                 max_val = max(hist) if hist and max(hist) > 0 else 1
                 self._counts = [int((val / max_val) * 1000) for val in hist[:256]]
             else:
-                self._counts = [0] * 256
+                self._counts = list(empty)
+                self._r_counts = list(empty)
+                self._g_counts = list(empty)
+                self._b_counts = list(empty)
         except Exception:
-            self._counts = [0] * 256
+            self._counts = list(empty)
+            self._r_counts = list(empty)
+            self._g_counts = list(empty)
+            self._b_counts = list(empty)
         self.update()
 
     def reset_points(self) -> None:
@@ -215,27 +268,41 @@ class HistogramWidget(QWidget):
         p.drawLine(QPointF(w * 0.33, 1), QPointF(w * 0.33, graph_bottom))
         p.drawLine(QPointF(w * 0.66, 1), QPointF(w * 0.66, graph_bottom))
 
-        # Histogram curve polygon
-        if any(self._counts):
+        # Histogram curve polygons (RGB channels behind Luminance)
+        usable_w = max(1.0, float(w - 12))
+        usable_h = graph_bottom - 4
+        step = usable_w / 255.0
+
+        def _build_hist_path(counts: list[int]) -> QPainterPath:
             path = QPainterPath()
             path.moveTo(6, graph_bottom - 2)
-            usable_w = max(1.0, float(w - 12))
-            usable_h = graph_bottom - 4
-            step = usable_w / 255.0
-
             for i in range(256):
                 x = 6 + i * step
-                y = (graph_bottom - 2) - (self._counts[i] / 1000.0) * usable_h
+                y = (graph_bottom - 2) - (counts[i] / 1000.0) * usable_h
                 path.lineTo(x, y)
             path.lineTo(w - 6, graph_bottom - 2)
             path.closeSubpath()
+            return path
 
+        has_rgb = any(self._r_counts) or any(self._g_counts) or any(self._b_counts)
+        if has_rgb:
+            for counts, fill_col, stroke_col in (
+                (self._r_counts, QColor(235, 75, 75, 70), QColor(255, 95, 95, 165)),
+                (self._g_counts, QColor(75, 210, 95, 70), QColor(95, 235, 115, 165)),
+                (self._b_counts, QColor(75, 145, 255, 70), QColor(100, 170, 255, 165)),
+            ):
+                if any(counts):
+                    p.setPen(QPen(stroke_col, 1))
+                    p.setBrush(fill_col)
+                    p.drawPath(_build_hist_path(counts))
+
+        if any(self._counts):
             grad = QLinearGradient(0, 0, 0, graph_bottom)
-            grad.setColorAt(0.0, QColor(220, 225, 230, 220))
-            grad.setColorAt(1.0, QColor(140, 150, 160, 180))
+            grad.setColorAt(0.0, QColor(220, 225, 230, 150 if has_rgb else 220))
+            grad.setColorAt(1.0, QColor(140, 150, 160, 100 if has_rgb else 180))
             p.setPen(QPen(QColor("#D0D5DA"), 1))
             p.setBrush(grad)
-            p.drawPath(path)
+            p.drawPath(_build_hist_path(self._counts))
 
         # Draw interactive upward-pointing arrow handles at black and white points
         bx = self._get_handle_x(self.black_point)
@@ -1819,18 +1886,31 @@ class _GeotagInput(QLineEdit):
             return
 
         import threading
-        def _fetch():
+
+        def _fetch() -> None:
+            results: list[dict[str, Any]] = []
             try:
-                results = search_places_online(query, db_engine=self._db_engine, timeout=2.0, limit=6)
-                if results and self.text().strip().lower() == query.lower():
-                    QTimer.singleShot(0, lambda: self._apply_online_results(results))
-                else:
-                    QTimer.singleShot(0, lambda: self.lbl_status.setVisible(False) if self.lbl_status else None)
+                results = search_places_online(query, db_engine=self._db_engine, timeout=4.0, limit=6)
             except Exception:
-                if self.lbl_status is not None:
-                    QTimer.singleShot(0, lambda: self.lbl_status.setVisible(False))
+                results = []
+            self._pending_online_search = (query, results)
+            QMetaObject.invokeMethod(self, "_finish_online_search", Qt.QueuedConnection)
 
         threading.Thread(target=_fetch, daemon=True).start()
+
+    @Slot()
+    def _finish_online_search(self) -> None:
+        payload = getattr(self, "_pending_online_search", None)
+        if not payload:
+            if self.lbl_status is not None:
+                self.lbl_status.setVisible(False)
+            return
+        self._pending_online_search = None
+        query, results = payload
+        if results and self.text().strip().lower() == query.lower():
+            self._apply_online_results(results)
+        elif self.lbl_status is not None:
+            self.lbl_status.setVisible(False)
 
     def _apply_online_results(self, new_places: list[dict[str, Any]]) -> None:
         if self.lbl_status is not None:
@@ -1884,23 +1964,12 @@ class _FineTuneGroup(QFrame):
     def __init__(self, title: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("FineTuneGroup")
-        self.setStyleSheet(
-            """
-            QFrame#FineTuneGroup {
-                background: #FFFFFF;
-                border: 1px solid #D2DFEE;
-                border-radius: 4px;
-            }
-            """
-        )
         self.vbox = QVBoxLayout(self)
         self.vbox.setContentsMargins(8, 6, 8, 8)
         self.vbox.setSpacing(4)
 
         lbl = QLabel(title, self)
-        lbl.setStyleSheet(
-            "color: #29588C; font-family: 'Segoe UI'; font-size: 9.5pt; font-weight: 600; border: none;"
-        )
+        lbl.setObjectName("FineTuneGroupTitle")
         self.vbox.addWidget(lbl)
 
 
@@ -2096,6 +2165,8 @@ class TagAndCaptionDock(QDockWidget):
     remove_background_requested = Signal()
     mask_preview_toggled = Signal(bool)                      # live ruby mask overlay
     map_location_selected = Signal(list, str, float, float)  # media_ids, label, lat, lon
+    ocr_rescan_requested = Signal(str)                       # preferred backend key
+    ocr_text_edited = Signal(str)                            # edited or cleared OCR text
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Tag and caption", parent)
@@ -2104,8 +2175,8 @@ class TagAndCaptionDock(QDockWidget):
             QDockWidget.DockWidgetClosable
         )
         self.setTitleBarWidget(QWidget(self))  # Hide default ugly dock titlebar
-        self.setMinimumWidth(220)
-        self.setMaximumWidth(600)
+        self.setMinimumWidth(240)
+        self.setMaximumWidth(700)
 
         self._current_mode: Literal["info", "fine_tune", "depth_light"] = "info"
         self._selected_ids: list[int] = []
@@ -2115,6 +2186,8 @@ class TagAndCaptionDock(QDockWidget):
         self._updating_ui: bool = False
         self._original_filename: str = ""
         self._current_date_taken_ts: int = 0
+        self._last_caption_text: str = ""
+        self._last_valid_geotag: str = ""
 
         # Real-time event throttler/coalescer to maintain responsive 60 FPS interactions
         self._dl_timer = QTimer(self)
@@ -2142,12 +2215,12 @@ class TagAndCaptionDock(QDockWidget):
             """
             QFrame#RightSidebarContainer {
                 background-color: #FFFFFF;
-                border-left: 1px solid #D2DFEE;
+                border-left: 1px solid qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #DCE7F5, stop:0.08 #B7D1EE, stop:0.92 #B7D1EE, stop:1 #DCE7F5);
             }
             """
         )
         outer_vbox = QVBoxLayout(self.container)
-        outer_vbox.setContentsMargins(0, 0, 0, 0)
+        outer_vbox.setContentsMargins(1, 0, 0, 0)
         outer_vbox.setSpacing(0)
 
         # Subtle Header Row with small '✕' button in top right (matches WLPG screenshots)
@@ -2198,10 +2271,11 @@ class TagAndCaptionDock(QDockWidget):
         self._apply_stylesheet()
 
     def sizeHint(self) -> QSize:
-        return QSize(295, 600) if getattr(self, "_current_mode", "info") in ("fine_tune", "depth_light") else QSize(280, 600)
+        return QSize(310, 600) if getattr(self, "_current_mode", "info") in ("fine_tune", "depth_light") else QSize(280, 600)
 
     def minimumSizeHint(self) -> QSize:
-        return QSize(220, 300)
+        min_w = 285 if getattr(self, "_current_mode", "info") in ("fine_tune", "depth_light") else 240
+        return QSize(min_w, 300)
 
     def keyPressEvent(self, event: Any) -> None:
         if event.key() in (Qt.Key_Left, Qt.Key_Right):
@@ -2217,11 +2291,15 @@ class TagAndCaptionDock(QDockWidget):
         """Switches between Tag & Caption (Ctrl+I), Fine-Tune (Ctrl+F), and Depth & Light."""
         self._current_mode = mode
         if mode == "depth_light":
+            self.setMinimumWidth(285)
             self.mode_stack.setCurrentIndex(2)
         elif mode == "fine_tune":
+            self.setMinimumWidth(285)
             self.mode_stack.setCurrentIndex(1)
         else:
+            self.setMinimumWidth(240)
             self.mode_stack.setCurrentIndex(0)
+        self.updateGeometry()
         self.show()
 
     def focus_filename_rename(self) -> None:
@@ -2358,6 +2436,7 @@ class TagAndCaptionDock(QDockWidget):
         self.txt_caption = QLineEdit(top_content)
         self.txt_caption.setObjectName("InlineEdit")
         self.txt_caption.setPlaceholderText("Add caption")
+        self.txt_caption.returnPressed.connect(self._on_caption_return_pressed)
         self.txt_caption.editingFinished.connect(self._on_caption_editing_finished)
         top_vbox.addWidget(self.txt_caption)
 
@@ -2409,7 +2488,7 @@ class TagAndCaptionDock(QDockWidget):
         # Empty state label: "X items in this view" (media_1792167382404_9d7d42ec.png)
         self.lbl_view_items_count = QLabel("0 items in this view", bottom_content)
         self.lbl_view_items_count.setStyleSheet(
-            "color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt; padding-top: 2px;"
+            "color: #475569; font-family: 'Segoe UI'; font-size: 9pt; padding-top: 2px;"
         )
         bottom_vbox.addWidget(self.lbl_view_items_count)
 
@@ -2422,24 +2501,24 @@ class TagAndCaptionDock(QDockWidget):
 
         self.lbl_selection_header = QLabel("No items selected", self.info_form_frame)
         self.lbl_selection_header.setStyleSheet(
-            "color: #7B8B9B; font-family: 'Segoe UI'; font-size: 8.5pt;"
+            "color: #64748B; font-family: 'Segoe UI'; font-size: 9pt;"
         )
         form_vbox.addWidget(self.lbl_selection_header)
 
         form = QFormLayout()
         form.setContentsMargins(0, 2, 0, 2)
-        form.setSpacing(3)
+        form.setSpacing(4)
         form.setLabelAlignment(Qt.AlignLeft)
 
         def make_val_lbl() -> QLabel:
             lbl = QLabel("-", self.info_form_frame)
-            lbl.setStyleSheet("color: #1E395B; font-family: 'Segoe UI'; font-size: 8.5pt;")
+            lbl.setStyleSheet("color: #1E293B; font-family: 'Segoe UI'; font-size: 9pt;")
             lbl.setWordWrap(True)
             return lbl
 
         def make_field_lbl(text: str) -> QLabel:
             lbl = QLabel(text, self.info_form_frame)
-            lbl.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
+            lbl.setStyleSheet("color: #475569; font-family: 'Segoe UI'; font-size: 9pt;")
             return lbl
 
         self.txt_filename = QLineEdit(self.info_form_frame)
@@ -2616,6 +2695,148 @@ class TagAndCaptionDock(QDockWidget):
 
         form_vbox.addLayout(form)
         bottom_vbox.addWidget(self.info_form_frame)
+
+        # Collapsible OCR "Text in Photo" box (shown ONLY when single selected photo has non-empty ocr_text)
+        self.ocr_section_widget = QFrame(bottom_content)
+        self.ocr_section_widget.setObjectName("OcrSectionWidget")
+        ocr_vbox = QVBoxLayout(self.ocr_section_widget)
+        ocr_vbox.setContentsMargins(0, 6, 0, 0)
+        ocr_vbox.setSpacing(4)
+
+        ocr_hdr = QHBoxLayout()
+        ocr_hdr.setContentsMargins(0, 0, 0, 0)
+        self.btn_ocr_toggle = QToolButton(self.ocr_section_widget)
+        self.btn_ocr_toggle.setObjectName("OcrToggleBtn")
+        self.btn_ocr_toggle.setText("▾ Text in Photo (OCR)")
+        self.btn_ocr_toggle.setCheckable(True)
+        self.btn_ocr_toggle.setChecked(True)
+        self.btn_copy_ocr = QToolButton(self.ocr_section_widget)
+        self.btn_copy_ocr.setObjectName("OcrCopyBtn")
+        self.btn_copy_ocr.setText("Copy Text")
+        self.btn_copy_ocr.setPopupMode(QToolButton.MenuButtonPopup)
+        self.btn_copy_ocr.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.btn_copy_ocr.setFixedHeight(22)
+
+        self._ocr_menu = QMenu(self.btn_copy_ocr)
+        act_copy_ocr = self._ocr_menu.addAction("Copy Text")
+        act_edit_ocr = self._ocr_menu.addAction("Edit OCR Text")
+        rescan_menu = self._ocr_menu.addMenu("Rescan with...")
+        for lbl, key in (
+            ("Auto (Best Available)", "auto"),
+            ("RapidOCR (ONNX)", "rapidocr"),
+            ("Windows OCR", "windows_media_ocr"),
+            ("Tesseract", "pytesseract"),
+        ):
+            act_r = rescan_menu.addAction(lbl)
+            act_r.triggered.connect(lambda _c=False, b=key: self.ocr_rescan_requested.emit(b))
+        self._ocr_menu.addSeparator()
+        act_remove_ocr = self._ocr_menu.addAction("Remove OCR Text")
+        self.btn_copy_ocr.setMenu(self._ocr_menu)
+
+        ocr_hdr.addWidget(self.btn_ocr_toggle)
+        ocr_hdr.addStretch(1)
+        ocr_hdr.addWidget(self.btn_copy_ocr)
+        ocr_vbox.addLayout(ocr_hdr)
+
+        self.ocr_edit_bar = QWidget(self.ocr_section_widget)
+        ocr_edit_row = QHBoxLayout(self.ocr_edit_bar)
+        ocr_edit_row.setContentsMargins(0, 0, 0, 0)
+        ocr_edit_row.setSpacing(4)
+        ocr_edit_row.addStretch(1)
+        self.btn_ocr_save_edit = QPushButton("Save", self.ocr_edit_bar)
+        self.btn_ocr_save_edit.setObjectName("FineTuneActionBtn")
+        self.btn_ocr_save_edit.setFixedHeight(20)
+        self.btn_ocr_save_edit.setToolTip("Save OCR text (Ctrl+Enter)")
+        self.btn_ocr_cancel_edit = QPushButton("Cancel", self.ocr_edit_bar)
+        self.btn_ocr_cancel_edit.setObjectName("FineTuneResetBtn")
+        self.btn_ocr_cancel_edit.setFixedHeight(20)
+        self.btn_ocr_cancel_edit.setToolTip("Cancel editing (Esc)")
+        ocr_edit_row.addWidget(self.btn_ocr_save_edit)
+        ocr_edit_row.addWidget(self.btn_ocr_cancel_edit)
+        self.ocr_edit_bar.setVisible(False)
+        ocr_vbox.addWidget(self.ocr_edit_bar)
+
+        self.txt_ocr_preview = QPlainTextEdit(self.ocr_section_widget)
+        self.txt_ocr_preview.setObjectName("OcrPreviewEdit")
+        self.txt_ocr_preview.setReadOnly(True)
+        self.txt_ocr_preview.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+        )
+        self.txt_ocr_preview.setMaximumHeight(92)
+        ocr_vbox.addWidget(self.txt_ocr_preview)
+        self._ocr_pre_edit_text: str = ""
+
+        def _refresh_ocr_edit_style() -> None:
+            st = self.txt_ocr_preview.style()
+            if st is not None:
+                st.unpolish(self.txt_ocr_preview)
+                st.polish(self.txt_ocr_preview)
+
+        def _toggle_ocr_box(expanded: bool) -> None:
+            self.txt_ocr_preview.setVisible(expanded)
+            if not expanded and self.ocr_edit_bar.isVisible():
+                _cancel_ocr_edit()
+            self.btn_ocr_toggle.setText("▾ Text in Photo (OCR)" if expanded else "▸ Text in Photo (OCR)")
+
+        def _copy_ocr_text() -> None:
+            txt = self.txt_ocr_preview.toPlainText().strip()
+            if txt:
+                QApplication.clipboard().setText(txt)
+                self.btn_copy_ocr.setText("Copied ✓")
+                QTimer.singleShot(1500, lambda: self.btn_copy_ocr.setText("Copy Text"))
+
+        def _begin_ocr_edit() -> None:
+            self._ocr_pre_edit_text = self.txt_ocr_preview.toPlainText()
+            if not self.btn_ocr_toggle.isChecked():
+                self.btn_ocr_toggle.setChecked(True)
+            self.txt_ocr_preview.setReadOnly(False)
+            self.txt_ocr_preview.setTextInteractionFlags(Qt.TextEditorInteraction)
+            _refresh_ocr_edit_style()
+            self.ocr_edit_bar.setVisible(True)
+            bottom_scroll.ensureWidgetVisible(self.ocr_edit_bar)
+            self.txt_ocr_preview.setFocus()
+
+        def _save_ocr_edit() -> None:
+            if self.txt_ocr_preview.isReadOnly():
+                return
+            new_txt = self.txt_ocr_preview.toPlainText().strip()
+            self.txt_ocr_preview.setReadOnly(True)
+            self.txt_ocr_preview.setTextInteractionFlags(
+                Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+            )
+            _refresh_ocr_edit_style()
+            self.ocr_edit_bar.setVisible(False)
+            self.ocr_text_edited.emit(new_txt)
+
+        def _cancel_ocr_edit() -> None:
+            self.txt_ocr_preview.setPlainText(self._ocr_pre_edit_text)
+            self.txt_ocr_preview.setReadOnly(True)
+            self.txt_ocr_preview.setTextInteractionFlags(
+                Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+            )
+            _refresh_ocr_edit_style()
+            self.ocr_edit_bar.setVisible(False)
+
+        def _remove_ocr_text() -> None:
+            if self.ocr_edit_bar.isVisible():
+                _cancel_ocr_edit()
+            self.txt_ocr_preview.clear()
+            self.ocr_section_widget.setVisible(False)
+            self.ocr_text_edited.emit("")
+
+        self.btn_ocr_toggle.toggled.connect(_toggle_ocr_box)
+        self.btn_copy_ocr.clicked.connect(_copy_ocr_text)
+        act_copy_ocr.triggered.connect(_copy_ocr_text)
+        act_edit_ocr.triggered.connect(_begin_ocr_edit)
+        act_remove_ocr.triggered.connect(_remove_ocr_text)
+        self.btn_ocr_save_edit.clicked.connect(_save_ocr_edit)
+        self.btn_ocr_cancel_edit.clicked.connect(_cancel_ocr_edit)
+        QShortcut(QKeySequence("Ctrl+Return"), self.txt_ocr_preview, _save_ocr_edit, context=Qt.WidgetShortcut)
+        QShortcut(QKeySequence("Ctrl+Enter"), self.txt_ocr_preview, _save_ocr_edit, context=Qt.WidgetShortcut)
+        QShortcut(QKeySequence(Qt.Key_Escape), self.txt_ocr_preview, _cancel_ocr_edit, context=Qt.WidgetShortcut)
+        self.ocr_section_widget.setVisible(False)
+        bottom_vbox.addWidget(self.ocr_section_widget)
+
         bottom_vbox.addStretch(1)
 
         bottom_scroll.setWidget(bottom_content)
@@ -2727,23 +2948,9 @@ class TagAndCaptionDock(QDockWidget):
         grp_str = _FineTuneGroup("Straighten photo", content)
         str_row = QHBoxLayout()
         self.btn_auto_straighten = QPushButton("Auto straighten", grp_str)
+        self.btn_auto_straighten.setObjectName("FineTuneActionBtn")
         self.btn_auto_straighten.setFixedHeight(22)
-        self.btn_auto_straighten.setStyleSheet(
-            """
-            QPushButton {
-                background: #F7FAFD;
-                border: 1px solid #B5D2ED;
-                border-radius: 3px;
-                color: #1E395B;
-                font-family: 'Segoe UI';
-                font-size: 8pt;
-                padding: 2px 8px;
-            }
-            QPushButton:hover {
-                background: #E4F0FC;
-            }
-            """
-        )
+        self.btn_auto_straighten.setCursor(Qt.PointingHandCursor)
         self.btn_auto_straighten.clicked.connect(self.auto_straighten_requested.emit)
         str_row.addWidget(self.btn_auto_straighten)
         str_row.addStretch(1)
@@ -2803,58 +3010,19 @@ class TagAndCaptionDock(QDockWidget):
         action_bar.setContentsMargins(0, 6, 0, 4)
 
         self.btn_hold_compare = QPushButton("Hold to Compare (Original)", content)
+        self.btn_hold_compare.setObjectName("FineTuneActionBtn")
         self.btn_hold_compare.setFixedHeight(26)
         self.btn_hold_compare.setCursor(Qt.PointingHandCursor)
         self.btn_hold_compare.setToolTip("Click and hold to preview original unedited photo (\\)")
-        self.btn_hold_compare.setStyleSheet(
-            """
-            QPushButton {
-                background: #F7FAFD;
-                border: 1px solid #B5D2ED;
-                border-radius: 3px;
-                color: #1E395B;
-                font-family: 'Segoe UI';
-                font-size: 8pt;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background: #E4F0FC;
-            }
-            QPushButton:pressed {
-                background: #CCE4F7;
-                border-color: #3399FF;
-            }
-            """
-        )
         self.btn_hold_compare.pressed.connect(self.compare_started.emit)
         self.btn_hold_compare.released.connect(self.compare_ended.emit)
         action_bar.addWidget(self.btn_hold_compare, 1)
 
         self.btn_reset_default = QPushButton("Reset to default", content)
+        self.btn_reset_default.setObjectName("FineTuneResetBtn")
         self.btn_reset_default.setFixedHeight(26)
         self.btn_reset_default.setCursor(Qt.PointingHandCursor)
         self.btn_reset_default.setToolTip("Reset all adjustments and levels back to default")
-        self.btn_reset_default.setStyleSheet(
-            """
-            QPushButton {
-                background: #F7FAFD;
-                border: 1px solid #B5D2ED;
-                border-radius: 3px;
-                color: #1E395B;
-                font-family: 'Segoe UI';
-                font-size: 8pt;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background: #FFF1F0;
-                border-color: #FFA39E;
-                color: #CF1322;
-            }
-            QPushButton:pressed {
-                background: #FFCCC7;
-            }
-            """
-        )
         self.btn_reset_default.clicked.connect(self.reset_all_adjustments)
         action_bar.addWidget(self.btn_reset_default, 1)
 
@@ -2873,9 +3041,7 @@ class TagAndCaptionDock(QDockWidget):
         h_layout.setSpacing(4)
 
         lbl = QLabel(text, container)
-        lbl.setStyleSheet(
-            "color: #1E395B; font-family: 'Segoe UI'; font-size: 8pt; border: none; background: transparent;"
-        )
+        lbl.setObjectName("SliderHeaderLabel")
         h_layout.addWidget(lbl)
         h_layout.addStretch(1)
 
@@ -2883,9 +3049,6 @@ class TagAndCaptionDock(QDockWidget):
         val_lbl.setObjectName("val_lbl")
         val_lbl.setMinimumWidth(32)
         val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        val_lbl.setStyleSheet(
-            "color: #5A7A9E; font-family: 'Segoe UI'; font-size: 8pt; font-weight: 600; border: none; background: transparent; padding-right: 2px;"
-        )
         h_layout.addWidget(val_lbl)
 
         if slider is not None:
@@ -2964,29 +3127,8 @@ class TagAndCaptionDock(QDockWidget):
         cutout_row.setSpacing(6)
         cutout_row.setContentsMargins(0, 2, 0, 4)
 
-        btn_style_cutout = """
-            QPushButton {
-                background: #F7FAFD;
-                border: 1px solid #B5D2ED;
-                border-radius: 3px;
-                color: #1E395B;
-                font-family: 'Segoe UI';
-                font-size: 8pt;
-                font-weight: 600;
-                padding: 3px 6px;
-                text-align: left;
-            }
-            QPushButton:hover {
-                background: #E4F0FC;
-                border-color: #7BA7C9;
-            }
-            QPushButton:pressed {
-                background: #CCE4F7;
-                border-color: #3399FF;
-            }
-        """
-
         self.btn_copy_subject = QPushButton("Copy Subject", grp_cutout)
+        self.btn_copy_subject.setObjectName("DepthCutoutBtn")
         self.btn_copy_subject.setIcon(make_wlpg_icon("copy_subject", 16))
         self.btn_copy_subject.setIconSize(QSize(16, 16))
         self.btn_copy_subject.setFixedHeight(28)
@@ -2994,11 +3136,11 @@ class TagAndCaptionDock(QDockWidget):
         self.btn_copy_subject.setToolTip(
             "Extract the foreground subject with a transparent background (RGBA) and copy to clipboard"
         )
-        self.btn_copy_subject.setStyleSheet(btn_style_cutout)
         self.btn_copy_subject.clicked.connect(self.copy_subject_requested.emit)
         cutout_row.addWidget(self.btn_copy_subject, 1)
 
         self.btn_remove_background = QPushButton("Remove Background", grp_cutout)
+        self.btn_remove_background.setObjectName("DepthCutoutBtn")
         self.btn_remove_background.setIcon(make_wlpg_icon("remove_background", 16))
         self.btn_remove_background.setIconSize(QSize(16, 16))
         self.btn_remove_background.setFixedHeight(28)
@@ -3006,7 +3148,6 @@ class TagAndCaptionDock(QDockWidget):
         self.btn_remove_background.setToolTip(
             "Remove the background from this photo (save as PNG, WebP, AVIF, or JXL to keep transparency)"
         )
-        self.btn_remove_background.setStyleSheet(btn_style_cutout)
         self.btn_remove_background.clicked.connect(self.remove_background_requested.emit)
         cutout_row.addWidget(self.btn_remove_background, 1)
 
@@ -3151,59 +3292,19 @@ class TagAndCaptionDock(QDockWidget):
         action_bar.setContentsMargins(0, 4, 0, 4)
 
         self.btn_dl_hold_compare = QPushButton("Hold to Compare (Original)", content)
+        self.btn_dl_hold_compare.setObjectName("FineTuneActionBtn")
         self.btn_dl_hold_compare.setFixedHeight(26)
         self.btn_dl_hold_compare.setCursor(Qt.PointingHandCursor)
         self.btn_dl_hold_compare.setToolTip("Click and hold to preview original unedited photo (\\)")
-        self.btn_dl_hold_compare.setStyleSheet(
-            """
-            QPushButton {
-                background: #F7FAFD;
-                border: 1px solid #B5D2ED;
-                border-radius: 3px;
-                color: #1E395B;
-                font-family: 'Segoe UI';
-                font-size: 8pt;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background: #E4F0FC;
-            }
-            QPushButton:pressed {
-                background: #CCE4F7;
-                border-color: #3399FF;
-            }
-            """
-        )
         self.btn_dl_hold_compare.pressed.connect(self.compare_started.emit)
         self.btn_dl_hold_compare.released.connect(self.compare_ended.emit)
         action_bar.addWidget(self.btn_dl_hold_compare)
 
         self.btn_dl_reset = QPushButton("Reset to Default", content)
+        self.btn_dl_reset.setObjectName("FineTuneResetBtn")
         self.btn_dl_reset.setFixedHeight(26)
         self.btn_dl_reset.setCursor(Qt.PointingHandCursor)
         self.btn_dl_reset.setToolTip("Reset all depth, blur, relight, and haze adjustments to default")
-        self.btn_dl_reset.setStyleSheet(
-            """
-            QPushButton {
-                background: #F7FAFD;
-                border: 1px solid #B5D2ED;
-                border-radius: 3px;
-                color: #1E395B;
-                font-family: 'Segoe UI';
-                font-size: 8pt;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background: #FFF1F0;
-                border-color: #FFA39E;
-                color: #CF1322;
-            }
-            QPushButton:pressed {
-                background: #FFCCC7;
-                border-color: #F5222D;
-            }
-            """
-        )
         self.btn_dl_reset.clicked.connect(self.depth_reset_requested.emit)
         action_bar.addWidget(self.btn_dl_reset)
 
@@ -3557,6 +3658,9 @@ class TagAndCaptionDock(QDockWidget):
                 self.lbl_lon.setText("Unavailable")
                 self.txt_caption.clear()
                 self.txt_geotag.clear()
+                if hasattr(self, "ocr_section_widget"):
+                    self.txt_ocr_preview.clear()
+                    self.ocr_section_widget.setVisible(False)
                 return
 
             self.lbl_view_items_count.setVisible(False)
@@ -3744,7 +3848,9 @@ class TagAndCaptionDock(QDockWidget):
                 self.lbl_lat.setText(f"{float(lat):.5f}" if lat is not None else "Unavailable")
                 self.lbl_lon.setText(f"{float(lon):.5f}" if lon is not None else "Unavailable")
 
-                self.txt_caption.setText(str(summary.get("caption") or ""))
+                cap_val = str(summary.get("caption") or "")
+                self.txt_caption.setText(cap_val)
+                self._last_caption_text = cap_val.strip()
                 loc_name = str(summary.get("location_name") or "").strip()
                 if not loc_name and lat is not None and lon is not None:
                     try:
@@ -3754,6 +3860,11 @@ class TagAndCaptionDock(QDockWidget):
                     except Exception:
                         pass
                 self.txt_geotag.setText(loc_name)
+                self._last_valid_geotag = loc_name
+                if hasattr(self, "ocr_section_widget"):
+                    ocr_val = str(summary.get("ocr_text") or "").strip()
+                    self.txt_ocr_preview.setPlainText(ocr_val)
+                    self.ocr_section_widget.setVisible(bool(ocr_val))
             else:
                 lead = summary.get("lead", {})
                 self.lbl_selection_header.setText(f"{count} items selected")
@@ -3811,7 +3922,9 @@ class TagAndCaptionDock(QDockWidget):
                 self.lbl_lat.setText(f"{float(lead_lat):.5f}" if lead_lat is not None else "Unavailable")
                 self.lbl_lon.setText(f"{float(lead_lon):.5f}" if lead_lon is not None else "Unavailable")
 
-                self.txt_caption.setText(str(lead.get("caption") or ""))
+                cap_val = str(lead.get("caption") or "")
+                self.txt_caption.setText(cap_val)
+                self._last_caption_text = cap_val.strip()
                 common_loc = str(summary.get("common_location_name") or lead.get("location_name") or "").strip()
                 if not common_loc and lead_lat is not None and lead_lon is not None:
                     try:
@@ -3821,6 +3934,10 @@ class TagAndCaptionDock(QDockWidget):
                     except Exception:
                         pass
                 self.txt_geotag.setText(common_loc)
+                self._last_valid_geotag = common_loc
+                if hasattr(self, "ocr_section_widget"):
+                    self.txt_ocr_preview.clear()
+                    self.ocr_section_widget.setVisible(False)
         finally:
             self._updating_ui = False
 
@@ -3914,33 +4031,130 @@ class TagAndCaptionDock(QDockWidget):
         self._update_flag_button(new_flag)
         self.flag_edited.emit(new_flag)
 
+    def _on_caption_return_pressed(self) -> None:
+        self._on_caption_editing_finished()
+        QTimer.singleShot(0, self.txt_caption.clearFocus)
+
+    def keyPressEvent(self, event: Any) -> None:
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def _on_caption_editing_finished(self) -> None:
         if self._updating_ui or not self._selected_ids:
             return
-        self.caption_committed.emit(self.txt_caption.text().strip())
+        new_cap = self.txt_caption.text().strip()
+        if new_cap == getattr(self, "_last_caption_text", ""):
+            return
+        self._last_caption_text = new_cap
+        self.caption_committed.emit(new_cap)
 
     def commit_caption(self, caption_text: str | None = None) -> None:
         if caption_text is not None:
             self.txt_caption.setText(caption_text)
-        self.caption_committed.emit(self.txt_caption.text().strip())
+        new_cap = self.txt_caption.text().strip()
+        self._last_caption_text = new_cap
+        self.caption_committed.emit(new_cap)
 
     def _on_geotag_committed(self) -> None:
         if self._updating_ui or not self._selected_ids:
             return
-        self.txt_geotag.setCursorPosition(0)
-        self.geotag_edited.emit(self.txt_geotag.text().strip())
+        if getattr(self, "_ignore_next_geotag_return", False):
+            self._ignore_next_geotag_return = False
+            QTimer.singleShot(0, self.txt_geotag.clearFocus)
+            return
+
+        raw = self.txt_geotag.text().strip()
+        popup = self.txt_geotag._completer.popup() if hasattr(self.txt_geotag, "_completer") else None
+        if popup is not None and popup.isVisible():
+            popup.hide()
+
+        if not raw:
+            if getattr(self, "_last_valid_geotag", ""):
+                self._last_valid_geotag = ""
+                self._on_geotag_cleared()
+            QTimer.singleShot(0, self.txt_geotag.clearFocus)
+            return
+
+        if raw == getattr(self, "_last_valid_geotag", ""):
+            QTimer.singleShot(0, self.txt_geotag.clearFocus)
+            return
+
+        # Auto-select the first valid item from the autocomplete list if available
+        places = getattr(self.txt_geotag, "_current_places", None) or []
+        chosen = next(
+            (p for p in places if p.get("formatted_address", "").lower() == raw.lower()),
+            None,
+        )
+        if chosen is None and places:
+            chosen = next(
+                (p for p in places if raw.lower() in p.get("formatted_address", "").lower()),
+                places[0],
+            )
+        if chosen is not None and chosen.get("lat") is not None and chosen.get("lon") is not None:
+            fmt = str(chosen["formatted_address"])
+            lat, lon = float(chosen["lat"]), float(chosen["lon"])
+            self.txt_geotag.setText(fmt)
+            self._last_valid_geotag = fmt
+            self.lbl_lat.setText(f"{lat:.5f}")
+            self.lbl_lon.setText(f"{lon:.5f}")
+            if self.lbl_geotag_status is not None:
+                self.lbl_geotag_status.setVisible(False)
+            self.geotag_edited.emit(fmt)
+            QTimer.singleShot(0, self.txt_geotag.clearFocus)
+            return
+
+        lat, lon, fmt = resolve_location_query(
+            raw, allow_network=False, db_engine=getattr(self.txt_geotag, "_db_engine", None)
+        )
+        if lat is not None and lon is not None and fmt:
+            self.txt_geotag.setText(fmt)
+            self._last_valid_geotag = fmt
+            self.lbl_lat.setText(f"{float(lat):.5f}")
+            self.lbl_lon.setText(f"{float(lon):.5f}")
+            if self.lbl_geotag_status is not None:
+                self.lbl_geotag_status.setVisible(False)
+            self.geotag_edited.emit(fmt)
+            QTimer.singleShot(0, self.txt_geotag.clearFocus)
+            return
+
+        # No offline match: let MainWindow try online lookup asynchronously (and reject if invalid)
+        if self.lbl_geotag_status is not None:
+            self.lbl_geotag_status.setText("Searching...")
+            self.lbl_geotag_status.setVisible(True)
+        self.geotag_edited.emit(raw)
+        QTimer.singleShot(0, self.txt_geotag.clearFocus)
+
+    def revert_invalid_geotag(self, invalid_query: str = "") -> None:
+        """Restores the previous valid geotag and shows a non-blocking invalid-location indicator."""
+        self.txt_geotag.setText(getattr(self, "_last_valid_geotag", ""))
+        if self.lbl_geotag_status is not None:
+            self.lbl_geotag_status.setText("Location not found")
+            self.lbl_geotag_status.setVisible(True)
+            QTimer.singleShot(
+                3000,
+                lambda: self.lbl_geotag_status.setVisible(False)
+                if self.lbl_geotag_status is not None and self.lbl_geotag_status.text() == "Location not found"
+                else None,
+            )
 
     def _on_place_selected(self, place_name: str, lat: float, lon: float) -> None:
         if self._updating_ui or not self._selected_ids:
             return
+        self._ignore_next_geotag_return = True
+        QTimer.singleShot(0, lambda: setattr(self, "_ignore_next_geotag_return", False))
+        self._last_valid_geotag = place_name
         self.txt_geotag.setCursorPosition(0)
         self.lbl_lat.setText(f"{lat:.5f}")
         self.lbl_lon.setText(f"{lon:.5f}")
         self.geotag_edited.emit(place_name)
+        QTimer.singleShot(0, self.txt_geotag.clearFocus)
 
     def _on_geotag_cleared(self) -> None:
         if self._updating_ui or not self._selected_ids:
             return
+        self._last_valid_geotag = ""
         self.lbl_lat.setText("Unavailable")
         self.lbl_lon.setText("Unavailable")
         self.geotag_edited.emit("")
@@ -4004,26 +4218,26 @@ class TagAndCaptionDock(QDockWidget):
 
         if hasattr(self, "lbl_view_items_count"):
             self.lbl_view_items_count.setStyleSheet(
-                f"color: {'#94A3B8' if is_dark else '#55687C'}; font-family: 'Segoe UI'; font-size: 8.5pt; padding-top: 2px;"
+                f"color: {'#94A3B8' if is_dark else '#475569'}; font-family: 'Segoe UI'; font-size: 9pt; padding-top: 2px;"
             )
         if hasattr(self, "lbl_selection_header"):
             self.lbl_selection_header.setStyleSheet(
-                f"color: {'#94A3B8' if is_dark else '#7B8B9B'}; font-family: 'Segoe UI'; font-size: 8.5pt;"
+                f"color: {'#94A3B8' if is_dark else '#64748B'}; font-family: 'Segoe UI'; font-size: 9pt;"
             )
 
-        # Update form labels inside info_form_frame only if visible
-        if hasattr(self, "info_form_frame") and self.info_form_frame.isVisible() and hasattr(self, "_info_form"):
+        # Update form labels inside info_form_frame regardless of current visibility
+        if hasattr(self, "info_form_frame") and hasattr(self, "_info_form"):
             form = self._info_form
             for row in range(form.rowCount()):
                 lbl_item = form.itemAt(row, QFormLayout.LabelRole)
                 if lbl_item and isinstance(lbl_item.widget(), QLabel):
                     lbl_item.widget().setStyleSheet(
-                        f"color: {'#94A3B8' if is_dark else '#55687C'}; font-family: 'Segoe UI'; font-size: 8.5pt;"
+                        f"color: {'#94A3B8' if is_dark else '#475569'}; font-family: 'Segoe UI'; font-size: 9pt;"
                     )
                 fld_item = form.itemAt(row, QFormLayout.FieldRole)
                 if fld_item and isinstance(fld_item.widget(), QLabel):
                     fld_item.widget().setStyleSheet(
-                        f"color: {'#E2E8F0' if is_dark else '#1E395B'}; font-family: 'Segoe UI'; font-size: 8.5pt;"
+                        f"color: {'#E2E8F0' if is_dark else '#1E293B'}; font-family: 'Segoe UI'; font-size: 9pt;"
                     )
 
         # Update existing people/tag chips only if visible
@@ -4050,15 +4264,15 @@ class TagAndCaptionDock(QDockWidget):
                 """
             )
             if hasattr(self, "page_info"):
-                self.page_info.setStyleSheet("background-color: #1B1E24;")
+                self.page_info.setStyleSheet("QWidget#InfoPage { background-color: #1B1E24; }")
             if hasattr(self, "info_splitter"):
-                self.info_splitter.setStyleSheet("background-color: #1B1E24;")
+                self.info_splitter.setStyleSheet("QSplitter#InfoSplitter { background-color: #1B1E24; }")
                 for i in range(self.info_splitter.count()):
                     w = self.info_splitter.widget(i)
                     if isinstance(w, QScrollArea):
-                        w.setStyleSheet("background-color: #1B1E24; border: none;")
+                        w.setStyleSheet("QScrollArea { background-color: #1B1E24; border: none; }")
                         if w.widget():
-                            w.widget().setStyleSheet("background-color: #1B1E24;")
+                            w.widget().setStyleSheet("")
             self.setStyleSheet(
                 """
                 QDockWidget#TagAndCaptionDock {
@@ -4087,25 +4301,126 @@ class TagAndCaptionDock(QDockWidget):
                     border: 1px solid #2D323B;
                     border-radius: 4px;
                 }
-                QLabel#SectionTitle {
+                QLabel#FineTuneGroupTitle {
                     color: #60A5FA;
                     font-family: 'Segoe UI';
                     font-size: 9.5pt;
                     font-weight: 600;
                     border: none;
                     background: transparent;
+                }
+                QLabel#SliderHeaderLabel {
+                    color: #E2E8F0;
+                    font-family: 'Segoe UI';
+                    font-size: 8pt;
+                    border: none;
+                    background: transparent;
+                }
+                QLabel#val_lbl {
+                    color: #94A3B8;
+                    font-family: 'Segoe UI';
+                    font-size: 8pt;
+                    font-weight: 600;
+                    border: none;
+                    background: transparent;
+                    padding-right: 2px;
+                }
+                QPushButton#FineTuneActionBtn,
+                QPushButton#FineTuneResetBtn,
+                QPushButton#DepthCutoutBtn {
+                    background: #262B34;
+                    border: 1px solid #3B4252;
+                    border-radius: 3px;
+                    color: #E2E8F0;
+                    font-family: 'Segoe UI';
+                    font-size: 8pt;
+                    font-weight: 600;
+                    padding: 2px 8px;
+                }
+                QPushButton#DepthCutoutBtn {
+                    padding: 3px 6px;
+                    text-align: left;
+                }
+                QPushButton#FineTuneActionBtn:hover,
+                QPushButton#DepthCutoutBtn:hover {
+                    background: #2E3440;
+                    border-color: #60A5FA;
+                }
+                QPushButton#FineTuneResetBtn:hover {
+                    background: #3B1F24;
+                    border-color: #F87171;
+                    color: #FCA5A5;
+                }
+                QPushButton#FineTuneActionBtn:pressed,
+                QPushButton#DepthCutoutBtn:pressed {
+                    background: #1E3A5F;
+                    border-color: #3B82F6;
+                }
+                QToolButton#OcrToggleBtn {
+                    border: none;
+                    background: transparent;
+                    color: #60A5FA;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                    font-weight: 600;
+                    padding: 0;
+                }
+                QToolButton#OcrCopyBtn {
+                    font-size: 8pt;
+                    padding: 1px 16px 1px 8px;
+                    border: 1px solid #3B4252;
+                    border-radius: 3px;
+                    background: #262B34;
+                    color: #E2E8F0;
+                }
+                QToolButton#OcrCopyBtn:hover {
+                    background: #2E3440;
+                    border-color: #60A5FA;
+                }
+                QToolButton#OcrCopyBtn::menu-button {
+                    border-left: 1px solid #3B4252;
+                    width: 14px;
+                }
+                QToolButton#OcrCopyBtn::menu-button:hover {
+                    background: #3B4252;
+                }
+                QPlainTextEdit#OcrPreviewEdit {
+                    background: #14171B;
+                    border: 1px solid #333A45;
+                    border-radius: 4px;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                    color: #E2E8F0;
+                    padding: 4px;
+                }
+                QPlainTextEdit#OcrPreviewEdit[readOnly="false"] {
+                    background: #181E27;
+                    border: 1px solid #60A5FA;
+                }
+                QLabel#SectionTitle {
+                    color: #60A5FA;
+                    font-family: 'Segoe UI';
+                    font-size: 10.5pt;
+                    font-weight: 600;
+                    border: none;
+                    background: transparent;
                     margin-top: 6px;
                 }
                 QLineEdit#InlineEdit {
-                    background: #14171B;
-                    border: 1px solid #333A45;
-                    border-radius: 2px;
-                    padding: 2px 6px;
+                    background: transparent;
+                    border: 1px solid transparent;
+                    border-radius: 3px;
+                    padding: 3px 6px;
                     font-family: 'Segoe UI';
                     font-size: 8.5pt;
                     color: #E2E8F0;
                 }
+                QLineEdit#InlineEdit:hover {
+                    background: #1E2530;
+                    border: 1px solid #475569;
+                }
                 QLineEdit#InlineEdit:focus {
+                    background: #14171B;
                     border: 1px solid #3B82F6;
                 }
                 """
@@ -4116,20 +4431,20 @@ class TagAndCaptionDock(QDockWidget):
             """
             QFrame#RightSidebarContainer {
                 background-color: #FFFFFF;
-                border-left: 1px solid #D2DFEE;
+                border-left: 1px solid qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #DCE7F5, stop:0.08 #B7D1EE, stop:0.92 #B7D1EE, stop:1 #DCE7F5);
             }
             """
         )
         if hasattr(self, "page_info"):
-            self.page_info.setStyleSheet("background-color: #FFFFFF;")
+            self.page_info.setStyleSheet("QWidget#InfoPage { background-color: #FFFFFF; }")
         if hasattr(self, "info_splitter"):
-            self.info_splitter.setStyleSheet("background-color: #FFFFFF;")
+            self.info_splitter.setStyleSheet("QSplitter#InfoSplitter { background-color: #FFFFFF; }")
             for i in range(self.info_splitter.count()):
                 w = self.info_splitter.widget(i)
                 if isinstance(w, QScrollArea):
-                    w.setStyleSheet("background-color: #FFFFFF; border: none;")
+                    w.setStyleSheet("QScrollArea { background-color: #FFFFFF; border: none; }")
                     if w.widget():
-                        w.widget().setStyleSheet("background-color: #FFFFFF;")
+                        w.widget().setStyleSheet("")
         self.setStyleSheet(
             """
             QDockWidget#TagAndCaptionDock {
@@ -4138,7 +4453,7 @@ class TagAndCaptionDock(QDockWidget):
             }
             QFrame#RightSidebarContainer {
                 background-color: #FFFFFF;
-                border-left: 1px solid #D2DFEE;
+                border-left: 1px solid qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #DCE7F5, stop:0.08 #B7D1EE, stop:0.92 #B7D1EE, stop:1 #DCE7F5);
             }
             QWidget#InfoPage {
                 background-color: #FFFFFF;
@@ -4154,25 +4469,131 @@ class TagAndCaptionDock(QDockWidget):
                 background-color: #FFFFFF;
             }
             QLabel#SectionTitle {
-                color: #1B64B0;
+                color: #1B5E9E;
+                font-family: 'Segoe UI';
+                font-size: 10.5pt;
+                font-weight: 500;
+                border: none;
+                background: transparent;
+                margin-top: 6px;
+            }
+            QFrame#FineTuneGroup {
+                background: #FFFFFF;
+                border: 1px solid #D2DFEE;
+                border-radius: 4px;
+            }
+            QLabel#FineTuneGroupTitle {
+                color: #29588C;
                 font-family: 'Segoe UI';
                 font-size: 9.5pt;
                 font-weight: 600;
                 border: none;
                 background: transparent;
-                margin-top: 6px;
+            }
+            QLabel#SliderHeaderLabel {
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 8pt;
+                border: none;
+                background: transparent;
+            }
+            QLabel#val_lbl {
+                color: #5A7A9E;
+                font-family: 'Segoe UI';
+                font-size: 8pt;
+                font-weight: 600;
+                border: none;
+                background: transparent;
+                padding-right: 2px;
+            }
+            QPushButton#FineTuneActionBtn,
+            QPushButton#FineTuneResetBtn,
+            QPushButton#DepthCutoutBtn {
+                background: #F7FAFD;
+                border: 1px solid #B5D2ED;
+                border-radius: 3px;
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 8pt;
+                font-weight: 600;
+                padding: 2px 8px;
+            }
+            QPushButton#DepthCutoutBtn {
+                padding: 3px 6px;
+                text-align: left;
+            }
+            QPushButton#FineTuneActionBtn:hover,
+            QPushButton#DepthCutoutBtn:hover {
+                background: #E4F0FC;
+                border-color: #7BA7C9;
+            }
+            QPushButton#FineTuneResetBtn:hover {
+                background: #FFF1F0;
+                border-color: #FFA39E;
+                color: #CF1322;
+            }
+            QPushButton#FineTuneActionBtn:pressed,
+            QPushButton#DepthCutoutBtn:pressed {
+                background: #CCE4F7;
+                border-color: #3399FF;
+            }
+            QToolButton#OcrToggleBtn {
+                border: none;
+                background: transparent;
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+                font-weight: 600;
+                padding: 0;
+            }
+            QToolButton#OcrCopyBtn {
+                font-size: 8pt;
+                padding: 1px 16px 1px 8px;
+                border: 1px solid #CBD5E1;
+                border-radius: 3px;
+                background: #F8FAFC;
+                color: #1E395B;
+            }
+            QToolButton#OcrCopyBtn:hover {
+                background: #E2E8F0;
+                border-color: #94A3B8;
+            }
+            QToolButton#OcrCopyBtn::menu-button {
+                border-left: 1px solid #CBD5E1;
+                width: 14px;
+            }
+            QToolButton#OcrCopyBtn::menu-button:hover {
+                background: #CBD5E1;
+            }
+            QPlainTextEdit#OcrPreviewEdit {
+                background: #F8FAFC;
+                border: 1px solid #E2E8F0;
+                border-radius: 4px;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+                color: #0F172A;
+                padding: 4px;
+            }
+            QPlainTextEdit#OcrPreviewEdit[readOnly="false"] {
+                background: #FFFFFF;
+                border: 1px solid #0078D7;
             }
             QLineEdit#InlineEdit {
-                background: #FFFFFF;
-                border: 1px solid #D5E2F0;
-                border-radius: 2px;
-                padding: 2px 6px;
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 3px;
+                padding: 3px 6px;
                 font-family: 'Segoe UI';
                 font-size: 8.5pt;
                 color: #1E395B;
             }
+            QLineEdit#InlineEdit:hover {
+                background: #EEF5FC;
+                border: 1px solid #9EC0E0;
+            }
             QLineEdit#InlineEdit:focus {
-                border: 1px solid #3380CC;
+                background: #FFFFFF;
+                border: 1px solid #1E293B;
             }
             """
         )

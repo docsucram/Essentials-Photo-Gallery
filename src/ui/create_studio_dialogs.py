@@ -15,7 +15,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from PySide6.QtCore import Qt, QThread, Signal, QRectF, QPointF, QPoint, QTimer, QSize
+from PySide6.QtCore import Qt, QThread, Signal, QRectF, QPointF, QPoint, QTimer, QSize, QEvent
 from PySide6.QtGui import (
     QImage,
     QPixmap,
@@ -54,12 +54,18 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QButtonGroup,
     QToolButton,
+    QListWidget,
+    QListWidgetItem,
 )
 
 from src.imaging.create_tools import (
     stitch_panorama,
     stitch_panorama_raw,
     postprocess_panorama,
+    compute_grid_slots,
+    compute_polaroid_card_size,
+    default_polaroid_positions_norm,
+    _get_seamless_slots,
     create_grid_collage,
     create_blended_seamless_collage,
     create_polaroid_scatter_collage,
@@ -740,6 +746,23 @@ class PanoramaDialog(QDialog):
 # 2. Interactive Collage & 'Then & Now' Studio Dialog
 # =============================================================================
 
+def recommended_grid_layouts(count: int) -> list[str]:
+    """Returns sensible Grid / Masonry layout presets tailored to the selected photo count."""
+    if count <= 1:
+        return ["1x1", "Masonry"]
+    if count == 2:
+        return ["2x1", "1x2", "Masonry"]
+    if count == 3:
+        return ["3x1", "1x3", "Center Hero", "Masonry"]
+    if count == 4:
+        return ["2x2", "4x1", "1x4", "Center Hero", "Masonry"]
+    if count in (5, 6):
+        return ["3x2", "2x3", "Center Hero", "Masonry"]
+    if count in (7, 8):
+        return ["4x2", "2x4", "3x3", "Center Hero", "Masonry"]
+    return ["3x3", "4x3", "3x4", "Center Hero", "Masonry"]
+
+
 class CollageDialog(QDialog):
     """
     Interactive QGraphicsView Collage & 'Then & Now' Studio:
@@ -757,11 +780,22 @@ class CollageDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.photos_data = photos_data
+        self.photos_data = [dict(p) for p in photos_data]
         self.output_dir = Path(photos_data[0]["file_path"]).parent if photos_data and photos_data[0].get("file_path") else Path.home()
         self.saved_file_path: Path | None = None
         self.rendered_bgr: np.ndarray | None = None
         self._is_fit_mode: bool = True
+        self._last_preview_size: tuple[int, int] = (1000, 600)
+        self._selected_grid_slot: int | None = None
+        self._grid_selection_rect: QGraphicsRectItem | None = None
+        self._dragging_polaroid_idx: int | None = None
+        self._drag_offset: QPointF = QPointF(0.0, 0.0)
+        self._press_pos_vp: QPoint | None = None
+        self._pending_grid_slot: int | None = None
+        self._panning_crop_idx: int | None = None
+        self._panning_crop_slot_size: tuple[int, int] = (100, 100)
+        self._panning_crop_start_fc: tuple[float, float] = (0.5, 0.4)
+        self._panning_crop_start_scene: QPointF = QPointF(0.0, 0.0)
 
         self.bg_color = QColor(245, 245, 248)
         self.bg_texture = "dark_wood"
@@ -790,6 +824,15 @@ class CollageDialog(QDialog):
         self.preview_view.setStyleSheet("background: #1C1C1E; border: 1px solid #555558; border-radius: 4px;")
         self.preview_pixmap_item = QGraphicsPixmapItem()
         self.preview_scene.addItem(self.preview_pixmap_item)
+        self._grid_selection_rect = QGraphicsRectItem()
+        self._grid_selection_rect.setPen(QPen(QColor(50, 150, 255), 4))
+        self._grid_selection_rect.setBrush(QBrush(QColor(50, 150, 255, 35)))
+        self._grid_selection_rect.setZValue(10.0)
+        self._grid_selection_rect.setVisible(False)
+        self.preview_scene.addItem(self._grid_selection_rect)
+        self.preview_view.setMouseTracking(True)
+        self.preview_view.viewport().setMouseTracking(True)
+        self.preview_view.viewport().installEventFilter(self)
         self.preview_view.zoom_changed.connect(self._on_zoom_changed)
         left_layout.addWidget(self.preview_view, 1)
 
@@ -866,6 +909,44 @@ class CollageDialog(QDialog):
         grp_style.layout().addWidget(self.btn_shuffle)
         sidebar_layout.addWidget(grp_style)
 
+        # 1b. Manual Photo Order & Crop Framing (All Collage modes)
+        self.grp_order = _FineTuneGroup("Photo Order & Framing")
+        self.grp_order.setVisible(True)
+        lbl_order_hint = QLabel("Reorder photos, or drag cropped photos with the Hand tool to adjust framing:")
+        lbl_order_hint.setWordWrap(True)
+        lbl_order_hint.setStyleSheet("font-size: 10.5px; color: #555;")
+        self.grp_order.layout().addWidget(lbl_order_hint)
+
+        self.lst_photo_order = QListWidget(self)
+        self.lst_photo_order.setMaximumHeight(110)
+        self.lst_photo_order.setStyleSheet(
+            "QListWidget { border: 1px solid #C8C8CC; border-radius: 3px; background: #FFFFFF; font-size: 11px; }"
+        )
+        self.grp_order.layout().addWidget(self.lst_photo_order)
+
+        order_btn_row = QHBoxLayout()
+        order_btn_row.setSpacing(6)
+        self.btn_move_up = QPushButton("↑ Up", self)
+        self.btn_move_down = QPushButton("↓ Down", self)
+        self.btn_frame_mode = QPushButton("✋ Frame", self)
+        self.btn_frame_mode.setCheckable(True)
+        self.btn_frame_mode.setToolTip("Hand tool: drag inside cropped photos to adjust framing (also works by dragging in Blended/Grid modes)")
+        self.btn_reset_framing = QPushButton("Reset Crop", self)
+        self.btn_reset_framing.setToolTip("Reset all manual photo framing adjustments")
+        for b in (self.btn_move_up, self.btn_move_down, self.btn_frame_mode, self.btn_reset_framing):
+            b.setCursor(Qt.PointingHandCursor)
+            b.setStyleSheet("padding: 4px 6px; font-size: 11px;")
+        self.btn_move_up.clicked.connect(lambda: self._move_photo(-1))
+        self.btn_move_down.clicked.connect(lambda: self._move_photo(1))
+        self.btn_reset_framing.clicked.connect(self._reset_photo_framing)
+        order_btn_row.addWidget(self.btn_move_up)
+        order_btn_row.addWidget(self.btn_move_down)
+        order_btn_row.addWidget(self.btn_frame_mode)
+        order_btn_row.addWidget(self.btn_reset_framing)
+        self.grp_order.layout().addLayout(order_btn_row)
+        sidebar_layout.addWidget(self.grp_order)
+        self._refresh_order_list()
+
         # 2. Seamless Blend Options (Default WLPG mode)
         self.grp_seamless = _FineTuneGroup("Blended Collage Settings")
         lbl_feather = QLabel("Edge Softness / Blending:")
@@ -882,8 +963,8 @@ class CollageDialog(QDialog):
         self.grp_grid = _FineTuneGroup("Grid Arrangement & Border")
         self.grp_grid.setVisible(False)
         self.cmb_grid_layout = QComboBox(self)
-        self.cmb_grid_layout.addItems(["2x2", "2x1", "3x2", "Center Hero", "Masonry"])
-        self.cmb_grid_layout.currentIndexChanged.connect(self._render_preview)
+        self.cmb_grid_layout.addItems(recommended_grid_layouts(len(self.photos_data)))
+        self.cmb_grid_layout.currentIndexChanged.connect(self._on_grid_layout_changed)
         self.grp_grid.layout().addWidget(self.cmb_grid_layout)
 
         lbl_b = QLabel("Border Thickness:")
@@ -923,6 +1004,12 @@ class CollageDialog(QDialog):
         self.chk_captions.setChecked(True)
         self.chk_captions.toggled.connect(self._render_preview)
         self.grp_polaroid.layout().addWidget(self.chk_captions)
+
+        self.btn_reset_polaroids = QPushButton("Reset Polaroid Positions", self)
+        self.btn_reset_polaroids.setCursor(Qt.PointingHandCursor)
+        self.btn_reset_polaroids.setStyleSheet("padding: 4px 8px; font-size: 11px;")
+        self.btn_reset_polaroids.clicked.connect(self._reset_polaroid_positions)
+        self.grp_polaroid.layout().addWidget(self.btn_reset_polaroids)
         sidebar_layout.addWidget(self.grp_polaroid)
 
         # 5. Canvas Orientation & Export Resolution
@@ -1036,8 +1123,62 @@ class CollageDialog(QDialog):
         self.grp_seamless.setVisible(idx == 0)
         self.grp_grid.setVisible(idx == 1)
         self.grp_polaroid.setVisible(idx == 2)
+        self.grp_order.setVisible(True)
         # Shuffle button doesn't make sense for chronological Then & Now
         self.btn_shuffle.setVisible(idx != 3)
+        self._selected_grid_slot = None
+        self._dragging_polaroid_idx = None
+        self._panning_crop_idx = None
+        self._pending_grid_slot = None
+        self.preview_view.unsetCursor()
+        self._render_preview()
+
+    def _on_grid_layout_changed(self) -> None:
+        self._selected_grid_slot = None
+        self._render_preview()
+
+    def _refresh_order_list(self, selected_row: int | None = None) -> None:
+        if not hasattr(self, "lst_photo_order"):
+            return
+        self.lst_photo_order.clear()
+        for idx, d in enumerate(self.photos_data):
+            fp = d.get("file_path") or d.get("filename") or ""
+            name = Path(str(fp)).name if fp else f"Photo {idx + 1}"
+            self.lst_photo_order.addItem(QListWidgetItem(f"{idx + 1}. {name}"))
+        if selected_row is not None and 0 <= selected_row < self.lst_photo_order.count():
+            self.lst_photo_order.setCurrentRow(selected_row)
+        elif self.lst_photo_order.count() > 0:
+            self.lst_photo_order.setCurrentRow(0)
+
+    def _move_photo(self, delta: int) -> None:
+        row = self.lst_photo_order.currentRow()
+        if row < 0:
+            return
+        new_row = row + delta
+        if not (0 <= new_row < len(self.photos_data)):
+            return
+        self.swap_photos(row, new_row)
+
+    def swap_photos(self, idx_a: int, idx_b: int) -> None:
+        """Swaps two photos in self.photos_data and refreshes order UI + preview."""
+        if idx_a == idx_b:
+            return
+        if not (0 <= idx_a < len(self.photos_data) and 0 <= idx_b < len(self.photos_data)):
+            return
+        self.photos_data[idx_a], self.photos_data[idx_b] = self.photos_data[idx_b], self.photos_data[idx_a]
+        self._user_shuffled = True
+        self._selected_grid_slot = None
+        self._refresh_order_list(selected_row=idx_b)
+        self._render_preview()
+
+    def _reset_photo_framing(self) -> None:
+        for d in self.photos_data:
+            d.pop("focus_center", None)
+        self._render_preview()
+
+    def _reset_polaroid_positions(self) -> None:
+        for d in self.photos_data:
+            d.pop("polaroid_pos", None)
         self._render_preview()
 
     def _pick_bg_color(self) -> None:
@@ -1065,6 +1206,8 @@ class CollageDialog(QDialog):
         import random
         random.shuffle(self.photos_data)
         self._user_shuffled = True
+        self._selected_grid_slot = None
+        self._refresh_order_list()
         self._render_preview()
 
     def _render_canvas(self, target_size: tuple[int, int]) -> np.ndarray:
@@ -1083,6 +1226,8 @@ class CollageDialog(QDialog):
         if not images_bgr:
             return np.full((target_size[1], target_size[0], 3), (245, 245, 248), dtype=np.uint8)
 
+        focus_centers = [d.get("focus_center") for d in self.photos_data if d.get("image_bgr") is not None]
+
         if style_idx == 0:
             feather_ratio = self.sld_feather.value() / 100.0 if hasattr(self, "sld_feather") else 0.22
             faces_per_image = [d.get("faces") for d in self.photos_data]
@@ -1093,6 +1238,7 @@ class CollageDialog(QDialog):
                 blend_feather=feather_ratio,
                 faces_per_image=faces_per_image,
                 prioritize_faces=prioritize,
+                focus_centers=focus_centers,
             )
         elif style_idx == 1:
             layout_name = self.cmb_grid_layout.currentText().lower().replace(" ", "_")
@@ -1103,6 +1249,7 @@ class CollageDialog(QDialog):
                 corner_radius=self.sld_corner.value(),
                 bg_color=_qcolor_to_bgr(self.bg_color),
                 target_size=target_size,
+                focus_centers=focus_centers,
             )
         elif style_idx == 2:
             tex_name = "dark_wood" if "Wood" in self.cmb_texture.currentText() else ("linen" if "Linen" in self.cmb_texture.currentText() else "slate")
@@ -1121,11 +1268,16 @@ class CollageDialog(QDialog):
                         dt_str = str(raw_dt)
 
                     caption = d.get("caption") or dt_str or d.get("filename") or ""
-                    polaroid_data.append({
+                    p_entry: dict[str, Any] = {
                         "image_bgr": images_bgr[i],
                         "caption": str(caption),
                         "date_str": dt_str,
-                    })
+                    }
+                    if d.get("polaroid_pos") is not None:
+                        p_entry["center_norm"] = d["polaroid_pos"]
+                    if d.get("focus_center") is not None:
+                        p_entry["focus_center"] = d["focus_center"]
+                    polaroid_data.append(p_entry)
             return create_polaroid_scatter_collage(
                 images_data=polaroid_data,
                 target_size=target_size,
@@ -1153,6 +1305,7 @@ class CollageDialog(QDialog):
         scale = min(1.0, 1280.0 / max(full_w, full_h))
         pw = max(16, int(round(full_w * scale)))
         ph = max(16, int(round(full_h * scale)))
+        self._last_preview_size = (pw, ph)
 
         rendered = self._render_canvas(target_size=(pw, ph))
         self.rendered_bgr = rendered
@@ -1161,11 +1314,250 @@ class CollageDialog(QDialog):
         pm = _cv2_to_qpixmap(rendered)
         self.preview_pixmap_item.setPixmap(pm)
         self.preview_scene.setSceneRect(QRectF(pm.rect()))
+        self._update_grid_selection_overlay()
         if self._is_fit_mode:
             self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
             self._on_zoom_changed(self.preview_view.transform().m11())
 
-        self.lbl_info.setText(f"{pw} × {ph} px (Full: {full_w} × {full_h}) • {len(self.photos_data)} photos")
+        style_idx = self.cmb_style.currentIndex()
+        hint = ""
+        if style_idx == 1:
+            hint = " • Click 2 slots to swap"
+        elif style_idx == 2:
+            hint = " • Drag Polaroids to move"
+        self.lbl_info.setText(f"{pw} × {ph} px (Full: {full_w} × {full_h}) • {len(self.photos_data)} photos{hint}")
+
+    def _current_grid_slots(self) -> list[tuple[int, int, int, int]]:
+        layout_name = self.cmb_grid_layout.currentText().lower().replace(" ", "_")
+        return compute_grid_slots(
+            count=len(self.photos_data),
+            layout=layout_name,
+            border_thickness=self.sld_border.value(),
+            target_size=self._last_preview_size,
+        )
+
+    def _update_grid_selection_overlay(self) -> None:
+        if self._grid_selection_rect is None:
+            return
+        if self.cmb_style.currentIndex() != 1 or self._selected_grid_slot is None:
+            self._grid_selection_rect.setVisible(False)
+            return
+        slots = self._current_grid_slots()
+        if 0 <= self._selected_grid_slot < len(slots):
+            sx, sy, sw, sh = slots[self._selected_grid_slot]
+            self._grid_selection_rect.setRect(QRectF(sx, sy, sw, sh))
+            self._grid_selection_rect.setVisible(True)
+        else:
+            self._grid_selection_rect.setVisible(False)
+
+    def _hit_test_grid_slot(self, scene_pos: QPointF) -> int | None:
+        slots = self._current_grid_slots()
+        px, py = scene_pos.x(), scene_pos.y()
+        for idx, (sx, sy, sw, sh) in enumerate(slots):
+            if idx < len(self.photos_data) and sx <= px <= sx + sw and sy <= py <= sy + sh:
+                return idx
+        return None
+
+    def _polaroid_center_px(self, idx: int, defaults: list[tuple[float, float]]) -> tuple[float, float]:
+        pw, ph = self._last_preview_size
+        custom_pos = self.photos_data[idx].get("polaroid_pos")
+        if custom_pos is not None and len(custom_pos) == 2:
+            nx, ny = float(custom_pos[0]), float(custom_pos[1])
+        else:
+            nx, ny = defaults[idx % len(defaults)]
+        return pw * nx, ph * ny
+
+    def _hit_test_polaroid(self, scene_pos: QPointF) -> tuple[int, tuple[float, float]] | None:
+        count = len(self.photos_data)
+        if count == 0:
+            return None
+        card_w, card_h = compute_polaroid_card_size(self._last_preview_size)
+        defaults = default_polaroid_positions_norm(count)
+        px, py = scene_pos.x(), scene_pos.y()
+        # Iterate top-most card first (last drawn)
+        for idx in range(count - 1, -1, -1):
+            cx, cy = self._polaroid_center_px(idx, defaults)
+            if abs(px - cx) <= card_w * 0.52 and abs(py - cy) <= card_h * 0.52:
+                return idx, (cx, cy)
+        return None
+
+    def _is_photo_cropped_for_slot(self, idx: int, slot_w: int, slot_h: int) -> bool:
+        if not (0 <= idx < len(self.photos_data)) or slot_w <= 0 or slot_h <= 0:
+            return False
+        img = self.photos_data[idx].get("image_bgr")
+        if img is None:
+            return False
+        ih, iw = img.shape[:2]
+        if ih <= 0 or iw <= 0:
+            return False
+        return abs((iw / ih) - (slot_w / slot_h)) > 0.015
+
+    def _hit_test_cropped_slot(self, scene_pos: QPointF) -> tuple[int, int, int] | None:
+        style_idx = self.cmb_style.currentIndex()
+        pw, ph = self._last_preview_size
+        px, py = scene_pos.x(), scene_pos.y()
+
+        if style_idx == 0:
+            n = len(self.photos_data)
+            if n == 0:
+                return None
+            slots = _get_seamless_slots(n, ph > pw)
+            for idx in range(min(n, len(slots)) - 1, -1, -1):
+                cx_n, cy_n, sw_n, sh_n = slots[idx]
+                sw = max(64, int(pw * sw_n))
+                sh = max(64, int(ph * sh_n))
+                sx = pw * cx_n - sw / 2.0
+                sy = ph * cy_n - sh / 2.0
+                if sx <= px <= sx + sw and sy <= py <= sy + sh:
+                    if self._is_photo_cropped_for_slot(idx, sw, sh):
+                        return idx, sw, sh
+            return None
+
+        if style_idx == 1:
+            hit = self._hit_test_grid_slot(scene_pos)
+            if hit is not None:
+                slots = self._current_grid_slots()
+                _, _, sw, sh = slots[hit]
+                if self._is_photo_cropped_for_slot(hit, sw, sh):
+                    return hit, sw, sh
+            return None
+
+        if style_idx == 2:
+            hit_pol = self._hit_test_polaroid(scene_pos)
+            if hit_pol is not None:
+                idx, _ = hit_pol
+                card_w, _ = compute_polaroid_card_size(self._last_preview_size)
+                photo_w = max(16, card_w - 32)
+                photo_h = max(16, int(photo_w * 0.85))
+                if self._is_photo_cropped_for_slot(idx, photo_w, photo_h):
+                    return idx, photo_w, photo_h
+            return None
+
+        return None
+
+    def _start_crop_pan(self, idx: int, sw: int, sh: int, scene_pos: QPointF) -> None:
+        self._panning_crop_idx = idx
+        self._panning_crop_slot_size = (sw, sh)
+        fc = self.photos_data[idx].get("focus_center")
+        self._panning_crop_start_fc = (float(fc[0]), float(fc[1])) if fc else (0.5, 0.40)
+        self._panning_crop_start_scene = scene_pos
+        self.lst_photo_order.setCurrentRow(idx)
+        self.preview_view.setCursor(Qt.ClosedHandCursor)
+
+    def eventFilter(self, obj, event) -> bool:
+        if (
+            hasattr(self, "cmb_style")
+            and obj is self.preview_view.viewport()
+            and not getattr(self.preview_view, "_space_pressed", False)
+        ):
+            etype = event.type()
+            if etype not in (QEvent.MouseButtonPress, QEvent.MouseMove, QEvent.MouseButtonRelease):
+                return super().eventFilter(obj, event)
+            style_idx = self.cmb_style.currentIndex()
+            frame_mode = hasattr(self, "btn_frame_mode") and self.btn_frame_mode.isChecked()
+            alt_held = bool(event.modifiers() & Qt.AltModifier) if hasattr(event, "modifiers") else False
+
+            if etype == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                scene_pos = self.preview_view.mapToScene(event.pos())
+                self._press_pos_vp = event.pos()
+                if style_idx == 0:
+                    crop_hit = self._hit_test_cropped_slot(scene_pos)
+                    if crop_hit is not None:
+                        self._start_crop_pan(*crop_hit, scene_pos)
+                        return True
+                elif style_idx == 1:
+                    hit = self._hit_test_grid_slot(scene_pos)
+                    if hit is not None:
+                        if frame_mode or alt_held:
+                            crop_hit = self._hit_test_cropped_slot(scene_pos)
+                            if crop_hit is not None:
+                                self._start_crop_pan(*crop_hit, scene_pos)
+                                return True
+                        self._pending_grid_slot = hit
+                        return True
+                elif style_idx == 2:
+                    if frame_mode or alt_held:
+                        crop_hit = self._hit_test_cropped_slot(scene_pos)
+                        if crop_hit is not None:
+                            self._start_crop_pan(*crop_hit, scene_pos)
+                            return True
+                    hit = self._hit_test_polaroid(scene_pos)
+                    if hit is not None:
+                        idx, (cx, cy) = hit
+                        self._dragging_polaroid_idx = idx
+                        self._drag_offset = QPointF(cx - scene_pos.x(), cy - scene_pos.y())
+                        self.lst_photo_order.setCurrentRow(idx)
+                        self.preview_view.setCursor(Qt.ClosedHandCursor)
+                        return True
+
+            elif etype == QEvent.MouseMove:
+                scene_pos = self.preview_view.mapToScene(event.pos())
+                # Promote pending grid click to crop pan if dragged > 5px over a cropped slot
+                if self._pending_grid_slot is not None and self._press_pos_vp is not None:
+                    if (event.pos() - self._press_pos_vp).manhattanLength() > 5:
+                        crop_hit = self._hit_test_cropped_slot(self.preview_view.mapToScene(self._press_pos_vp))
+                        self._pending_grid_slot = None
+                        if crop_hit is not None:
+                            self._start_crop_pan(*crop_hit, scene_pos)
+                            return True
+
+                if self._panning_crop_idx is not None:
+                    sw, sh = self._panning_crop_slot_size
+                    dx = scene_pos.x() - self._panning_crop_start_scene.x()
+                    dy = scene_pos.y() - self._panning_crop_start_scene.y()
+                    sx0, sy0 = self._panning_crop_start_fc
+                    nx = max(0.0, min(1.0, sx0 - (dx / max(1, sw))))
+                    ny = max(0.0, min(1.0, sy0 - (dy / max(1, sh))))
+                    self.photos_data[self._panning_crop_idx]["focus_center"] = (nx, ny)
+                    self._render_preview()
+                    return True
+
+                if self._dragging_polaroid_idx is not None and style_idx == 2:
+                    pw, ph = self._last_preview_size
+                    nx = max(0.05, min(0.95, (scene_pos.x() + self._drag_offset.x()) / max(1, pw)))
+                    ny = max(0.05, min(0.95, (scene_pos.y() + self._drag_offset.y()) / max(1, ph)))
+                    self.photos_data[self._dragging_polaroid_idx]["polaroid_pos"] = (nx, ny)
+                    self._render_preview()
+                    return True
+
+                # Hover cursor: show OpenHandCursor over cropped photos where Hand framing applies
+                show_hand_hover = (
+                    style_idx == 0
+                    or style_idx == 1
+                    or (style_idx == 2 and (frame_mode or alt_held))
+                )
+                if show_hand_hover and self._hit_test_cropped_slot(scene_pos) is not None:
+                    self.preview_view.setCursor(Qt.OpenHandCursor)
+                else:
+                    self.preview_view.unsetCursor()
+
+            elif etype == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                if self._panning_crop_idx is not None:
+                    self._panning_crop_idx = None
+                    self._press_pos_vp = None
+                    self.preview_view.unsetCursor()
+                    return True
+                if self._pending_grid_slot is not None and style_idx == 1:
+                    hit = self._pending_grid_slot
+                    self._pending_grid_slot = None
+                    self._press_pos_vp = None
+                    if self._selected_grid_slot is None:
+                        self._selected_grid_slot = hit
+                        self._update_grid_selection_overlay()
+                        self.lst_photo_order.setCurrentRow(hit)
+                    elif self._selected_grid_slot == hit:
+                        self._selected_grid_slot = None
+                        self._update_grid_selection_overlay()
+                    else:
+                        self.swap_photos(self._selected_grid_slot, hit)
+                    return True
+                if self._dragging_polaroid_idx is not None:
+                    self._dragging_polaroid_idx = None
+                    self._press_pos_vp = None
+                    self.preview_view.unsetCursor()
+                    return True
+
+        return super().eventFilter(obj, event)
 
     def _save_collage(self) -> None:
         first_path = self.photos_data[0].get("file_path") if self.photos_data else None

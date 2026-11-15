@@ -74,6 +74,7 @@ from PySide6.QtWidgets import (
 from src.db.repository import CatalogRepository
 from src.imaging.image_loader import NEXTGEN_DOT_EXT_SET, RAW_DOT_EXT_SET
 from src.ui.ribbon_toolbar import make_wlpg_icon
+from src.utils.wpd_mtp import MtpDeviceSession, enumerate_mtp_devices
 
 
 SUPPORTED_PHOTO_EXTS = {
@@ -94,6 +95,19 @@ class DiscoveredItem:
     is_video: bool
     is_duplicate: bool = False
     selected: bool = True
+    mtp_device_id: str | None = None
+    mtp_object_id: str | None = None
+    thumbnail_bytes: bytes | None = None
+
+
+@dataclass
+class ImportSource:
+    label: str
+    source_type: str  # "folder" | "mtp"
+    path: Path | None = None
+    has_dcim: bool = False
+    mtp_device_id: str | None = None
+    mtp_device_name: str | None = None
 
 
 def extract_file_datetime(path: Path) -> datetime:
@@ -202,29 +216,117 @@ def detect_available_sources() -> list[tuple[str, Path, bool]]:
     return sources
 
 
+def detect_all_import_sources() -> list[ImportSource]:
+    """Discovers MTP/PTP cameras & smartphones plus mounted volumes and standard folders."""
+    all_sources: list[ImportSource] = []
+
+    # 1. MTP / PTP Cameras & Smartphones via Windows Portable Devices (WPD)
+    try:
+        for dev in enumerate_mtp_devices():
+            all_sources.append(
+                ImportSource(
+                    label=dev.label,
+                    source_type="mtp",
+                    has_dcim=True,
+                    mtp_device_id=dev.pnp_id,
+                    mtp_device_name=dev.friendly_name or dev.description or "Portable Device",
+                )
+            )
+    except Exception:
+        pass
+
+    # 2. Mounted volumes, DCIM memory cards, and standard user folders
+    for label, path, has_dcim in detect_available_sources():
+        all_sources.append(
+            ImportSource(
+                label=label,
+                source_type="folder",
+                path=path,
+                has_dcim=has_dcim,
+            )
+        )
+
+    return all_sources
+
+
 class _ScannerSignals(QObject):
     finished = Signal(list, int)  # (items: list[DiscoveredItem], duplicate_count: int)
     progress = Signal(int)
+    error = Signal(str)
 
 
 class _BackgroundScanner(QRunnable):
     def __init__(
         self,
-        source_dir: Path,
+        source_dir: Path | None,
         existing_name_size: set[tuple[str, int]],
         existing_size_date: set[tuple[int, int]],
         signals: _ScannerSignals,
+        mtp_device_id: str | None = None,
+        mtp_device_name: str | None = None,
     ) -> None:
         super().__init__()
         self.source_dir = source_dir
         self.existing_name_size = existing_name_size
         self.existing_size_date = existing_size_date
         self.signals = signals
+        self.mtp_device_id = mtp_device_id
+        self.mtp_device_name = mtp_device_name or "Device"
+
+    def _is_duplicate(self, fname: str, size: int, dt: datetime) -> bool:
+        dt_epoch = int(dt.timestamp())
+        return (
+            (fname.lower(), size) in self.existing_name_size
+            or (size, dt_epoch) in self.existing_size_date
+        )
+
+    def _run_mtp_scan(self) -> tuple[list[DiscoveredItem], int]:
+        discovered: list[DiscoveredItem] = []
+        dup_count = 0
+        with MtpDeviceSession(self.mtp_device_id or "") as sess:
+            mtp_items = sess.scan_media(
+                SUPPORTED_EXTS,
+                SUPPORTED_VIDEO_EXTS,
+                progress_cb=self.signals.progress.emit,
+            )
+            for obj in mtp_items:
+                is_dup = self._is_duplicate(obj.filename, obj.file_size, obj.date_taken)
+                if is_dup:
+                    dup_count += 1
+                rel = f"{obj.relative_folder}/{obj.filename}".strip("/")
+                discovered.append(
+                    DiscoveredItem(
+                        source_path=Path(rel),
+                        filename=obj.filename,
+                        file_size=obj.file_size,
+                        date_taken=obj.date_taken,
+                        is_video=obj.is_video,
+                        is_duplicate=is_dup,
+                        selected=not is_dup,
+                        mtp_device_id=obj.device_pnp_id,
+                        mtp_object_id=obj.object_id,
+                        thumbnail_bytes=obj.thumbnail_bytes,
+                    )
+                )
+        return discovered, dup_count
 
     def run(self) -> None:
         discovered: list[DiscoveredItem] = []
         dup_count = 0
         try:
+            if self.mtp_device_id:
+                try:
+                    discovered, dup_count = self._run_mtp_scan()
+                except Exception as exc:
+                    self.signals.error.emit(str(exc))
+                    return
+                self.signals.finished.emit(discovered, dup_count)
+                return
+
+            if not self.source_dir:
+                self.signals.finished.emit([], 0)
+                return
+
             entries: list[Path] = []
             for root, _, files in os.walk(self.source_dir):
                 for f in files:
@@ -237,14 +339,9 @@ class _BackgroundScanner(QRunnable):
                     st = p.stat()
                     size = st.st_size
                     dt = extract_file_datetime(p)
-                    dt_epoch = int(dt.timestamp())
                     fname = p.name
                     is_vid = p.suffix.lower() in SUPPORTED_VIDEO_EXTS
-
-                    is_dup = (
-                        (fname.lower(), size) in self.existing_name_size
-                        or (size, dt_epoch) in self.existing_size_date
-                    )
+                    is_dup = self._is_duplicate(fname, size, dt)
                     if is_dup:
                         dup_count += 1
 
@@ -299,6 +396,7 @@ class SafeCopyWorker(QRunnable):
         copied = 0
         created_folders: set[Path] = set()
         imported_entries: list[tuple[Path, list[str]]] = []
+        mtp_sessions: dict[str, MtpDeviceSession] = {}
 
         try:
             for g in self.groups_data:
@@ -324,19 +422,31 @@ class SafeCopyWorker(QRunnable):
                     )
                     dest = target_dir / target_name
 
-                    # Safe copy with metadata preservation
-                    shutil.copy2(src, dest)
+                    if item.mtp_device_id and item.mtp_object_id:
+                        sess = mtp_sessions.get(item.mtp_device_id)
+                        if sess is None:
+                            sess = MtpDeviceSession(item.mtp_device_id).__enter__()
+                            mtp_sessions[item.mtp_device_id] = sess
+                        sess.copy_object_to_file(item.mtp_object_id, dest, expected_size=item.file_size)
+                        if self.delete_source:
+                            try:
+                                sess.delete_object(item.mtp_object_id)
+                            except Exception:
+                                pass
+                    else:
+                        # Safe copy with metadata preservation
+                        shutil.copy2(src, dest)
 
-                    # Byte size verification
-                    if dest.stat().st_size != src.stat().st_size:
-                        raise IOError(f"Byte size mismatch verifying copied file: {dest.name}")
+                        # Byte size verification
+                        if dest.stat().st_size != src.stat().st_size:
+                            raise IOError(f"Byte size mismatch verifying copied file: {dest.name}")
 
-                    # Optional safe delete from source
-                    if self.delete_source:
-                        try:
-                            src.unlink()
-                        except Exception:
-                            pass
+                        # Optional safe delete from source
+                        if self.delete_source:
+                            try:
+                                src.unlink()
+                            except Exception:
+                                pass
 
                     imported_entries.append((dest, tags))
                     copied += 1
@@ -345,6 +455,12 @@ class SafeCopyWorker(QRunnable):
             self.signals.finished.emit(list(created_folders), imported_entries)
         except Exception as exc:
             self.signals.error.emit(str(exc))
+        finally:
+            for sess in mtp_sessions.values():
+                try:
+                    sess.__exit__(None, None, None)
+                except Exception:
+                    pass
 
 
 class _ThumbnailItemWidget(QFrame):
@@ -411,6 +527,19 @@ class _ThumbnailItemWidget(QFrame):
 
     def _load_fast_preview(self) -> None:
         try:
+            if self.item.thumbnail_bytes:
+                qimg = QImage.fromData(self.item.thumbnail_bytes)
+                if not qimg.isNull():
+                    pix = QPixmap.fromImage(qimg).scaled(
+                        84, 58, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    )
+                    self.lbl_thumb.setPixmap(pix)
+                    return
+
+            if self.item.mtp_device_id:
+                self.lbl_thumb.setText("🎬 Video" if self.item.is_video else "📷 Photo")
+                return
+
             if not self.item.source_path.exists():
                 return
             if not self.item.is_video:
@@ -590,6 +719,7 @@ class ImportMediaDialog(QDialog):
         self._scanner_signals = _ScannerSignals()
         self._scanner_signals.finished.connect(self._on_scan_finished)
         self._scanner_signals.progress.connect(self._on_scan_progress)
+        self._scanner_signals.error.connect(self._on_scan_error)
 
         self._copy_signals = ImportCopySignals()
         self._copy_signals.progress.connect(self._on_copy_progress)
@@ -661,6 +791,15 @@ class ImportMediaDialog(QDialog):
         )
         self.btn_browse_source.clicked.connect(self._browse_source_folder)
         h_top.addWidget(self.btn_browse_source)
+
+        self.btn_refresh_sources = QPushButton("Refresh", top_frame)
+        self.btn_refresh_sources.setToolTip("Re-scan for connected cameras, smartphones (MTP/PTP), and drives")
+        self.btn_refresh_sources.setStyleSheet(
+            "QPushButton { background-color: #FFFFFF; border: 1px solid #B0C4DE; padding: 4px 10px; border-radius: 2px; }"
+            "QPushButton:hover { background-color: #E2EBF5; }"
+        )
+        self.btn_refresh_sources.clicked.connect(self._populate_sources)
+        h_top.addWidget(self.btn_refresh_sources)
 
         h_top.addSpacing(12)
 
@@ -815,20 +954,23 @@ class ImportMediaDialog(QDialog):
     def _populate_sources(self) -> None:
         self.combo_source.blockSignals(True)
         self.combo_source.clear()
-        detected = detect_available_sources()
-        for label, path, has_dcim in detected:
-            self.combo_source.addItem(label, str(path))
+        detected = detect_all_import_sources()
+        for src in detected:
+            self.combo_source.addItem(src.label, src)
         self.combo_source.blockSignals(False)
 
         if self.combo_source.count() > 0:
-            self._start_scan(Path(self.combo_source.currentData()))
+            src = self.combo_source.currentData()
+            if isinstance(src, ImportSource):
+                self._start_scan_source(src)
 
     def _set_source_path(self, path: Path) -> None:
+        src = ImportSource(label=f"Custom Folder ({path})", source_type="folder", path=path)
         self.combo_source.blockSignals(True)
-        self.combo_source.insertItem(0, f"Custom Folder ({path})", str(path))
+        self.combo_source.insertItem(0, src.label, src)
         self.combo_source.setCurrentIndex(0)
         self.combo_source.blockSignals(False)
-        self._start_scan(path)
+        self._start_scan_source(src)
 
     def _browse_source_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Select Source Folder / Camera Stage")
@@ -843,8 +985,28 @@ class ImportMediaDialog(QDialog):
 
     def _on_source_combo_changed(self, idx: int) -> None:
         data = self.combo_source.itemData(idx)
-        if data:
+        if isinstance(data, ImportSource):
+            self._start_scan_source(data)
+        elif data:
             self._start_scan(Path(data))
+
+    def _start_scan_source(self, src: ImportSource) -> None:
+        if src.source_type == "mtp" and src.mtp_device_id:
+            dev_label = src.mtp_device_name or src.label
+            self.lbl_status.setText(f"Scanning '{dev_label}' (MTP/PTP) for photos and videos...")
+            self.btn_import.setEnabled(False)
+            self._clear_groups()
+            worker = _BackgroundScanner(
+                source_dir=None,
+                existing_name_size=self._existing_name_size,
+                existing_size_date=self._existing_size_date,
+                signals=self._scanner_signals,
+                mtp_device_id=src.mtp_device_id,
+                mtp_device_name=dev_label,
+            )
+            self._thread_pool.start(worker)
+        elif src.path is not None:
+            self._start_scan(src.path)
 
     def _start_scan(self, source_dir: Path) -> None:
         if not source_dir.exists():
@@ -864,6 +1026,15 @@ class ImportMediaDialog(QDialog):
 
     def _on_scan_progress(self, count: int) -> None:
         self.lbl_status.setText(f"Scanning... ({count:,} files examined)")
+
+    def _on_scan_error(self, err_msg: str) -> None:
+        self._all_items = []
+        self._duplicate_count = 0
+        self._clear_groups()
+        self.btn_import.setEnabled(False)
+        self.lbl_status.setText(
+            f"Could not read device ({err_msg}). Unlock your phone/camera, enable File Transfer (MTP), and click Refresh."
+        )
 
     def _on_scan_finished(self, items: list[DiscoveredItem], dup_count: int) -> None:
         self._all_items = items
@@ -957,6 +1128,7 @@ class ImportMediaDialog(QDialog):
         self.btn_import.setEnabled(False)
         self.btn_cancel.setEnabled(False)
         self.btn_browse_source.setEnabled(False)
+        self.btn_refresh_sources.setEnabled(False)
         self.btn_browse_dest.setEnabled(False)
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
@@ -1012,5 +1184,8 @@ class ImportMediaDialog(QDialog):
     def _on_copy_error(self, err_msg: str) -> None:
         self.btn_import.setEnabled(True)
         self.btn_cancel.setEnabled(True)
+        self.btn_browse_source.setEnabled(True)
+        self.btn_refresh_sources.setEnabled(True)
+        self.btn_browse_dest.setEnabled(True)
         self.progress_bar.setVisible(False)
         QMessageBox.critical(self, "Import Error", f"An error occurred during file import:\n{err_msg}")

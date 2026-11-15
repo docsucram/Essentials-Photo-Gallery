@@ -76,7 +76,15 @@ _RATING_LABELS: dict[int, str] = {
 }
 
 
-def _build_boolean_search_sql(search_text: str) -> tuple[str, list[Any]]:
+def _build_fts5_prefix_query(term: str) -> str | None:
+    """Convert an arbitrary search string into a safe FTS5 prefix MATCH expression."""
+    tokens = re.findall(r"[^\W_]+", term or "", re.UNICODE)
+    if not tokens:
+        return None
+    return " ".join(f'"{tok}"*' for tok in tokens)
+
+
+def _build_boolean_search_sql(search_text: str, use_ocr_fts: bool = False) -> tuple[str, list[Any]]:
     """
     Parses a Boolean search string supporting:
     - AND / OR / NOT operators (e.g. 'cat AND dog', 'cat OR dog', 'sunset -winter')
@@ -90,7 +98,7 @@ def _build_boolean_search_sql(search_text: str) -> tuple[str, list[Any]]:
         return "", []
 
     token_pattern = re.compile(
-        r'(-?(?:person|people|tag):"[^"]+"|-?(?:person|people|tag):\S+|"[^"]+"|\bAND\b|\bOR\b|\bNOT\b|-\S+|\S+)',
+        r'(-?(?:person|people|tag|ocr):"[^"]+"|-?(?:person|people|tag|ocr):\S+|"[^"]+"|\bAND\b|\bOR\b|\bNOT\b|-\S+|\S+)',
         re.IGNORECASE,
     )
     raw_tokens = token_pattern.findall(text)
@@ -118,7 +126,7 @@ def _build_boolean_search_sql(search_text: str) -> tuple[str, list[Any]]:
         next_not = False
         val = token[1:] if token.startswith("-") else token
 
-        field_match = re.match(r"^(person|people|tag):(.*)$", val, re.IGNORECASE)
+        field_match = re.match(r"^(person|people|tag|ocr):(.*)$", val, re.IGNORECASE)
         if field_match:
             field_type = field_match.group(1).lower()
             field_val = field_match.group(2).strip('"')
@@ -130,6 +138,14 @@ def _build_boolean_search_sql(search_text: str) -> tuple[str, list[Any]]:
                     WHERE mp.media_id = m.id AND mp.state = 1 AND p.name LIKE ? COLLATE NOCASE
                 )"""
                 p_list = [like_val]
+            elif field_type == "ocr":
+                fts_q = _build_fts5_prefix_query(field_val) if use_ocr_fts else None
+                if fts_q:
+                    atom = "m.id IN (SELECT media_id FROM media_ocr_fts WHERE media_ocr_fts MATCH ?)"
+                    p_list = [fts_q]
+                else:
+                    atom = "COALESCE(m.ocr_text, '') LIKE ? COLLATE NOCASE"
+                    p_list = [like_val]
             else:
                 atom = """EXISTS (
                     SELECT 1 FROM media_tags mt
@@ -140,10 +156,18 @@ def _build_boolean_search_sql(search_text: str) -> tuple[str, list[Any]]:
         else:
             term = val.strip('"')
             like_val = f"%{term}%"
-            atom = """(
+            fts_q = _build_fts5_prefix_query(term) if use_ocr_fts else None
+            if fts_q:
+                ocr_pred = "m.id IN (SELECT media_id FROM media_ocr_fts WHERE media_ocr_fts MATCH ?)"
+                ocr_param = fts_q
+            else:
+                ocr_pred = "COALESCE(m.ocr_text, '') LIKE ? COLLATE NOCASE"
+                ocr_param = like_val
+            atom = f"""(
                 m.filename LIKE ? COLLATE NOCASE
                 OR m.caption LIKE ? COLLATE NOCASE
                 OR m.location_name LIKE ? COLLATE NOCASE
+                OR {ocr_pred}
                 OR EXISTS (
                     SELECT 1 FROM media_tags mt
                     JOIN tags t ON mt.tag_id = t.id
@@ -155,7 +179,7 @@ def _build_boolean_search_sql(search_text: str) -> tuple[str, list[Any]]:
                     WHERE mp.media_id = m.id AND mp.state = 1 AND p.name LIKE ? COLLATE NOCASE
                 )
             )"""
-            p_list = [like_val, like_val, like_val, like_val, like_val]
+            p_list = [like_val, like_val, like_val, ocr_param, like_val, like_val]
 
         if is_negated:
             atom = f"NOT ({atom})"
@@ -188,6 +212,8 @@ class FilterQuerySpec:
     date_year: int | None = None
     date_month: int | None = None
     date_day: int | None = None
+    date_from: int | None = None
+    date_to: int | None = None
     include_tag_ids: tuple[int, ...] = ()
     tag_boolean_mode: Literal["AND", "OR"] = "AND"
     exclude_tag_ids: tuple[int, ...] = ()
@@ -204,6 +230,9 @@ class FilterQuerySpec:
     search_text: str = ""
     bbox: tuple[float, float, float, float] | None = None  # (min_lat, max_lat, min_lon, max_lon)
     media_ids: tuple[int, ...] | None = None  # Explicit media ID filtering (e.g. from map cluster clicks)
+    location_country: str | None = None
+    location_state: str | None = None
+    location_city: str | None = None
     group_by: str = "month"  # "month", "year", "date", "rating", "folder", "media_type", "flag", "size", "none"
     sort_by: str = "date"  # "date", "name", "rating", "size", "media_type"
     sort_reverse: bool = False
@@ -272,6 +301,38 @@ class CatalogRepository:
 
     def __init__(self, engine: DualDatabaseEngine) -> None:
         self.engine = engine
+        self.include_private: bool = False
+        self._has_ocr_fts: bool | None = None
+
+    def _supports_ocr_fts(self) -> bool:
+        if self._has_ocr_fts is None:
+            try:
+                row = self.engine.catalog_conn().execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_ocr_fts';"
+                ).fetchone()
+                self._has_ocr_fts = row is not None
+            except Exception:
+                self._has_ocr_fts = False
+        return bool(self._has_ocr_fts)
+
+    def set_include_private(self, include_private: bool) -> None:
+        """Toggle session visibility of Private Folders across all catalog queries."""
+        self.include_private = bool(include_private)
+
+    def has_private_folders(self) -> bool:
+        """Returns True if at least one folder in catalog.db is marked is_private = 1."""
+        conn = self.engine.catalog_conn()
+        row = conn.execute(
+            "SELECT 1 FROM folders WHERE COALESCE(is_private, 0) = 1 LIMIT 1;"
+        ).fetchone()
+        return row is not None
+
+    def _private_folder_clause(self, alias: str = "f") -> str:
+        """SQL predicate enforcing excluded-folder and Private Folder session isolation."""
+        base = f"COALESCE({alias}.monitor_mode, 'always') != 'excluded'"
+        if self.include_private:
+            return base
+        return f"({base} AND COALESCE({alias}.is_private, 0) = 0)"
 
     # -------------------------------------------------------------------------
     # Folder Operations
@@ -312,19 +373,288 @@ class CatalogRepository:
             conn.commit()
 
     def get_folders(self) -> list[dict[str, Any]]:
+        """Returns active catalog folders respecting Private Mode session isolation."""
+        conn = self.engine.catalog_conn()
+        clause = self._private_folder_clause("f")
+        rows = conn.execute(
+            f"""
+            SELECT f.id, f.path, f.name, f.parent_id, f.mtime, f.is_favourite,
+                   COALESCE(f.monitor_mode, 'always') AS monitor_mode,
+                   COALESCE(f.scan_faces, 1) AS scan_faces,
+                   COALESCE(f.scan_ocr, 0) AS scan_ocr,
+                   COALESCE(f.is_private, 0) AS is_private,
+                   COALESCE(f.ocr_scanned_count, 0) AS ocr_scanned_count
+            FROM folders f
+            WHERE {clause}
+            ORDER BY f.path ASC;
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_all_folders_with_policies(self) -> list[dict[str, Any]]:
+        """Returns all folders (including excluded and private) for the Folder Manager Dialog."""
         conn = self.engine.catalog_conn()
         rows = conn.execute(
-            "SELECT id, path, name, parent_id, mtime, is_favourite FROM folders ORDER BY path ASC;"
+            """
+            SELECT f.id, f.path, f.name, f.parent_id, f.mtime, f.is_favourite,
+                   COALESCE(f.monitor_mode, 'always') AS monitor_mode,
+                   COALESCE(f.scan_faces, 1) AS scan_faces,
+                   COALESCE(f.scan_ocr, 0) AS scan_ocr,
+                   COALESCE(f.is_private, 0) AS is_private,
+                   COALESCE(f.ocr_scanned_count, 0) AS ocr_scanned_count,
+                   (SELECT COUNT(*) FROM media m WHERE m.folder_id = f.id AND COALESCE(m.is_missing, 0) = 0) AS media_count
+            FROM folders f
+            ORDER BY f.path ASC;
+            """
         ).fetchall()
         return [dict(r) for r in rows]
 
     def get_folder_by_id(self, folder_id: int) -> dict[str, Any] | None:
         conn = self.engine.catalog_conn()
         row = conn.execute(
-            "SELECT id, path, name, parent_id, mtime, is_favourite FROM folders WHERE id = ?;",
+            """
+            SELECT id, path, name, parent_id, mtime, is_favourite,
+                   COALESCE(monitor_mode, 'always') AS monitor_mode,
+                   COALESCE(scan_faces, 1) AS scan_faces,
+                   COALESCE(scan_ocr, 0) AS scan_ocr,
+                   COALESCE(is_private, 0) AS is_private,
+                   COALESCE(ocr_scanned_count, 0) AS ocr_scanned_count
+            FROM folders WHERE id = ?;
+            """,
             (folder_id,),
         ).fetchone()
         return dict(row) if row else None
+
+    def update_folder_policy(
+        self,
+        folder_id: int,
+        *,
+        monitor_mode: str | None = None,
+        scan_faces: bool | None = None,
+        scan_ocr: bool | None = None,
+        is_private: bool | None = None,
+    ) -> None:
+        """Persist Folder Manager policy flags for a single folder."""
+        updates: list[str] = []
+        params: list[Any] = []
+        if monitor_mode is not None:
+            mode_val = str(monitor_mode).strip().lower()
+            if mode_val not in ("always", "once", "excluded"):
+                mode_val = "always"
+            updates.append("monitor_mode = ?")
+            params.append(mode_val)
+        if scan_faces is not None:
+            updates.append("scan_faces = ?")
+            params.append(1 if scan_faces else 0)
+        if scan_ocr is not None:
+            updates.append("scan_ocr = ?")
+            params.append(1 if scan_ocr else 0)
+        if is_private is not None:
+            updates.append("is_private = ?")
+            params.append(1 if is_private else 0)
+        if not updates:
+            return
+        params.append(int(folder_id))
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            conn.execute(
+                f"UPDATE folders SET {', '.join(updates)} WHERE id = ?;",
+                params,
+            )
+            conn.commit()
+
+    def apply_folder_policy_to_subfolders(self, folder_id: int) -> int:
+        """Cascade monitor_mode, scan_faces, scan_ocr, and is_private to all descendant folders."""
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            row = conn.execute(
+                """
+                SELECT COALESCE(monitor_mode, 'always') AS monitor_mode,
+                       COALESCE(scan_faces, 1) AS scan_faces,
+                       COALESCE(scan_ocr, 1) AS scan_ocr,
+                       COALESCE(is_private, 0) AS is_private
+                FROM folders WHERE id = ?;
+                """,
+                (int(folder_id),),
+            ).fetchone()
+            if not row:
+                return 0
+            desc_rows = conn.execute(
+                """
+                WITH RECURSIVE descendants(id) AS (
+                    SELECT id FROM folders WHERE parent_id = ?
+                    UNION ALL
+                    SELECT f.id FROM folders f
+                    JOIN descendants d ON f.parent_id = d.id
+                )
+                SELECT id FROM descendants;
+                """,
+                (int(folder_id),),
+            ).fetchall()
+            desc_ids = [int(r[0]) for r in desc_rows]
+            if not desc_ids:
+                return 0
+            placeholders = ",".join("?" for _ in desc_ids)
+            conn.execute(
+                f"""
+                UPDATE folders
+                SET monitor_mode = ?, scan_faces = ?, scan_ocr = ?, is_private = ?
+                WHERE id IN ({placeholders});
+                """,
+                [
+                    row["monitor_mode"],
+                    int(row["scan_faces"]),
+                    int(row["scan_ocr"]),
+                    int(row["is_private"]),
+                    *desc_ids,
+                ],
+            )
+            conn.commit()
+            return len(desc_ids)
+
+    def exclude_folder_from_catalog(self, folder_id: int) -> int:
+        """
+        Mark folder_id and all descendants as monitor_mode='excluded' and remove their
+        cataloged media records without deleting files on disk.
+        """
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            desc_rows = conn.execute(
+                """
+                WITH RECURSIVE sub(id) AS (
+                    SELECT ?
+                    UNION ALL
+                    SELECT f.id FROM folders f JOIN sub s ON f.parent_id = s.id
+                )
+                SELECT id FROM sub;
+                """,
+                (int(folder_id),),
+            ).fetchall()
+            folder_ids = [int(r[0]) for r in desc_rows]
+            if not folder_ids:
+                return 0
+
+            placeholders = ",".join("?" for _ in folder_ids)
+            media_rows = conn.execute(
+                f"SELECT id FROM media WHERE folder_id IN ({placeholders});",
+                folder_ids,
+            ).fetchall()
+            media_ids = [int(r[0]) for r in media_rows]
+
+            conn.execute(
+                f"UPDATE folders SET monitor_mode = 'excluded' WHERE id IN ({placeholders});",
+                folder_ids,
+            )
+            if media_ids:
+                for chunk in _iter_id_chunks(media_ids, 900):
+                    m_ph = ",".join("?" for _ in chunk)
+                    try:
+                        conn.execute(f"DELETE FROM media_ocr_fts WHERE media_id IN ({m_ph});", chunk)
+                    except sqlite3.OperationalError:
+                        pass
+                    conn.execute(f"DELETE FROM media WHERE id IN ({m_ph});", chunk)
+            conn.commit()
+
+        if media_ids and self.engine.thumbnails_db_path is not None:
+            thumb_conn = self.engine.thumbnails_conn()
+            for chunk in _iter_id_chunks(media_ids, 900):
+                m_ph = ",".join("?" for _ in chunk)
+                thumb_conn.execute(f"DELETE FROM thumbnails WHERE media_id IN ({m_ph});", chunk)
+            thumb_conn.commit()
+        return len(media_ids)
+
+    def clear_unconfirmed_faces_in_folder(self, folder_id: int) -> int:
+        """Delete unconfirmed (state = 0) face detections/suggestions for media in folder_id tree."""
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            cur = conn.execute(
+                """
+                DELETE FROM media_people
+                WHERE state = 0
+                  AND media_id IN (
+                      SELECT m.id FROM media m
+                      WHERE m.folder_id IN (
+                          WITH RECURSIVE sub(id) AS (
+                              SELECT ?
+                              UNION ALL
+                              SELECT f.id FROM folders f JOIN sub s ON f.parent_id = s.id
+                          )
+                          SELECT id FROM sub
+                      )
+                  );
+                """,
+                (int(folder_id),),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+
+    def get_monitored_folder_paths(self) -> list[str]:
+        """Return folder paths configured for live monitoring (monitor_mode = 'always')."""
+        conn = self.engine.catalog_conn()
+        rows = conn.execute(
+            "SELECT path FROM folders WHERE COALESCE(monitor_mode, 'always') = 'always' ORDER BY path ASC;"
+        ).fetchall()
+        return [str(r[0]) for r in rows]
+
+    def get_excluded_folder_paths(self) -> set[str]:
+        """Return normalized folder paths marked as excluded so parent scans skip them."""
+        conn = self.engine.catalog_conn()
+        rows = conn.execute(
+            "SELECT path FROM folders WHERE COALESCE(monitor_mode, 'always') = 'excluded';"
+        ).fetchall()
+        return {str(Path(r[0])).replace("\\", "/").rstrip("/").lower() for r in rows}
+
+    def update_media_ocr(self, media_id: int, ocr_text: str) -> None:
+        """Store extracted OCR text in media + media_ocr_fts and mark ocr_scanned = 1."""
+        clean_text = (ocr_text or "").strip()
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            conn.execute(
+                "UPDATE media SET ocr_scanned = 1, ocr_text = ? WHERE id = ?;",
+                (clean_text, int(media_id)),
+            )
+            try:
+                conn.execute("DELETE FROM media_ocr_fts WHERE media_id = ?;", (int(media_id),))
+                if clean_text:
+                    conn.execute(
+                        "INSERT INTO media_ocr_fts (media_id, ocr_text) VALUES (?, ?);",
+                        (int(media_id), clean_text),
+                    )
+            except sqlite3.OperationalError:
+                pass
+            conn.execute(
+                """
+                UPDATE folders
+                SET ocr_scanned_count = (
+                    SELECT COUNT(*) FROM media m
+                    WHERE m.folder_id = folders.id AND COALESCE(m.ocr_scanned, 0) = 1
+                )
+                WHERE id = (SELECT folder_id FROM media WHERE id = ?);
+                """,
+                (int(media_id),),
+            )
+            conn.commit()
+
+    def reset_ocr_scan_flags(self) -> int:
+        """Reset ocr_scanned = 0 for all non-video media in OCR-enabled folders so they are re-scanned."""
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            cur = conn.execute(
+                """
+                UPDATE media
+                SET ocr_scanned = 0
+                WHERE is_video = 0
+                  AND folder_id IN (
+                      SELECT id FROM folders
+                      WHERE COALESCE(scan_ocr, 1) = 1
+                        AND COALESCE(monitor_mode, 'always') != 'excluded'
+                  );
+                """
+            )
+            queued = int(cur.rowcount or 0)
+            conn.execute("UPDATE folders SET ocr_scanned_count = 0;")
+            conn.commit()
+            return queued
 
     def rename_folder(self, old_path: str, new_path: str, new_name: str) -> None:
         """
@@ -425,6 +755,45 @@ class CatalogRepository:
 
             return media_ids
 
+    def relocate_folder_tree(self, folder_id: int, new_root_path: str) -> int:
+        """
+        Updates a root folder and all its descendant subfolders to a new disk path,
+        preserving all media IDs, tags, faces, albums, and thumbnails.
+        Returns the number of folder rows updated.
+        """
+        norm_new = os.path.normpath(str(new_root_path))
+        new_name = os.path.basename(norm_new) or norm_new
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            row = conn.execute("SELECT id, path FROM folders WHERE id = ?;", (folder_id,)).fetchone()
+            if row is None:
+                return 0
+            old_root = os.path.normpath(str(row["path"]))
+            old_prefix_slash = (old_root.rstrip("/\\") + "/").lower()
+            old_prefix_bslash = (old_root.rstrip("/\\") + "\\").lower()
+
+            all_folders = conn.execute("SELECT id, path FROM folders;").fetchall()
+            updates: list[tuple[str, str, int]] = []
+            for f in all_folders:
+                fid = int(f["id"])
+                f_path = str(f["path"])
+                if fid == folder_id:
+                    updates.append((norm_new, new_name, fid))
+                    continue
+                f_lower = os.path.normpath(f_path).lower()
+                if f_lower.startswith(old_prefix_slash) or f_lower.startswith(old_prefix_bslash):
+                    rel = os.path.normpath(f_path)[len(old_root.rstrip("/\\")) + 1:]
+                    updated_path = os.path.normpath(os.path.join(norm_new, rel))
+                    updates.append((updated_path, os.path.basename(updated_path) or updated_path, fid))
+
+            if updates:
+                conn.executemany(
+                    "UPDATE folders SET path = ?, name = ? WHERE id = ?;",
+                    updates,
+                )
+                conn.commit()
+            return len(updates)
+
     def delete_media(self, media_ids: Sequence[int]) -> int:
         """Deletes media records from catalog.db and associated thumbnails from thumbnails.db."""
         if not media_ids:
@@ -451,7 +820,16 @@ class CatalogRepository:
         cur = conn.cursor()
         cur.row_factory = None
         counts = {r: 0 for r in range(6)}
-        for r_val, cnt in cur.execute("SELECT rating, COUNT(*) FROM media GROUP BY rating;").fetchall():
+        priv_clause = self._private_folder_clause("f")
+        for r_val, cnt in cur.execute(
+            f"""
+            SELECT m.rating, COUNT(*)
+            FROM media m
+            JOIN folders f ON f.id = m.folder_id
+            WHERE COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
+            GROUP BY m.rating;
+            """
+        ).fetchall():
             if r_val is not None:
                 counts[int(r_val)] = int(cnt)
         return counts
@@ -466,12 +844,15 @@ class CatalogRepository:
         cur = conn.cursor()
         cur.row_factory = None
         day_buckets: dict[int, int] = {}
+        priv_clause = self._private_folder_clause("f")
         for (day_key, cnt) in cur.execute(
-            """
-            SELECT CAST(FLOOR((CASE WHEN date_taken > 100000000000 THEN date_taken / 1000.0 ELSE date_taken * 1.0 END) / 86400.0) AS INTEGER) AS day_key,
+            f"""
+            SELECT CAST(FLOOR((CASE WHEN m.date_taken > 100000000000 THEN m.date_taken / 1000.0 ELSE m.date_taken * 1.0 END) / 86400.0) AS INTEGER) AS day_key,
                    COUNT(*) AS cnt
-            FROM media
-            WHERE date_taken IS NOT NULL AND date_taken != 0
+            FROM media m
+            JOIN folders f ON f.id = m.folder_id
+            WHERE m.date_taken IS NOT NULL AND m.date_taken != 0
+              AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
             GROUP BY day_key;
             """
         ).fetchall():
@@ -646,7 +1027,9 @@ class CatalogRepository:
         cur = conn.cursor()
         cur.row_factory = None
 
-        where_clauses: list[str] = []
+        where_clauses: list[str] = [
+            f"EXISTS (SELECT 1 FROM folders f WHERE f.id = m.folder_id AND {self._private_folder_clause('f')})"
+        ]
         params: list[Any] = []
 
         # 1. Folder scope
@@ -671,7 +1054,10 @@ class CatalogRepository:
                 params.append(spec.folder_id)
 
         # 2. Date Taken range (uses idx_media_date_taken without per-row strftime overhead)
-        if spec.date_year is not None:
+        if spec.date_from is not None and spec.date_to is not None:
+            where_clauses.append("m.date_taken BETWEEN ? AND ?")
+            params.extend([int(spec.date_from), int(spec.date_to)])
+        elif spec.date_year is not None:
             start_ts, end_ts = _compute_date_bounds_utc(
                 spec.date_year, spec.date_month, spec.date_day
             )
@@ -760,7 +1146,8 @@ class CatalogRepository:
 
         # 6. Media Type filter
         if spec.media_type == "image":
-            where_clauses.append("m.is_video = 0")
+            raw_clauses = " OR ".join(f"m.filename LIKE '%.{ext}'" for ext in RAW_EXTENSIONS)
+            where_clauses.append(f"(m.is_video = 0 AND NOT ({raw_clauses}))")
         elif spec.media_type == "video":
             where_clauses.append("m.is_video = 1")
         elif spec.media_type == "raw":
@@ -796,6 +1183,38 @@ class CatalogRepository:
                     params.extend(chunk)
                 where_clauses.append(f"({' OR '.join(id_subclauses)})")
 
+        # 6c. Place / Location hierarchy filter (from Places nav tree)
+        loc_country = (getattr(spec, "location_country", None) or "").strip()
+        loc_state = (getattr(spec, "location_state", None) or "").strip()
+        loc_city = (getattr(spec, "location_city", None) or "").strip()
+        if loc_country or loc_state or loc_city:
+            if loc_country:
+                where_clauses.append("TRIM(COALESCE(m.location_country, '')) = ?")
+                params.append(loc_country)
+            if loc_state:
+                if loc_country in ("United Kingdom", "GB", "UK") and loc_state in (
+                    "England",
+                    "Wales",
+                    "Scotland",
+                    "Northern Ireland",
+                ):
+                    uk_aliases = {
+                        "England": ("ENG", "ENGLAND"),
+                        "Wales": ("WLS", "WALES"),
+                        "Scotland": ("SCT", "SCOTLAND"),
+                        "Northern Ireland": ("NIR", "NORTHERN IRELAND"),
+                    }[loc_state]
+                    where_clauses.append(
+                        "UPPER(TRIM(COALESCE(m.location_state, ''))) IN (?, ?)"
+                    )
+                    params.extend(uk_aliases)
+                else:
+                    where_clauses.append("TRIM(COALESCE(m.location_state, '')) = ?")
+                    params.append(loc_state)
+            if loc_city:
+                where_clauses.append("TRIM(COALESCE(m.location_city, '')) = ?")
+                params.append(loc_city)
+
         # 7. World Map Bounding Box filter (via media_rtree virtual table or media.lat/lon fallback)
         if spec.bbox is not None:
             min_lat, max_lat, min_lon, max_lon = spec.bbox
@@ -822,9 +1241,12 @@ class CatalogRepository:
                 real_min_lat, real_max_lat, real_min_lon, real_max_lon,
             ])
 
-        # 8. Full Boolean text search & people/tag query
+        # 8. Full Boolean text search & people/tag/OCR query
         if spec.search_text.strip():
-            b_sql, b_params = _build_boolean_search_sql(spec.search_text.strip())
+            b_sql, b_params = _build_boolean_search_sql(
+                spec.search_text.strip(),
+                use_ocr_fts=self._supports_ocr_fts(),
+            )
             if b_sql:
                 where_clauses.append(b_sql)
                 params.extend(b_params)
@@ -2138,12 +2560,16 @@ class CatalogRepository:
 
     def get_tag_tree(self) -> list[dict[str, Any]]:
         conn = self.engine.catalog_conn()
+        priv_clause = self._private_folder_clause("f")
         rows = conn.execute(
-            """
+            f"""
             WITH tag_counts AS (
                 SELECT tc.ancestor_id AS tag_id, COUNT(DISTINCT mt.media_id) AS cnt
                 FROM tag_closure tc
                 JOIN media_tags mt ON mt.tag_id = tc.descendant_id
+                JOIN media m ON m.id = mt.media_id
+                JOIN folders f ON f.id = m.folder_id
+                WHERE COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
                 GROUP BY tc.ancestor_id
             )
             SELECT
@@ -2916,18 +3342,37 @@ class CatalogRepository:
 
     def get_people_list(self) -> list[dict[str, Any]]:
         conn = self.engine.catalog_conn()
-        # Single-pass aggregation avoids O(people * media_people) nested-loop index scans
-        rows = conn.execute(
+        priv_clause = self._private_folder_clause("f")
+        # Exclude people who appear ONLY in private/excluded folders when Private Mode is locked
+        leak_guard = (
+            ""
+            if self.include_private
+            else """
+            WHERE COALESCE(c.media_count, 0) > 0
+               OR NOT EXISTS (
+                   SELECT 1 FROM media_people mp2
+                   JOIN media m2 ON m2.id = mp2.media_id
+                   JOIN folders f2 ON f2.id = m2.folder_id
+                   WHERE (mp2.person_id = p.id OR mp2.suggested_person_id = p.id)
+                     AND (COALESCE(f2.is_private, 0) = 1 OR COALESCE(f2.monitor_mode, 'always') = 'excluded')
+               )
             """
+        )
+        rows = conn.execute(
+            f"""
             SELECT p.id, p.name, p.thumbnail_blob, p.confirmed_count,
                    COALESCE(c.media_count, 0) AS media_count
             FROM people p
             LEFT JOIN (
-                SELECT person_id, COUNT(DISTINCT media_id) AS media_count
-                FROM media_people
-                WHERE state = 1 AND person_id IS NOT NULL
-                GROUP BY person_id
+                SELECT mp.person_id, COUNT(DISTINCT mp.media_id) AS media_count
+                FROM media_people mp
+                JOIN media m ON m.id = mp.media_id
+                JOIN folders f ON f.id = m.folder_id
+                WHERE mp.state = 1 AND mp.person_id IS NOT NULL
+                  AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
+                GROUP BY mp.person_id
             ) c ON c.person_id = p.id
+            {leak_guard}
             ORDER BY p.name COLLATE NOCASE ASC;
             """
         ).fetchall()
@@ -2941,26 +3386,48 @@ class CatalogRepository:
         """Fast query (<60ms) for named people with photo and pending suggestion counts."""
         conn = self.engine.catalog_conn()
         thresh = float(min_confidence)
-        # Aggregate confirmed and suggested counts in separate subqueries to prevent Cartesian row explosion
-        named_rows = conn.execute(
+        priv_clause = self._private_folder_clause("f")
+        leak_guard = (
+            ""
+            if self.include_private
+            else """
+            WHERE COALESCE(c.photo_count, 0) > 0
+               OR COALESCE(s.suggestion_count, 0) > 0
+               OR NOT EXISTS (
+                   SELECT 1 FROM media_people mp2
+                   JOIN media m2 ON m2.id = mp2.media_id
+                   JOIN folders f2 ON f2.id = m2.folder_id
+                   WHERE (mp2.person_id = p.id OR mp2.suggested_person_id = p.id)
+                     AND (COALESCE(f2.is_private, 0) = 1 OR COALESCE(f2.monitor_mode, 'always') = 'excluded')
+               )
             """
+        )
+        named_rows = conn.execute(
+            f"""
             SELECT p.id, p.name, p.thumbnail_blob, p.confirmed_count,
                    COALESCE(c.photo_count, 0) AS photo_count,
                    COALESCE(s.suggestion_count, 0) AS suggestion_count
             FROM people p
             LEFT JOIN (
-                SELECT person_id, COUNT(DISTINCT media_id) AS photo_count
-                FROM media_people
-                WHERE state = 1 AND person_id IS NOT NULL
-                GROUP BY person_id
+                SELECT mp.person_id, COUNT(DISTINCT mp.media_id) AS photo_count
+                FROM media_people mp
+                JOIN media m ON m.id = mp.media_id
+                JOIN folders f ON f.id = m.folder_id
+                WHERE mp.state = 1 AND mp.person_id IS NOT NULL
+                  AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
+                GROUP BY mp.person_id
             ) c ON c.person_id = p.id
             LEFT JOIN (
-                SELECT suggested_person_id, COUNT(*) AS suggestion_count
-                FROM media_people
-                WHERE state = 0 AND suggested_person_id IS NOT NULL
-                  AND (? <= 0.0 OR COALESCE(similarity_score, 1.0) >= ?)
-                GROUP BY suggested_person_id
+                SELECT mp.suggested_person_id, COUNT(*) AS suggestion_count
+                FROM media_people mp
+                JOIN media m ON m.id = mp.media_id
+                JOIN folders f ON f.id = m.folder_id
+                WHERE mp.state = 0 AND mp.suggested_person_id IS NOT NULL
+                  AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
+                  AND (? <= 0.0 OR COALESCE(mp.similarity_score, 1.0) >= ?)
+                GROUP BY mp.suggested_person_id
             ) s ON s.suggested_person_id = p.id
+            {leak_guard}
             ORDER BY photo_count DESC, p.name COLLATE NOCASE ASC;
             """,
             (thresh, thresh),
@@ -2980,13 +3447,17 @@ class CatalogRepository:
     def get_unnamed_face_clusters(self, min_confidence: float = 0.52) -> list[dict[str, Any]]:
         """Clusters unassigned face embeddings without a confident suggestion into recurring unnamed groups."""
         conn = self.engine.catalog_conn()
+        priv_clause = self._private_folder_clause("f")
         unassigned_rows = conn.execute(
-            """
+            f"""
             SELECT mp.id, mp.embedding, mp.suggested_person_id, p.name AS suggested_person_name
             FROM media_people mp
+            JOIN media m ON m.id = mp.media_id
+            JOIN folders f ON f.id = m.folder_id
             LEFT JOIN people p ON p.id = mp.suggested_person_id
             WHERE mp.state = 0
               AND mp.embedding IS NOT NULL
+              AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
               AND (mp.suggested_person_id IS NULL OR COALESCE(mp.similarity_score, 0.0) < ?);
             """,
             (float(min_confidence),),
@@ -3050,14 +3521,16 @@ class CatalogRepository:
         Returns pending suggestions (state = 0) for person_id, with face_id, confidence, media_id.
         """
         conn = self.engine.catalog_conn()
+        priv_clause = self._private_folder_clause("f")
         rows = conn.execute(
-            """
+            f"""
             SELECT mp.id AS face_id, mp.media_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
                    COALESCE(mp.similarity_score, 0.0) AS confidence, m.filename, f.path AS folder_path
             FROM media_people mp
             JOIN media m ON m.id = mp.media_id
             JOIN folders f ON f.id = m.folder_id
             WHERE mp.state = 0 AND mp.suggested_person_id = ?
+              AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
             ORDER BY COALESCE(mp.similarity_score, 0.0) DESC
             LIMIT ?;
             """,
@@ -4128,9 +4601,10 @@ class CatalogRepository:
         Supports filtering by specific suggested person_id, or returning all suggestions + unnamed faces.
         """
         conn = self.engine.catalog_conn()
+        priv_clause = self._private_folder_clause("f")
         if person_id is not None:
             rows = conn.execute(
-                """
+                f"""
                 SELECT mp.id, mp.id AS face_id, mp.media_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
                        COALESCE(mp.similarity_score, 0.0) AS confidence,
                        mp.suggested_person_id, p.name AS suggested_name, p.thumbnail_blob AS person_thumb,
@@ -4141,6 +4615,7 @@ class CatalogRepository:
                 JOIN folders f ON f.id = m.folder_id
                 WHERE mp.state = 0 AND mp.suggested_person_id = ?
                   AND COALESCE(mp.similarity_score, 0.0) >= ?
+                  AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
                 ORDER BY COALESCE(mp.similarity_score, 0.0) DESC
                 LIMIT ?;
                 """,
@@ -4148,7 +4623,7 @@ class CatalogRepository:
             ).fetchall()
         elif include_unnamed:
             rows = conn.execute(
-                """
+                f"""
                 SELECT mp.id, mp.id AS face_id, mp.media_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
                        COALESCE(mp.similarity_score, 0.0) AS confidence,
                        mp.suggested_person_id, p.name AS suggested_name, p.thumbnail_blob AS person_thumb,
@@ -4159,6 +4634,7 @@ class CatalogRepository:
                 JOIN folders f ON f.id = m.folder_id
                 WHERE mp.state = 0
                   AND (mp.suggested_person_id IS NULL OR COALESCE(mp.similarity_score, 0.0) >= ?)
+                  AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
                 ORDER BY (mp.suggested_person_id IS NULL) ASC, COALESCE(mp.similarity_score, 0.0) DESC
                 LIMIT ?;
                 """,
@@ -4166,7 +4642,7 @@ class CatalogRepository:
             ).fetchall()
         else:
             rows = conn.execute(
-                """
+                f"""
                 SELECT mp.id, mp.id AS face_id, mp.media_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
                        COALESCE(mp.similarity_score, 0.0) AS confidence,
                        mp.suggested_person_id, p.name AS suggested_name, p.thumbnail_blob AS person_thumb,
@@ -4177,6 +4653,7 @@ class CatalogRepository:
                 JOIN folders f ON f.id = m.folder_id
                 WHERE mp.state = 0 AND mp.suggested_person_id IS NOT NULL
                   AND COALESCE(mp.similarity_score, 0.0) >= ?
+                  AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
                 ORDER BY COALESCE(mp.similarity_score, 0.0) DESC
                 LIMIT ?;
                 """,
@@ -4192,9 +4669,10 @@ class CatalogRepository:
         Supports filtering by specific person_id or returning all confirmed faces.
         """
         conn = self.engine.catalog_conn()
+        priv_clause = self._private_folder_clause("f")
         if person_id is not None:
             rows = conn.execute(
-                """
+                f"""
                 SELECT mp.id, mp.id AS face_id, mp.media_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
                        1.0 AS confidence, mp.person_id AS suggested_person_id, p.name AS suggested_name,
                        p.thumbnail_blob AS person_thumb, m.filename, f.path AS folder_path, 1 AS is_confirmed
@@ -4203,6 +4681,7 @@ class CatalogRepository:
                 JOIN media m ON m.id = mp.media_id
                 JOIN folders f ON f.id = m.folder_id
                 WHERE mp.state = 1 AND mp.person_id = ?
+                  AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
                 ORDER BY m.id DESC
                 LIMIT ?;
                 """,
@@ -4210,7 +4689,7 @@ class CatalogRepository:
             ).fetchall()
         else:
             rows = conn.execute(
-                """
+                f"""
                 SELECT mp.id, mp.id AS face_id, mp.media_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
                        1.0 AS confidence, mp.person_id AS suggested_person_id, p.name AS suggested_name,
                        p.thumbnail_blob AS person_thumb, m.filename, f.path AS folder_path, 1 AS is_confirmed
@@ -4219,6 +4698,7 @@ class CatalogRepository:
                 JOIN media m ON m.id = mp.media_id
                 JOIN folders f ON f.id = m.folder_id
                 WHERE mp.state = 1
+                  AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
                 ORDER BY p.name COLLATE NOCASE ASC, m.id DESC
                 LIMIT ?;
                 """,
@@ -4276,8 +4756,9 @@ class CatalogRepository:
         c_matrix = np.stack(c_matrix_list, axis=0)  # (N_people, 512)
 
         # 2. Fetch confirmed faces with boxes (excluding already human-verified outliers)
+        priv_clause = self._private_folder_clause("f")
         face_rows = conn.execute(
-            """
+            f"""
             SELECT mp.id AS face_id, mp.media_id, mp.person_id, p.name AS person_name,
                    mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h, mp.embedding,
                    m.filename, f.path AS folder_path
@@ -4287,6 +4768,7 @@ class CatalogRepository:
             JOIN folders f ON f.id = m.folder_id
             WHERE mp.state = 1 AND mp.rect_w > 0.005
               AND (mp.similarity_score IS NULL OR mp.similarity_score < 0.99)
+              AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
             ORDER BY m.id DESC
             LIMIT 4000;
             """
@@ -4398,8 +4880,9 @@ class CatalogRepository:
         paired with unassigned detected face boxes (state = 0, rect_w > 0.005) on the same photo.
         """
         conn = self.engine.catalog_conn()
+        priv_clause = self._private_folder_clause("f")
         rows = conn.execute(
-            """
+            f"""
             SELECT mp.id AS boxless_id, mp.media_id, mp.person_id, p.name AS person_name,
                    mp2.id AS face_id, mp2.rect_x, mp2.rect_y, mp2.rect_w, mp2.rect_h,
                    COALESCE(mp2.similarity_score, 0.0) AS confidence,
@@ -4410,6 +4893,7 @@ class CatalogRepository:
             JOIN media m ON m.id = mp.media_id
             JOIN folders f ON f.id = m.folder_id
             WHERE mp.state = 1 AND (mp.rect_w IS NULL OR mp.rect_w <= 0.005)
+              AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
             ORDER BY p.name COLLATE NOCASE ASC, m.id DESC
             LIMIT ?;
             """,
@@ -4445,14 +4929,18 @@ class CatalogRepository:
         Returns the number of faces linked.
         """
         conn = self.engine.catalog_conn()
+        priv_clause = self._private_folder_clause("f")
         rows = conn.execute(
-            """
+            f"""
             SELECT mp.media_id, mp.id AS boxless_id, mp.person_id, p.name AS person_name,
                    mp2.id AS face_id
             FROM media_people mp
             JOIN people p ON p.id = mp.person_id
             JOIN media_people mp2 ON mp2.media_id = mp.media_id AND mp2.state = 0 AND mp2.rect_w > 0.005
+            JOIN media m ON m.id = mp.media_id
+            JOIN folders f ON f.id = m.folder_id
             WHERE mp.state = 1 AND (mp.rect_w IS NULL OR mp.rect_w <= 0.005)
+              AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
             GROUP BY mp.media_id
             HAVING COUNT(DISTINCT mp.id) = 1 AND COUNT(DISTINCT mp2.id) = 1;
             """
@@ -4475,15 +4963,20 @@ class CatalogRepository:
         numeric administrative codes (e.g. '01', '07').
         """
         conn = self.engine.catalog_conn()
+        priv_clause = self._private_folder_clause("f")
         rows = conn.execute(
-            """
-            SELECT location_country, location_state, location_city, COUNT(*) as cnt
-            FROM media
-            WHERE (location_country IS NOT NULL AND location_country != '')
-               OR (location_state IS NOT NULL AND location_state != '')
-               OR (location_city IS NOT NULL AND location_city != '')
-            GROUP BY location_country, location_state, location_city
-            ORDER BY location_country, location_state, location_city;
+            f"""
+            SELECT m.location_country, m.location_state, m.location_city, COUNT(*) as cnt
+            FROM media m
+            JOIN folders f ON f.id = m.folder_id
+            WHERE COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
+              AND (
+                (m.location_country IS NOT NULL AND m.location_country != '')
+                OR (m.location_state IS NOT NULL AND m.location_state != '')
+                OR (m.location_city IS NOT NULL AND m.location_city != '')
+              )
+            GROUP BY m.location_country, m.location_state, m.location_city
+            ORDER BY m.location_country, m.location_state, m.location_city;
             """
         ).fetchall()
 
@@ -5064,7 +5557,15 @@ class CatalogRepository:
     def get_total_media_count(self) -> int:
         """Returns the total number of non-missing media records in the catalog."""
         conn = self.engine.catalog_conn()
-        row = conn.execute("SELECT COUNT(*) AS cnt FROM media WHERE is_missing = 0;").fetchone()
+        priv_clause = self._private_folder_clause("f")
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS cnt
+            FROM media m
+            JOIN folders f ON f.id = m.folder_id
+            WHERE COALESCE(m.is_missing, 0) = 0 AND {priv_clause};
+            """
+        ).fetchone()
         return int(row["cnt"]) if row else 0
 
     def mark_media_clean(
@@ -5196,18 +5697,20 @@ class CatalogRepository:
 
     def get_albums_with_counts(self) -> list[dict[str, Any]]:
         conn = self.engine.catalog_conn()
+        priv_clause = self._private_folder_clause("f")
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 a.id,
                 a.name,
                 a.description,
                 a.cover_media_id,
                 a.created_at,
-                COUNT(m.id) AS item_count
+                COUNT(CASE WHEN m.id IS NOT NULL AND {priv_clause} THEN 1 END) AS item_count
             FROM albums a
             LEFT JOIN album_items ai ON ai.album_id = a.id
             LEFT JOIN media m ON m.id = ai.media_id AND COALESCE(m.is_missing, 0) = 0
+            LEFT JOIN folders f ON f.id = m.folder_id
             GROUP BY a.id
             ORDER BY LOWER(a.name) ASC, a.id ASC;
             """
@@ -5224,16 +5727,52 @@ class CatalogRepository:
             for r in rows
         ]
 
+    def set_album_cover(self, album_id: int, media_id: int) -> None:
+        """Sets the cover photo (cover_media_id) for a static album."""
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            conn.execute(
+                "UPDATE albums SET cover_media_id = ? WHERE id = ?;",
+                (int(media_id), int(album_id)),
+            )
+            conn.commit()
+
+    def get_album_cover_candidates(self, album_id: int) -> list[dict[str, Any]]:
+        """Returns non-missing media items in an album for cover selection, current cover first."""
+        conn = self.engine.catalog_conn()
+        rows = conn.execute(
+            """
+            SELECT m.id, m.filename, a.cover_media_id
+            FROM album_items ai
+            JOIN albums a ON a.id = ai.album_id
+            JOIN media m ON m.id = ai.media_id
+            WHERE ai.album_id = ? AND COALESCE(m.is_missing, 0) = 0
+            ORDER BY CASE WHEN m.id = a.cover_media_id THEN 0 ELSE 1 END ASC,
+                     ai.sort_order ASC, m.date_taken DESC, m.id DESC;
+            """,
+            (int(album_id),),
+        ).fetchall()
+        return [
+            {
+                "id": int(r["id"]),
+                "filename": str(r["filename"]),
+                "is_cover": (r["cover_media_id"] is not None and int(r["id"]) == int(r["cover_media_id"])),
+            }
+            for r in rows
+        ]
+
     def get_album_preview_media_ids(self, album_id: int, limit: int = 3) -> list[int]:
-        """Return up to `limit` non-missing media IDs for an album's stack preview."""
+        """Return up to `limit` non-missing media IDs for an album's stack preview, cover first."""
         conn = self.engine.catalog_conn()
         rows = conn.execute(
             """
             SELECT m.id
             FROM album_items ai
+            JOIN albums a ON a.id = ai.album_id
             JOIN media m ON m.id = ai.media_id
             WHERE ai.album_id = ? AND COALESCE(m.is_missing, 0) = 0
-            ORDER BY ai.sort_order ASC, m.date_taken DESC, m.id DESC
+            ORDER BY CASE WHEN m.id = a.cover_media_id THEN 0 ELSE 1 END ASC,
+                     ai.sort_order ASC, m.date_taken DESC, m.id DESC
             LIMIT ?;
             """,
             (int(album_id), int(limit)),
@@ -5333,8 +5872,13 @@ class CatalogRepository:
     def count_smart_album_matches(self, rules_dict: dict[str, Any] | str) -> int:
         where_sql, params = compile_smart_album_where(rules_dict, alias="m")
         conn = self.engine.catalog_conn()
+        priv_clause = self._private_folder_clause("f")
         row = conn.execute(
-            f"SELECT COUNT(*) FROM media m WHERE COALESCE(m.is_missing, 0) = 0 AND ({where_sql});",
+            f"""
+            SELECT COUNT(*) FROM media m
+            JOIN folders f ON f.id = m.folder_id
+            WHERE COALESCE(m.is_missing, 0) = 0 AND {priv_clause} AND ({where_sql});
+            """,
             params,
         ).fetchone()
         return int(row[0]) if row else 0
@@ -5342,7 +5886,7 @@ class CatalogRepository:
     def get_smart_albums_with_counts(self) -> list[dict[str, Any]]:
         conn = self.engine.catalog_conn()
         rows = conn.execute(
-            "SELECT id, name, rules_json, created_at FROM smart_albums ORDER BY id ASC;"
+            "SELECT id, name, rules_json, created_at, cover_media_id FROM smart_albums ORDER BY id ASC;"
         ).fetchall()
         out: list[dict[str, Any]] = []
         for r in rows:
@@ -5359,26 +5903,80 @@ class CatalogRepository:
                     "rules_json": raw_json,
                     "rules_dict": rules_dict,
                     "created_at": int(r["created_at"]),
+                    "cover_media_id": r["cover_media_id"],
                     "item_count": cnt,
                 }
             )
         return out
 
+    def set_smart_album_cover(self, smart_album_id: int, media_id: int) -> None:
+        """Sets the cover photo (cover_media_id) for a Smart Album."""
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            conn.execute(
+                "UPDATE smart_albums SET cover_media_id = ? WHERE id = ?;",
+                (int(media_id), int(smart_album_id)),
+            )
+            conn.commit()
+
+    def get_smart_album_cover_candidates(self, smart_album_id: int, limit: int = 120) -> list[dict[str, Any]]:
+        """Returns non-missing media items matching a Smart Album for cover selection."""
+        sa = self.get_smart_album(int(smart_album_id))
+        if not sa:
+            return []
+        conn = self.engine.catalog_conn()
+        cov_row = conn.execute(
+            "SELECT cover_media_id FROM smart_albums WHERE id = ?;",
+            (int(smart_album_id),),
+        ).fetchone()
+        cover_id = int(cov_row["cover_media_id"]) if (cov_row and cov_row["cover_media_id"] is not None) else None
+        where_sql, params = compile_smart_album_where(sa.get("rules") or {}, alias="m")
+        if cover_id is not None:
+            order_sql = "ORDER BY CASE WHEN m.id = ? THEN 0 ELSE 1 END ASC, m.date_taken DESC, m.id DESC"
+            q_params = (*params, cover_id, int(limit))
+        else:
+            order_sql = "ORDER BY m.date_taken DESC, m.id DESC"
+            q_params = (*params, int(limit))
+        rows = conn.execute(
+            f"""
+            SELECT m.id, m.filename
+            FROM media m
+            WHERE COALESCE(m.is_missing, 0) = 0 AND ({where_sql})
+            {order_sql}
+            LIMIT ?;
+            """,
+            q_params,
+        ).fetchall()
+        return [
+            {
+                "id": int(r["id"]),
+                "filename": str(r["filename"]),
+                "is_cover": (cover_id is not None and int(r["id"]) == cover_id),
+            }
+            for r in rows
+        ]
+
     def get_smart_album_preview_media_ids(
-        self, rules_dict: dict[str, Any] | str, limit: int = 3
+        self, rules_dict: dict[str, Any] | str, limit: int = 3, cover_media_id: int | None = None
     ) -> list[int]:
-        """Return up to `limit` non-missing media IDs matching a Smart Album's rules."""
+        """Return up to `limit` non-missing media IDs matching a Smart Album's rules, cover first."""
         where_sql, params = compile_smart_album_where(rules_dict, alias="m")
         conn = self.engine.catalog_conn()
+        if cover_media_id is not None:
+            order_sql = "ORDER BY CASE WHEN m.id = ? THEN 0 ELSE 1 END ASC, m.date_taken DESC, m.id DESC"
+            q_params = (*params, int(cover_media_id), int(limit))
+        else:
+            order_sql = "ORDER BY m.date_taken DESC, m.id DESC"
+            q_params = (*params, int(limit))
         rows = conn.execute(
             f"""
             SELECT m.id
             FROM media m
             WHERE COALESCE(m.is_missing, 0) = 0 AND ({where_sql})
-            ORDER BY m.date_taken DESC, m.id DESC
+            {order_sql}
             LIMIT ?;
             """,
-            (*params, int(limit)),
+            q_params,
         ).fetchall()
         return [int(r["id"]) for r in rows]
 
@@ -5459,6 +6057,38 @@ class ThumbnailRepository:
 
     def __init__(self, engine: DualDatabaseEngine) -> None:
         self.engine = engine
+        self.include_private: bool = False
+        self._has_ocr_fts: bool | None = None
+
+    def _supports_ocr_fts(self) -> bool:
+        if self._has_ocr_fts is None:
+            try:
+                row = self.engine.catalog_conn().execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_ocr_fts';"
+                ).fetchone()
+                self._has_ocr_fts = row is not None
+            except Exception:
+                self._has_ocr_fts = False
+        return bool(self._has_ocr_fts)
+
+    def set_include_private(self, include_private: bool) -> None:
+        """Toggle session visibility of Private Folders across all catalog queries."""
+        self.include_private = bool(include_private)
+
+    def has_private_folders(self) -> bool:
+        """Returns True if at least one folder in catalog.db is marked is_private = 1."""
+        conn = self.engine.catalog_conn()
+        row = conn.execute(
+            "SELECT 1 FROM folders WHERE COALESCE(is_private, 0) = 1 LIMIT 1;"
+        ).fetchone()
+        return row is not None
+
+    def _private_folder_clause(self, alias: str = "f") -> str:
+        """SQL predicate enforcing excluded-folder and Private Folder session isolation."""
+        base = f"COALESCE({alias}.monitor_mode, 'always') != 'excluded'"
+        if self.include_private:
+            return base
+        return f"({base} AND COALESCE({alias}.is_private, 0) = 0)"
 
     @property
     def _write_lock(self) -> Any:
@@ -5983,7 +6613,9 @@ def _compile_single_smart_rule(
             raw_set = ",".join(f"'{e}'" for e in RAW_EXTENSIONS)
             sql = f"({alias}.is_video = 0 AND LOWER(LTRIM(COALESCE({alias}.ext, ''), '.')) IN ({raw_set}))"
             return (f"NOT {sql}" if neg else sql), []
-        return (f"{alias}.is_video = 1" if neg else f"{alias}.is_video = 0"), []
+        raw_set = ",".join(f"'{e}'" for e in RAW_EXTENSIONS)
+        photo_sql = f"({alias}.is_video = 0 AND LOWER(LTRIM(COALESCE({alias}.ext, ''), '.')) NOT IN ({raw_set}))"
+        return (f"NOT {photo_sql}" if neg else photo_sql), []
 
     # 13. File Extension
     if raw_field in ("file_ext", "ext", "file_type"):
@@ -6088,6 +6720,20 @@ def _compile_single_smart_rule(
         if op in ("not_contains", "excludes"):
             return f"({make_expr} NOT LIKE ? ESCAPE '\\')", [pat]
         return f"({make_expr} LIKE ? ESCAPE '\\')", [pat]
+
+    # 19b. OCR Text (Text in Photo)
+    if raw_field in ("ocr_text", "ocr", "text_in_photo"):
+        if op == "is_empty":
+            return f"TRIM(COALESCE({alias}.ocr_text, '')) = ''", []
+        if op == "is_not_empty":
+            return f"TRIM(COALESCE({alias}.ocr_text, '')) != ''", []
+        if not val_str:
+            return None
+        pat = f"%{_escape_like_term(val_str.lower())}%"
+        sql = f"LOWER(COALESCE({alias}.ocr_text, '')) LIKE ? ESCAPE '\\'"
+        if op in ("not_contains", "excludes"):
+            return f"NOT ({sql})", [pat]
+        return sql, [pat]
 
     # 20. Number of Detected Faces (confirmed state=1 or unconfirmed suggestion state=0, excluding rejected state=2)
     if raw_field in ("face_count", "detected_faces"):

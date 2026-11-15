@@ -1040,7 +1040,7 @@ def write_metadata_lossless(media_detail: dict[str, Any]) -> int | None:
 class _AsyncFlushSignals(QObject):
     batch_synced = Signal(list)
     sync_error = Signal(int, str)
-    finished = Signal()
+    finished = Signal(bool)
 
 
 class _AsyncFlushWorker(QRunnable):
@@ -1062,17 +1062,20 @@ class _AsyncFlushWorker(QRunnable):
         self.stop_requested = stop_requested
 
     def run(self) -> None:
+        has_more = False
         try:
             repo = CatalogRepository(self.engine)
             dirty_items = repo.fetch_dirty_media_batch(limit=self.batch_limit)
             if not dirty_items:
                 return
 
+            has_more = len(dirty_items) >= self.batch_limit
             synced_ids: list[int] = []
             updated_mtimes: dict[int, int] = {}
 
             for item in dirty_items:
                 if self.stop_requested and self.stop_requested.is_set():
+                    has_more = False
                     break
                 mid = int(item["id"])
                 try:
@@ -1088,10 +1091,11 @@ class _AsyncFlushWorker(QRunnable):
                 repo.mark_media_clean(synced_ids, updated_mtimes)
                 self.signals.batch_synced.emit(synced_ids)
         except Exception as exc:
+            has_more = False
             self.signals.sync_error.emit(0, str(exc))
         finally:
             self.engine.close_thread_connections()
-            self.signals.finished.emit()
+            self.signals.finished.emit(has_more)
 
 
 class MetadataSyncDaemon(QObject):
@@ -1150,7 +1154,8 @@ class MetadataSyncDaemon(QObject):
         self.stop_requested.set()
         if self._timer is not None and self._timer.isActive():
             self._timer.stop()
-        self._thread_pool.waitForDone(3000)
+        self._thread_pool.clear()
+        self._thread_pool.waitForDone(800)
 
     def _on_timer_tick(self) -> None:
         if not self._running or self._is_flushing or self._paused or self.stop_requested.is_set():
@@ -1163,8 +1168,10 @@ class MetadataSyncDaemon(QObject):
         worker = _AsyncFlushWorker(self.engine, batch_limit=25, signals=signals, stop_requested=self.stop_requested)
         self._thread_pool.start(worker)
 
-    def _on_flush_finished(self) -> None:
+    def _on_flush_finished(self, has_more: bool = False) -> None:
         self._is_flushing = False
+        if has_more and self._running and not self._paused and not self.stop_requested.is_set():
+            QTimer.singleShot(50, self._on_timer_tick)
 
     def flush_now(self, batch_limit: int = 100, force: bool = False) -> int:
         """

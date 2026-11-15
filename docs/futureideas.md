@@ -1,6 +1,6 @@
 # Essentials Photo Gallery — Future Ideas & Innovation Roadmap (`docs/futureideas.md`)
 
-This document tracks forward-looking enhancements and unimplemented capabilities planned for **Essentials Photo Gallery**. Completed systems—such as the 32-bit perceptual tone engine, U-Point selective control points, Depth & Light bokeh/relighting, ICE-style panorama stitching, Photo Fuse, vector privacy redaction, Duplicate & Burst Finder, Interactive Leaflet World Map & Hierarchical Places Tree, **Static & 17-Dimension Boolean Smart Albums**, and **Next-Gen Codecs (`HEIC`/`AVIF`/`JPEG XL`)**—are documented in [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`editing_engine.md`](editing_engine.md).
+This document tracks forward-looking enhancements and unimplemented capabilities planned for **Essentials Photo Gallery**. Completed systems—such as the 32-bit perceptual tone engine, U-Point selective control points, Depth & Light bokeh/relighting, ICE-style panorama stitching, Photo Fuse, vector privacy redaction, Duplicate & Burst Finder, Interactive Leaflet World Map & Hierarchical Places Tree, **Static & 17-Dimension Boolean Smart Albums**, **Next-Gen Codecs (`HEIC`/`AVIF`/`JPEG XL`)**, **Offline Text-in-Photo OCR Search (`FTS5` + Tesseract/RapidOCR/WinRT)**, **LaMa ONNX Generative Inpainting** (Spot Fix Object Eraser, 3D Cinematic Motion disocclusion fill, Panorama gap fill, optional Straighten/Crop AI fill), and **Picasa-Style Folder Manager & Private Mode (with PIN/Auto-Lock)**—are implemented in the codebase.
 
 All future ideas follow the core philosophy of **100% local, private, offline execution** with zero external cloud telemetry and sub-10ms UI query responsiveness at 500,000+ item scale.
 
@@ -22,21 +22,13 @@ All future ideas follow the core philosophy of **100% local, private, offline ex
 
 ---
 
-## 2. Offline Text-in-Photo OCR Search
+## 2. Offline Text-in-Photo OCR Search *(Implemented — Future Extensions)*
 
-### 2.1 SQLite FTS5 Full-Text Search Integration
-- **Concept:** Find photos containing visible text (street signs, receipts, handwritten notes, whiteboards, book covers, certificates, screenshots).
-- **Architecture:**
-  - Background worker runs Windows native `Windows.Media.Ocr` (built into Windows 10/11) or quantized `RapidOCR` ONNX.
-  - Indexes extracted strings in an SQLite virtual FTS5 table:
-    ```sql
-    CREATE VIRTUAL TABLE media_ocr_fts USING fts5(
-        media_id UNINDEXED,
-        ocr_text,
-        tokenize = 'unicode61 remove_diacritics 2'
-    );
-    ```
-  - Integrated directly into the main Search Box alongside tags and captions.
+### 2.1 SQLite FTS5 Full-Text Search Integration ✅ *(Implemented)*
+- Implemented in `src/core/ocr_engine.py`, `src/workers/ocr_worker.py`, `media_ocr_fts`, Smart Album `OCR Text` rule, and Right Info Dock copyable OCR preview.
+- **Next Steps:**
+  - Multi-language RapidOCR ONNX model pack downloads inside **Options → AI & Downloads**.
+  - On-image bounding-box text highlighting / click-to-copy directly in Single Image View.
 
 ---
 
@@ -60,12 +52,14 @@ All future ideas follow the core philosophy of **100% local, private, offline ex
 
 ---
 
-## 5. Archival Restoration & Inpainting Upgrades
+## 5. Archival Restoration, OpenCV 5.0 & ONNXRuntime Opportunities
 
 - **Archival Scan Restoration & 2x Super-Resolution (`Real-ESRGAN` / `GFPGAN` ONNX):**
-  Dedicated tool for scanned 1950s–1980s film prints and early-2000s low-res digital captures to remove JPEG block artifacts, scanner dust scratches, and gently restore facial clarity.
-- **Large-Mask Generative Inpainting (`LaMa` ONNX):**
-  Optional ONNX inpainting backend for erasing large photobombers, power lines, and street clutter where exemplar frequency separation isn't enough.
+  Dedicated tool for scanned 1950s–1980s film prints and early-2000s low-res digital captures to remove JPEG block artifacts, scanner dust scratches, and gently restore facial clarity (downloadable via **Options → AI & Downloads**).
+- **Large-Mask Generative Inpainting (`LaMa` ONNX) ✅ *(Implemented for Object Eraser, 3D Motion, Panorama, Optional Crop/Straighten)*:**
+  - **Next Extensions:** 4-point Perspective / Keystone corner fill, Photo Fuse burst-alignment edge fill, and 1-click **"Remove Date Stamp"** / **"Heal Film Scratch"** archival presets.
+- **Learned Panorama Feature Matching (`ALIKED` / `DISK` + `LightGlue` ONNX):**
+  Surface the OpenCV 5.0 learned matcher models (`_find_learned_matcher_models` in `src/imaging/create_tools.py`) in **Options → AI & Downloads** to improve panorama alignment on low-texture skies, water, and indoor scenes.
 
 ---
 
@@ -75,11 +69,10 @@ All future ideas follow the core philosophy of **100% local, private, offline ex
 
 ---
 
-## 7. Per-Folder Scan & Privacy Controls
+## 7. Per-Folder Scan & Privacy Controls ✅ *(Implemented — Future Extensions)*
 
-- Folder-level preferences accessible from the Left Navigation Dock:
-  - Mark folders as **Private / Hidden** (excluded from default `"All photos and videos"` unless unlocked).
-  - Toggle background passes per folder root (**Face detection**, future **OCR / CLIP indexing**, **Live file watcher**).
+- Implemented in `FolderManagerDialog` (`Scan Always`, `Scan Once`, `Exclude from catalog`, per-folder `Scan Faces` / `Scan OCR`, `Private Folder` isolation, and optional PBKDF2 PIN + idle auto-lock).
+- **Next Steps:** Windows Hello biometric unlock integration on Windows 10/11 and per-folder CLIP semantic indexing toggle.
 
 ---
 
@@ -92,34 +85,35 @@ All future ideas follow the core philosophy of **100% local, private, offline ex
 
 ---
 
-## 10. Lessons & Pipeline Upgrades Inspired by Greycard
+## 9. Fine Tune & Pipeline Upgrades (Inspired by Greycard)
 
-### 10.1 Pre-Computed Text Embeddings for Zero-Bloat Semantic Masking (`sam3_presets.bin`)
+### 9.1 Pre-Computed Text Embeddings for Zero-Bloat Semantic Masking (`sam3_presets.bin`)
 - **Concept:** Enable instant 1-click semantic masking (*Sky, Subject, Person, Face, Skin, Eyes, Lips, Teeth, Hair, Clothes, Background, Building, Vegetation, Water, Ground*) without shipping a massive 500 MB text encoder model.
 - **Architecture:**
   - Pre-compute the text prompt embeddings offline once for the 16 standard photographic masking categories and pack them into a tiny (~524 KB) binary asset (`sam3_presets.bin` / `semantic_mask_presets.bin`).
   - At runtime, only the lightweight vision encoder/decoder (e.g., quantized MobileSAM / SAM-3 ONNX) runs against the image, multiplying its image features against the pre-computed `524 KB` preset vectors in `<15 ms` to generate instant, edge-accurate local adjustment masks.
+- **Selective / Masked Fine Tune Integration:** Allow Fine Tune sliders (Exposure, Contrast, Saturation, Clarity, Shadows/Highlights) to target an AI-generated *Subject*, *Sky*, or *Background* mask or brush mask.
 
-### 10.2 Embedded JPEG Fast-Path for Camera RAW Files (`.RAF`, `.CR3`, `.NEF`, `.ARW`)
+### 9.2 Embedded JPEG Fast-Path for Camera RAW Files (`.RAF`, `.CR3`, `.NEF`, `.ARW`) ✅ *(Implemented)*
 - **Concept:** Achieve instantaneous (`<5 ms`) thumbnail generation and initial Single Image View loading for 40–80 MB camera RAW files (such as Fujifilm X-Trans `.RAF` files) while preserving the camera's built-in Film Simulation preview.
-- **Architecture:**
-  - Every modern camera RAW container embeds a full-resolution (or half-resolution) camera-processed JPEG preview at a deterministic header byte offset with the camera's exact color profile (e.g., Fujifilm *Provia*, *Classic Chrome*, *Velvia*) already applied.
-  - `ThumbnailDecodeWorker` and `SingleMediaViewer` extract and decode this embedded JPEG stream directly from the byte range for instant browsing and culling, deferring heavy 16-bit linear RAW demosaicing (`rawpy` / `LibRaw` Markesteijn/AMaZE) strictly until the user enters active slider editing.
+- **Implemented (`src/imaging/image_loader.py`, `src/workers/scanner_thumb_worker.py`, `src/ui/media_viewer.py`):**
+  - `decode_raw_embedded_preview()` and `ThumbnailDecodeWorker` extract and decode the camera's embedded JPEG/bitmap stream (with EXIF orientation applied) for instant browsing and culling, deferring heavy `rawpy` demosaicing strictly until active slider editing (`_upgrade_raw_to_full_demosaic_async()`).
 
-### 10.3 AgX-Style Highlight Chroma Roll-Off ("Film Shoulder Desaturation")
+### 9.3 AgX-Style Highlight Chroma Roll-Off ("Film Shoulder Desaturation") ✅ *(Implemented)*
 - **Concept:** Prevent bright specular highlights (sunset clouds, neon signs, sun-lit skin) from looking artificially clipped or posterized yellow/magenta when boosting exposure or contrast.
-- **Formulation (`src/imaging/opencv_engine.py`):**
-  - Inside the Unified CIE $L^*a^*b^*$ pass, couple the Filmic Soft-Knee luminance curve with an AgX-inspired chromaticity roll-off above the highlight shoulder threshold ($L^* > 220.0$ on the $0..255$ scale):
+- **Implemented (`src/imaging/opencv_engine.py`):**
+  - Inside the Unified CIE $L^*a^*b^*$ pass (`need_tone_lab`), couples the Filmic Soft-Knee luminance curve with an AgX-inspired chromaticity roll-off above the highlight shoulder threshold ($L^* > 220.0$ on the $0..255$ scale):
     $$w_{\text{desat}} = \text{clip}\left(\frac{L^* - 220.0}{35.0}, 0.0, 1.0\right)^2$$
     $$A^{*\prime} = 128.0 + (A^* - 128.0) \cdot (1.0 - 0.65 \cdot w_{\text{desat}})$$
     $$B^{*\prime} = 128.0 + (B^* - 128.0) \cdot (1.0 - 0.65 \cdot w_{\text{desat}})$$
   - Gently desaturates extreme highlights toward clean paper-white as $L^* \to 255$, emulating analog color negative film behavior.
 
-### 10.4 Focus-Aware Mouse-Wheel Slider Ergonomics
+### 9.4 Focus-Aware Mouse-Wheel Slider Ergonomics ✅ *(Implemented)*
 - **Concept:** Prevent accidental slider changes when scrolling the right-hand editing sidebar, while enabling fast precision mouse-wheel scrubbing when a slider is intentionally targeted.
-- **UX Rules (`_AeroFineTuneSlider` in `src/ui/right_tag_dock.py`):**
-  - **Unfocused Hover:** Scrolling the mouse wheel over the sidebar scrolls the vertical panel normally; unfocused sliders ignore wheel events (`event.ignore()`).
-  - **Focused / Active Slider (or `Alt + Wheel`):** Once a slider is clicked/focused (or while holding `Alt`), mouse-wheel ticks increment/decrement the slider in clean `±1` (`Shift + Wheel` for `±5`) steps without scrolling the parent sidebar away from the cursor.
+- **Implemented (`_AeroFineTuneSlider` in `src/ui/right_tag_dock.py`):**
+  - **Unfocused Hover:** Uses `Qt.StrongFocus`; unfocused sliders ignore wheel events (`event.ignore()`) so the parent Fine Tune sidebar scrolls normally.
+  - **Focused / Active Slider (or `Alt + Wheel`):** Accepts wheel events in clean `±1` (`Shift + Wheel` for `±5`) steps without scrolling the parent sidebar away from the cursor.
 
-### 10.5 Live RGB / Luminance Histogram with "Subject-Only" Scope Toggle
-- **Concept:** Provide
+### 9.5 Live RGB / Luminance Histogram ✅ *(Implemented — Future: "Subject-Only" Scope Toggle)*
+- **Implemented (`HistogramWidget` in `src/ui/right_tag_dock.py`):** Renders translucent `R`, `G`, and `B` channel curves behind the Luminance histogram with interactive Black/White point markers.
+- **Next Step:** Add an optional **"Subject-Only"** scope toggle that computes the histogram strictly inside the detected foreground/subject mask so bright skies don't skew skin-tone exposure decisions.

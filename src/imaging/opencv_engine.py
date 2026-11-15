@@ -15,6 +15,7 @@ Provides professional, non-destructive, floating-point image processing:
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 from collections import OrderedDict
@@ -23,6 +24,8 @@ from typing import Any, Literal
 
 import cv2
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Thread-safe bounded checkpoint cache for render_adjusted_image
 _STAGE_CACHE_LOCK = threading.Lock()
@@ -71,6 +74,7 @@ class PhotoAdjustmentRecipe:
     dehaze: float = 0.0           # -100.0 .. +100.0 (Atmospheric haze reduction)
     vignette: float = 0.0         # -100.0 .. +100.0 (Dark <-> Light corners)
     straighten_deg: float = 0.0   # -15.0 .. +15.0 degrees
+    straighten_ai_fill: bool = False  # Fill rotated corner wedges instead of cropping inward
     sharpen: float = 0.0          # 0.0 .. 100.0 (Halo-free unsharp mask amount)
     denoise: float = 0.0          # 0.0 .. 100.0 (Dual-domain bilateral amount)
     black_point: float = 0.0      # 0.0 .. 255.0 (Histogram black point clip)
@@ -140,6 +144,7 @@ class PhotoAdjustmentRecipe:
             dehaze=self.dehaze,
             vignette=self.vignette,
             straighten_deg=self.straighten_deg,
+            straighten_ai_fill=self.straighten_ai_fill,
             sharpen=self.sharpen,
             denoise=self.denoise,
             black_point=self.black_point,
@@ -625,8 +630,23 @@ def render_adjusted_image(
 
             lab[:, :, 0] = np.clip(L + 0.5, 0.0, 255.0).astype(np.uint8)
             if has_ab:
+                # AgX-style highlight chroma roll-off: gently desaturate extreme highlights (L > 220)
+                # toward paper-white so boosted highlights don't clip to harsh yellow/magenta.
+                w_desat = np.clip((L - 220.0) / 35.0, 0.0, 1.0) ** 2
+                rolloff = 1.0 - 0.65 * w_desat
+                A = 128.0 + (A - 128.0) * rolloff
+                B = 128.0 + (B - 128.0) * rolloff
                 lab[:, :, 1] = np.clip(A + 0.5, 0.0, 255.0).astype(np.uint8)
                 lab[:, :, 2] = np.clip(B + 0.5, 0.0, 255.0).astype(np.uint8)
+            else:
+                hl_mask = L > 220.0
+                if np.any(hl_mask):
+                    w_desat = np.clip((L[hl_mask] - 220.0) / 35.0, 0.0, 1.0) ** 2
+                    rolloff = 1.0 - 0.65 * w_desat
+                    a_hl = 128.0 + (lab[:, :, 1][hl_mask].astype(np.float32) - 128.0) * rolloff
+                    b_hl = 128.0 + (lab[:, :, 2][hl_mask].astype(np.float32) - 128.0) * rolloff
+                    lab[:, :, 1][hl_mask] = np.clip(a_hl + 0.5, 0.0, 255.0).astype(np.uint8)
+                    lab[:, :, 2][hl_mask] = np.clip(b_hl + 0.5, 0.0, 255.0).astype(np.uint8)
             img = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
 
         if slot is not None:
@@ -859,18 +879,21 @@ def render_adjusted_image(
 
     # 7. Straighten & Crop
     if abs(recipe.straighten_deg) >= 0.05:
-        h, w = img.shape[:2]
-        center = (w / 2.0, h / 2.0)
-        rot_matrix = cv2.getRotationMatrix2D(center, -float(recipe.straighten_deg), 1.0)
-        img = cv2.warpAffine(
-            img,
-            rot_matrix,
-            (w, h),
-            flags=cv2.INTER_CUBIC,
-            borderMode=cv2.BORDER_REFLECT_101,
-        )
-        if recipe.crop_rect is None:
-            img = _crop_largest_inscribed_rect(img, recipe.straighten_deg, w, h)
+        if getattr(recipe, "straighten_ai_fill", False):
+            img = straighten_with_ai_fill(img, recipe.straighten_deg)
+        else:
+            h, w = img.shape[:2]
+            center = (w / 2.0, h / 2.0)
+            rot_matrix = cv2.getRotationMatrix2D(center, -float(recipe.straighten_deg), 1.0)
+            img = cv2.warpAffine(
+                img,
+                rot_matrix,
+                (w, h),
+                flags=cv2.INTER_CUBIC,
+                borderMode=cv2.BORDER_REFLECT_101,
+            )
+            if recipe.crop_rect is None:
+                img = _crop_largest_inscribed_rect(img, recipe.straighten_deg, w, h)
 
     if recipe.crop_rect is not None:
         h, w = img.shape[:2]
@@ -893,6 +916,115 @@ def render_adjusted_image(
             img = img[t:b, l:r]
 
     return np.ascontiguousarray(img)
+
+
+def straighten_with_ai_fill(img: np.ndarray, angle_deg: float) -> np.ndarray:
+    """
+    Rotate an RGB uint8 image by angle_deg while preserving the full (w, h) frame
+    and filling empty rotated corner wedges via LaMa (or built-in texture fallback).
+    """
+    h, w = img.shape[:2]
+    center = (w / 2.0, h / 2.0)
+    rot_matrix = cv2.getRotationMatrix2D(center, -float(angle_deg), 1.0)
+    # Use BORDER_REPLICATE instead of black BORDER_CONSTANT so INTER_CUBIC never
+    # introduces a 1-2px dark anti-aliased fringe along the rotated image boundary.
+    rot_img = cv2.warpAffine(
+        img,
+        rot_matrix,
+        (w, h),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    ones = np.full((h, w), 255, dtype=np.uint8)
+    rot_mask = cv2.warpAffine(
+        ones,
+        rot_matrix,
+        (w, h),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    gap_mask = np.where(rot_mask == 0, np.uint8(255), np.uint8(0))
+    if np.any(gap_mask > 0):
+        from src.imaging.creative_effects import inpaint_object_lama
+
+        seam_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        inpaint_mask = cv2.dilate(gap_mask, seam_k, iterations=1)
+        filled = inpaint_object_lama(rot_img, inpaint_mask)
+        erode_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        keep_bin = cv2.erode((gap_mask == 0).astype(np.uint8) * 255, erode_k, iterations=1)
+        alpha_keep = cv2.GaussianBlur(keep_bin.astype(np.float32) / 255.0, (7, 7), 1.8)
+        alpha_keep = np.where(gap_mask > 0, 0.0, alpha_keep)[:, :, None]
+        blended = (
+            rot_img.astype(np.float32) * alpha_keep
+            + filled.astype(np.float32) * (1.0 - alpha_keep)
+        )
+        return np.clip(blended, 0, 255).astype(np.uint8)
+    return rot_img
+
+
+def expand_canvas_with_ai_fill(
+    img: np.ndarray, left: int, top: int, right: int, bottom: int
+) -> np.ndarray:
+    """
+    Crop/expand an RGB uint8 image to (left, top, right, bottom) where bounds may
+    extend outside [0..w, 0..h], filling any out-of-bounds margins via LaMa (or
+    built-in texture synthesis fallback when the neural model is not installed).
+    """
+    h, w = img.shape[:2]
+    out_w = max(1, int(right - left))
+    out_h = max(1, int(bottom - top))
+    mask = np.full((out_h, out_w), 255, dtype=np.uint8)
+
+    src_x1 = max(0, left)
+    src_y1 = max(0, top)
+    src_x2 = min(w, right)
+    src_y2 = min(h, bottom)
+
+    if src_x2 > src_x1 and src_y2 > src_y1:
+        # Pre-fill expanded margins with edge-replicated pixels instead of black (0,0,0)
+        # so neural/texture context never sees a hard black cliff at the boundary.
+        pad_l = max(0, -left)
+        pad_t = max(0, -top)
+        pad_r = max(0, right - w)
+        pad_b = max(0, bottom - h)
+        sub = img[src_y1:src_y2, src_x1:src_x2]
+        canvas = cv2.copyMakeBorder(
+            sub, pad_t, pad_b, pad_l, pad_r, borderType=cv2.BORDER_REPLICATE
+        )
+        if canvas.shape[0] != out_h or canvas.shape[1] != out_w:
+            canvas = cv2.resize(canvas, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+
+        dst_x1 = src_x1 - left
+        dst_y1 = src_y1 - top
+        dst_x2 = dst_x1 + (src_x2 - src_x1)
+        dst_y2 = dst_y1 + (src_y2 - src_y1)
+        mask[dst_y1:dst_y2, dst_x1:dst_x2] = 0
+    else:
+        canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+
+    if np.any(mask > 0):
+        from src.imaging.creative_effects import inpaint_object_lama
+
+        # Dilate mask slightly (5px) into the original border so LaMa synthesizes across
+        # any edge JPEG ringing/dark border, then erode+feather-blend with the crisp interior.
+        seam_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+        inpaint_mask = cv2.dilate(mask, seam_k, iterations=1)
+        filled = inpaint_object_lama(canvas, inpaint_mask)
+
+        if src_x2 > src_x1 and src_y2 > src_y1:
+            # Smooth feathered transition across the boundary (erode 2px so edge artifacts are replaced)
+            erode_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            keep_bin = cv2.erode((mask == 0).astype(np.uint8) * 255, erode_k, iterations=1)
+            alpha_keep = cv2.GaussianBlur(keep_bin.astype(np.float32) / 255.0, (9, 9), 2.0)
+            alpha_keep = np.where(mask > 0, 0.0, alpha_keep)[:, :, None]
+            blended = (
+                canvas.astype(np.float32) * alpha_keep
+                + filled.astype(np.float32) * (1.0 - alpha_keep)
+            )
+            return np.clip(blended, 0, 255).astype(np.uint8)
+        return filled
+    return canvas
 
 
 def analyze_noise_profile(master_rgb: np.ndarray) -> float:
@@ -1057,8 +1189,8 @@ def detect_auto_straighten_angle(master_rgb: np.ndarray) -> float:
     candidate_tilts: list[float] = []
     weights: list[float] = []
 
-    for line in lines:
-        x1, y1, x2, y2 = line[0]
+    # OpenCV 5 returns (N, 4) for HoughLinesP while OpenCV 4 returned (N, 1, 4)
+    for x1, y1, x2, y2 in np.asarray(lines).reshape(-1, 4):
         dx = float(x2 - x1)
         dy = float(y2 - y1)
         length = math.hypot(dx, dy)

@@ -265,20 +265,21 @@ QSlider::handle:horizontal:hover {
 /* Minimalist modern scrollbars (dark mode) */
 QScrollBar:vertical {
     border: none;
-    background: transparent;
-    width: 8px;
+    background: #181C22;
+    width: 5px;
     margin: 0px 0px 0px 0px;
 }
 QScrollBar::handle:vertical {
-    background: #4B5563;
+    background: #64748B;
     min-height: 28px;
-    border-radius: 4px;
+    border-radius: 2px;
+    margin: 0px;
 }
 QScrollBar::handle:vertical:hover {
-    background: #6B7280;
+    background: #94A3B8;
 }
 QScrollBar::handle:vertical:pressed {
-    background: #9CA3AF;
+    background: #CBD5E1;
 }
 QScrollBar::sub-line:vertical, QScrollBar::add-line:vertical {
     border: none;

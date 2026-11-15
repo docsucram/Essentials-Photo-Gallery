@@ -1098,9 +1098,9 @@ class MarkupFloatingToolbar(QFrame):
         layout.addWidget(self.grip_handle)
 
         # Title label
-        lbl = QLabel("Markup:")
-        lbl.setStyleSheet("font-weight: bold; color: #1E395B; padding-right: 2px;")
-        layout.addWidget(lbl)
+        self.lbl_title = QLabel("Markup:")
+        self.lbl_title.setObjectName("MarkupTitleLabel")
+        layout.addWidget(self.lbl_title)
 
         # Tool switcher buttons
         self.btn_group = QButtonGroup(self)
@@ -1390,24 +1390,10 @@ class MarkupFloatingToolbar(QFrame):
 
         # Save photo with markups
         self.btn_save = QPushButton("Save")
+        self.btn_save.setObjectName("MarkupSaveBtn")
         self.btn_save.setIcon(make_wlpg_icon("save", 14))
         self.btn_save.setIconSize(QSize(14, 14))
         self.btn_save.setToolTip("Save changes to original photo (Ctrl+S)")
-        self.btn_save.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FDFDFE, stop:1 #EFF4F9);
-                border: 1px solid #7DA2CE;
-                border-radius: 3px;
-                padding: 3px 8px;
-                font-size: 11px;
-                font-weight: 600;
-                color: #1E395B;
-            }
-            QPushButton:hover {
-                background: #E1ECF9;
-                border-color: #3388E8;
-            }
-        """)
         self.btn_save.clicked.connect(self.save_requested.emit)
         layout.addWidget(self.btn_save)
 
@@ -1435,27 +1421,162 @@ class MarkupFloatingToolbar(QFrame):
 
         # Cancel / Close
         self.btn_cancel = QPushButton("Close")
+        self.btn_cancel.setObjectName("MarkupCancelBtn")
         self.btn_cancel.setIcon(make_symbol_icon("cross", 14))
         self.btn_cancel.setIconSize(QSize(14, 14))
-        self.btn_cancel.setStyleSheet("""
-            QPushButton {
-                background: #F8F9FA;
-                border: 1px solid #CBD5E1;
-                border-radius: 3px;
-                padding: 3px 7px;
-                font-size: 11px;
-                color: #1E293B;
-            }
-            QPushButton:hover {
-                background: #EDF2F7;
-                border-color: #94A3B8;
-            }
-        """)
         self.btn_cancel.clicked.connect(self.cancel_requested.emit)
         layout.addWidget(self.btn_cancel)
 
         # Initialize contextual visibility for tool-specific buttons
         self._set_tool("pen")
+        self.set_dark_mode(False)
+
+    def set_dark_mode(self, is_dark: bool) -> None:
+        """Apply Dark Studio or classic light Aero styling to the floating Markup toolbar."""
+        if is_dark:
+            self.setStyleSheet(f"""
+                MarkupFloatingToolbar {{
+                    background: #1E242C;
+                    border: 1px solid #3B4252;
+                    border-radius: 6px;
+                    padding: 3px;
+                }}
+                QLabel {{
+                    font-size: 11px;
+                    color: #E2E8F0;
+                    background: transparent;
+                }}
+                QLabel#MarkupTitleLabel {{
+                    font-weight: bold;
+                    color: #F8FAFC;
+                    padding-right: 2px;
+                    background: transparent;
+                }}
+                QToolButton {{
+                    border: 1px solid transparent;
+                    border-radius: 3px;
+                    padding: 2px 6px;
+                    min-height: 22px;
+                    font-size: 11px;
+                    font-weight: 500;
+                    color: #E2E8F0;
+                    background: transparent;
+                }}
+                QToolButton:hover {{
+                    background: #2C3440;
+                    border: 1px solid #4B5563;
+                }}
+                QToolButton:checked {{
+                    background: #1E3A5F;
+                    border: 1px solid #3B82F6;
+                    color: #FFFFFF;
+                }}
+                QToolButton#btn_shape {{
+                    min-width: 68px;
+                    padding-right: 18px;
+                }}
+                QToolButton#btn_shape:hover::menu-button,
+                QToolButton#btn_shape:checked::menu-button {{
+                    border-left: 1px solid rgba(96, 165, 250, 130);
+                }}
+                QToolButton::menu-arrow {{
+                    image: url("{ARROW_DROPDOWN_PATH}");
+                    width: 7px;
+                    height: 4px;
+                }}
+                QPushButton#MarkupSaveBtn,
+                QPushButton#MarkupCancelBtn {{
+                    background: #262B34;
+                    border: 1px solid #3B4252;
+                    border-radius: 3px;
+                    padding: 3px 8px;
+                    font-size: 11px;
+                    font-weight: 600;
+                    color: #E2E8F0;
+                }}
+                QPushButton#MarkupSaveBtn:hover,
+                QPushButton#MarkupCancelBtn:hover {{
+                    background: #2E3440;
+                    border-color: #60A5FA;
+                }}
+            """)
+        else:
+            self.setStyleSheet(f"""
+                MarkupFloatingToolbar {{
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FDFDFE, stop:1 #EFF4F9);
+                    border: 1px solid #70A6E8;
+                    border-radius: 6px;
+                    padding: 3px;
+                }}
+                QLabel {{
+                    font-size: 11px;
+                    color: #1E395B;
+                    background: transparent;
+                }}
+                QLabel#MarkupTitleLabel {{
+                    font-weight: bold;
+                    color: #1E395B;
+                    padding-right: 2px;
+                    background: transparent;
+                }}
+                QToolButton {{
+                    border: 1px solid transparent;
+                    border-radius: 3px;
+                    padding: 2px 6px;
+                    min-height: 22px;
+                    font-size: 11px;
+                    font-weight: 500;
+                    color: #1E395B;
+                    background: transparent;
+                }}
+                QToolButton:hover {{
+                    background: #E1ECF9;
+                    border: 1px solid #85B5EB;
+                }}
+                QToolButton:checked {{
+                    background: #CBE2F8;
+                    border: 1px solid #3388E8;
+                    color: #0E294B;
+                }}
+                QToolButton#btn_shape {{
+                    min-width: 68px;
+                    padding-right: 18px;
+                }}
+                QToolButton#btn_shape:hover::menu-button,
+                QToolButton#btn_shape:checked::menu-button {{
+                    border-left: 1px solid rgba(112, 166, 232, 130);
+                }}
+                QToolButton::menu-arrow {{
+                    image: url("{ARROW_DROPDOWN_PATH}");
+                    width: 7px;
+                    height: 4px;
+                }}
+                QPushButton#MarkupSaveBtn {{
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FDFDFE, stop:1 #EFF4F9);
+                    border: 1px solid #7DA2CE;
+                    border-radius: 3px;
+                    padding: 3px 8px;
+                    font-size: 11px;
+                    font-weight: 600;
+                    color: #1E395B;
+                }}
+                QPushButton#MarkupSaveBtn:hover {{
+                    background: #E1ECF9;
+                    border-color: #3388E8;
+                }}
+                QPushButton#MarkupCancelBtn {{
+                    background: #F8F9FA;
+                    border: 1px solid #CBD5E1;
+                    border-radius: 3px;
+                    padding: 3px 7px;
+                    font-size: 11px;
+                    color: #1E293B;
+                }}
+                QPushButton#MarkupCancelBtn:hover {{
+                    background: #EDF2F7;
+                    border-color: #94A3B8;
+                }}
+            """)
 
     def _update_shape_button_ui(self) -> None:
         label_map = {"rect": "Box", "ellipse": "Oval", "star": "Star"}

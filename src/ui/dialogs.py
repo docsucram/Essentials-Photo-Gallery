@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QRadioButton,
@@ -387,6 +388,7 @@ class AppSettingsDialog(QDialog):
         self.heal_faces_requested: bool = False
         self.purge_rescan_requested: bool = False
         self.fast_rematch_requested: bool = False
+        self.rescan_ocr_requested: bool = False
         self.originals_dir: str = originals_dir or str(Path.home() / "Pictures" / ".OriginalFiles")
 
         # Load Save as copy settings from QSettings if not explicitly passed
@@ -405,73 +407,7 @@ class AppSettingsDialog(QDialog):
         self.tab_widget = QTabWidget(self)
         self.tabs = self.tab_widget  # Compatibility alias
         self.tab_widget.setFont(QFont("Segoe UI", 9))
-        if self._is_dark:
-            self.tab_widget.setStyleSheet(
-                """
-                QTabWidget::pane {
-                    border: 1px solid #3E4756;
-                    background: #1E222A;
-                    top: -1px;
-                }
-                QTabBar::tab {
-                    background: #262B35;
-                    border: 1px solid #3E4756;
-                    border-top-left-radius: 3px;
-                    border-top-right-radius: 3px;
-                    padding: 4px 12px;
-                    margin-right: 2px;
-                    color: #CBD5E1;
-                    font-family: 'Segoe UI';
-                    font-size: 9pt;
-                }
-                QTabBar::tab:hover {
-                    background: #303744;
-                    border-color: #4B5563;
-                    color: #FFFFFF;
-                }
-                QTabBar::tab:selected {
-                    background: #1E222A;
-                    border: 1px solid #3E4756;
-                    border-bottom: 1px solid #1E222A;
-                    margin-bottom: -1px;
-                    font-weight: 600;
-                    color: #FFFFFF;
-                }
-                """
-            )
-        else:
-            self.tab_widget.setStyleSheet(
-                """
-                QTabWidget::pane {
-                    border: 1px solid #9EB6CE;
-                    background: #FFFFFF;
-                    top: -1px;
-                }
-                QTabBar::tab {
-                    background: #F0F4F9;
-                    border: 1px solid #9EB6CE;
-                    border-top-left-radius: 3px;
-                    border-top-right-radius: 3px;
-                    padding: 4px 12px;
-                    margin-right: 2px;
-                    color: #1E395B;
-                    font-family: 'Segoe UI';
-                    font-size: 9pt;
-                }
-                QTabBar::tab:hover {
-                    background: #E5EEF8;
-                    border-color: #7DA2CE;
-                }
-                QTabBar::tab:selected {
-                    background: #FFFFFF;
-                    border: 1px solid #9EB6CE;
-                    border-bottom: 1px solid #FFFFFF;
-                    margin-bottom: -1px;
-                    font-weight: 600;
-                    color: #000000;
-                }
-                """
-            )
+        self._apply_dialog_theme(self._is_dark)
 
         # -------------------------------------------------------------
         # Tab 1: General (docs: screenshot 2)
@@ -953,7 +889,152 @@ class AppSettingsDialog(QDialog):
         self.edit_tab = tab_edit
 
         # -------------------------------------------------------------
-        # Tab 5: Database
+        # Tab 5: AI & Downloads (Optional Models & OCR Engines)
+        # -------------------------------------------------------------
+        tab_ai = QWidget()
+        v_ai = QVBoxLayout(tab_ai)
+        v_ai.setContentsMargins(14, 14, 14, 14)
+        v_ai.setSpacing(12)
+
+        ai_intro = QLabel(
+            "Manage optional AI models and external OCR engines. Models are stored in your local AppData folder "
+            "and can be uninstalled at any time."
+        )
+        ai_intro.setWordWrap(True)
+        ai_intro.setStyleSheet("color: #666; font-size: 11px;")
+        v_ai.addWidget(ai_intro)
+
+        # 1. AI Neural Inpainting (LaMa)
+        grp_lama = QGroupBox("AI Neural Inpainting (LaMa)", tab_ai)
+        v_lama = QVBoxLayout(grp_lama)
+        v_lama.setSpacing(6)
+        lama_desc = QLabel(
+            "Optional deep-learning fill model (~208 MB) that upgrades Object Eraser, Crop AI Expand, "
+            "Panorama corner fill, and 3D Cinematic background fill. Built-in basic inpainting is used when not installed.",
+            grp_lama,
+        )
+        lama_desc.setWordWrap(True)
+        lama_desc.setStyleSheet("color: #666; font-size: 10.5px;")
+        v_lama.addWidget(lama_desc)
+
+        self.lbl_opt_lama_status = QLabel("Checking status...", grp_lama)
+        self.lbl_opt_lama_status.setWordWrap(True)
+        v_lama.addWidget(self.lbl_opt_lama_status)
+
+        self.chk_opt_lama_enabled = QCheckBox(
+            "Enable AI Object Eraser (LaMa) when model is installed", grp_lama
+        )
+        self.chk_opt_lama_enabled.toggled.connect(self._on_opt_lama_enabled_toggled)
+        v_lama.addWidget(self.chk_opt_lama_enabled)
+
+        lama_btn_row = QHBoxLayout()
+        self.btn_opt_lama_download = QPushButton("Download AI Object Eraser", grp_lama)
+        self.btn_opt_lama_uninstall = QPushButton("Uninstall Model", grp_lama)
+        self.btn_opt_lama_download.clicked.connect(self._on_opt_lama_download)
+        self.btn_opt_lama_uninstall.clicked.connect(self._on_opt_lama_uninstall)
+        lama_btn_row.addWidget(self.btn_opt_lama_download)
+        lama_btn_row.addWidget(self.btn_opt_lama_uninstall)
+        lama_btn_row.addStretch(1)
+        v_lama.addLayout(lama_btn_row)
+        v_ai.addWidget(grp_lama)
+
+        # 2. Offline Text Recognition (OCR)
+        grp_ocr = QGroupBox("Offline Text Recognition (OCR)", tab_ai)
+        v_ocr = QVBoxLayout(grp_ocr)
+        v_ocr.setSpacing(7)
+        ocr_desc = QLabel(
+            "• Windows Native OCR: Built-in Windows 10/11 OCR — zero download, best for photos (used first by Auto).\n"
+            "• RapidOCR (~15 MB): Self-contained offline AI text recognition downloaded to AppData.\n"
+            "• Tesseract OCR: Uses an external tesseract.exe installation if already on your PC.",
+            grp_ocr,
+        )
+        ocr_desc.setWordWrap(True)
+        ocr_desc.setStyleSheet("color: #666; font-size: 10.5px;")
+        v_ocr.addWidget(ocr_desc)
+
+        self.lbl_opt_ocr_status = QLabel("Detecting OCR engine...", grp_ocr)
+        self.lbl_opt_ocr_status.setWordWrap(True)
+        self.lbl_opt_ocr_status.setStyleSheet("font-weight: 600;")
+        v_ocr.addWidget(self.lbl_opt_ocr_status)
+
+        ocr_engine_row = QHBoxLayout()
+        ocr_engine_row.addWidget(QLabel("Preferred Engine:", grp_ocr))
+        self.cmb_opt_ocr_backend = QComboBox(grp_ocr)
+        self.cmb_opt_ocr_backend.addItem("Auto (Recommended)", "auto")
+        self.cmb_opt_ocr_backend.addItem("Windows Native OCR (WinRT)", "windows_media_ocr")
+        self.cmb_opt_ocr_backend.addItem("RapidOCR (ONNX)", "rapidocr")
+        self.cmb_opt_ocr_backend.addItem("Tesseract OCR", "pytesseract")
+        self.cmb_opt_ocr_backend.currentIndexChanged.connect(self._on_opt_ocr_backend_changed)
+        ocr_engine_row.addWidget(self.cmb_opt_ocr_backend, 1)
+        self.btn_opt_rescan_ocr = QPushButton("Re-scan All OCR...", grp_ocr)
+        self.btn_opt_rescan_ocr.setToolTip(
+            "Re-run OCR indexing across all OCR-enabled folders using the selected engine."
+        )
+        self.btn_opt_rescan_ocr.clicked.connect(self._on_opt_rescan_ocr)
+        ocr_engine_row.addWidget(self.btn_opt_rescan_ocr)
+        v_ocr.addLayout(ocr_engine_row)
+
+        self.lbl_opt_rapid_status = QLabel("RapidOCR Add-on: Checking...", grp_ocr)
+        self.lbl_opt_rapid_status.setWordWrap(True)
+        v_ocr.addWidget(self.lbl_opt_rapid_status)
+
+        rapid_dl_row = QHBoxLayout()
+        self.btn_opt_rapid_download = QPushButton("Download RapidOCR (~15 MB)", grp_ocr)
+        self.btn_opt_rapid_uninstall = QPushButton("Uninstall RapidOCR", grp_ocr)
+        self.btn_opt_rapid_download.clicked.connect(self._on_opt_rapid_download)
+        self.btn_opt_rapid_uninstall.clicked.connect(self._on_opt_rapid_uninstall)
+        rapid_dl_row.addWidget(self.btn_opt_rapid_download)
+        rapid_dl_row.addWidget(self.btn_opt_rapid_uninstall)
+        rapid_dl_row.addStretch(1)
+        v_ocr.addLayout(rapid_dl_row)
+
+        rapid_row = QHBoxLayout()
+        rapid_lbl = QLabel("RapidOCR Folder:", grp_ocr)
+        rapid_lbl.setMinimumWidth(105)
+        rapid_row.addWidget(rapid_lbl)
+        self.txt_opt_rapid_dir = QLabel("Default (AppData)", grp_ocr)
+        self.txt_opt_rapid_dir.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.txt_opt_rapid_dir.setStyleSheet("color: #444; font-size: 11px;")
+        self.txt_opt_rapid_dir.setWordWrap(True)
+        self.btn_opt_browse_rapid = QPushButton("Browse...", grp_ocr)
+        self.btn_opt_reset_rapid = QPushButton("Reset", grp_ocr)
+        self.btn_opt_browse_rapid.clicked.connect(self._on_opt_browse_rapidocr)
+        self.btn_opt_reset_rapid.clicked.connect(self._on_opt_reset_rapidocr)
+        rapid_row.addWidget(self.txt_opt_rapid_dir, 1)
+        rapid_row.addWidget(self.btn_opt_browse_rapid)
+        rapid_row.addWidget(self.btn_opt_reset_rapid)
+        v_ocr.addLayout(rapid_row)
+
+        tess_row = QHBoxLayout()
+        tess_lbl = QLabel("Tesseract (.exe):", grp_ocr)
+        tess_lbl.setMinimumWidth(105)
+        tess_row.addWidget(tess_lbl)
+        self.txt_opt_tesseract_path = QLabel("Not detected", grp_ocr)
+        self.txt_opt_tesseract_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.txt_opt_tesseract_path.setStyleSheet("color: #444; font-size: 11px;")
+        self.txt_opt_tesseract_path.setWordWrap(True)
+        self.btn_opt_browse_tess = QPushButton("Browse...", grp_ocr)
+        self.btn_opt_detect_tess = QPushButton("Auto-Detect", grp_ocr)
+        self.btn_opt_browse_tess.clicked.connect(self._on_opt_browse_tesseract)
+        self.btn_opt_detect_tess.clicked.connect(self._on_opt_detect_tesseract)
+        tess_row.addWidget(self.txt_opt_tesseract_path, 1)
+        tess_row.addWidget(self.btn_opt_browse_tess)
+        tess_row.addWidget(self.btn_opt_detect_tess)
+        v_ocr.addLayout(tess_row)
+
+        v_ai.addWidget(grp_ocr)
+        v_ai.addStretch(1)
+
+        self._opt_lama_dl_thread = None
+        self._opt_rapid_dl_thread = None
+        self._refresh_ai_downloads_tab()
+
+        self.addons_tab = tab_ai
+        self.tab_widget.addTab(tab_ai, "Add-ons")
+        self.ai_downloads_tab = tab_ai
+
+        # -------------------------------------------------------------
+        # Tab 6: Database
         # -------------------------------------------------------------
         tab_database = QWidget()
         v_db = QVBoxLayout(tab_database)
@@ -1048,8 +1129,337 @@ class AppSettingsDialog(QDialog):
                 self.tab_widget.setCurrentWidget(self.import_tab)
             elif itab in ("originals", "original"):
                 self.tab_widget.setCurrentWidget(self.originals_tab)
+            elif itab in ("addons", "add-ons", "ocr", "ai"):
+                self.tab_widget.setCurrentWidget(self.addons_tab)
             elif itab in ("database", "db"):
                 self.tab_widget.setCurrentWidget(self.database_tab)
+            elif itab in ("downloads", "ai_downloads", "ai", "addons", "optional_downloads"):
+                self.tab_widget.setCurrentWidget(self.ai_downloads_tab)
+
+    def _apply_dialog_theme(self, is_dark: bool) -> None:
+        """Apply light or dark stylesheet to this dialog and its tab widget (supports live Apply)."""
+        self._is_dark = bool(is_dark)
+        if self._is_dark:
+            self.setStyleSheet(
+                """
+                QDialog { background: #1A1D24; color: #E2E8F0; }
+                QLabel, QCheckBox, QRadioButton, QGroupBox { color: #E2E8F0; }
+                QGroupBox { border: 1px solid #3E4756; border-radius: 4px; margin-top: 8px; padding-top: 10px; }
+                QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; color: #94A3B8; }
+                QLineEdit, QSpinBox, QComboBox { background: #262B35; color: #E2E8F0; border: 1px solid #3E4756; border-radius: 3px; padding: 3px 6px; }
+                QPushButton { background: #262B35; color: #E2E8F0; border: 1px solid #3E4756; border-radius: 3px; padding: 4px 10px; }
+                QPushButton:hover { background: #303744; }
+                """
+            )
+            self.tab_widget.setStyleSheet(
+                """
+                QTabWidget::pane {
+                    border: 1px solid #3E4756;
+                    background: #1E222A;
+                    top: -1px;
+                }
+                QTabBar::tab {
+                    background: #262B35;
+                    border: 1px solid #3E4756;
+                    border-top-left-radius: 3px;
+                    border-top-right-radius: 3px;
+                    padding: 4px 12px;
+                    margin-right: 2px;
+                    color: #CBD5E1;
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                }
+                QTabBar::tab:hover {
+                    background: #303744;
+                    border-color: #4B5563;
+                    color: #FFFFFF;
+                }
+                QTabBar::tab:selected {
+                    background: #1E222A;
+                    border: 1px solid #3E4756;
+                    border-bottom: 1px solid #1E222A;
+                    margin-bottom: -1px;
+                    font-weight: 600;
+                    color: #FFFFFF;
+                }
+                """
+            )
+        else:
+            self.setStyleSheet("")
+            self.tab_widget.setStyleSheet(
+                """
+                QTabWidget::pane {
+                    border: 1px solid #9EB6CE;
+                    background: #FFFFFF;
+                    top: -1px;
+                }
+                QTabBar::tab {
+                    background: #F0F4F9;
+                    border: 1px solid #9EB6CE;
+                    border-top-left-radius: 3px;
+                    border-top-right-radius: 3px;
+                    padding: 4px 12px;
+                    margin-right: 2px;
+                    color: #1E395B;
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                }
+                QTabBar::tab:hover {
+                    background: #E5EEF8;
+                    border-color: #7DA2CE;
+                }
+                QTabBar::tab:selected {
+                    background: #FFFFFF;
+                    border: 1px solid #9EB6CE;
+                    border-bottom: 1px solid #FFFFFF;
+                    margin-bottom: -1px;
+                    font-weight: 600;
+                    color: #000000;
+                }
+                """
+            )
+
+    def _refresh_ai_downloads_tab(self) -> None:
+        try:
+            from src.imaging.creative_effects import get_lama_model_status, is_lama_enabled
+
+            st = get_lama_model_status()
+            enabled = is_lama_enabled()
+            self.chk_opt_lama_enabled.blockSignals(True)
+            self.chk_opt_lama_enabled.setChecked(enabled)
+            self.chk_opt_lama_enabled.blockSignals(False)
+            if st.get("installed"):
+                state_txt = "Enabled" if enabled else "Disabled (using built-in synthesizer)"
+                self.lbl_opt_lama_status.setText(
+                    f"Status: Installed ({st.get('filename')}, {st.get('size_mb', 0):.0f} MB) — {state_txt}"
+                )
+                self.btn_opt_lama_download.setText("Re-download / Update")
+                self.btn_opt_lama_uninstall.setEnabled(True)
+            else:
+                self.lbl_opt_lama_status.setText(
+                    f"Status: Not installed (using built-in multi-scale texture synthesizer). "
+                    f"Optional download: ~{st.get('size_mb', 50)} MB."
+                )
+                self.btn_opt_lama_download.setText(f"Download AI Object Eraser (~{st.get('size_mb', 50)} MB)")
+                self.btn_opt_lama_uninstall.setEnabled(False)
+        except Exception as exc:
+            self.lbl_opt_lama_status.setText(f"Status unavailable: {exc}")
+
+        try:
+            from src.core.ocr_engine import OcrEngine, get_ocr_engine_status
+
+            pref = OcrEngine.get_preferred_backend()
+            self.cmb_opt_ocr_backend.blockSignals(True)
+            p_idx = self.cmb_opt_ocr_backend.findData(pref)
+            self.cmb_opt_ocr_backend.setCurrentIndex(max(0, p_idx))
+            self.cmb_opt_ocr_backend.blockSignals(False)
+
+            ocr_st = get_ocr_engine_status()
+            labels = {
+                "rapidocr": "RapidOCR (ONNX)",
+                "winocr": "Windows Native OCR (WinRT)",
+                "windows_media_ocr": "Windows.Media.Ocr",
+                "pytesseract": "Tesseract OCR",
+                "stub": "Not configured (MSER stub)",
+            }
+            b_label = labels.get(ocr_st["backend"], ocr_st["backend"])
+            self.lbl_opt_ocr_status.setText(f"Active OCR Engine: {b_label}")
+            tess_det = ocr_st.get("tesseract_detected") or ""
+            self.txt_opt_tesseract_path.setText(tess_det or "Not found on PC")
+            self.txt_opt_tesseract_path.setToolTip(tess_det)
+
+            rapid_installed = bool(ocr_st.get("rapidocr_installed"))
+            rapid_mb = ocr_st.get("rapidocr_size_mb", 15)
+            custom_dir = ocr_st.get("custom_model_dir") or ""
+            if custom_dir:
+                from src.core.ocr_engine import _find_rapidocr_files
+                det_p, rec_p, _ = _find_rapidocr_files(Path(custom_dir))
+                if det_p and rec_p:
+                    self.txt_opt_rapid_dir.setText(custom_dir)
+                else:
+                    self.txt_opt_rapid_dir.setText(f"{custom_dir} (no .onnx models found — click Reset)")
+            else:
+                self.txt_opt_rapid_dir.setText("Default (AppData)")
+
+            if rapid_installed:
+                self.lbl_opt_rapid_status.setText(f"RapidOCR Add-on: Installed ({rapid_mb} MB)")
+                self.lbl_opt_rapid_status.setStyleSheet("color: #1B6E2D; font-size: 11px;")
+                self.btn_opt_rapid_download.setText(f"Re-download RapidOCR ({rapid_mb} MB)")
+                self.btn_opt_rapid_uninstall.setEnabled(True)
+            else:
+                self.lbl_opt_rapid_status.setText(f"RapidOCR Add-on: Not installed (~{rapid_mb} MB download)")
+                self.lbl_opt_rapid_status.setStyleSheet("color: #666; font-size: 11px;")
+                self.btn_opt_rapid_download.setText(f"Download RapidOCR (~{rapid_mb} MB)")
+                self.btn_opt_rapid_uninstall.setEnabled(False)
+        except Exception as exc:
+            self.lbl_opt_ocr_status.setText(f"OCR status unavailable: {exc}")
+
+    def _on_opt_lama_enabled_toggled(self, checked: bool) -> None:
+        from src.imaging.creative_effects import set_lama_enabled
+
+        set_lama_enabled(bool(checked))
+        self._refresh_ai_downloads_tab()
+
+    def _on_opt_ocr_backend_changed(self, _idx: int) -> None:
+        from src.core.ocr_engine import OcrEngine
+
+        backend = str(self.cmb_opt_ocr_backend.currentData() or "auto")
+        OcrEngine.set_preferred_backend(backend)
+        self._refresh_ai_downloads_tab()
+
+    def _on_opt_lama_download(self) -> None:
+        if self._opt_lama_dl_thread is not None and self._opt_lama_dl_thread.isRunning():
+            return
+        from PySide6.QtCore import QThread, Signal as QtSignal
+
+        class _LamaOptDlWorker(QThread):
+            progress = QtSignal(int, int)
+            finished_ok = QtSignal(bool)
+
+            def run(self) -> None:
+                from src.imaging.creative_effects import download_lama_model
+
+                path = download_lama_model(
+                    progress_cb=lambda d, t: self.progress.emit(int(d), int(t))
+                )
+                self.finished_ok.emit(path is not None)
+
+        self.btn_opt_lama_download.setEnabled(False)
+        self.btn_opt_lama_download.setText("Downloading...")
+        worker = _LamaOptDlWorker(self)
+
+        def _on_prog(done: int, total: int) -> None:
+            if total > 0:
+                pct = int(min(99, (done * 100) // total))
+                self.btn_opt_lama_download.setText(f"Downloading {pct}%...")
+            else:
+                self.btn_opt_lama_download.setText(f"Downloading {done // (1024 * 1024)} MB...")
+
+        def _on_done(ok: bool) -> None:
+            self._opt_lama_dl_thread = None
+            self.btn_opt_lama_download.setEnabled(True)
+            self._refresh_ai_downloads_tab()
+            if not ok:
+                QMessageBox.warning(
+                    self,
+                    "Download Failed",
+                    "Could not download the AI Object Eraser model. Check your internet connection and try again.",
+                )
+
+        worker.progress.connect(_on_prog)
+        worker.finished_ok.connect(_on_done)
+        self._opt_lama_dl_thread = worker
+        worker.start()
+
+    def _on_opt_lama_uninstall(self) -> None:
+        from src.imaging.creative_effects import uninstall_lama_model
+
+        if uninstall_lama_model():
+            QMessageBox.information(self, "Uninstalled", "AI Object Eraser model removed from AppData.")
+        self._refresh_ai_downloads_tab()
+
+    def _on_opt_browse_tesseract(self) -> None:
+        from src.core.ocr_engine import OcrEngine, resolve_tesseract_executable
+
+        start_dir = r"C:\Program Files\Tesseract-OCR" if Path(r"C:\Program Files\Tesseract-OCR").is_dir() else ""
+        exe, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select tesseract.exe (e.g. C:\\Program Files\\Tesseract-OCR\\tesseract.exe)",
+            start_dir,
+            "Tesseract Executable (tesseract.exe);;Executables (*.exe);;All Files (*)",
+        )
+        if exe:
+            resolved = resolve_tesseract_executable(exe) or exe
+            OcrEngine.save_ocr_paths(tesseract_path=resolved)
+            self._refresh_ai_downloads_tab()
+
+    def _on_opt_detect_tesseract(self) -> None:
+        from src.core.ocr_engine import OcrEngine, detect_tesseract_executable
+
+        OcrEngine.save_ocr_paths(tesseract_path="")
+        detected = detect_tesseract_executable()
+        self._refresh_ai_downloads_tab()
+        if detected:
+            QMessageBox.information(self, "Tesseract Detected", f"Detected Tesseract at:\n{detected}")
+        else:
+            QMessageBox.information(
+                self,
+                "Tesseract Not Found",
+                "Could not find tesseract.exe in PATH or standard Program Files folders.",
+            )
+
+    def _on_opt_browse_rapidocr(self) -> None:
+        from src.core.ocr_engine import OcrEngine, _find_rapidocr_files
+
+        folder = QFileDialog.getExistingDirectory(self, "Select RapidOCR ONNX Models Folder")
+        if folder:
+            det_p, rec_p, _ = _find_rapidocr_files(Path(folder))
+            if not (det_p and rec_p):
+                QMessageBox.warning(
+                    self,
+                    "No RapidOCR Models Found",
+                    "The selected folder does not contain RapidOCR ONNX model files (*det*.onnx and *rec*.onnx).",
+                )
+                return
+            OcrEngine.save_ocr_paths(custom_model_dir=folder)
+            self._refresh_ai_downloads_tab()
+
+    def _on_opt_reset_rapidocr(self) -> None:
+        from src.core.ocr_engine import OcrEngine
+
+        OcrEngine.save_ocr_paths(custom_model_dir="")
+        self._refresh_ai_downloads_tab()
+
+    def _on_opt_rapid_download(self) -> None:
+        if self._opt_rapid_dl_thread is not None and self._opt_rapid_dl_thread.isRunning():
+            return
+        from PySide6.QtCore import QThread, Signal as QtSignal
+
+        class _RapidOptDlWorker(QThread):
+            progress = QtSignal(int, int)
+            finished_ok = QtSignal(bool)
+
+            def run(self) -> None:
+                from src.core.ocr_engine import download_rapidocr_models
+
+                path = download_rapidocr_models(
+                    progress_cb=lambda d, t: self.progress.emit(int(d), int(t))
+                )
+                self.finished_ok.emit(path is not None)
+
+        self.btn_opt_rapid_download.setEnabled(False)
+        self.btn_opt_rapid_download.setText("Downloading...")
+        worker = _RapidOptDlWorker(self)
+
+        def _on_prog(done: int, total: int) -> None:
+            if total > 0:
+                pct = int(min(99, (done * 100) // total))
+                self.btn_opt_rapid_download.setText(f"Downloading {pct}%...")
+            else:
+                self.btn_opt_rapid_download.setText(f"Downloading {done // (1024 * 1024)} MB...")
+
+        def _on_done(ok: bool) -> None:
+            self._opt_rapid_dl_thread = None
+            self.btn_opt_rapid_download.setEnabled(True)
+            self._refresh_ai_downloads_tab()
+            if not ok:
+                QMessageBox.warning(
+                    self,
+                    "Download Failed",
+                    "Could not download RapidOCR models. Check your internet connection and try again.",
+                )
+
+        worker.progress.connect(_on_prog)
+        worker.finished_ok.connect(_on_done)
+        self._opt_rapid_dl_thread = worker
+        worker.start()
+
+    def _on_opt_rapid_uninstall(self) -> None:
+        from src.core.ocr_engine import uninstall_rapidocr_models
+
+        if uninstall_rapidocr_models():
+            QMessageBox.information(self, "Uninstalled", "RapidOCR models removed from AppData.")
+        self._refresh_ai_downloads_tab()
 
     def _refresh_db_stats(self) -> None:
         if not hasattr(self, "lbl_db_stats"):
@@ -1091,11 +1501,26 @@ class AppSettingsDialog(QDialog):
     def _on_face_rescan_unscanned(self) -> None:
         self.rescan_unscanned_requested = True
 
+    def _on_opt_rescan_ocr(self) -> None:
+        engine_label = self.cmb_opt_ocr_backend.currentText()
+        reply = QMessageBox.question(
+            self,
+            "Re-scan All OCR",
+            f"Re-scan OCR text across all OCR-enabled folders using '{engine_label}'?\n\n"
+            "This runs in the background and will update previously scanned photos.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self.rescan_ocr_requested = True
+            self.accept()
+
     def _on_apply(self) -> None:
         if hasattr(self, "face_tab") and self.face_tab:
             self.face_tab.save_settings()
         self._save_copy_preferences()
         self.settings_applied.emit()
+        self._apply_dialog_theme(self.selected_theme() == "dark")
 
     def accept(self) -> None:
         if hasattr(self, "face_tab") and self.face_tab:
@@ -1609,7 +2034,9 @@ class AboutDialog(QDialog):
         lbl_title.setStyleSheet("font-family: 'Segoe UI', sans-serif; font-size: 13pt; font-weight: bold; color: #1E395B;")
         info_vbox.addWidget(lbl_title)
 
-        lbl_ver = QLabel("Version 0.12.0 (64-bit)", self)
+        from src.version import APP_VERSION
+
+        lbl_ver = QLabel(f"Version {APP_VERSION} (64-bit)", self)
         lbl_ver.setStyleSheet("font-family: 'Segoe UI', sans-serif; font-size: 8.5pt; color: #55687D;")
         info_vbox.addWidget(lbl_ver)
 
@@ -1644,9 +2071,19 @@ class AboutDialog(QDialog):
 
         vbox.addStretch(1)
 
-        # Bottom OK button
+        # Update status label + Check for Updates & OK buttons
+        self.lbl_update_status = QLabel("", self)
+        self.lbl_update_status.setStyleSheet("font-family: 'Segoe UI', sans-serif; font-size: 8.5pt; color: #3A6EA5;")
+        self.lbl_update_status.setWordWrap(True)
+        vbox.addWidget(self.lbl_update_status)
+
         btn_box = QHBoxLayout()
+        self.btn_check_updates = QPushButton("Check for Updates...", self)
+        self.btn_check_updates.setFixedHeight(26)
+        self.btn_check_updates.clicked.connect(self._on_check_updates)
+        btn_box.addWidget(self.btn_check_updates)
         btn_box.addStretch(1)
+        self._update_thread = None
         btn_ok = QPushButton("OK", self)
         btn_ok.setFixedSize(85, 26)
         btn_ok.setDefault(True)
@@ -1681,5 +2118,262 @@ class AboutDialog(QDialog):
             }
             """
         )
+
+    def _on_check_updates(self) -> None:
+        if self._update_thread is not None and self._update_thread.isRunning():
+            return
+        from PySide6.QtCore import QThread, Signal as QtSignal
+
+        class _UpdateCheckWorker(QThread):
+            result_ready = QtSignal(bool, object, str)
+
+            def run(self) -> None:
+                try:
+                    from src.version import fetch_latest_release
+                    info = fetch_latest_release()
+                    self.result_ready.emit(True, info, "")
+                except Exception as exc:
+                    self.result_ready.emit(False, None, str(exc))
+
+        self.btn_check_updates.setEnabled(False)
+        self.lbl_update_status.setText("Checking GitHub Releases for updates...")
+        worker = _UpdateCheckWorker(self)
+
+        def _on_result(ok: bool, info: object, err: str) -> None:
+            self._update_thread = None
+            self.btn_check_updates.setEnabled(True)
+            if not ok or not isinstance(info, dict):
+                self.lbl_update_status.setText("Could not check for updates (offline or GitHub unreachable).")
+                return
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            from src.version import APP_VERSION, is_newer_version, download_installer_exe
+
+            latest_ver = str(info.get("version") or "")
+            if not is_newer_version(latest_ver, APP_VERSION):
+                self.lbl_update_status.setText(f"✓ You are running the latest version ({APP_VERSION}).")
+                return
+
+            self.lbl_update_status.setText(f"Update available: v{latest_ver} (current: {APP_VERSION}).")
+            installer_url = str(info.get("installer_url") or "")
+            html_url = str(info.get("html_url") or "")
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Update Available")
+            msg.setIcon(QMessageBox.Information)
+            msg.setText(f"A new version of Essentials Photo Gallery (v{latest_ver}) is available.")
+            msg.setInformativeText(f"You are currently running version {APP_VERSION}.")
+            btn_dl = msg.addButton("Download && Install", QMessageBox.AcceptRole) if installer_url else None
+            btn_web = msg.addButton("Open Release Page", QMessageBox.ActionRole)
+            msg.addButton(QMessageBox.Close)
+            msg.exec()
+            clicked = msg.clickedButton()
+            if btn_dl is not None and clicked == btn_dl:
+                from PySide6.QtWidgets import QProgressDialog
+                prog = QProgressDialog("Downloading installer...", "Cancel", 0, 100, self)
+                prog.setWindowTitle("Updating Essentials Photo Gallery")
+                prog.setWindowModality(Qt.WindowModal)
+                prog.show()
+                cancelled = {"v": False}
+                prog.canceled.connect(lambda: cancelled.__setitem__("v", True))
+
+                class _InstallerDlWorker(QThread):
+                    progress = QtSignal(int, int)
+                    done = QtSignal(object)
+
+                    def run(self) -> None:
+                        p = download_installer_exe(
+                            installer_url,
+                            str(info.get("installer_name") or "EssentialsPhotoGallery_Setup_x64.exe"),
+                            progress_cb=lambda d, t: self.progress.emit(int(d), int(t)),
+                            cancel_cb=lambda: cancelled["v"],
+                        )
+                        self.done.emit(p)
+
+                dl_w = _InstallerDlWorker(self)
+                dl_w.progress.connect(lambda d, t: prog.setValue(int((d * 100) // t)) if t > 0 else None)
+
+                def _on_dl_done(path_obj: object) -> None:
+                    prog.close()
+                    if path_obj:
+                        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path_obj)))
+                    elif not cancelled["v"]:
+                        QMessageBox.warning(self, "Download Failed", "Could not download the installer.")
+
+                dl_w.done.connect(_on_dl_done)
+                self._update_thread = dl_w
+                dl_w.start()
+            elif clicked == btn_web and html_url:
+                QDesktopServices.openUrl(QUrl(html_url))
+
+        worker.result_ready.connect(_on_result)
+        self._update_thread = worker
+        worker.start()
+
+
+def prompt_and_download_lama_addon(
+    parent: QWidget | None = None,
+    feature_name: str = "AI Neural Inpainting",
+) -> bool:
+    """
+    Contextually prompt the user once to download the optional ~208 MB LaMa model
+    when using Object Eraser / AI Expand / Panorama Fill for the first time.
+    Returns True if the caller should proceed (downloaded or user chose Basic Inpainting),
+    or False if the user cancelled.
+    """
+    from PySide6.QtCore import QSettings, QThread, Signal as QtSignal
+    from PySide6.QtWidgets import QProgressDialog
+    from src.imaging.creative_effects import (
+        LAMA_MODEL_SIZE_MB,
+        download_lama_model,
+        get_lama_model_status,
+    )
+
+    if get_lama_model_status().get("installed"):
+        return True
+
+    settings = QSettings("PhotoGallery64", "PhotoGallery64")
+    if bool(settings.value("ai/lama_prompted", False, type=bool)):
+        return True
+
+    box = QMessageBox(parent)
+    box.setWindowTitle(f"Install AI Neural Inpainting (~{LAMA_MODEL_SIZE_MB} MB)?")
+    box.setIcon(QMessageBox.Question)
+    box.setText(f"Download the optional AI Neural Inpainting add-on (~{LAMA_MODEL_SIZE_MB} MB)?")
+    box.setInformativeText(
+        f"You're using {feature_name}. Installing the LaMa neural model greatly improves quality "
+        "when removing objects or expanding borders.\n\n"
+        "You can manage optional add-ons anytime in Options → Add-ons."
+    )
+    btn_dl = box.addButton(f"Download (~{LAMA_MODEL_SIZE_MB} MB)", QMessageBox.AcceptRole)
+    btn_basic = box.addButton("Use Basic Inpainting", QMessageBox.NoRole)
+    box.addButton(QMessageBox.Cancel)
+    box.exec()
+    clicked = box.clickedButton()
+
+    if clicked == btn_basic:
+        settings.setValue("ai/lama_prompted", True)
+        return True
+    if clicked != btn_dl:
+        return False
+
+    settings.setValue("ai/lama_prompted", True)
+    prog = QProgressDialog(f"Downloading AI Neural Inpainting (~{LAMA_MODEL_SIZE_MB} MB)...", "Cancel", 0, 100, parent)
+    prog.setWindowTitle("Downloading Add-on")
+    prog.setWindowModality(Qt.WindowModal)
+    prog.setMinimumDuration(0)
+    prog.show()
+
+    cancelled = {"v": False}
+    prog.canceled.connect(lambda: cancelled.__setitem__("v", True))
+    result_holder = {"path": None}
+
+    class _DlThread(QThread):
+        progress = QtSignal(int, int)
+
+        def run(self) -> None:
+            result_holder["path"] = download_lama_model(
+                progress_cb=lambda d, t: self.progress.emit(int(d), int(t)),
+                cancel_cb=lambda: cancelled["v"],
+            )
+
+    t = _DlThread(parent)
+    t.progress.connect(lambda d, tot: prog.setValue(int(min(99, (d * 100) // tot))) if tot > 0 else None)
+    t.start()
+    while t.isRunning():
+        QApplication.processEvents()
+        t.wait(30)
+    prog.close()
+
+    if result_holder["path"] is None and not cancelled["v"]:
+        QMessageBox.warning(
+            parent,
+            "Download Failed",
+            "Could not download the AI Neural Inpainting model. Falling back to Basic Inpainting.",
+        )
+    return True
+
+
+def prompt_and_download_rapidocr_addon(
+    parent: QWidget | None = None,
+    on_more_options: Any = None,
+) -> bool:
+    """
+    When OCR is enabled by the user and no dedicated OCR engine (RapidOCR / Tesseract / winocr)
+    is installed, prompt to 1-click download RapidOCR (~15 MB), open More Options, or Cancel.
+    Returns True if an OCR engine is ready (or was downloaded), False if cancelled.
+    """
+    from PySide6.QtCore import QThread, Signal as QtSignal
+    from PySide6.QtWidgets import QProgressDialog
+    from src.core.ocr_engine import (
+        RAPIDOCR_SIZE_MB,
+        download_rapidocr_models,
+        has_configured_ocr_engine,
+    )
+
+    if has_configured_ocr_engine():
+        return True
+
+    box = QMessageBox(parent)
+    box.setWindowTitle("Enable Text Recognition (OCR)")
+    box.setIcon(QMessageBox.Question)
+    box.setText(f"Download RapidOCR (~{RAPIDOCR_SIZE_MB} MB) for offline text recognition?")
+    box.setInformativeText(
+        "No offline OCR engine (RapidOCR or Tesseract) is currently installed.\n\n"
+        "You can also configure Tesseract or custom model paths in Options → Add-ons."
+    )
+    btn_dl = box.addButton(f"Download RapidOCR (~{RAPIDOCR_SIZE_MB} MB)", QMessageBox.AcceptRole)
+    btn_more = box.addButton("More Options...", QMessageBox.ActionRole)
+    box.addButton(QMessageBox.Cancel)
+    box.exec()
+    clicked = box.clickedButton()
+
+    if clicked == btn_more:
+        if callable(on_more_options):
+            on_more_options()
+        else:
+            dlg = AppSettingsDialog(parent=parent)
+            if hasattr(dlg, "ai_downloads_tab"):
+                dlg.tab_widget.setCurrentWidget(dlg.ai_downloads_tab)
+            dlg.exec()
+        return has_configured_ocr_engine()
+
+    if clicked != btn_dl:
+        return False
+
+    prog = QProgressDialog(f"Downloading RapidOCR (~{RAPIDOCR_SIZE_MB} MB)...", "Cancel", 0, 100, parent)
+    prog.setWindowTitle("Downloading OCR Add-on")
+    prog.setWindowModality(Qt.WindowModal)
+    prog.setMinimumDuration(0)
+    prog.show()
+
+    cancelled = {"v": False}
+    prog.canceled.connect(lambda: cancelled.__setitem__("v", True))
+    result_holder = {"dir": None}
+
+    class _DlThread(QThread):
+        progress = QtSignal(int, int)
+
+        def run(self) -> None:
+            result_holder["dir"] = download_rapidocr_models(
+                progress_cb=lambda d, t: self.progress.emit(int(d), int(t)),
+                cancel_cb=lambda: cancelled["v"],
+            )
+
+    t = _DlThread(parent)
+    t.progress.connect(lambda d, tot: prog.setValue(int(min(99, (d * 100) // tot))) if tot > 0 else None)
+    t.start()
+    while t.isRunning():
+        QApplication.processEvents()
+        t.wait(30)
+    prog.close()
+
+    if result_holder["dir"] is None and not cancelled["v"]:
+        QMessageBox.warning(
+            parent,
+            "Download Failed",
+            "Could not download RapidOCR models. Check your internet connection and try again.",
+        )
+        return False
+    return result_holder["dir"] is not None
 
 

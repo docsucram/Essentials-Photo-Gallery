@@ -1121,11 +1121,18 @@ def inpaint_disocclusion_background(
     """
     Inpaints the background behind the subject so parallax virtual camera moves
     reveal realistic background content rather than black holes.
+    Uses neural LaMa when available, otherwise falls back to fast Telea inpainting.
     """
     h, w = image_bgr.shape[:2]
     bin_mask = (subject_mask > 0.25).astype(np.uint8) * 255
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
     dilated_mask = cv2.dilate(bin_mask, kernel)
+
+    engine = get_lama_inpaint_engine()
+    if engine.has_neural_model() and np.any(dilated_mask > 0):
+        img_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        inpainted_rgb = inpaint_object_lama(img_rgb, dilated_mask)
+        return cv2.cvtColor(inpainted_rgb, cv2.COLOR_RGB2BGR)
 
     scale = max(1.0, max(h, w) / 600.0)
     if scale > 1.2:
@@ -1264,8 +1271,22 @@ def prepare_3d_parallax_layers(
     bin_mask = (alpha_matte > 0.15).astype(np.uint8) * 255
     dilated_mask = cv2.dilate(bin_mask, kernel)
 
-    # Inpaint background plate and background depth map at up to 1024px
-    if inpaint_scale > 1.15:
+    # Inpaint background plate (neural LaMa if available, otherwise Telea) and background depth map
+    lama_engine = get_lama_inpaint_engine()
+    if lama_engine.has_neural_model() and np.any(dilated_mask > 0):
+        bgr_rgb = cv2.cvtColor(bgr_array, cv2.COLOR_BGR2RGB)
+        bg_plate = cv2.cvtColor(inpaint_object_lama(bgr_rgb, dilated_mask), cv2.COLOR_RGB2BGR)
+        depth_u8 = (np.clip(depth_map, 0.0, 1.0) * 255.0).astype(np.uint8)
+        if inpaint_scale > 1.15:
+            sw, sh = max(16, int(w / inpaint_scale)), max(16, int(h / inpaint_scale))
+            small_mask = cv2.resize(dilated_mask, (sw, sh), interpolation=cv2.INTER_NEAREST)
+            small_depth = cv2.resize(depth_u8, (sw, sh), interpolation=cv2.INTER_AREA)
+            inpainted_depth_small = cv2.inpaint(small_depth, small_mask, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
+            depth_bg_u8 = cv2.resize(inpainted_depth_small, (w, h), interpolation=cv2.INTER_LINEAR)
+        else:
+            depth_bg_u8 = cv2.inpaint(depth_u8, dilated_mask, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
+        depth_bg = depth_bg_u8.astype(np.float32) / 255.0
+    elif inpaint_scale > 1.15:
         sw, sh = max(16, int(w / inpaint_scale)), max(16, int(h / inpaint_scale))
         small_img = cv2.resize(bgr_array, (sw, sh), interpolation=cv2.INTER_AREA)
         small_mask = cv2.resize(dilated_mask, (sw, sh), interpolation=cv2.INTER_NEAREST)
@@ -1811,18 +1832,124 @@ def extract_subject_cutout_rgba(
 # 6. LaMa ONNX Object Eraser & Multi-Scale Structure/Texture Inpainting
 # =============================================================================
 
+def transfer_best_donor_texture(
+    roi_rgb: np.ndarray,
+    roi_high: np.ndarray,
+    mask: np.ndarray,
+    donor_ring: np.ndarray,
+    bw: int,
+    bh: int,
+    min_donor_pixels: int = 16,
+) -> tuple[np.ndarray, bool]:
+    """
+    Score 8 directional donor shifts along ``donor_ring`` by boundary MAD error
+    and blend the top-2 best-matching shifts with std matching.
+
+    Preserves crisp directional textures (skin pores, hair, fabric, grass, wood)
+    without washing them out via a uniform 8-way average.
+    Returns ``(transferred_high, used_directional_shift)``.
+    """
+    rh, rw = mask.shape[:2]
+    mask_u8 = (mask > 0).astype(np.uint8)
+    mask_bool = mask_u8 > 0
+    donor_bool = donor_ring > 0
+    if np.count_nonzero(donor_bool) < min_donor_pixels or not np.any(mask_bool):
+        return np.zeros_like(roi_high), False
+
+    shift_x = max(10, int(bw * 1.15))
+    shift_y = max(10, int(bh * 1.15))
+    shifts = [
+        (0, shift_x), (0, -shift_x), (shift_y, 0), (-shift_y, 0),
+        (shift_y, shift_x), (-shift_y, -shift_x), (shift_y, -shift_x), (-shift_y, shift_x),
+    ]
+
+    roi_rgb_f = roi_rgb.astype(np.float32)
+    ref_ring = roi_rgb_f[donor_bool]
+    scored: list[tuple[float, np.ndarray]] = []
+    for dy, dx in shifts:
+        M = np.float32([[1, 0, dx], [0, 1, dy]])
+        sm = cv2.warpAffine(
+            mask_u8, M, (rw, rh),
+            flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+        )
+        if np.count_nonzero((sm > 0) & mask_bool) == 0:
+            sh_rgb = cv2.warpAffine(
+                roi_rgb_f, M, (rw, rh),
+                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT,
+            )
+            mad = float(np.mean(np.abs(sh_rgb[donor_bool] - ref_ring)))
+            sh_high = cv2.warpAffine(
+                roi_high, M, (rw, rh),
+                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT,
+            )
+            scored.append((mad, sh_high))
+
+    if not scored:
+        return np.zeros_like(roi_high), False
+
+    scored.sort(key=lambda item: item[0])
+    top = scored[:2]
+    if len(top) == 1:
+        trans_high = top[0][1].copy()
+    else:
+        w0 = 1.0 / (top[0][0] + 1.0)
+        w1 = 1.0 / (top[1][0] + 1.0)
+        w_sum = w0 + w1
+        trans_high = top[0][1] * (w0 / w_sum) + top[1][1] * (w1 / w_sum)
+
+    d_std = float(np.std(roi_high[donor_bool]))
+    t_std = float(np.std(trans_high[mask_bool]))
+    if t_std > 0.05 and d_std > 0.1:
+        gain = min(2.0, max(0.5, d_std / t_std))
+        trans_high = trans_high * gain
+
+    return trans_high, True
+
+
+def _match_boundary_and_blend(
+    roi_rgb: np.ndarray,
+    restored: np.ndarray,
+    bin_mask: np.ndarray,
+    feather_ksize: int = 9,
+    feather_sigma: float = 2.5,
+) -> np.ndarray:
+    """
+    Match mean LAB tone on a narrow perimeter ring around ``bin_mask`` so
+    upscaled 512x512 neural outputs blend without brightness/color seams.
+    """
+    mask_u8 = (bin_mask > 0).astype(np.uint8)
+    ring_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+    ring = (cv2.dilate(mask_u8, ring_k) > 0) & (mask_u8 == 0)
+
+    matched = restored
+    if np.count_nonzero(ring) >= 16:
+        src_lab = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+        dst_lab = cv2.cvtColor(restored, cv2.COLOR_RGB2LAB).astype(np.float32)
+        delta = np.mean(src_lab[ring], axis=0) - np.mean(dst_lab[ring], axis=0)
+        delta = np.clip(delta, -25.0, 25.0)
+        dst_lab = np.clip(dst_lab + delta[None, None, :], 0.0, 255.0).astype(np.uint8)
+        matched = cv2.cvtColor(dst_lab, cv2.COLOR_LAB2RGB)
+
+    feather = cv2.GaussianBlur(
+        mask_u8.astype(np.float32), (feather_ksize, feather_ksize), feather_sigma
+    )[..., None]
+    blended = roi_rgb.astype(np.float32) * (1.0 - feather) + matched.astype(np.float32) * feather
+    return np.clip(blended, 0.0, 255.0).astype(np.uint8)
+
+
 class LaMaInpaintEngine:
     """
     Local Neural Object Eraser & Inpainting Engine:
     - Supports ONNX LaMa models (lama_fp32.onnx / lama_quant.onnx / lama.onnx) in models/
-      executed via onnxruntime (DirectML / CPU) on a 512x512 context ROI crop.
-    - Includes a zero-dependency Multi-Scale Structure + Exemplar Texture Synthesis fallback
-      when the ONNX model file is not present locally.
+      executed via OpenCV 5.0's graph-based CPU DNN engine (cv2.dnn.readNetFromONNX)
+      or onnxruntime (DirectML / CPU) on a 512x512 context ROI crop.
+    - Includes a zero-dependency Multi-Scale Structure + Best-Match Exemplar Texture
+      Synthesis fallback when the ONNX model file is not present locally.
     """
 
     _instance: LaMaInpaintEngine | None = None
 
-    def __init__(self, models_dir: Path | str | None = None) -> None:
+    def __init__(self, models_dir: Path | str | None = None, backend: str = "auto") -> None:
         self.search_dirs: list[Path] = []
         if models_dir is not None:
             self.search_dirs.append(Path(models_dir))
@@ -1853,28 +1980,71 @@ class LaMaInpaintEngine:
         project_root = Path(__file__).resolve().parent.parent.parent
         self.search_dirs.append(project_root / "models")
 
+        self._backend = backend
+        self._cv_net: Any = None
         self._session: Any = None
         self._model_name: str | None = None
+        self._backend_used: str | None = None
         self._init_session()
 
-    def _find_model_file(self) -> Path | None:
+    @staticmethod
+    def default_search_dirs(model_dir: str | Path | None = None) -> list[Path]:
+        dirs: list[Path] = []
+        if model_dir is not None:
+            dirs.append(Path(model_dir))
+        try:
+            from src.utils.paths import get_app_data_dir
+
+            app_data_models = get_app_data_dir() / "models"
+            if app_data_models not in dirs:
+                dirs.append(app_data_models)
+        except Exception:
+            pass
+        dirs.append(Path("models").resolve())
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            dirs.append(Path(local_app_data) / "PhotoGallery" / "models")
+            dirs.append(Path(local_app_data) / "WindowsMediaGallery" / "models")
+        project_root = Path(__file__).resolve().parent.parent.parent
+        dirs.append(project_root / "models")
+        return dirs
+
+    @classmethod
+    def find_model_file(cls, search_dirs: list[Path] | None = None) -> Path | None:
         candidates = [
             "lama_quant.onnx",
             "lama_fp32.onnx",
             "lama.onnx",
             "big-lama.onnx",
         ]
-        for d in self.search_dirs:
+        for d in (search_dirs if search_dirs is not None else cls.default_search_dirs()):
             for fn in candidates:
                 p = d / fn
                 if p.is_file():
                     return p
         return None
 
-    def _init_session(self) -> bool:
-        model_path = self._find_model_file()
-        if not model_path:
+    def _find_model_file(self) -> Path | None:
+        return self.find_model_file(self.search_dirs)
+
+    def _init_opencv_dnn(self, model_path: Path) -> bool:
+        """Load ONNX LaMa model into OpenCV 5.0's graph-based CPU DNN engine."""
+        try:
+            net = cv2.dnn.readNetFromONNX(str(model_path))
+            net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+            net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+            self._cv_net = net
+            self._model_name = model_path.name
+            self._backend_used = "opencv_dnn"
+            logger.info("LaMa OpenCV DNN inpaint session loaded: %s", model_path.name)
+            return True
+        except Exception as e:
+            logger.debug("LaMa OpenCV DNN init skipped: %s", e)
+            self._cv_net = None
             return False
+
+    def _init_onnxruntime(self, model_path: Path) -> bool:
+        """Load ONNX LaMa model into onnxruntime (DirectML / CPU)."""
         try:
             import onnxruntime as ort
             providers = ort.get_available_providers()
@@ -1887,59 +2057,127 @@ class LaMaInpaintEngine:
             sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
             self._session = ort.InferenceSession(str(model_path), sess_opts, providers=prov_list)
             self._model_name = model_path.name
-            logger.info("LaMa ONNX inpaint session loaded: %s", model_path.name)
+            if self._backend_used is None:
+                self._backend_used = "onnxruntime"
+            logger.info("LaMa ONNXRuntime inpaint session loaded: %s", model_path.name)
             return True
         except Exception as e:
-            logger.debug("LaMa ONNX session init skipped: %s", e)
+            logger.debug("LaMa ONNXRuntime session init skipped: %s", e)
             self._session = None
             return False
+
+    def has_neural_model(self) -> bool:
+        """Return True when a neural LaMa ONNX session is loaded and enabled."""
+        if not is_lama_enabled():
+            return False
+        return self._session is not None or self._cv_net is not None
+
+    def reset_session(self) -> None:
+        """Release loaded neural sessions so model files can be reloaded or deleted."""
+        self._session = None
+        self._cv_net = None
+        self._model_name = None
+        self._backend_used = None
+
+    def _init_session(self) -> bool:
+        model_path = self._find_model_file()
+        if not model_path:
+            return False
+
+        loaded = False
+        if self._backend in ("auto", "onnxruntime") and self._session is None:
+            loaded = self._init_onnxruntime(model_path) or loaded
+        if self._backend in ("auto", "opencv_dnn") and self._cv_net is None:
+            if self._backend == "opencv_dnn" or not loaded:
+                loaded = self._init_opencv_dnn(model_path) or loaded
+        return loaded
+
+    def _postprocess_neural_output(
+        self, out: np.ndarray, roi_rgb: np.ndarray, bin_mask: np.ndarray
+    ) -> np.ndarray:
+        """Convert NCHW/CHW neural output to RGB uint8 and blend with boundary LAB matching."""
+        rh, rw = roi_rgb.shape[:2]
+        out_chw = out[0] if out.ndim == 4 else out
+        out_hwc = out_chw.transpose(1, 2, 0)
+        if float(np.max(out_hwc)) <= 1.5:
+            out_hwc = out_hwc * 255.0
+        out_u8 = np.clip(out_hwc, 0.0, 255.0).astype(np.uint8)
+        restored = cv2.resize(out_u8, (rw, rh), interpolation=cv2.INTER_CUBIC)
+        return _match_boundary_and_blend(roi_rgb, restored, bin_mask, feather_ksize=9, feather_sigma=2.5)
+
+    def _run_opencv_dnn(
+        self, roi_rgb: np.ndarray, bin_mask: np.ndarray, target_w: int = 512, target_h: int = 512
+    ) -> np.ndarray:
+        """Run LaMa ONNX inference on OpenCV 5.0's graph-based CPU DNN engine."""
+        img_512 = cv2.resize(roi_rgb, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+        mask_512 = cv2.resize(bin_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+        mask_512 = (mask_512 > 0).astype(np.float32)
+
+        img_tensor = np.ascontiguousarray(
+            (img_512.astype(np.float32) / 255.0).transpose(2, 0, 1)[None, ...]
+        )
+        mask_tensor = np.ascontiguousarray(mask_512[None, None, ...])
+
+        try:
+            self._cv_net.setInput(img_tensor, "image")
+            self._cv_net.setInput(mask_tensor, "mask")
+        except Exception:
+            self._cv_net.setInput(img_tensor)
+
+        out = self._cv_net.forward()
+        return self._postprocess_neural_output(out, roi_rgb, bin_mask)
+
+    def _run_onnxruntime(self, roi_rgb: np.ndarray, bin_mask: np.ndarray) -> np.ndarray:
+        """Run LaMa ONNX inference via onnxruntime (DirectML / CPU)."""
+        inputs = self._session.get_inputs()
+        in_shape = inputs[0].shape
+        target_h = in_shape[2] if len(in_shape) == 4 and isinstance(in_shape[2], int) and in_shape[2] > 0 else 512
+        target_w = in_shape[3] if len(in_shape) == 4 and isinstance(in_shape[3], int) and in_shape[3] > 0 else 512
+
+        img_512 = cv2.resize(roi_rgb, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+        mask_512 = cv2.resize(bin_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+        mask_512 = (mask_512 > 0).astype(np.float32)
+
+        img_tensor = (img_512.astype(np.float32) / 255.0).transpose(2, 0, 1)[None, ...]
+        mask_tensor = mask_512[None, None, ...]
+
+        feed = {inputs[0].name: img_tensor}
+        if len(inputs) >= 2:
+            feed[inputs[1].name] = mask_tensor
+
+        out = self._session.run(None, feed)[0]
+        return self._postprocess_neural_output(out, roi_rgb, bin_mask)
 
     def inpaint_roi(self, roi_rgb: np.ndarray, roi_mask_u8: np.ndarray) -> np.ndarray:
         """
         Inpaints a cropped ROI (H, W, 3) RGB uint8 where roi_mask_u8 > 0 marks the object to erase.
-        Uses LaMa ONNX inference if loaded, otherwise runs multi-scale coarse-to-fine structure +
-        exemplar texture synthesis.
+        Uses OpenCV 5.0 DNN or ONNXRuntime LaMa inference if loaded, otherwise runs multi-scale
+        coarse-to-fine structure + best-match exemplar texture synthesis.
         """
         rh, rw = roi_rgb.shape[:2]
         bin_mask = (roi_mask_u8 > 127).astype(np.uint8)
         if np.count_nonzero(bin_mask) == 0:
             return roi_rgb.copy()
 
-        # 1. Try LaMa ONNX session (512x512 context window)
-        if self._session is None:
+        # 1. Try LaMa neural session (ONNXRuntime first for 2.7x faster CPU inference, then OpenCV 5.0 DNN)
+        if self._cv_net is None and self._session is None:
             self._init_session()
 
-        if self._session is not None:
+        if self._session is not None and self._backend in ("auto", "onnxruntime"):
             try:
-                inputs = self._session.get_inputs()
-                in_shape = inputs[0].shape
-                target_h = in_shape[2] if len(in_shape) == 4 and isinstance(in_shape[2], int) and in_shape[2] > 0 else 512
-                target_w = in_shape[3] if len(in_shape) == 4 and isinstance(in_shape[3], int) and in_shape[3] > 0 else 512
-
-                img_512 = cv2.resize(roi_rgb, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
-                mask_512 = cv2.resize(bin_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
-                mask_512 = (mask_512 > 0).astype(np.float32)
-
-                img_tensor = (img_512.astype(np.float32) / 255.0).transpose(2, 0, 1)[None, ...]
-                mask_tensor = mask_512[None, None, ...]
-
-                feed = {inputs[0].name: img_tensor}
-                if len(inputs) >= 2:
-                    feed[inputs[1].name] = mask_tensor
-
-                out = self._session.run(None, feed)[0]
-                out_chw = out[0] if out.ndim == 4 else out
-                out_hwc = out_chw.transpose(1, 2, 0)
-                if float(np.max(out_hwc)) <= 1.5:
-                    out_hwc = out_hwc * 255.0
-                out_u8 = np.clip(out_hwc, 0.0, 255.0).astype(np.uint8)
-                restored = cv2.resize(out_u8, (rw, rh), interpolation=cv2.INTER_CUBIC)
-
-                feather = cv2.GaussianBlur(bin_mask.astype(np.float32), (9, 9), 2.5)[..., None]
-                blended = roi_rgb.astype(np.float32) * (1.0 - feather) + restored.astype(np.float32) * feather
-                return np.clip(blended, 0.0, 255.0).astype(np.uint8)
+                return self._run_onnxruntime(roi_rgb, bin_mask)
             except Exception as e:
-                logger.debug("LaMa ONNX inference failed, using multi-scale fallback: %s", e)
+                logger.debug("LaMa ONNXRuntime inference failed: %s", e)
+                if self._backend == "auto" and self._cv_net is None:
+                    model_path = self._find_model_file()
+                    if model_path is not None:
+                        self._init_opencv_dnn(model_path)
+
+        if self._cv_net is not None and self._backend in ("auto", "opencv_dnn"):
+            try:
+                return self._run_opencv_dnn(roi_rgb, bin_mask)
+            except Exception as e:
+                logger.debug("LaMa OpenCV DNN inference failed, using multi-scale fallback: %s", e)
 
         # 2. High-Fidelity Frequency Separation + Coherent 2D Spatial Texture Transfer Fallback
         pts_y, pts_x = np.where(bin_mask > 0)
@@ -1966,28 +2204,11 @@ class LaMaInpaintEngine:
         outer_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ring_r * 2 + 1, ring_r * 2 + 1))
         donor_ring = (cv2.dilate(bin_mask, outer_k) > 0) & (bin_mask == 0)
 
-        # 2d. Coherent multi-directional 2D affine donor shifts (preserves pebble, pore, fabric structure)
-        shift_x = max(10, int(bw * 1.15))
-        shift_y = max(10, int(bh * 1.15))
-        shifts = [
-            (0, shift_x), (0, -shift_x), (shift_y, 0), (-shift_y, 0),
-            (shift_y, shift_x), (-shift_y, -shift_x), (shift_y, -shift_x), (-shift_y, shift_x),
-        ]
-        valid_shifts = []
-        for dy, dx in shifts:
-            M = np.float32([[1, 0, dx], [0, 1, dy]])
-            sm = cv2.warpAffine(bin_mask, M, (rw, rh), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-            if np.count_nonzero((sm > 0) & (bin_mask > 0)) == 0:
-                sh = cv2.warpAffine(roi_high, M, (rw, rh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-                valid_shifts.append(sh)
-
-        if valid_shifts:
-            trans_high = np.mean(valid_shifts, axis=0)
-            d_std = float(np.std(roi_high[donor_ring]))
-            t_std = float(np.std(trans_high[bin_mask > 0]))
-            if t_std > 0.05 and d_std > 0.1:
-                trans_high = trans_high * (d_std / t_std)
-        else:
+        # 2d. Best-match directional 2D affine donor transfer (preserves pebble, pore, hair, fabric structure)
+        trans_high, used_shift = transfer_best_donor_texture(
+            roi_rgb, roi_high, bin_mask, donor_ring, bw, bh
+        )
+        if not used_shift:
             # Fallback for large centered objects: tile 2D spatial patches from donor perimeter
             trans_high = np.zeros_like(roi_high)
             patch_sz = max(12, min(36, min(rw, rh) // 6))
@@ -2063,4 +2284,153 @@ def inpaint_object_lama(
     inpainted_roi = engine.inpaint_roi(roi_rgb, roi_mask)
     result[cy1:cy2, cx1:cx2] = inpainted_roi
     return result
+
+
+LAMA_MODEL_URL = "https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx"
+LAMA_MODEL_FILENAME = "lama_fp32.onnx"
+LAMA_MODEL_SIZE_MB = 208
+
+
+def _get_lama_appdata_dir() -> Path:
+    try:
+        from src.utils.paths import get_app_data_dir
+        return get_app_data_dir() / "models"
+    except Exception:
+        local_app = os.environ.get("LOCALAPPDATA")
+        if local_app:
+            return Path(local_app) / "PhotoGallery" / "models"
+        return Path("models").resolve()
+
+
+def is_lama_enabled() -> bool:
+    """Return True if the user has enabled neural LaMa inpainting (default True)."""
+    try:
+        from PySide6.QtCore import QSettings
+
+        s = QSettings("PhotoGallery64", "PhotoGallery64")
+        return bool(s.value("ai/lama_enabled", True, type=bool))
+    except Exception:
+        return True
+
+
+def set_lama_enabled(enabled: bool) -> None:
+    """Enable or disable neural LaMa inpainting without uninstalling the model file."""
+    try:
+        from PySide6.QtCore import QSettings
+
+        s = QSettings("PhotoGallery64", "PhotoGallery64")
+        s.setValue("ai/lama_enabled", bool(enabled))
+    except Exception:
+        pass
+
+
+def get_lama_model_status() -> dict[str, Any]:
+    """Return installation status of the optional neural LaMa ONNX model without loading ONNX Runtime."""
+    engine = _SHARED_LAMA_ENGINE
+    model_path = engine._find_model_file() if engine is not None else LaMaInpaintEngine.find_model_file()
+    enabled = is_lama_enabled()
+    if model_path is not None and model_path.is_file():
+        size_mb = round(model_path.stat().st_size / (1024 * 1024), 1)
+        backend_label = (engine._backend_used or "ready") if engine is not None else "ready"
+        return {
+            "installed": True,
+            "enabled": enabled,
+            "path": model_path,
+            "filename": model_path.name,
+            "size_mb": size_mb,
+            "backend": backend_label if enabled else "disabled",
+        }
+    return {
+        "installed": False,
+        "enabled": enabled,
+        "path": None,
+        "filename": LAMA_MODEL_FILENAME,
+        "size_mb": LAMA_MODEL_SIZE_MB,
+        "backend": None,
+    }
+
+
+def download_lama_model(
+    progress_cb: Any = None,
+    cancel_cb: Any = None,
+    timeout: float = 30.0,
+) -> Path | None:
+    """
+    Download ``lama_fp32.onnx`` (~208 MB) into user AppData ``models/`` atomically.
+    ``progress_cb(bytes_done, total_bytes)`` and ``cancel_cb() -> bool`` are optional.
+    Reloads the shared LaMa engine on success and returns the model path, or None on failure/cancel.
+    """
+    import urllib.request
+
+    target_dir = _get_lama_appdata_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = target_dir / LAMA_MODEL_FILENAME
+    tmp_path = target_dir / f"{LAMA_MODEL_FILENAME}.part"
+
+    try:
+        req = urllib.request.Request(
+            LAMA_MODEL_URL,
+            headers={"User-Agent": "EssentialsPhotoGallery/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            total = int(resp.headers.get("Content-Length") or 0)
+            done = 0
+            chunk_size = 262144  # 256 KB
+            with open(tmp_path, "wb") as f:
+                while True:
+                    if cancel_cb is not None and cancel_cb():
+                        raise InterruptedError("Download cancelled")
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    if progress_cb is not None:
+                        progress_cb(done, total)
+
+        if total > 0 and done != total:
+            raise ValueError(f"Incomplete LaMa download ({done} of {total} bytes)")
+        if tmp_path.stat().st_size < 150_000_000:
+            raise ValueError("Downloaded LaMa model file is unexpectedly small")
+        with open(tmp_path, "rb") as chk:
+            head = chk.read(32).lstrip()
+            if head.startswith(b"<") or b"<html" in head.lower():
+                raise ValueError("Downloaded LaMa file appears to be HTML rather than an ONNX model")
+
+        tmp_path.replace(dest_path)
+        engine = get_lama_inpaint_engine()
+        engine.reset_session()
+        engine._init_session()
+        return dest_path
+    except Exception as e:
+        logger.warning("LaMa model download failed or cancelled: %s", e)
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        return None
+
+
+def uninstall_lama_model() -> bool:
+    """
+    Release the shared LaMa session and remove downloaded ``lama*.onnx`` files
+    from user AppData / local ``models/`` directories.
+    """
+    engine = get_lama_inpaint_engine()
+    engine.reset_session()
+
+    removed = False
+    candidate_names = ("lama_quant.onnx", "lama_fp32.onnx", "lama.onnx", "big-lama.onnx")
+    for d in list(engine.search_dirs) + [_get_lama_appdata_dir()]:
+        for name in candidate_names:
+            p = d / name
+            if p.is_file():
+                try:
+                    p.unlink()
+                    removed = True
+                except Exception as e:
+                    logger.warning("Could not delete %s: %s", p, e)
+    return removed
+
 

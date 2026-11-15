@@ -864,10 +864,14 @@ class DualDatabaseEngine:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL UNIQUE,
                     rules_json TEXT NOT NULL,
+                    cover_media_id INTEGER,
                     created_at INTEGER NOT NULL
                 );
                 """
             )
+            smart_cols = {r[1] for r in cur.execute("PRAGMA table_info(smart_albums);").fetchall()}
+            if "cover_media_id" not in smart_cols:
+                cur.execute("ALTER TABLE smart_albums ADD COLUMN cover_media_id INTEGER;")
 
             smart_count_row = cur.execute("SELECT COUNT(*) FROM smart_albums;").fetchone()
             if smart_count_row and int(smart_count_row[0]) == 0:
@@ -905,6 +909,41 @@ class DualDatabaseEngine:
                     )
         except Exception as exc:
             logger.warning("Error in albums/smart_albums migration: %s", exc)
+
+        # Folder Manager policies (monitor_mode, scan_faces, scan_ocr, is_private) & OCR FTS5
+        try:
+            folder_cols = {r[1] for r in cur.execute("PRAGMA table_info(folders);").fetchall()}
+            if "monitor_mode" not in folder_cols:
+                cur.execute("ALTER TABLE folders ADD COLUMN monitor_mode TEXT NOT NULL DEFAULT 'always';")
+            if "scan_faces" not in folder_cols:
+                cur.execute("ALTER TABLE folders ADD COLUMN scan_faces INTEGER NOT NULL DEFAULT 1;")
+            if "scan_ocr" not in folder_cols:
+                cur.execute("ALTER TABLE folders ADD COLUMN scan_ocr INTEGER NOT NULL DEFAULT 0;")
+            if "is_private" not in folder_cols:
+                cur.execute("ALTER TABLE folders ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0;")
+            if "ocr_scanned_count" not in folder_cols:
+                cur.execute("ALTER TABLE folders ADD COLUMN ocr_scanned_count INTEGER NOT NULL DEFAULT 0;")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_folders_monitor_mode ON folders(monitor_mode);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_folders_is_private ON folders(is_private);")
+
+            media_cols = {r[1] for r in cur.execute("PRAGMA table_info(media);").fetchall()}
+            if "ocr_scanned" not in media_cols:
+                cur.execute("ALTER TABLE media ADD COLUMN ocr_scanned INTEGER NOT NULL DEFAULT 0;")
+            if "ocr_text" not in media_cols:
+                cur.execute("ALTER TABLE media ADD COLUMN ocr_text TEXT DEFAULT '';")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_media_ocr_pending ON media(is_video, ocr_scanned);")
+
+            try:
+                cur.execute(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS media_ocr_fts
+                    USING fts5(media_id UNINDEXED, ocr_text, tokenize = 'unicode61 remove_diacritics 2');
+                    """
+                )
+            except sqlite3.OperationalError as fts_exc:
+                logger.info("SQLite FTS5 unavailable for media_ocr_fts, falling back to LIKE: %s", fts_exc)
+        except Exception as exc:
+            logger.warning("Error in folder policy / OCR migration: %s", exc)
 
         conn.commit()
 

@@ -519,6 +519,7 @@ class SearchScopeBar(QFrame):
         catalog_repo: CatalogRepository,
         location_label: str | None = None,
         special_people_label: str | None = None,
+        date_label: str | None = None,
     ) -> None:
         """Re-renders active People, Tag, Rating, Flag, Date, Location, Media type, and Orientation facet chips matching WLPG."""
         while self.chips_layout.count():
@@ -604,20 +605,27 @@ class SearchScopeBar(QFrame):
             chip.remove_clicked.connect(self.flagged_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 
-        # 5. Active Month / Date Chip: "Date: October 2022"
+        # 5. Active Month / Date Chip: "Date: Today", "Date: 15 November 2026", "Date: October 2022"
         d_year = filter_state.get("date_year")
         d_month = filter_state.get("date_month")
-        if d_year is not None or d_month is not None:
+        d_day = filter_state.get("date_day")
+        if date_label or d_year is not None or d_month is not None or d_day is not None:
             lbl_d = QLabel("Date:", self.chips_widget)
             lbl_d.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
             self.chips_layout.addWidget(lbl_d)
 
-            d_str = ""
-            if d_month is not None and 1 <= d_month <= 12:
-                d_str += calendar.month_name[d_month] + " "
-            if d_year is not None:
-                d_str += str(d_year)
-            chip = FilterChip(d_str.strip() or "Date", self.chips_widget)
+            if date_label:
+                d_text = date_label
+            else:
+                parts: list[str] = []
+                if d_day is not None:
+                    parts.append(str(d_day))
+                if d_month is not None and 1 <= d_month <= 12:
+                    parts.append(calendar.month_name[d_month])
+                if d_year is not None:
+                    parts.append(str(d_year))
+                d_text = " ".join(parts) or "Date"
+            chip = FilterChip(d_text, self.chips_widget)
             chip.remove_clicked.connect(self.date_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 

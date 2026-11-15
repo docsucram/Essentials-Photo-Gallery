@@ -6,6 +6,7 @@ image decoding & saving helpers for Essentials Photo Gallery.
 from __future__ import annotations
 
 import io
+import threading
 import warnings
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ except Exception:  # pragma: no cover
     ImageCms = None  # type: ignore[assignment]
 
 _CODECS_REGISTERED = False
+_WIC_LOCK = threading.Lock()
 
 
 def register_nextgen_codecs() -> dict[str, bool]:
@@ -284,120 +286,149 @@ def decode_wic_to_srgb(file_path: Path | str) -> np.ndarray | None:
 
     if sys.platform != "win32":
         return None
-
     try:
-        import ctypes
-        from ctypes import POINTER, Structure, WINFUNCTYPE, byref, c_int32, c_ubyte, c_uint32, c_void_p, c_wchar, c_wchar_p, wintypes
-
-        wic = ctypes.windll.LoadLibrary("windowscodecs.dll")
-        ole32 = ctypes.windll.ole32
-        ole32.CoInitialize(None)
-
-        class GUID(Structure):
-            _fields_ = [
-                ("Data1", wintypes.DWORD),
-                ("Data2", wintypes.WORD),
-                ("Data3", wintypes.WORD),
-                ("Data4", c_ubyte * 8),
-            ]
-
-        def _guid(s: str) -> GUID:
-            g = GUID()
-            ole32.CLSIDFromString(s, byref(g))
-            return g
-
-        GUID_24bppBGR = _guid("{6fddc324-4e03-4b15-be80-c75b0d095012}")
-        GUID_32bppBGRA = _guid("{6fddc324-4e03-4b15-be80-c75b0d095020}")
-
-        factory = c_void_p()
-        if wic.WICCreateImagingFactory_Proxy(c_uint32(0x0237), byref(factory)) != 0 or not factory.value:
+        p = Path(file_path)
+        if not p.is_file() or p.stat().st_size <= 0:
             return None
-        f_vtable = ctypes.cast(factory, POINTER(POINTER(c_void_p))).contents
+    except OSError:
+        return None
 
-        create_dec_fn = WINFUNCTYPE(
-            c_int32, c_void_p, c_wchar_p, c_void_p, wintypes.DWORD, c_uint32, POINTER(c_void_p)
-        )(f_vtable[3])
+    ole32 = None
+    coinit_ok = False
+    com_objs: list[c_void_p] = []
+    with _WIC_LOCK:
+        try:
+            import ctypes
+            from ctypes import POINTER, Structure, WINFUNCTYPE, byref, c_int32, c_ubyte, c_uint32, c_void_p, c_wchar, c_wchar_p, wintypes
 
-        decoder = c_void_p()
-        if create_dec_fn(factory, str(file_path), None, 0x80000000, 0, byref(decoder)) != 0 or not decoder.value:
-            return None
-        d_vtable = ctypes.cast(decoder, POINTER(POINTER(c_void_p))).contents
+            wic = ctypes.windll.LoadLibrary("windowscodecs.dll")
+            ole32 = ctypes.windll.ole32
+            hr = ole32.CoInitializeEx(None, 0x0)  # COINIT_MULTITHREADED
+            coinit_ok = hr in (0, 1)  # S_OK or S_FALSE
 
-        # Try sources: Preview first (full-res JPEG/RGB for RAW formats), then Frame 0, then Thumbnail
-        sources: list[c_void_p] = []
-        pv = c_void_p()
-        if WINFUNCTYPE(c_int32, c_void_p, POINTER(c_void_p))(d_vtable[9])(decoder, byref(pv)) == 0 and pv.value:
-            sources.append(pv)
-        fr = c_void_p()
-        if WINFUNCTYPE(c_int32, c_void_p, c_uint32, POINTER(c_void_p))(d_vtable[13])(decoder, 0, byref(fr)) == 0 and fr.value:
-            sources.append(fr)
-        tb = c_void_p()
-        if WINFUNCTYPE(c_int32, c_void_p, POINTER(c_void_p))(d_vtable[11])(decoder, byref(tb)) == 0 and tb.value:
-            sources.append(tb)
+            class GUID(Structure):
+                _fields_ = [
+                    ("Data1", wintypes.DWORD),
+                    ("Data2", wintypes.WORD),
+                    ("Data3", wintypes.WORD),
+                    ("Data4", c_ubyte * 8),
+                ]
 
-        for src in sources:
-            s_vtable = ctypes.cast(src, POINTER(POINTER(c_void_p))).contents
-            get_size_fn = WINFUNCTYPE(c_int32, c_void_p, POINTER(c_uint32), POINTER(c_uint32))(s_vtable[3])
-            w = c_uint32()
-            h = c_uint32()
-            if get_size_fn(src, byref(w), byref(h)) != 0 or w.value == 0 or h.value == 0:
-                continue
+            def _guid(s: str) -> GUID:
+                g = GUID()
+                ole32.CLSIDFromString(s, byref(g))
+                return g
 
-            get_fmt_fn = WINFUNCTYPE(c_int32, c_void_p, POINTER(GUID))(s_vtable[4])
-            src_fmt = GUID()
-            get_fmt_fn(src, byref(src_fmt))
-            guid_buf = (c_wchar * 40)()
-            ole32.StringFromGUID2(byref(src_fmt), guid_buf, 40)
-            fmt_str = guid_buf.value.upper()
+            GUID_24bppBGR = _guid("{6fddc324-4e03-4b15-be80-c75b0d095012}")
+            GUID_32bppBGRA = _guid("{6fddc324-4e03-4b15-be80-c75b0d095020}")
 
-            copy_pixels_fn = WINFUNCTYPE(c_int32, c_void_p, c_void_p, c_uint32, c_uint32, c_void_p)(s_vtable[7])
+            factory = c_void_p()
+            if wic.WICCreateImagingFactory_Proxy(c_uint32(0x0237), byref(factory)) != 0 or not factory.value:
+                return None
+            com_objs.append(factory)
+            f_vtable = ctypes.cast(factory, POINTER(POINTER(c_void_p))).contents
 
-            # Native 24bpp RGB
-            if fmt_str == "{6FDDC324-4E03-4BFE-B185-3D77768DC90C}":
-                stride = w.value * 3
-                buf_size = stride * h.value
-                buf = (c_ubyte * buf_size)()
-                if copy_pixels_fn(src, None, stride, buf_size, buf) == 0:
-                    arr = np.frombuffer(buf, dtype=np.uint8).reshape((h.value, w.value, 3))
-                    return np.ascontiguousarray(arr)
+            create_dec_fn = WINFUNCTYPE(
+                c_int32, c_void_p, c_wchar_p, c_void_p, wintypes.DWORD, c_uint32, POINTER(c_void_p)
+            )(f_vtable[3])
 
-            # Native 24bpp BGR
-            if fmt_str == "{6FDDC324-4E03-4B15-BE80-C75B0D095012}":
-                stride = w.value * 3
-                buf_size = stride * h.value
-                buf = (c_ubyte * buf_size)()
-                if copy_pixels_fn(src, None, stride, buf_size, buf) == 0:
-                    arr = np.frombuffer(buf, dtype=np.uint8).reshape((h.value, w.value, 3))
-                    return np.ascontiguousarray(arr[:, :, ::-1])
+            decoder = c_void_p()
+            if create_dec_fn(factory, str(file_path), None, 0x80000000, 0, byref(decoder)) != 0 or not decoder.value:
+                return None
+            com_objs.append(decoder)
+            d_vtable = ctypes.cast(decoder, POINTER(POINTER(c_void_p))).contents
 
-            # Native 32bpp BGRA or RGBA
-            if fmt_str in ("{6FDDC324-4E03-4B15-BE80-C75B0D095020}", "{F5C7AD2D-6A8D-43DD-A7A8-A29935261A20}"):
-                stride = w.value * 4
-                buf_size = stride * h.value
-                buf = (c_ubyte * buf_size)()
-                if copy_pixels_fn(src, None, stride, buf_size, buf) == 0:
-                    arr = np.frombuffer(buf, dtype=np.uint8).reshape((h.value, w.value, 4))
-                    if fmt_str.startswith("{6FDDC324"):
-                        return np.ascontiguousarray(arr[:, :, [2, 1, 0]])
-                    return np.ascontiguousarray(arr[:, :, :3])
+            # Try sources: Preview first (full-res JPEG/RGB for RAW formats), then Frame 0, then Thumbnail
+            sources: list[c_void_p] = []
+            pv = c_void_p()
+            if WINFUNCTYPE(c_int32, c_void_p, POINTER(c_void_p))(d_vtable[9])(decoder, byref(pv)) == 0 and pv.value:
+                sources.append(pv)
+                com_objs.append(pv)
+            fr = c_void_p()
+            if WINFUNCTYPE(c_int32, c_void_p, c_uint32, POINTER(c_void_p))(d_vtable[13])(decoder, 0, byref(fr)) == 0 and fr.value:
+                sources.append(fr)
+                com_objs.append(fr)
+            tb = c_void_p()
+            if WINFUNCTYPE(c_int32, c_void_p, POINTER(c_void_p))(d_vtable[11])(decoder, byref(tb)) == 0 and tb.value:
+                sources.append(tb)
+                com_objs.append(tb)
 
-            # Convert to 32bppBGRA or 24bppBGR via WIC converter
-            for target_guid, is_bgra in [(GUID_32bppBGRA, True), (GUID_24bppBGR, False)]:
-                conv = c_void_p()
-                if wic.WICConvertBitmapSource(byref(target_guid), src, byref(conv)) == 0 and conv.value:
-                    c_vt = ctypes.cast(conv, POINTER(POINTER(c_void_p))).contents
-                    c_copy_fn = WINFUNCTYPE(c_int32, c_void_p, c_void_p, c_uint32, c_uint32, c_void_p)(c_vt[7])
-                    bpp = 4 if is_bgra else 3
-                    stride = w.value * bpp
+            for src in sources:
+                s_vtable = ctypes.cast(src, POINTER(POINTER(c_void_p))).contents
+                get_size_fn = WINFUNCTYPE(c_int32, c_void_p, POINTER(c_uint32), POINTER(c_uint32))(s_vtable[3])
+                w = c_uint32()
+                h = c_uint32()
+                if get_size_fn(src, byref(w), byref(h)) != 0 or w.value == 0 or h.value == 0:
+                    continue
+
+                get_fmt_fn = WINFUNCTYPE(c_int32, c_void_p, POINTER(GUID))(s_vtable[4])
+                src_fmt = GUID()
+                get_fmt_fn(src, byref(src_fmt))
+                guid_buf = (c_wchar * 40)()
+                ole32.StringFromGUID2(byref(src_fmt), guid_buf, 40)
+                fmt_str = guid_buf.value.upper()
+
+                copy_pixels_fn = WINFUNCTYPE(c_int32, c_void_p, c_void_p, c_uint32, c_uint32, c_void_p)(s_vtable[7])
+
+                # Native 24bpp RGB
+                if fmt_str == "{6FDDC324-4E03-4BFE-B185-3D77768DC90C}":
+                    stride = w.value * 3
                     buf_size = stride * h.value
                     buf = (c_ubyte * buf_size)()
-                    if c_copy_fn(conv, None, stride, buf_size, buf) == 0:
-                        arr = np.frombuffer(buf, dtype=np.uint8).reshape((h.value, w.value, bpp))
-                        if is_bgra:
-                            return np.ascontiguousarray(arr[:, :, [2, 1, 0]])
+                    if copy_pixels_fn(src, None, stride, buf_size, buf) == 0:
+                        arr = np.frombuffer(buf, dtype=np.uint8).reshape((h.value, w.value, 3))
+                        return np.ascontiguousarray(arr)
+
+                # Native 24bpp BGR
+                if fmt_str == "{6FDDC324-4E03-4B15-BE80-C75B0D095012}":
+                    stride = w.value * 3
+                    buf_size = stride * h.value
+                    buf = (c_ubyte * buf_size)()
+                    if copy_pixels_fn(src, None, stride, buf_size, buf) == 0:
+                        arr = np.frombuffer(buf, dtype=np.uint8).reshape((h.value, w.value, 3))
                         return np.ascontiguousarray(arr[:, :, ::-1])
-    except Exception:
-        pass
+
+                # Native 32bpp BGRA or RGBA
+                if fmt_str in ("{6FDDC324-4E03-4B15-BE80-C75B0D095020}", "{F5C7AD2D-6A8D-43DD-A7A8-A29935261A20}"):
+                    stride = w.value * 4
+                    buf_size = stride * h.value
+                    buf = (c_ubyte * buf_size)()
+                    if copy_pixels_fn(src, None, stride, buf_size, buf) == 0:
+                        arr = np.frombuffer(buf, dtype=np.uint8).reshape((h.value, w.value, 4))
+                        if fmt_str.startswith("{6FDDC324"):
+                            return np.ascontiguousarray(arr[:, :, [2, 1, 0]])
+                        return np.ascontiguousarray(arr[:, :, :3])
+
+                # Convert to 32bppBGRA or 24bppBGR via WIC converter
+                for target_guid, is_bgra in [(GUID_32bppBGRA, True), (GUID_24bppBGR, False)]:
+                    conv = c_void_p()
+                    if wic.WICConvertBitmapSource(byref(target_guid), src, byref(conv)) == 0 and conv.value:
+                        com_objs.append(conv)
+                        c_vt = ctypes.cast(conv, POINTER(POINTER(c_void_p))).contents
+                        c_copy_fn = WINFUNCTYPE(c_int32, c_void_p, c_void_p, c_uint32, c_uint32, c_void_p)(c_vt[7])
+                        bpp = 4 if is_bgra else 3
+                        stride = w.value * bpp
+                        buf_size = stride * h.value
+                        buf = (c_ubyte * buf_size)()
+                        if c_copy_fn(conv, None, stride, buf_size, buf) == 0:
+                            arr = np.frombuffer(buf, dtype=np.uint8).reshape((h.value, w.value, bpp))
+                            if is_bgra:
+                                return np.ascontiguousarray(arr[:, :, [2, 1, 0]])
+                            return np.ascontiguousarray(arr[:, :, ::-1])
+        except Exception:
+            pass
+        finally:
+            for obj in reversed(com_objs):
+                try:
+                    vt = ctypes.cast(obj, POINTER(POINTER(c_void_p))).contents
+                    WINFUNCTYPE(c_uint32, c_void_p)(vt[2])(obj)
+                except Exception:
+                    pass
+            if coinit_ok and ole32 is not None:
+                try:
+                    ole32.CoUninitialize()
+                except Exception:
+                    pass
     return None
 
 
@@ -421,6 +452,53 @@ def extract_wic_thumbnail(file_path: Path | str, max_dim: int = 256) -> Any | No
         return qimg
     except Exception:
         return None
+
+
+def decode_raw_embedded_preview(
+    file_path: Path | str, *, min_long_edge: int = 800
+) -> tuple[np.ndarray | None, bool]:
+    """
+    Fast-path for camera RAW files (.CR2/.CR3/.NEF/.ARW/.RAF/.DNG):
+    Extracts the embedded camera-processed JPEG/bitmap preview (~3-15 ms) so
+    browsing and initial Single Image View feel instantaneous while preserving
+    the camera's built-in Picture Style / Film Simulation.
+    Returns (rgb_u8, is_embedded_preview). Falls back to full demosaic if
+    no embedded preview >= min_long_edge is available.
+    """
+    try:
+        import rawpy
+
+        with rawpy.imread(str(file_path)) as raw:
+            try:
+                thumb = raw.extract_thumb()
+                if thumb.format == rawpy.ThumbFormat.JPEG:
+                    arr = np.frombuffer(thumb.data, dtype=np.uint8)
+                    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    if bgr is not None and bgr.size > 0:
+                        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                        try:
+                            with Image.open(io.BytesIO(thumb.data)) as pil_t:
+                                orient = int(pil_t.getexif().get(0x0112) or 1)
+                            if orient != 1:
+                                from PIL import ImageOps
+                                with Image.open(io.BytesIO(thumb.data)) as pil_t2:
+                                    rgb = np.ascontiguousarray(
+                                        np.asarray(ImageOps.exif_transpose(pil_t2).convert("RGB"))
+                                    )
+                        except Exception:
+                            pass
+                        if max(rgb.shape[:2]) >= min_long_edge:
+                            return np.ascontiguousarray(rgb), True
+                elif thumb.format == rawpy.ThumbFormat.BITMAP:
+                    rgb = np.ascontiguousarray(thumb.data)
+                    if rgb.ndim == 3 and max(rgb.shape[:2]) >= min_long_edge:
+                        return rgb, True
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return decode_raw_to_srgb(file_path), False
 
 
 def decode_raw_to_srgb(file_path: Path | str) -> np.ndarray | None:

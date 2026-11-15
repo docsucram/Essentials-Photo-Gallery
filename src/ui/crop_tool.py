@@ -33,6 +33,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QPolygonF,
+    QTransform,
 )
 from PySide6.QtWidgets import (
     QGraphicsItem,
@@ -188,10 +189,21 @@ class CropOverlayItem(QGraphicsRectItem):
         self._image_rect = QRectF(rect)
         self.update()
 
+    def _rotated_image_polygon(self, scene_rect: QRectF) -> QPolygonF:
+        if scene_rect.isEmpty() or abs(self._rotation_deg) < 0.05:
+            return QPolygonF(scene_rect)
+        c = scene_rect.center()
+        t = QTransform()
+        t.translate(c.x(), c.y())
+        t.rotate(self._rotation_deg)
+        t.translate(-c.x(), -c.y())
+        return t.map(QPolygonF(scene_rect))
+
     def boundingRect(self) -> QRectF:
         img_rect = getattr(self, "_image_rect", QRectF())
         if not img_rect.isEmpty():
-            return img_rect
+            poly_rect = self._rotated_image_polygon(img_rect).boundingRect()
+            return poly_rect.united(self._rect).adjusted(-32.0, -32.0, 32.0, 32.0)
         inv_scale = self.get_view_inv_scale()
         margin = max(100.0, 150.0 * inv_scale)
         return self._rect.adjusted(-margin, -margin, margin, margin)
@@ -292,7 +304,7 @@ class CropOverlayItem(QGraphicsRectItem):
             scene_rect = self.scene().sceneRect()
         if not scene_rect.isEmpty():
             full_path = QPainterPath()
-            full_path.addRect(scene_rect)
+            full_path.addPolygon(self._rotated_image_polygon(scene_rect))
             crop_path = QPainterPath()
             crop_path.addRect(r)
             dimmed_path = full_path.subtracted(crop_path)
@@ -423,6 +435,7 @@ class CropScene(QGraphicsScene):
         self.crop_rotation_deg: float = 0.0
         self.pixmap_item: QGraphicsPixmapItem | None = None
         self.crop_enabled: bool = False
+        self.allow_ai_expand: bool = False
 
         # Drag state
         self._is_dragging: bool = False
@@ -451,8 +464,40 @@ class CropScene(QGraphicsScene):
                 self.pixmap_item.setRotation(0.0)
             self.crop_rect_updated.emit()
 
-    def _clamp_rect_to_scene(self, r: QRectF) -> QRectF:
+    def set_allow_ai_expand(self, allow: bool) -> None:
+        self.allow_ai_expand = bool(allow)
+        if not self.allow_ai_expand and self.crop_rect_item.isVisible():
+            self.crop_rect_item.setRect(self._clamp_rect_to_scene(self.crop_rect_item.rect()))
+            self.crop_rect_item.update()
+            self.update()
+            for v in self.views():
+                if v.viewport() is not None:
+                    v.viewport().update()
+            self.crop_rect_updated.emit()
+
+    def _crop_bounds_rect(self) -> QRectF:
         s = self.sceneRect()
+        if s.isEmpty():
+            return s
+        if getattr(self, "allow_ai_expand", False):
+            mx = s.width() * 0.25
+            my = s.height() * 0.25
+            return s.adjusted(-mx, -my, mx, my)
+        rot = abs(float(getattr(self, "crop_rotation_deg", 0.0)))
+        if rot >= 0.05:
+            rad = math.radians(rot)
+            sin_a = math.sin(rad)
+            cos_a = math.cos(rad)
+            fw, fh = float(s.width()), float(s.height())
+            factor = 1.0 / (cos_a + (fw / fh) * sin_a if fw > fh else cos_a + (fh / fw) * sin_a)
+            in_w = max(16.0, fw * factor * 0.985)
+            in_h = max(16.0, fh * factor * 0.985)
+            c = s.center()
+            return QRectF(c.x() - in_w / 2.0, c.y() - in_h / 2.0, in_w, in_h)
+        return s
+
+    def _clamp_rect_to_scene(self, r: QRectF) -> QRectF:
+        s = self._crop_bounds_rect()
         if s.isEmpty():
             return r
         x = max(s.left(), min(r.left(), s.right() - 16.0))
@@ -484,14 +529,16 @@ class CropScene(QGraphicsScene):
                 self._drag_start_angle = math.degrees(math.atan2(pos.y() - center.y(), pos.x() - center.x()))
                 self._drag_initial_rot = self.crop_rotation_deg
             else:
-                # Click outside: start drawing new rectangle
+                # Click outside: defer replacing existing crop until dragged past threshold
                 self._drag_mode = "new"
-                image_rect = self.sceneRect()
-                clamped_x = max(image_rect.left(), min(pos.x(), image_rect.right()))
-                clamped_y = max(image_rect.top(), min(pos.y(), image_rect.bottom()))
+                self._new_crop_started = False
+                bounds_rect = self._crop_bounds_rect()
+                clamped_x = max(bounds_rect.left(), min(pos.x(), bounds_rect.right()))
+                clamped_y = max(bounds_rect.top(), min(pos.y(), bounds_rect.bottom()))
                 self._drag_start_pos = QPointF(clamped_x, clamped_y)
-                self.crop_rect_item.setRect(QRectF(self._drag_start_pos, self._drag_start_pos))
-                self.crop_rect_item.show()
+                if not self.crop_rect_item.isVisible():
+                    self.crop_rect_item.setRect(QRectF(self._drag_start_pos, self._drag_start_pos))
+                    self.crop_rect_item.show()
 
             self.crop_rect_updated.emit()
             event.accept()
@@ -524,8 +571,8 @@ class CropScene(QGraphicsScene):
         if self._drag_mode == "move":
             # Translate crop rectangle
             new_rect = sr.translated(dx, dy)
-            # Clamp inside scene rect
-            s = self.sceneRect()
+            # Clamp inside allowed bounds
+            s = self._crop_bounds_rect()
             if not s.isEmpty():
                 if new_rect.left() < s.left():
                     new_rect.moveLeft(s.left())
@@ -548,17 +595,27 @@ class CropScene(QGraphicsScene):
             self.crop_rotation_deg = rot
             self.crop_rect_item.set_rotation_deg(rot, badge_pos=pos)
 
-            # Live hardware rotation on the background pixmap item
+            # Live hardware rotation on the background pixmap item (matches OpenCV CW direction for +rot)
             if self.pixmap_item is not None and self.sceneRect().isValid():
                 s_center = self.sceneRect().center()
                 self.pixmap_item.setTransformOriginPoint(s_center)
-                self.pixmap_item.setRotation(-rot)
+                self.pixmap_item.setRotation(rot)
+
+            if not self.allow_ai_expand and self.crop_rect_item.isVisible():
+                self.crop_rect_item.setRect(self._clamp_rect_to_scene(self.crop_rect_item.rect()))
+                self.update()
 
             self.crop_rect_updated.emit()
 
         elif self._drag_mode == "new":
+            if not getattr(self, "_new_crop_started", False):
+                drag_thresh = max(8.0, 12.0 * self.crop_rect_item.get_view_inv_scale())
+                if math.hypot(pos.x() - self._drag_start_pos.x(), pos.y() - self._drag_start_pos.y()) < drag_thresh:
+                    event.accept()
+                    return
+                self._new_crop_started = True
             # Rubber-band drawing
-            s = self.sceneRect()
+            s = self._crop_bounds_rect()
             clamped_x = max(s.left(), min(pos.x(), s.right()))
             clamped_y = max(s.top(), min(pos.y(), s.bottom()))
             new_rect = QRectF(self._drag_start_pos, QPointF(clamped_x, clamped_y)).normalized()
@@ -621,11 +678,15 @@ class CropScene(QGraphicsScene):
             return
 
         if event.button() == Qt.LeftButton and self._is_dragging:
+            was_new_unstarted = (
+                self._drag_mode == "new" and not getattr(self, "_new_crop_started", False)
+            )
             self._is_dragging = False
             self.crop_rect_item._is_rotating = False
             self._drag_mode = "none"
             self.crop_rect_item.update()
-            self.crop_rect_updated.emit()
+            if not was_new_unstarted:
+                self.crop_rect_updated.emit()
             event.accept()
             return
         super().mouseReleaseEvent(event)

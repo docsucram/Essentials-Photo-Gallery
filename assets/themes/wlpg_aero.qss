@@ -231,20 +231,21 @@ QCheckBox::indicator:disabled {
 /* Minimalist modern scrollbars matching Windows 11 fluent overlay (eliminating chunky white artifacts) */
 QScrollBar:vertical {
     border: none;
-    background: transparent;
-    width: 8px;
+    background: #F1F5F9;
+    width: 5px;
     margin: 0px 0px 0px 0px;
 }
 QScrollBar::handle:vertical {
-    background: #CBD5E1;
+    background: #94A3B8;
     min-height: 28px;
-    border-radius: 4px;
+    border-radius: 2px;
+    margin: 0px;
 }
 QScrollBar::handle:vertical:hover {
-    background: #94A3B8;
+    background: #64748B;
 }
 QScrollBar::handle:vertical:pressed {
-    background: #64748B;
+    background: #475569;
 }
 QScrollBar::sub-line:vertical, QScrollBar::add-line:vertical {
     border: none;

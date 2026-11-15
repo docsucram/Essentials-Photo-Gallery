@@ -130,12 +130,44 @@ class FaceDetectionWorker(QRunnable):
             return True
         return False
 
+    def _has_pending_face_work(self) -> bool:
+        """Checks catalog.db cheaply before loading heavy ONNX models."""
+        if self.target_media_ids or self.force_rescan:
+            return True
+        conn = self.engine.catalog_conn()
+        has_backfill = conn.execute(
+            """
+            SELECT 1 FROM media_people
+            WHERE state = 1 AND person_id IS NOT NULL AND embedding IS NULL
+            LIMIT 1;
+            """
+        ).fetchone()
+        if has_backfill is not None:
+            return True
+        has_unscanned = conn.execute(
+            """
+            SELECT 1
+            FROM media m
+            JOIN folders f ON f.id = m.folder_id
+            WHERE m.is_missing = 0 AND m.is_video = 0 AND m.face_scan_version >= 0 AND m.face_scan_version < ?
+              AND COALESCE(f.scan_faces, 1) = 1
+              AND COALESCE(f.monitor_mode, 'always') != 'excluded'
+            LIMIT 1;
+            """,
+            (TARGET_FACE_SCAN_VERSION,),
+        ).fetchone()
+        return has_unscanned is not None
+
     @Slot()
     def run(self) -> None:
         """Main worker execution entrypoint."""
         total_faces_detected = 0
         try:
             if self._is_cancelled():
+                return
+
+            if not self._has_pending_face_work():
+                self._run_stage3_match()
                 return
 
             if not self.face_engine.is_available:
@@ -356,6 +388,8 @@ class FaceDetectionWorker(QRunnable):
               AND m.is_missing = 0
               AND m.is_video = 0
               AND m.face_scan_version < 2
+              AND COALESCE(f.scan_faces, 1) = 1
+              AND COALESCE(f.monitor_mode, 'always') != 'excluded'
             ORDER BY mp.id ASC;
             """
         ).fetchall()
@@ -378,6 +412,8 @@ class FaceDetectionWorker(QRunnable):
               AND m.face_scan_version < 2
               AND mp.rect_w > 0.005
               AND mp.rect_h > 0.005
+              AND COALESCE(f.scan_faces, 1) = 1
+              AND COALESCE(f.monitor_mode, 'always') != 'excluded'
             ORDER BY mp.id ASC;
             """
         ).fetchall()
@@ -847,9 +883,12 @@ class FaceDetectionWorker(QRunnable):
             """
             SELECT
                 COUNT(*) AS total_library,
-                SUM(CASE WHEN face_scan_version < ? THEN 1 ELSE 0 END) AS remaining
-            FROM media
-            WHERE is_missing = 0 AND is_video = 0 AND face_scan_version >= 0;
+                SUM(CASE WHEN m.face_scan_version < ? THEN 1 ELSE 0 END) AS remaining
+            FROM media m
+            JOIN folders f ON f.id = m.folder_id
+            WHERE m.is_missing = 0 AND m.is_video = 0 AND m.face_scan_version >= 0
+              AND COALESCE(f.scan_faces, 1) = 1
+              AND COALESCE(f.monitor_mode, 'always') != 'excluded';
             """,
             (TARGET_FACE_SCAN_VERSION,),
         ).fetchone()
@@ -876,6 +915,8 @@ class FaceDetectionWorker(QRunnable):
                 FROM media m
                 JOIN folders f ON f.id = m.folder_id
                 WHERE m.is_missing = 0 AND m.is_video = 0 AND m.face_scan_version >= 0 AND m.face_scan_version < ?
+                  AND COALESCE(f.scan_faces, 1) = 1
+                  AND COALESCE(f.monitor_mode, 'always') != 'excluded'
                 ORDER BY m.id ASC
                 LIMIT ?;
                 """,

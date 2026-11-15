@@ -1275,10 +1275,14 @@ class FolderSyncWorker(QRunnable):
             }
 
             # Walk directories using fast iterative os.scandir stack
+            excluded_paths = repo.get_excluded_folder_paths()
             dir_stack: list[tuple[Path, int | None]] = [(self.root_path, None)]
 
             while dir_stack and not self.cancel_flag.is_set:
                 curr_dir, parent_fid = dir_stack.pop(0)
+                curr_norm = str(curr_dir).replace("\\", "/").rstrip("/").lower()
+                if curr_norm in excluded_paths:
+                    continue
                 try:
                     dir_stat = curr_dir.stat()
                 except OSError:
@@ -1904,12 +1908,14 @@ class ThumbnailDecodeWorker(QRunnable):
         except Exception:
             pass
 
-        try:
-            from src.imaging.image_loader import extract_wic_thumbnail
+        if Path(self.file_path).suffix.lower() not in {".jpg", ".jpeg", ".png", ".bmp", ".gif"}:
+            try:
+                from src.imaging.image_loader import extract_wic_thumbnail
 
-            return extract_wic_thumbnail(self.file_path, THUMB_MAX_DIM)
-        except Exception:
-            return None
+                return extract_wic_thumbnail(self.file_path, THUMB_MAX_DIM)
+            except Exception:
+                return None
+        return None
 
     def _decode_video_thumbnail(self) -> QImage | None:
         """Samples a non-dark frame at 15% -> 50% -> 1000ms, respects orientation, and composites a perforated filmstrip."""
