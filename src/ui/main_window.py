@@ -9130,10 +9130,40 @@ class PhotoGalleryMainWindow(QMainWindow):
         except Exception:
             pass
 
+        # Tear down QMediaPlayer, LaMa warmup thread, and QWebEngineView/Page so no QtWebEngineProcess or DLL locks linger
+        try:
+            if hasattr(self, "media_viewer"):
+                self.media_viewer._is_shutting_down = True
+                wt = getattr(self.media_viewer, "_lama_warmup_thread", None)
+                if wt is not None and wt.is_alive():
+                    wt.join(timeout=3.0)
+            if hasattr(self, "media_viewer") and hasattr(self.media_viewer, "media_player"):
+                self.media_viewer.media_player.stop()
+                self.media_viewer.media_player.setSource(QUrl())
+        except Exception:
+            pass
+        try:
+            mv = getattr(self, "_map_view", None)
+            if mv is not None:
+                wv = getattr(mv, "web_view", None)
+                if wv is not None:
+                    page = wv.page()
+                    wv.stop()
+                    wv.setParent(None)
+                    wv.deleteLater()
+                    if page is not None:
+                        page.deleteLater()
+                mv.close()
+                mv.deleteLater()
+                self._map_view = None
+        except Exception:
+            pass
+
         app = QApplication.instance()
         if app:
             try:
                 app.removeEventFilter(self)
+                app.processEvents()
             except Exception:
                 pass
 

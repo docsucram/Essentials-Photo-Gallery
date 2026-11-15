@@ -3535,9 +3535,12 @@ class SingleMediaViewer(QWidget):
                 self._lama_warmup_in_progress = False
                 self._lama_warmup_done = True
                 # Marshal back onto the GUI thread (QTimer.singleShot from a raw Python thread has no Qt event loop)
-                QMetaObject.invokeMethod(self, "_on_lama_warmup_finished", Qt.QueuedConnection)
+                if not getattr(self, "_is_shutting_down", False):
+                    QMetaObject.invokeMethod(self, "_on_lama_warmup_finished", Qt.QueuedConnection)
 
-        threading.Thread(target=_worker, daemon=True, name="LaMaWarmup").start()
+        t = threading.Thread(target=_worker, daemon=True, name="LaMaWarmup")
+        self._lama_warmup_thread = t
+        t.start()
 
     @Slot()
     def _on_lama_warmup_finished(self) -> None:

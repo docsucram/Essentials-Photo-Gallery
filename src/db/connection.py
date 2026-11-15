@@ -128,13 +128,25 @@ class DualDatabaseEngine:
 
         with self.write_lock:
             cat_conn = self.catalog_conn()
-            cat_conn.executescript(catalog_ddl)
+            # Run table/trigger DDL first, then migrate existing tables to add any new columns
+            # (e.g., location_country, is_favourite), and finally create indexes that reference them.
+            import re as _re
+            index_pat = _re.compile(r"CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+[^;]+;", _re.IGNORECASE)
+            index_stmts = index_pat.findall(catalog_ddl)
+            non_index_ddl = index_pat.sub("", catalog_ddl)
+            cat_conn.executescript(non_index_ddl)
             self._migrate_catalog_schema(cat_conn)
+            for idx_sql in index_stmts:
+                try:
+                    cat_conn.execute(idx_sql)
+                except sqlite3.OperationalError as exc:
+                    logger.warning("Skipping index creation during schema init: %s", exc)
             cat_conn.commit()
             self._configure_catalog_conn(cat_conn)
 
             if thumbnails_ddl.strip():
                 thumb_conn = self.thumbnails_conn()
+                self._migrate_thumbnails_schema(thumb_conn)
                 thumb_conn.executescript(thumbnails_ddl)
                 self._migrate_thumbnails_schema(thumb_conn)
                 thumb_conn.commit()
@@ -913,6 +925,8 @@ class DualDatabaseEngine:
         # Folder Manager policies (monitor_mode, scan_faces, scan_ocr, is_private) & OCR FTS5
         try:
             folder_cols = {r[1] for r in cur.execute("PRAGMA table_info(folders);").fetchall()}
+            if "is_favourite" not in folder_cols:
+                cur.execute("ALTER TABLE folders ADD COLUMN is_favourite INTEGER NOT NULL DEFAULT 0;")
             if "monitor_mode" not in folder_cols:
                 cur.execute("ALTER TABLE folders ADD COLUMN monitor_mode TEXT NOT NULL DEFAULT 'always';")
             if "scan_faces" not in folder_cols:
