@@ -56,14 +56,41 @@ jobs:
       - name: Upload installer to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         shell: pwsh
         run: |
           $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ github.event.inputs.tag }}" } else { "${{ github.ref_name }}" }
           $exe = "dist_installer/EssentialsPhotoGallery_Setup_x64.exe"
           if (-not (Test-Path $exe)) { throw "Installer not found at $exe" }
+          $versionedExe = "dist_installer/EssentialsPhotoGallery_Setup_${tag}_x64.exe"
+          Copy-Item $exe $versionedExe -Force
+
+          $env:TAG = $tag
+          $notesFile = "release_notes.md"
+          python -c "
+          import re, pathlib, os
+          tag = os.environ['TAG']
+          repo = os.environ['GH_REPO']
+          text = pathlib.Path('RELEASES.md').read_text(encoding='utf-8')
+          pat = re.compile(rf'^## Essentials Photo Gallery {re.escape(tag)}\b.*?(?=^\s*---\s*$|^## Essentials Photo Gallery v|\Z)', re.M | re.S)
+          m = pat.search(text)
+          if m:
+              body = m.group(0).strip()
+              body = re.sub(r'^## Essentials Photo Gallery v[^\r\n]+\r?\n+', '', body, count=1)
+              body = body.replace('(docs/images/', f'(https://raw.githubusercontent.com/{repo}/{tag}/docs/images/')
+              pathlib.Path('release_notes.md').write_text(body.strip() + '\n', encoding='utf-8')
+          "
+
           $exists = gh release view $tag 2>$null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $exe --clobber
+            gh release upload $tag $versionedExe --clobber
+            if (Test-Path $notesFile) {
+              gh release edit $tag --notes-file $notesFile
+            }
           } else {
-            gh release create $tag $exe --title "Essentials Photo Gallery $($tag.TrimStart('v'))" --generate-notes
+            if (Test-Path $notesFile) {
+              gh release create $tag $versionedExe --title "Essentials Photo Gallery $($tag.TrimStart('v'))" --notes-file $notesFile
+            } else {
+              gh release create $tag $versionedExe --title "Essentials Photo Gallery $($tag.TrimStart('v'))" --generate-notes
+            }
           }
