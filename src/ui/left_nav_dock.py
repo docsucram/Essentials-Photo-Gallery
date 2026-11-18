@@ -1123,6 +1123,7 @@ class LeftNavigationDock(QDockWidget):
         try:
             had_existing_folders = bool(self._folder_items)
             was_people_expanded = self.root_people.isExpanded() if hasattr(self, "root_people") else False
+            was_places_expanded = self.root_places.isExpanded() if hasattr(self, "root_places") else False
             was_albums_expanded = self.root_albums.isExpanded() if hasattr(self, "root_albums") else True
             was_my_albums_expanded = self.root_my_albums.isExpanded() if hasattr(self, "root_my_albums") else True
             was_smart_albums_expanded = (
@@ -1341,7 +1342,8 @@ class LeftNavigationDock(QDockWidget):
                 for c_name in sorted(countries.keys()):
                     states = countries[c_name]
                     c_total = sum(cnt for s_cities in states.values() for cnt in s_cities.values())
-                    c_item = QTreeWidgetItem([f"{c_name} ({c_total})"])
+                    c_label = c_name or "Unknown Country"
+                    c_item = QTreeWidgetItem([f"{c_label} ({c_total})"])
                     c_item.setData(0, _NODE_TYPE_ROLE, "place")
                     c_item.setData(0, _NODE_PAYLOAD_ROLE, (c_name, "", ""))
                     c_item.setIcon(0, places_icon)
@@ -1371,6 +1373,8 @@ class LeftNavigationDock(QDockWidget):
             self.root_folders.setExpanded(True)
             self.root_tags.setExpanded(True)
             self.root_people.setExpanded(was_people_expanded)
+            if hasattr(self, "root_places"):
+                self.root_places.setExpanded(was_places_expanded)
             if getattr(self, "_dark_mode", False):
                 self._sync_tree_item_colors()
             self._sync_tree_selection()

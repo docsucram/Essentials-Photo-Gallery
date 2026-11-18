@@ -4,6 +4,51 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 
 ---
 
+## Essentials Photo Gallery v0.14.0
+
+**Essentials Photo Gallery 0.14.0** takes a big step forward in both editing power and library cleanup—introducing **Advanced Fine Tune** with **Automatic Regional Masks**, a **revamped Duplicates Finder** paired with **Find Similar Photos**, and **Companion Phone GPS Matching** for automatic geotagging.
+
+### Fine Tune Advanced Mode & Automatic Regional Masking
+
+- **Advanced Fine Tune:** Fine Tune controls now have an **Advanced** mode (leaving the classic **Basic** controls untouched when you want simplicity), unlocking a live RGB histogram, **Smart Enhance**, **Whites** & **Blacks**, content-aware **Structure**, **Tone Curve** (`RGB` + `R`/`G`/`B` channels + S-Curve preset), **WB Eyedropper**, **8-Band Color Mixer (HSL)**, **Sharpen Masking**, **Color Noise**, **Vignette Feather**, **Orton Glow / Golden Hour**, and **Film Grain**.
+
+![Fine Tune Advanced Mode with Tone Curve, Whites, Blacks, Structure, and RGB Histogram](docs/images/release-0.14.0/fine-tune-advanced-curve.jpg)
+
+- **Automatic Regional Masks (`Whole | Subject | Background | Sky`):** Isolate and adjust the **Subject**, **Background**, or **Sky** automatically using `DepthAndMatteEngine`, refine any region with the interactive **Add (+) / Subtract (-)** Smart Brush, and inspect a live **region-masked histogram**. The red mask overlay and dotted boundary can be toggled anytime (even while on **Whole Photo**), and the red fill automatically hides while dragging sliders so you can judge tonal changes clearly.
+
+![Automatic Sky Regional Mask with dotted boundary and Fine Tune Advanced controls](docs/images/release-0.14.0/fine-tune-regional-sky-mask.jpg)
+
+### Revamped Duplicates Finder & New Find Similar Photos
+
+- **Revamped Duplicates & Bursts Workspace:** Redesigned around a dedicated contextual **`Duplicates`** Ribbon tab with **Compare Selected** (opening full Light Table Compare Mode), **Info Pane**, **Sort & Group**, **Auto-Pick** rules, **Metadata Merge** on delete, **Move Duplicates...**, and **Delete All Duplicates**, plus right-click **Show Card Details** toggles (`Filename`, `Folder Path`, `Resolution & Size`, `Date & Sharpness`).
+
+![Revamped Find Duplicates workspace with contextual Ribbon, Auto-Pick, and Side-by-Side Cards](docs/images/release-0.14.0/duplicates-finder-revamped.jpg)
+
+- **New Find Similar Photos:** Right-click any photo in the Gallery or Single Image View and choose **Find Similar** to surface visually matching shots using spatial + position-invariant LAB color palette and perceptual hash matching. Fine-tune matches live between **70%–98%** (default **81%**) with the Scope Bar slider, expand from a folder to **Search all**, and jump right back to your photo's position when closing the search.
+
+![Find Similar Photos matching purple iris shots with the live Scope Bar similarity slider](docs/images/release-0.14.0/find-similar-results.jpg)
+
+### Auto-Geotagging: Match Locations from Timed Photos
+
+- **Companion Phone GPS Matching (`Home → Geotag ▾ → Match Locations from Timed Photos...`):** Copy GPS locations from your phone's geotagged photos (or a `.gpx` track) onto camera photos taken around the same time. Review side-by-side **Destination ← GPS Source** previews with enlarged hover cards, sort by any column, optionally sync a wrong camera clock using 2 photos, and undo in one step (`Ctrl+Z`).
+
+![Match Locations from Timed Photos showing side-by-side Destination and GPS Source previews](docs/images/release-0.14.0/gps-match-locations.jpg)
+
+### Other Notable Improvements & Fixes
+
+- **Database Fresh Start & Empty-Library Prompt:** Added **Fresh Start (Reset Catalog & Thumbnails)...** in **Options → Database** (with confirmation warning, leaving files on disk untouched) and an empty-library `"No photos or videos in your gallery yet."` screen with a clickable **`Add a folder to your library...`** link.
+- **Performance & Responsiveness:**
+  - **Faster Face Recognition Model Loading:** Cached the loaded `FaceEngine` session across scans, skipped unused 2D/3D landmark and gender/age InsightFace models (`allowed_modules=["detection", "recognition"]`), and lowered background `FaceDetectionWorker` thread priority.
+  - **Snappier Folder Manager:** Sped up opening and toggling via grouped `media_count` queries, batched policy commits, cached icons, deferred OCR probing, in-place tree/subfolder updates (no scroll jump), and deferred main-window refresh on close.
+  - **Large Folder Indexing:** Improved UI responsiveness when adding large folders via **File → Add to Library**.
+- **UX & Reliability Polish:**
+  - **Tag & Caption Pane & Face Tagging:** Multi-selection people tags show `(All)` when shared across all selected photos and hide `(no box - add)`; clicking into the right pane closes an open face box, and the **Tag someone** popup fades out smoothly.
+  - **Video Seek Bar, Immersive Mode & Navigation:** Clicking anywhere on the video seek bar jumps straight to that timestamp (`PointingHandCursor`), **Immersive Mode (`F4`)** keeps the draggable title bar and window controls visible, and Left Navigation / Folder Manager folders sort in true case-insensitive A–Z order.
+  - **Home Ribbon `People` & `Geotag` Split Buttons:** Added the **Geotag ▾** dropdown menu and promoted **People** to a 2-part split button, plus improved narrow-screen Ribbon spacing.
+  - **Bug Fixes:** Fixed **Object Eraser** and the 99% **LaMa Neural Inpainting** download hang from 0.13.0, fixed **Private Folders** unhide persistence and **Places** tree expansion persistence, reduced startup NVIDIA/DirectML probe popups, and prevented unprompted background ~280 MB face model downloads.
+
+---
+
 ## Essentials Photo Gallery v0.13.0
 
 Welcome to **Essentials Photo Gallery 0.13.0**! This release upgrades the core imaging and UI engine for faster everyday browsing, introduces a **Folder Manager & Private Folders** system, adds opt-in **Offline Text-in-Photo Search (OCR)**, and polishes **AI Inpainting** across **Crop AI Expand** and **Object Eraser**.
@@ -29,7 +74,7 @@ Find receipts, street signs, documents, and screenshots by the words inside them
 - **Opt-In Per Folder:** Text recognition is off by default; enable it on any folder from **Folder Manager** (or run an on-demand **Scan Folder for Text Now**). If no OCR engine is installed yet, you'll be prompted to download **RapidOCR (~15 MB)** in one click, or point to an existing **Tesseract** or **Windows Native OCR** setup in **Options -> Add-ons**.
 - **Search & Copy:** Extracted text is indexed in the local database for instant search and Smart Albums, and appears selectable/copyable right in the **Information** pane.
 
-![Text in Photo OCR detecting and displaying copyable text from a parking ticket](docs/images/release-0.13.0/ocr-text-in-photo.png)
+![Text in Photo OCR detecting and displaying copyable text from a station sign](docs/images/release-0.13.0/ocr-text-in-photo.jpg)
 
 ### Folder Manager & Private Folders
 

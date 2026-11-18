@@ -214,6 +214,15 @@ QComboBox:focus {
     border: 1px solid #0F6CBD;
 }
 
+QComboBox QAbstractItemView {
+    background-color: #FFFFFF;
+    color: #111827;
+    border: 1px solid #D1D5DB;
+    selection-background-color: #E8F2FC;
+    selection-color: #0F172A;
+    outline: none;
+}
+
 /* Menus */
 QMenu {
     background-color: #FFFFFF;

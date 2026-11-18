@@ -424,6 +424,17 @@ def handle_win32_native_event(
                     local_tb_pt = top_header.mapFrom(window, local_win_pt)
                     if is_titlebar_caption_hit(top_header, local_tb_pt):
                         return True, HTCAPTION
+            elif getattr(window, "_is_immersive_mode", False) and ribbon is not None:
+                tab_widget = getattr(ribbon, "tab_widget", None)
+                if isinstance(tab_widget, QWidget) and tab_widget.isVisible():
+                    pt = wintypes.POINT(gx, gy)
+                    if user32.ScreenToClient(msg.hWnd, ctypes.byref(pt)):
+                        local_win_pt = QPoint(int(round(pt.x / dpr)), int(round(pt.y / dpr)))
+                        local_tw_pt = tab_widget.mapFrom(window, local_win_pt)
+                        tab_bar = tab_widget.tabBar() if hasattr(tab_widget, "tabBar") else None
+                        strip_h = max(28, tab_bar.height() if tab_bar is not None else 28)
+                        if 0 <= local_tw_pt.y() < strip_h and is_titlebar_caption_hit(tab_widget, local_tw_pt):
+                            return True, HTCAPTION
 
             return True, HTCLIENT
     except Exception:

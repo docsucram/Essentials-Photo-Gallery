@@ -58,9 +58,11 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QCompleter,
     QDateEdit,
     QDockWidget,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -104,27 +106,52 @@ class _AeroFineTuneSlider(QSlider):
     def __init__(self, min_val: int, max_val: int, default_val: int, parent: QWidget | None = None) -> None:
         super().__init__(Qt.Horizontal, parent)
         self.default_val = default_val
+        self._header_widget: QWidget | None = None
         self.setRange(min_val, max_val)
         self.setValue(default_val)
         self.setFixedHeight(18)
         self.setFocusPolicy(Qt.StrongFocus)
+        self.setCursor(Qt.SizeHorCursor)
+        self.set_track_gradient(None)
+
+    def setEnabled(self, enabled: bool) -> None:
+        super().setEnabled(bool(enabled))
+        if self._header_widget is not None:
+            self._header_widget.setEnabled(bool(enabled))
+
+    def set_track_gradient(self, stops: list[tuple[float, str]] | None) -> None:
+        """Apply a neutral or color-coded linear gradient groove to the slider."""
+        if stops:
+            stops_css = ", ".join(f"stop:{pos:.2f} {col}" for pos, col in stops)
+            groove_bg = f"qlineargradient(x1:0, y1:0, x2:1, y2:0, {stops_css})"
+            groove_h = "5px"
+        else:
+            groove_bg = "#D8DFE6"
+            groove_h = "4px"
         self.setStyleSheet(
-            """
-            QSlider::groove:horizontal {
-                height: 4px;
-                background: #D8DFE6;
+            f"""
+            QSlider::groove:horizontal {{
+                height: {groove_h};
+                background: {groove_bg};
                 border-radius: 2px;
-            }
-            QSlider::handle:horizontal {
+            }}
+            QSlider::groove:horizontal:disabled {{
+                background: rgba(148, 163, 184, 0.25);
+            }}
+            QSlider::handle:horizontal {{
                 background: #0078D7;
                 border: 1px solid #005A9E;
                 width: 8px;
                 margin: -6px 0;
                 border-radius: 2px;
-            }
-            QSlider::handle:horizontal:hover {
+            }}
+            QSlider::handle:horizontal:hover {{
                 background: #2B88D8;
-            }
+            }}
+            QSlider::handle:horizontal:disabled {{
+                background: #94A3B8;
+                border: 1px solid #64748B;
+            }}
             """
         )
 
@@ -166,6 +193,7 @@ class HistogramWidget(QWidget):
     points_changed = Signal(int, int)  # (black_point, white_point)
     slider_pressed = Signal()
     slider_released = Signal(str)
+    histogram_updated = Signal(object, object, object, object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -174,13 +202,40 @@ class HistogramWidget(QWidget):
         self._r_counts: list[int] = [0] * 256
         self._g_counts: list[int] = [0] * 256
         self._b_counts: list[int] = [0] * 256
+        self._show_rgb_channels: bool = False
+        self._handles_enabled: bool = True
+        self._hist_mask: np.ndarray | None = None
+        self._last_image_data: Any = None
         self.black_point: int = 0      # 0 .. 255
         self.white_point: int = 255    # 0 .. 255
         self._drag_handle: str | None = None
         self._hover_handle: str | None = None
         self.setMouseTracking(True)
 
+    def set_handles_enabled(self, enabled: bool) -> None:
+        self._handles_enabled = bool(enabled)
+        if not self._handles_enabled:
+            self._drag_handle = None
+            self._hover_handle = None
+            self.unsetCursor()
+        self.update()
+
+    def set_histogram_mask(self, mask: np.ndarray | None) -> None:
+        self._hist_mask = mask
+        if self._last_image_data is not None:
+            self.set_histogram_data(self._last_image_data)
+
+    def set_rgb_mode(self, enabled: bool) -> None:
+        enabled_b = bool(enabled)
+        target_h = 128 if enabled_b else 94
+        if self.height() != target_h:
+            self.setFixedHeight(target_h)
+        if self._show_rgb_channels != enabled_b:
+            self._show_rgb_channels = enabled_b
+        self.update()
+
     def set_histogram_data(self, image_data: Any) -> None:
+        self._last_image_data = image_data
         empty = [0] * 256
         if image_data is None:
             self._counts = list(empty)
@@ -191,12 +246,21 @@ class HistogramWidget(QWidget):
             return
         try:
             if isinstance(image_data, np.ndarray):
+                h_i, w_i = image_data.shape[:2]
+                cv_mask = None
+                if self._hist_mask is not None and self._hist_mask.size > 0:
+                    m_res = self._hist_mask
+                    if m_res.shape[:2] != (h_i, w_i):
+                        m_res = cv2.resize(m_res.astype(np.float32), (w_i, h_i), interpolation=cv2.INTER_LINEAR)
+                    cand_m = (m_res > 0.25).astype(np.uint8) * 255
+                    if np.any(cand_m > 0):
+                        cv_mask = cand_m
                 if image_data.ndim == 3 and image_data.shape[2] >= 3:
                     rgb = image_data[:, :, :3]
                     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-                    r_h = cv2.calcHist([rgb], [0], None, [256], [0, 256]).flatten()
-                    g_h = cv2.calcHist([rgb], [1], None, [256], [0, 256]).flatten()
-                    b_h = cv2.calcHist([rgb], [2], None, [256], [0, 256]).flatten()
+                    r_h = cv2.calcHist([rgb], [0], cv_mask, [256], [0, 256]).flatten()
+                    g_h = cv2.calcHist([rgb], [1], cv_mask, [256], [0, 256]).flatten()
+                    b_h = cv2.calcHist([rgb], [2], cv_mask, [256], [0, 256]).flatten()
                     max_rgb = max(float(r_h.max()), float(g_h.max()), float(b_h.max()), 1.0)
                     self._r_counts = [int((val / max_rgb) * 1000) for val in r_h]
                     self._g_counts = [int((val / max_rgb) * 1000) for val in g_h]
@@ -206,7 +270,7 @@ class HistogramWidget(QWidget):
                     self._r_counts = list(empty)
                     self._g_counts = list(empty)
                     self._b_counts = list(empty)
-                hist = cv2.calcHist([gray], [0], None, [256], [0, 256]).flatten()
+                hist = cv2.calcHist([gray], [0], cv_mask, [256], [0, 256]).flatten()
                 max_val = float(hist.max()) if hist.max() > 0 else 1.0
                 self._counts = [int((val / max_val) * 1000) for val in hist]
             elif isinstance(image_data, Image.Image):
@@ -232,6 +296,7 @@ class HistogramWidget(QWidget):
             self._r_counts = list(empty)
             self._g_counts = list(empty)
             self._b_counts = list(empty)
+        self.histogram_updated.emit(self._counts, self._r_counts, self._g_counts, self._b_counts)
         self.update()
 
     def reset_points(self) -> None:
@@ -255,7 +320,7 @@ class HistogramWidget(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         w = self.width()
         h = self.height()
-        graph_bottom = 68.0
+        graph_bottom = max(40.0, float(h) - 26.0)
 
         # Black background with subtle rounded border
         p.setPen(QPen(QColor("#7B8B9B"), 1))
@@ -284,7 +349,9 @@ class HistogramWidget(QWidget):
             path.closeSubpath()
             return path
 
-        has_rgb = any(self._r_counts) or any(self._g_counts) or any(self._b_counts)
+        has_rgb = self._show_rgb_channels and (
+            any(self._r_counts) or any(self._g_counts) or any(self._b_counts)
+        )
         if has_rgb:
             for counts, fill_col, stroke_col in (
                 (self._r_counts, QColor(235, 75, 75, 70), QColor(255, 95, 95, 165)),
@@ -338,7 +405,7 @@ class HistogramWidget(QWidget):
         p.end()
 
     def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.LeftButton and self._handles_enabled:
             bx = self._get_handle_x(self.black_point)
             wx = self._get_handle_x(self.white_point)
             pos_x = float(event.pos().x())
@@ -359,7 +426,7 @@ class HistogramWidget(QWidget):
                 self.update()
                 event.accept()
                 return
-            elif pos_y >= 60.0:
+            elif pos_y >= max(40.0, float(self.height()) - 26.0) - 8.0:
                 if dist_b < dist_w:
                     self._drag_handle = "black"
                     val = self._get_val_from_x(pos_x)
@@ -377,6 +444,9 @@ class HistogramWidget(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        if not self._handles_enabled:
+            super().mouseMoveEvent(event)
+            return
         pos_x = float(event.pos().x())
         pos_y = float(event.pos().y())
 
@@ -401,11 +471,12 @@ class HistogramWidget(QWidget):
         dist_w = abs(pos_x - wx)
         prev_hover = self._hover_handle
 
-        if (pos_y >= 55.0 and dist_b <= 14.0) or dist_b <= 10.0:
+        handle_y_thresh = max(40.0, float(self.height()) - 26.0) - 13.0
+        if (pos_y >= handle_y_thresh and dist_b <= 14.0) or dist_b <= 10.0:
             self._hover_handle = "black"
             self.setCursor(Qt.PointingHandCursor)
             self.setToolTip(f"Black point (Shadows clip): {self.black_point}")
-        elif (pos_y >= 55.0 and dist_w <= 14.0) or dist_w <= 10.0:
+        elif (pos_y >= handle_y_thresh and dist_w <= 14.0) or dist_w <= 10.0:
             self._hover_handle = "white"
             self.setCursor(Qt.PointingHandCursor)
             self.setToolTip(f"White point (Highlights clip): {self.white_point}")
@@ -432,6 +503,356 @@ class HistogramWidget(QWidget):
         self.points_changed.emit(0, 255)
         self.slider_released.emit("Reset Levels")
         event.accept()
+
+
+class _ToneCurveCanvas(QWidget):
+    """Interactive spline Tone Curve editor for RGB / Red / Green / Blue channels."""
+
+    curve_changed = Signal()
+    curve_pressed = Signal()
+    curve_released = Signal()
+
+    _CHANNEL_COLORS = {
+        "rgb": "#E6ECF2",
+        "r": "#F06464",
+        "g": "#58C870",
+        "b": "#5EA0F5",
+    }
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(192)
+        self.setMouseTracking(True)
+        self._active_channel: str = "rgb"
+        self._curves: dict[str, list[tuple[float, float]]] = {
+            "rgb": [(0.0, 0.0), (1.0, 1.0)],
+            "r": [(0.0, 0.0), (1.0, 1.0)],
+            "g": [(0.0, 0.0), (1.0, 1.0)],
+            "b": [(0.0, 0.0), (1.0, 1.0)],
+        }
+        self._hist_counts: dict[str, list[int]] = {
+            "rgb": [],
+            "r": [],
+            "g": [],
+            "b": [],
+        }
+        self._drag_idx: int | None = None
+        self._hover_idx: int | None = None
+
+    def set_histogram_counts(
+        self,
+        luma: list[int] | None,
+        r: list[int] | None,
+        g: list[int] | None,
+        b: list[int] | None,
+    ) -> None:
+        self._hist_counts = {
+            "rgb": list(luma or []),
+            "r": list(r or []),
+            "g": list(g or []),
+            "b": list(b or []),
+        }
+        self.update()
+
+    def set_active_channel(self, channel: str) -> None:
+        if channel in self._curves and self._active_channel != channel:
+            self._active_channel = channel
+            self._drag_idx = None
+            self._hover_idx = None
+            self.update()
+
+    def get_curves(self) -> dict[str, list[tuple[float, float]]]:
+        return {k: [tuple(p) for p in v] for k, v in self._curves.items()}
+
+    def set_curves(self, curves: dict[str, list[tuple[float, float]]]) -> None:
+        for ch in ("rgb", "r", "g", "b"):
+            pts = curves.get(ch)
+            if pts and len(pts) >= 2:
+                self._curves[ch] = sorted((float(x), float(y)) for x, y in pts)
+            else:
+                self._curves[ch] = [(0.0, 0.0), (1.0, 1.0)]
+        self.update()
+
+    def apply_s_curve_preset(self) -> None:
+        self._curves[self._active_channel] = [
+            (0.0, 0.0),
+            (0.25, 0.20),
+            (0.50, 0.50),
+            (0.75, 0.80),
+            (1.0, 1.0),
+        ]
+        self.update()
+        self.curve_changed.emit()
+        self.curve_released.emit()
+
+    def reset_active_channel(self) -> None:
+        self._curves[self._active_channel] = [(0.0, 0.0), (1.0, 1.0)]
+        self.update()
+        self.curve_changed.emit()
+        self.curve_released.emit()
+
+    def _plot_rect(self) -> QRectF:
+        return QRectF(8.0, 8.0, max(20.0, float(self.width() - 16)), max(20.0, float(self.height() - 16)))
+
+    def _pt_to_px(self, pt: tuple[float, float]) -> QPointF:
+        r = self._plot_rect()
+        return QPointF(r.left() + pt[0] * r.width(), r.bottom() - pt[1] * r.height())
+
+    def _px_to_pt(self, pos: QPointF) -> tuple[float, float]:
+        r = self._plot_rect()
+        nx = max(0.0, min(1.0, (pos.x() - r.left()) / max(1.0, r.width())))
+        ny = max(0.0, min(1.0, (r.bottom() - pos.y()) / max(1.0, r.height())))
+        return (round(nx, 4), round(ny, 4))
+
+    def paintEvent(self, _event) -> None:
+        from src.imaging.opencv_engine import _build_curve_lut
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        r = self._plot_rect()
+
+        # Clean dark studio background + color-dependent histogram + 4x4 grid
+        p.setPen(QPen(QColor("#363D49"), 1))
+        p.setBrush(QColor("#1A1D22"))
+        p.drawRoundedRect(r, 3, 3)
+
+        hist = self._hist_counts.get(self._active_channel, [])
+        if hist and any(hist):
+            h_col = QColor(self._CHANNEL_COLORS[self._active_channel])
+            h_col.setAlpha(68 if self._active_channel == "rgb" else 88)
+            h_stroke = QColor(self._CHANNEL_COLORS[self._active_channel])
+            h_stroke.setAlpha(115)
+            h_path = QPainterPath()
+            h_path.moveTo(r.left() + 1, r.bottom() - 1)
+            step_x = (r.width() - 2) / max(1, len(hist) - 1)
+            for idx_h, val_h in enumerate(hist):
+                hx = r.left() + 1 + idx_h * step_x
+                hy = (r.bottom() - 1) - (val_h / 1000.0) * (r.height() - 4)
+                h_path.lineTo(hx, hy)
+            h_path.lineTo(r.right() - 1, r.bottom() - 1)
+            h_path.closeSubpath()
+            p.setPen(QPen(h_stroke, 0.9))
+            p.setBrush(h_col)
+            p.drawPath(h_path)
+
+        p.setPen(QPen(QColor("#282E38"), 1))
+        for frac in (0.25, 0.5, 0.75):
+            gx = r.left() + frac * r.width()
+            gy = r.top() + frac * r.height()
+            p.drawLine(QPointF(gx, r.top() + 1), QPointF(gx, r.bottom() - 1))
+            p.drawLine(QPointF(r.left() + 1, gy), QPointF(r.right() - 1, gy))
+
+        # Identity diagonal
+        p.setPen(QPen(QColor("#38424D"), 1, Qt.DashLine))
+        p.drawLine(QPointF(r.left(), r.bottom()), QPointF(r.right(), r.top()))
+
+        # Inactive modified channel curves subtly underneath
+        for ch, pts in self._curves.items():
+            if ch == self._active_channel:
+                continue
+            if len(pts) == 2 and pts[0] == (0.0, 0.0) and pts[1] == (1.0, 1.0):
+                continue
+            lut = _build_curve_lut(pts)
+            col = QColor(self._CHANNEL_COLORS[ch])
+            col.setAlpha(105)
+            p.setPen(QPen(col, 1.3))
+            path = QPainterPath()
+            for i in range(0, 256, 3):
+                px = r.left() + (i / 255.0) * r.width()
+                py = r.bottom() - (float(lut[i]) / 255.0) * r.height()
+                if i == 0:
+                    path.moveTo(px, py)
+                else:
+                    path.lineTo(px, py)
+            px_end = r.right()
+            py_end = r.bottom() - (float(lut[255]) / 255.0) * r.height()
+            path.lineTo(px_end, py_end)
+            p.drawPath(path)
+
+        # Active channel curve
+        active_pts = self._curves[self._active_channel]
+        lut = _build_curve_lut(active_pts)
+        active_col = QColor(self._CHANNEL_COLORS[self._active_channel])
+        p.setPen(QPen(active_col, 2.0))
+        path = QPainterPath()
+        for i in range(256):
+            px = r.left() + (i / 255.0) * r.width()
+            py = r.bottom() - (float(lut[i]) / 255.0) * r.height()
+            if i == 0:
+                path.moveTo(px, py)
+            else:
+                path.lineTo(px, py)
+        p.drawPath(path)
+
+        # Control point handles
+        for idx, pt in enumerate(active_pts):
+            c = self._pt_to_px(pt)
+            is_hi = idx == self._drag_idx or idx == self._hover_idx
+            rad = 5.0 if is_hi else 4.0
+            p.setPen(QPen(QColor("#0F1419"), 1.5))
+            p.setBrush(QColor("#38BDF8") if is_hi else active_col)
+            p.drawEllipse(c, rad, rad)
+        p.end()
+
+    def _hit_test(self, pos: QPointF) -> int | None:
+        pts = self._curves[self._active_channel]
+        best_idx = None
+        best_d = 10.0
+        for idx, pt in enumerate(pts):
+            c = self._pt_to_px(pt)
+            d = ((c.x() - pos.x()) ** 2 + (c.y() - pos.y()) ** 2) ** 0.5
+            if d <= best_d:
+                best_d = d
+                best_idx = idx
+        return best_idx
+
+    def mousePressEvent(self, event) -> None:
+        pos = QPointF(event.pos())
+        pts = self._curves[self._active_channel]
+        hit = self._hit_test(pos)
+        if event.button() == Qt.RightButton:
+            if hit is not None and 0 < hit < len(pts) - 1:
+                pts.pop(hit)
+                self._hover_idx = None
+                self.update()
+                self.curve_changed.emit()
+                self.curve_released.emit()
+            event.accept()
+            return
+        if event.button() == Qt.LeftButton:
+            self.curve_pressed.emit()
+            if hit is not None:
+                self._drag_idx = hit
+            else:
+                nx, ny = self._px_to_pt(pos)
+                nx = max(0.02, min(0.98, nx))
+                pts.append((nx, ny))
+                pts.sort(key=lambda item: item[0])
+                self._drag_idx = pts.index((nx, ny))
+                self.curve_changed.emit()
+            self.update()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        pos = QPointF(event.pos())
+        pts = self._curves[self._active_channel]
+        if self._drag_idx is not None:
+            nx, ny = self._px_to_pt(pos)
+            idx = self._drag_idx
+            if idx == 0:
+                nx = 0.0
+            elif idx == len(pts) - 1:
+                nx = 1.0
+            else:
+                min_x = pts[idx - 1][0] + 0.02
+                max_x = pts[idx + 1][0] - 0.02
+                nx = max(min_x, min(max_x, nx))
+            pts[idx] = (nx, ny)
+            self.update()
+            self.curve_changed.emit()
+            event.accept()
+            return
+        prev_h = self._hover_idx
+        self._hover_idx = self._hit_test(pos)
+        self.setCursor(Qt.PointingHandCursor if self._hover_idx is not None else Qt.CrossCursor)
+        if prev_h != self._hover_idx:
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._drag_idx is not None:
+            self._drag_idx = None
+            self.curve_released.emit()
+            self.update()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            hit = self._hit_test(QPointF(event.pos()))
+            pts = self._curves[self._active_channel]
+            if hit is not None and 0 < hit < len(pts) - 1:
+                pts.pop(hit)
+                self._drag_idx = None
+                self._hover_idx = None
+                self.update()
+                self.curve_changed.emit()
+                self.curve_released.emit()
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
+
+class _CollapsibleDrawer(QWidget):
+    """Compact Lightroom-style collapsible drawer for Advanced Fine Tune controls."""
+
+    def __init__(self, title: str, parent: QWidget | None = None, expanded: bool = False) -> None:
+        super().__init__(parent)
+        self._title = title
+        self._expanded = bool(expanded)
+        self._has_active = False
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 4, 0, 2)
+        outer.setSpacing(4)
+
+        self.btn_toggle = QPushButton(self)
+        self.btn_toggle.setObjectName("FineTuneDrawerBtn")
+        self.btn_toggle.setCheckable(True)
+        self.btn_toggle.setChecked(self._expanded)
+        self.btn_toggle.setFixedHeight(24)
+        self.btn_toggle.setCursor(Qt.PointingHandCursor)
+        self.btn_toggle.setStyleSheet(
+            """
+            QPushButton#FineTuneDrawerBtn {
+                text-align: left;
+                padding: 2px 8px;
+                background: rgba(128, 145, 165, 0.12);
+                border: 1px solid rgba(128, 145, 165, 0.28);
+                border-radius: 4px;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+                font-weight: 600;
+            }
+            QPushButton#FineTuneDrawerBtn:hover {
+                background: rgba(56, 152, 236, 0.14);
+                border-color: rgba(56, 152, 236, 0.45);
+            }
+            """
+        )
+        self.btn_toggle.clicked.connect(self._on_toggled)
+        outer.addWidget(self.btn_toggle)
+
+        self.body = QWidget(self)
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(4, 2, 2, 4)
+        self.body_layout.setSpacing(5)
+        self.body.setVisible(self._expanded)
+        outer.addWidget(self.body)
+        self._refresh_label()
+
+    def _refresh_label(self) -> None:
+        arrow = "▾" if self._expanded else "▸"
+        dot = " ●" if self._has_active else ""
+        self.btn_toggle.setText(f"{arrow}  {self._title}{dot}")
+
+    def _on_toggled(self, checked: bool) -> None:
+        self._expanded = bool(checked)
+        self.body.setVisible(self._expanded)
+        self.body.updateGeometry()
+        self.updateGeometry()
+        if self.parentWidget() is not None:
+            self.parentWidget().updateGeometry()
+        self._refresh_label()
+
+    def set_active_indicator(self, active: bool) -> None:
+        active_b = bool(active)
+        if self._has_active != active_b:
+            self._has_active = active_b
+            self._refresh_label()
 
 
 class _RemovableChipWidget(QFrame):
@@ -1226,7 +1647,8 @@ class _DescriptiveTagRowWidget(QFrame):
         hbox.addWidget(self.lbl)
 
         if total_selection_count > 1:
-            self.lbl_count = QLabel(f"({tag_count})", self)
+            cnt_text = "(All)" if tag_count >= total_selection_count else f"({tag_count})"
+            self.lbl_count = QLabel(cnt_text, self)
             self.lbl_count.setObjectName("TagCountLabel")
             hbox.addWidget(self.lbl_count)
 
@@ -1759,14 +2181,44 @@ def _make_cross_icon(size: int = 16) -> QIcon:
     return icon
 
 
+def _make_pin_icon(size: int = 16, color: str = "#0066CC") -> QIcon:
+    """Creates a subtle map pin icon shown while editing a geotag."""
+    icon = QIcon()
+    for mode, col in [(QIcon.Normal, color), (QIcon.Active, "#004D99"), (QIcon.Selected, "#004D99")]:
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        cx = size * 0.5
+        top_y = size * 0.14
+        r = size * 0.27
+        tip_y = size * 0.88
+        path = QPainterPath()
+        path.moveTo(cx, tip_y)
+        path.quadTo(cx - r * 1.15, size * 0.54, cx - r, top_y + r)
+        path.arcTo(QRectF(cx - r, top_y, r * 2.0, r * 2.0), 180.0, -180.0)
+        path.quadTo(cx + r * 1.15, size * 0.54, cx, tip_y)
+        path.closeSubpath()
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(QColor(col)))
+        p.drawPath(path)
+        p.setBrush(QBrush(QColor("#FFFFFF")))
+        p.drawEllipse(QPointF(cx, top_y + r), r * 0.42, r * 0.42)
+        p.end()
+        icon.addPixmap(pm, mode)
+    return icon
+
+
 class _GeotagInput(QLineEdit):
     """
     WLPG-style Geotag input field featuring sub-2ms gazetteer autocomplete,
-    a 'Searching...' status indicator, background Nominatim lookup, and [✕] clear action.
+    a 'Searching...' status indicator, background Nominatim lookup,
+    [✕] clear action on hover, and a focus-only map pin action for adjusting coordinates.
     """
 
     place_selected = Signal(str, float, float)  # formatted_name, lat, lon
     geotag_cleared = Signal()
+    adjust_pin_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1809,6 +2261,14 @@ class _GeotagInput(QLineEdit):
                 }
             """)
 
+        self.act_pin = self.addAction(
+            _make_pin_icon(16),
+            QLineEdit.TrailingPosition,
+        )
+        self.act_pin.setToolTip("Adjust location on map...")
+        self.act_pin.setVisible(False)
+        self.act_pin.triggered.connect(self.adjust_pin_requested.emit)
+
         self.act_clear = self.addAction(
             _make_cross_icon(16),
             QLineEdit.TrailingPosition,
@@ -1830,8 +2290,13 @@ class _GeotagInput(QLineEdit):
         self.setCursorPosition(0)
         self.setToolTip(text if text.strip() else "")
 
+    def focusInEvent(self, event: Any) -> None:
+        super().focusInEvent(event)
+        self.act_pin.setVisible(True)
+
     def focusOutEvent(self, event: Any) -> None:
         super().focusOutEvent(event)
+        self.act_pin.setVisible(False)
         self.setCursorPosition(0)
 
     def enterEvent(self, event: Any) -> None:
@@ -1959,18 +2424,78 @@ class _GeotagInput(QLineEdit):
 
 
 class _FineTuneGroup(QFrame):
-    """Rounded card group box for Fine-Tune controls matching media_1792165772919_087b03d2.png."""
+    """Rounded card group box for Fine-Tune controls with optional collapsible header."""
 
     def __init__(self, title: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("FineTuneGroup")
-        self.vbox = QVBoxLayout(self)
-        self.vbox.setContentsMargins(8, 6, 8, 8)
-        self.vbox.setSpacing(4)
+        self._title = title
+        self._collapsible = False
+        self._expanded = True
+        self._has_active = False
 
-        lbl = QLabel(title, self)
-        lbl.setObjectName("FineTuneGroupTitle")
-        self.vbox.addWidget(lbl)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 6, 8, 8)
+        outer.setSpacing(4)
+
+        self.btn_header = QPushButton(title, self)
+        self.btn_header.setObjectName("FineTuneGroupTitle")
+        self.btn_header.setFlat(True)
+        self.btn_header.setStyleSheet(
+            """
+            QPushButton#FineTuneGroupTitle {
+                text-align: left;
+                border: none;
+                background: transparent;
+                padding: 0;
+            }
+            """
+        )
+        self.btn_header.clicked.connect(self._on_header_clicked)
+        outer.addWidget(self.btn_header)
+
+        self.body = QWidget(self)
+        self.body.setStyleSheet("background: transparent; border: none;")
+        self.vbox = QVBoxLayout(self.body)
+        self.vbox.setContentsMargins(0, 0, 0, 0)
+        self.vbox.setSpacing(4)
+        outer.addWidget(self.body)
+        self._refresh_header()
+
+    def _refresh_header(self) -> None:
+        dot = " ●" if self._has_active else ""
+        if self._collapsible:
+            arrow = "▾ " if self._expanded else "▸ "
+            self.btn_header.setText(f"{arrow}{self._title}{dot}")
+            self.btn_header.setCursor(Qt.PointingHandCursor)
+        else:
+            self.btn_header.setText(f"{self._title}{dot}")
+            self.btn_header.setCursor(Qt.ArrowCursor)
+
+    def _on_header_clicked(self) -> None:
+        if self._collapsible:
+            self.set_expanded(not self._expanded)
+
+    def set_title(self, title: str) -> None:
+        self._title = title
+        self._refresh_header()
+
+    def set_collapsible(self, collapsible: bool) -> None:
+        self._collapsible = bool(collapsible)
+        if not self._collapsible:
+            self.set_expanded(True)
+        self._refresh_header()
+
+    def set_expanded(self, expanded: bool) -> None:
+        self._expanded = bool(expanded)
+        self.body.setVisible(self._expanded)
+        self._refresh_header()
+
+    def set_active_indicator(self, active: bool) -> None:
+        active_b = bool(active)
+        if self._has_active != active_b:
+            self._has_active = active_b
+            self._refresh_header()
 
 
 class _NoHorizontalScrollArea(QScrollArea):
@@ -2142,10 +2667,26 @@ class TagAndCaptionDock(QDockWidget):
 
     # Signals for Fine-Tune adjustments
     fine_tune_exposure_changed = Signal(int, int, int, int, int)   # brightness, contrast, shadows, highlights, clarity
+    fine_tune_exposure_ext_changed = Signal(int, int)              # whites, blacks
+    fine_tune_smart_enhance_changed = Signal(int)                  # smart_enhance (0..100)
+    fine_tune_structure_changed = Signal(int)                      # structure (-100..100)
     fine_tune_color_changed = Signal(int, int, int, int)           # temp, tint, saturation, dehaze
     fine_tune_straighten_changed = Signal(float)                   # angle
     fine_tune_detail_changed = Signal(int, int)                    # sharpen, denoise
+    fine_tune_detail_ext_changed = Signal(int, int, int, int, int, int) # denoise_chroma, grain_amount, grain_size, sharpen_masking, sharpen_radius, denoise_detail
+    fine_tune_curve_changed = Signal(dict)                         # {"rgb": [...], "r": [...], "g": [...], "b": [...]}
+    fine_tune_hsl_changed = Signal(dict, dict, dict)               # hue, sat, lum dicts
+    fine_tune_region_changed = Signal(str, dict)                   # region_name, region_dict
+    region_scope_changed = Signal(str)                             # "whole"|"subject"|"background"|"sky"
+    region_mask_preview_toggled = Signal(str)                      # "subject"|"background"|"sky"|""
+    region_mask_fill_toggled = Signal(bool)                        # False=outline only, True=red fill+outline
+    region_brush_mode_changed = Signal(str, str, int, bool)        # region, mode ("paint"|"erase"|""), brush_size, smart_select
+    region_brush_cleared = Signal(str)                             # region
+    region_mask_invert_requested = Signal(str)                     # region
+    wb_eyedropper_toggled = Signal(bool)
+    fine_tune_look_profile_changed = Signal(str, int)              # effect_key_or_cube, intensity (0..200)
     fine_tune_optics_changed = Signal(int)                         # vignette
+    fine_tune_optics_ext_changed = Signal(int, int, int, int)      # vignette, vignette_feather, orton_glow, golden_hour
     fine_tune_levels_changed = Signal(int, int)                    # black_point, white_point
     fine_tune_reset_requested = Signal()                           # reset all adjustments to default
     fine_tune_auto_adjust = Signal()
@@ -2155,6 +2696,8 @@ class TagAndCaptionDock(QDockWidget):
     compare_ended = Signal()
     fine_tune_slider_pressed = Signal()
     fine_tune_slider_released = Signal(str)
+    dock_mode_changed = Signal(str)  # "info"|"fine_tune"|"depth_light"|"" (when hidden)
+    pane_interacted = Signal()       # emitted when user clicks inside the right pane (excluding Add people input)
 
     # Signals for Depth & Light adjustments
     depth_bokeh_changed = Signal(int, int, int, int, int)    # blur, focal_plane, glow, boundary_shift, boundary_feather
@@ -2165,6 +2708,7 @@ class TagAndCaptionDock(QDockWidget):
     remove_background_requested = Signal()
     mask_preview_toggled = Signal(bool)                      # live ruby mask overlay
     map_location_selected = Signal(list, str, float, float)  # media_ids, label, lat, lon
+    adjust_geotag_requested = Signal()
     ocr_rescan_requested = Signal(str)                       # preferred backend key
     ocr_text_edited = Signal(str)                            # edited or cleared OCR text
 
@@ -2203,10 +2747,39 @@ class TagAndCaptionDock(QDockWidget):
         self._ft_timer.setInterval(16)
         self._ft_timer.timeout.connect(self._flush_fine_tune_emits)
         self._pending_ft_exposure = False
+        self._pending_ft_exposure_ext = False
+        self._pending_ft_smart_enhance = False
+        self._pending_ft_structure = False
         self._pending_ft_color = False
         self._pending_ft_optics = False
         self._pending_ft_straighten = False
         self._pending_ft_detail = False
+        self._pending_ft_curve = False
+        self._pending_ft_hsl = False
+        self._pending_ft_detail_ext = False
+        self._pending_ft_region = False
+        self._pending_ft_look = False
+        self._fine_tune_advanced_mode = False
+        self._active_region_scope: str = "whole"
+        self._last_preview_region: str = "subject"
+        self._region_edits: dict[str, dict[str, Any]] = {}
+        self._global_region_mirror: dict[str, Any] = {
+            "brightness": 0,
+            "contrast": 0,
+            "shadows": 0,
+            "highlights": 0,
+            "whites": 0,
+            "blacks": 0,
+            "clarity": 0,
+            "temperature": 0,
+            "tint": 0,
+            "saturation": 0,
+            "dehaze": 0,
+            "curve_rgb": [(0.0, 0.0), (1.0, 1.0)],
+            "curve_r": [(0.0, 0.0), (1.0, 1.0)],
+            "curve_g": [(0.0, 0.0), (1.0, 1.0)],
+            "curve_b": [(0.0, 0.0), (1.0, 1.0)],
+        }
 
         # Outer Container & Header Row with close '✕' button
         self.container = QFrame(self)
@@ -2225,9 +2798,9 @@ class TagAndCaptionDock(QDockWidget):
 
         # Subtle Header Row with small '✕' button in top right (matches WLPG screenshots)
         header_row = QWidget(self.container)
-        header_row.setFixedHeight(24)
+        header_row.setFixedHeight(18)
         h_layout = QHBoxLayout(header_row)
-        h_layout.setContentsMargins(8, 4, 6, 0)
+        h_layout.setContentsMargins(6, 1, 6, 0)
         h_layout.addStretch(1)
 
         self.btn_close_dock = QPushButton("✕", header_row)
@@ -2269,6 +2842,19 @@ class TagAndCaptionDock(QDockWidget):
 
         self.setWidget(self.container)
         self._apply_stylesheet()
+        self.set_dark_mode(False)
+        self.container.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.MouseButtonPress and watched is self.container:
+            if not (hasattr(self, "txt_add_person") and self.txt_add_person.underMouse()):
+                self.pane_interacted.emit()
+        return super().eventFilter(watched, event)
+
+    def mousePressEvent(self, event: Any) -> None:
+        if not (hasattr(self, "txt_add_person") and self.txt_add_person.underMouse()):
+            self.pane_interacted.emit()
+        super().mousePressEvent(event)
 
     def sizeHint(self) -> QSize:
         return QSize(310, 600) if getattr(self, "_current_mode", "info") in ("fine_tune", "depth_light") else QSize(280, 600)
@@ -2289,7 +2875,10 @@ class TagAndCaptionDock(QDockWidget):
 
     def set_mode(self, mode: Literal["info", "fine_tune", "depth_light"]) -> None:
         """Switches between Tag & Caption (Ctrl+I), Fine-Tune (Ctrl+F), and Depth & Light."""
+        prev_mode = getattr(self, "_current_mode", "info")
         self._current_mode = mode
+        if prev_mode == "fine_tune" and mode != "fine_tune":
+            self.clear_mask_editing_session()
         if mode == "depth_light":
             self.setMinimumWidth(285)
             self.mode_stack.setCurrentIndex(2)
@@ -2301,6 +2890,26 @@ class TagAndCaptionDock(QDockWidget):
             self.mode_stack.setCurrentIndex(0)
         self.updateGeometry()
         self.show()
+        self.dock_mode_changed.emit(mode)
+
+    def showEvent(self, event: Any) -> None:
+        super().showEvent(event)
+        self.dock_mode_changed.emit(getattr(self, "_current_mode", "info"))
+
+    def hideEvent(self, event: Any) -> None:
+        if getattr(self, "_current_mode", "info") == "fine_tune":
+            self.clear_mask_editing_session()
+        self.dock_mode_changed.emit("")
+        super().hideEvent(event)
+
+    def clear_mask_editing_session(self) -> None:
+        """Clears active mask overlay & brush editing when Fine Tune (Advanced) is closed."""
+        self._clear_region_brush_buttons()
+        self._set_mask_preview_visible(False)
+        self.region_mask_preview_toggled.emit("")
+        self.region_brush_mode_changed.emit("", "", self.slider_region_brush_size.value() if hasattr(self, "slider_region_brush_size") else 40, True)
+        if getattr(self, "_active_region_scope", "whole") != "whole":
+            self.set_active_region_scope("whole")
 
     def focus_filename_rename(self) -> None:
         """Switches to Information mode, reveals dock, and focuses filename input with select-all."""
@@ -2311,6 +2920,15 @@ class TagAndCaptionDock(QDockWidget):
             self.stack_filename.start_edit()
             self.txt_filename.setFocus()
             self.txt_filename.selectAll()
+
+    def focus_geotag_input(self) -> None:
+        """Switches to Information mode, reveals dock, and focuses geotag input so edit actions appear."""
+        self.set_mode("info")
+        self.show()
+        self.raise_()
+        if hasattr(self, "txt_geotag"):
+            self.txt_geotag.setFocus()
+            self.txt_geotag.selectAll()
 
     def current_mode(self) -> str:
         return self._current_mode
@@ -2426,6 +3044,7 @@ class TagAndCaptionDock(QDockWidget):
         self.txt_geotag.returnPressed.connect(self._on_geotag_committed)
         self.txt_geotag.place_selected.connect(self._on_place_selected)
         self.txt_geotag.geotag_cleared.connect(self._on_geotag_cleared)
+        self.txt_geotag.adjust_pin_requested.connect(self.adjust_geotag_requested.emit)
         top_vbox.addWidget(self.txt_geotag)
 
         # 3. Caption
@@ -2859,18 +3478,321 @@ class TagAndCaptionDock(QDockWidget):
     # Page 2: Fine-Tune Adjustments Pane (media_1792165772919_087b03d2.png)
     # -------------------------------------------------------------------------
     def _build_fine_tune_page(self) -> QWidget:
-        scroll = _NoHorizontalScrollArea()
+        page_wrap = QWidget()
+        page_vbox = QVBoxLayout(page_wrap)
+        page_vbox.setContentsMargins(0, 0, 0, 0)
+        page_vbox.setSpacing(4)
+
+        # Header Bar: Basic | Advanced segmented toggle (always pinned at top)
+        mode_bar_wrap = QWidget(page_wrap)
+        mode_bar = QHBoxLayout(mode_bar_wrap)
+        mode_bar.setContentsMargins(8, 0, 8, 2)
+        mode_bar.setSpacing(4)
+        lbl_mode = QLabel("Mode:", mode_bar_wrap)
+        lbl_mode.setObjectName("SliderHeaderLabel")
+        mode_bar.addWidget(lbl_mode)
+        mode_bar.addStretch(1)
+
+        self.btn_ft_basic = QPushButton("Basic", mode_bar_wrap)
+        self.btn_ft_basic.setObjectName("FineTunePillBtn")
+        self.btn_ft_basic.setCheckable(True)
+        self.btn_ft_basic.setFixedHeight(22)
+        self.btn_ft_basic.setCursor(Qt.PointingHandCursor)
+        self.btn_ft_basic.clicked.connect(lambda: self.set_fine_tune_advanced_mode(False))
+
+        self.btn_ft_advanced = QPushButton("Advanced", mode_bar_wrap)
+        self.btn_ft_advanced.setObjectName("FineTunePillBtn")
+        self.btn_ft_advanced.setCheckable(True)
+        self.btn_ft_advanced.setFixedHeight(22)
+        self.btn_ft_advanced.setCursor(Qt.PointingHandCursor)
+        self.btn_ft_advanced.clicked.connect(lambda: self.set_fine_tune_advanced_mode(True))
+
+        mode_bar.addWidget(self.btn_ft_basic)
+        self.btn_ft_advanced.setFixedWidth(74)
+        self.btn_ft_basic.setFixedWidth(56)
+        mode_bar.addWidget(self.btn_ft_advanced)
+        page_vbox.addWidget(mode_bar_wrap)
+
+        # Pinned Histogram slot (Advanced mode: freezes Histogram above the scroll area)
+        self.ft_pinned_hist_slot = QFrame(page_wrap)
+        self.ft_pinned_hist_slot.setObjectName("FineTuneGroup")
+        self._pinned_hist_layout = QVBoxLayout(self.ft_pinned_hist_slot)
+        self._pinned_hist_layout.setContentsMargins(8, 4, 8, 4)
+        self._pinned_hist_layout.setSpacing(2)
+        self.ft_pinned_hist_slot.setVisible(False)
+        page_vbox.addWidget(self.ft_pinned_hist_slot)
+
+        scroll = _NoHorizontalScrollArea(page_wrap)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        page_vbox.addWidget(scroll, 1)
 
         content = QWidget(scroll)
         vbox = QVBoxLayout(content)
-        vbox.setContentsMargins(8, 2, 8, 8)
+        vbox.setContentsMargins(8, 0, 8, 8)
         vbox.setSpacing(8)
 
+        # Phase 1 Regional Masking Scope Bar (Visible in Advanced Mode)
+        # Group 0 (Advanced): Mask (styled identically to Adjust exposure)
+        self._grp_mask = _FineTuneGroup("Mask", content)
+        self.region_scope_widget = QWidget(self._grp_mask)
+        reg_vbox = QVBoxLayout(self.region_scope_widget)
+        reg_vbox.setContentsMargins(0, 2, 0, 2)
+        reg_vbox.setSpacing(7)
+
+        # Row 1: Mask: [ Show | Hide ]
+        mask_vis_row = QHBoxLayout()
+        mask_vis_row.setContentsMargins(0, 0, 0, 0)
+        mask_vis_row.setSpacing(6)
+        lbl_mvis = QLabel("Mask:", self.region_scope_widget)
+        lbl_mvis.setObjectName("SliderHeaderLabel")
+        lbl_mvis.setFixedWidth(68)
+        mask_vis_row.addWidget(lbl_mvis)
+
+        vis_seg = QHBoxLayout()
+        vis_seg.setContentsMargins(0, 0, 0, 0)
+        vis_seg.setSpacing(4)
+        self.btn_mask_show = QPushButton("Show", self.region_scope_widget)
+        self.btn_mask_show.setObjectName("FineTuneSubBtn")
+        self.btn_mask_show.setCheckable(True)
+        self.btn_mask_show.setFixedHeight(24)
+        self.btn_mask_show.setCursor(Qt.PointingHandCursor)
+        self.btn_mask_show.setToolTip("Show mask overlay on the photo (even when Whole Photo is selected)")
+
+        self.btn_mask_hide = QPushButton("Hide", self.region_scope_widget)
+        self.btn_mask_hide.setObjectName("FineTuneSubBtn")
+        self.btn_mask_hide.setCheckable(True)
+        self.btn_mask_hide.setChecked(True)
+        self.btn_mask_hide.setFixedHeight(24)
+        self.btn_mask_hide.setCursor(Qt.PointingHandCursor)
+        self.btn_mask_hide.setToolTip("Hide mask overlay (adjustments still apply to the selected region)")
+
+        self.btn_mask_fill = QPushButton("", self.region_scope_widget)
+        self.btn_mask_fill.setObjectName("FineTuneSubBtn")
+        self.btn_mask_fill.setCheckable(True)
+        self.btn_mask_fill.setChecked(True)
+        self.btn_mask_fill.setFixedSize(26, 24)
+        self.btn_mask_fill.setIcon(self._make_mask_fill_icon(True, 16))
+        self.btn_mask_fill.setIconSize(QSize(16, 16))
+        self.btn_mask_fill.setCursor(Qt.PointingHandCursor)
+        self.btn_mask_fill.setToolTip("Toggle red mask fill (on = red fill + outline, off = dotted outline only; temporarily hides fill while dragging sliders)")
+        self.btn_mask_fill.toggled.connect(self._on_mask_fill_toggled)
+
+        # Alias kept for backward compatibility
+        self.btn_region_mask_preview = self.btn_mask_show
+        self.btn_mask_show.clicked.connect(lambda _=False: self._set_mask_preview_visible(True))
+        self.btn_mask_hide.clicked.connect(lambda _=False: self._set_mask_preview_visible(False))
+        vis_seg.addWidget(self.btn_mask_show, 1)
+        vis_seg.addWidget(self.btn_mask_hide, 1)
+        vis_seg.addWidget(self.btn_mask_fill, 0)
+        mask_vis_row.addLayout(vis_seg, 1)
+        reg_vbox.addLayout(mask_vis_row)
+
+        # Row 2: Auto Mask: Pure Icon-Only Tiles (hover tooltip shows name & description)
+        auto_row = QHBoxLayout()
+        auto_row.setContentsMargins(0, 0, 0, 0)
+        auto_row.setSpacing(6)
+        lbl_auto = QLabel("Auto Mask:", self.region_scope_widget)
+        lbl_auto.setObjectName("SliderHeaderLabel")
+        lbl_auto.setFixedWidth(68)
+        auto_row.addWidget(lbl_auto)
+
+        reg_pills = QHBoxLayout()
+        reg_pills.setSpacing(4)
+        reg_pills.setContentsMargins(0, 0, 0, 0)
+        self._region_scope_buttons: dict[str, QPushButton] = {}
+        self._region_scope_tips = {
+            "whole": "Whole Photo\nApply Fine Tune adjustments to the entire image",
+            "subject": "Subject\nAutomatically isolate and adjust the main person or subject",
+            "background": "Background\nAutomatically isolate and adjust the background behind the subject",
+            "sky": "Sky\nAutomatically detect and adjust the sky region",
+        }
+        for r_key in ("whole", "subject", "background", "sky"):
+            rb = QPushButton("", self.region_scope_widget)
+            rb.setObjectName("FineTuneIconTileBtn")
+            rb.setCheckable(True)
+            rb.setChecked(r_key == "whole")
+            rb.setFixedHeight(30)
+            rb.setIcon(self._make_mask_tool_icon(r_key, 20, is_checked=(r_key == "whole")))
+            rb.setIconSize(QSize(20, 20))
+            rb.setCursor(Qt.PointingHandCursor)
+            rb.setToolTip(self._region_scope_tips[r_key])
+            rb.clicked.connect(lambda _=False, rk=r_key: self.set_active_region_scope(rk))
+            reg_pills.addWidget(rb, 1)
+            self._region_scope_buttons[r_key] = rb
+        auto_row.addLayout(reg_pills, 1)
+        reg_vbox.addLayout(auto_row)
+
+        # Row 3: Edit Mask: Photoshop-style Add (+) / Subtract (-) Smart Brush toggles
+        tool_row = QHBoxLayout()
+        tool_row.setContentsMargins(0, 0, 0, 0)
+        tool_row.setSpacing(6)
+        lbl_edit = QLabel("Edit Mask:", self.region_scope_widget)
+        lbl_edit.setObjectName("SliderHeaderLabel")
+        lbl_edit.setFixedWidth(68)
+        tool_row.addWidget(lbl_edit)
+
+        edit_bar = QHBoxLayout()
+        edit_bar.setContentsMargins(0, 0, 0, 0)
+        edit_bar.setSpacing(4)
+
+        self.btn_region_paint = QPushButton("", self.region_scope_widget)
+        self.btn_region_paint.setObjectName("FineTuneIconTileBtn")
+        self.btn_region_paint.setCheckable(True)
+        self.btn_region_paint.setFixedHeight(30)
+        self.btn_region_paint.setIcon(self._make_mask_tool_icon("add", 18))
+        self.btn_region_paint.setIconSize(QSize(18, 18))
+        self.btn_region_paint.setCursor(Qt.PointingHandCursor)
+        self.btn_region_paint.setToolTip("Add to Mask (+)\nSmart brush: drag on the photo to add areas to the mask (automatically snaps to edges)")
+        self.btn_region_paint.clicked.connect(lambda checked: self._on_region_brush_toggled("paint", checked))
+        edit_bar.addWidget(self.btn_region_paint, 1)
+
+        self.btn_region_erase = QPushButton("", self.region_scope_widget)
+        self.btn_region_erase.setObjectName("FineTuneIconTileBtn")
+        self.btn_region_erase.setCheckable(True)
+        self.btn_region_erase.setFixedHeight(30)
+        self.btn_region_erase.setIcon(self._make_mask_tool_icon("subtract", 18))
+        self.btn_region_erase.setIconSize(QSize(18, 18))
+        self.btn_region_erase.setCursor(Qt.PointingHandCursor)
+        self.btn_region_erase.setToolTip("Subtract from Mask (−)\nSmart brush: drag on the photo to remove areas from the mask (automatically snaps to edges)")
+        self.btn_region_erase.clicked.connect(lambda checked: self._on_region_brush_toggled("erase", checked))
+        edit_bar.addWidget(self.btn_region_erase, 1)
+
+        self.btn_mask_invert = QPushButton("", self.region_scope_widget)
+        self.btn_mask_invert.setObjectName("FineTuneIconTileBtn")
+        self.btn_mask_invert.setFixedHeight(30)
+        self.btn_mask_invert.setIcon(self._make_mask_tool_icon("invert", 18))
+        self.btn_mask_invert.setIconSize(QSize(18, 18))
+        self.btn_mask_invert.setCursor(Qt.PointingHandCursor)
+        self.btn_mask_invert.setToolTip("Invert Mask\nFlip selected and unselected areas of the mask")
+        self.btn_mask_invert.clicked.connect(self._on_mask_invert_clicked)
+        edit_bar.addWidget(self.btn_mask_invert, 1)
+
+        tool_row.addLayout(edit_bar, 1)
+        reg_vbox.addLayout(tool_row)
+
+        # Row 4: Brush size + Clear mask (visible when a sub-region or brush is active)
+        self.region_brush_row_widget = QWidget(self.region_scope_widget)
+        brush_col = QVBoxLayout(self.region_brush_row_widget)
+        brush_col.setContentsMargins(0, 0, 0, 0)
+        brush_col.setSpacing(5)
+
+        size_row = QHBoxLayout()
+        size_row.setContentsMargins(0, 0, 0, 0)
+        size_row.setSpacing(6)
+        lbl_bsz = QLabel("Brush size:", self.region_brush_row_widget)
+        lbl_bsz.setObjectName("SliderHeaderLabel")
+        lbl_bsz.setFixedWidth(68)
+        size_row.addWidget(lbl_bsz)
+
+        self.slider_region_brush_size = QSlider(Qt.Horizontal, self.region_brush_row_widget)
+        self.slider_region_brush_size.setRange(10, 120)
+        self.slider_region_brush_size.setValue(40)
+        self.slider_region_brush_size.setFixedHeight(16)
+        self.slider_region_brush_size.setCursor(Qt.SizeHorCursor)
+        self.slider_region_brush_size.setToolTip("Adjust the brush radius (10–120 px)")
+        self.slider_region_brush_size.valueChanged.connect(self._on_region_brush_size_changed)
+        size_row.addWidget(self.slider_region_brush_size, 1)
+
+        self.lbl_brush_size_val = QLabel("40px", self.region_brush_row_widget)
+        self.lbl_brush_size_val.setObjectName("val_lbl")
+        self.lbl_brush_size_val.setFixedWidth(30)
+        self.lbl_brush_size_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        size_row.addWidget(self.lbl_brush_size_val)
+        brush_col.addLayout(size_row)
+
+        # Row 5: Clear mask + Reset edits
+        clr_row = QHBoxLayout()
+        clr_row.setContentsMargins(0, 0, 0, 0)
+        clr_row.setSpacing(6)
+        self.btn_region_brush_clear = QPushButton("Clear mask", self.region_brush_row_widget)
+        self.btn_region_brush_clear.setObjectName("FineTuneSubBtn")
+        self.btn_region_brush_clear.setFixedHeight(22)
+        self.btn_region_brush_clear.setCursor(Qt.PointingHandCursor)
+        self.btn_region_brush_clear.setToolTip("Clear all manual brush strokes on this mask")
+        self.btn_region_brush_clear.clicked.connect(self._on_region_brush_clear)
+        clr_row.addWidget(self.btn_region_brush_clear)
+
+        self.btn_region_reset = QPushButton("Reset edits", self.region_scope_widget)
+        self.btn_region_reset.setObjectName("FineTuneSubBtn")
+        self.btn_region_reset.setFixedHeight(22)
+        self.btn_region_reset.setVisible(False)
+        self.btn_region_reset.setCursor(Qt.PointingHandCursor)
+        self.btn_region_reset.setToolTip("Reset all exposure & color slider edits for this region")
+        self.btn_region_reset.clicked.connect(self._reset_active_region)
+        clr_row.addWidget(self.btn_region_reset)
+        clr_row.addStretch(1)
+        brush_col.addLayout(clr_row)
+
+        self.region_brush_row_widget.setVisible(False)
+        reg_vbox.addWidget(self.region_brush_row_widget)
+
+        self._grp_mask.vbox.addWidget(self.region_scope_widget)
+        vbox.addWidget(self._grp_mask)
+
+        # Group 0b: Presets (Look Profiles + .cube 3D LUT + Amount)
+        self._grp_presets = _FineTuneGroup("Presets", content)
+        self.look_profile_widget = QWidget(self._grp_presets)
+        look_vbox = QVBoxLayout(self.look_profile_widget)
+        look_vbox.setContentsMargins(0, 0, 0, 0)
+        look_vbox.setSpacing(4)
+        look_top = QHBoxLayout()
+        look_top.setContentsMargins(0, 0, 0, 0)
+        look_top.setSpacing(5)
+        lbl_look = QLabel("Look:", self.look_profile_widget)
+        lbl_look.setObjectName("SliderHeaderLabel")
+        look_top.addWidget(lbl_look)
+        self.cmb_look_profile = QComboBox(self.look_profile_widget)
+        self.cmb_look_profile.setFixedHeight(22)
+        for lbl_p, key_p in (
+            ("As Shot", "none"),
+            ("Natural", "natural"),
+            ("Warm Print", "warm_print"),
+            ("Vivid", "vivid"),
+            ("Portrait", "portrait"),
+            ("Monochrome", "monochrome"),
+        ):
+            self.cmb_look_profile.addItem(lbl_p, key_p)
+        self.cmb_look_profile.setToolTip("Apply a non-destructive color look profile or .cube 3D LUT")
+        self.cmb_look_profile.currentIndexChanged.connect(self._on_look_profile_combo_changed)
+        look_top.addWidget(self.cmb_look_profile, 1)
+
+        self.btn_import_cube_lut = QPushButton("LUT...", self.look_profile_widget)
+        self.btn_import_cube_lut.setObjectName("FineTuneSubBtn")
+        self.btn_import_cube_lut.setFixedHeight(22)
+        self.btn_import_cube_lut.setCursor(Qt.PointingHandCursor)
+        self.btn_import_cube_lut.setToolTip("Import a .cube 3D LUT file")
+        self.btn_import_cube_lut.clicked.connect(self._on_import_cube_lut_clicked)
+        look_top.addWidget(self.btn_import_cube_lut)
+        look_vbox.addLayout(look_top)
+
+        self.ft_slider_look_amount = self._make_aero_slider(0, 200, 100)
+        self.ft_slider_look_amount.setValue(100)
+        self.ft_slider_look_amount.setEnabled(False)
+        look_vbox.addWidget(self._make_slider_header("Profile amount", self.ft_slider_look_amount))
+        look_vbox.addWidget(self.ft_slider_look_amount)
+        self.ft_slider_look_amount.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+        self.ft_slider_look_amount.valueChanged.connect(self._emit_fine_tune_look)
+        self.ft_slider_look_amount.sliderReleased.connect(
+            lambda: self._on_fine_tune_slider_released("Look Profile Amount")
+        )
+        self._grp_presets.vbox.addWidget(self.look_profile_widget)
+        vbox.addWidget(self._grp_presets)
+
         # Group 1: Adjust exposure
-        grp_exp = _FineTuneGroup("Adjust exposure", content)
+        self._grp_exp = _FineTuneGroup("Adjust exposure", content)
+        grp_exp = self._grp_exp
+        self.ft_slider_smart_enhance = self._make_aero_slider(0, 100, 0)
+        self.ft_slider_smart_enhance.set_track_gradient([(0.0, "#CBD5E1"), (0.5, "#60A5FA"), (1.0, "#2563EB")])
+        grp_exp.vbox.addWidget(self._make_slider_header("Smart enhance", self.ft_slider_smart_enhance))
+        grp_exp.vbox.addWidget(self.ft_slider_smart_enhance)
+        self.ft_slider_smart_enhance.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+        self.ft_slider_smart_enhance.valueChanged.connect(self._emit_fine_tune_smart_enhance)
+        self.ft_slider_smart_enhance.sliderReleased.connect(
+            lambda: self._on_fine_tune_slider_released("Smart Enhance")
+        )
+
         self.ft_slider_brightness = self._make_aero_slider(-100, 100, 0)
         grp_exp.vbox.addWidget(self._make_slider_header("Brightness", self.ft_slider_brightness))
         grp_exp.vbox.addWidget(self.ft_slider_brightness)
@@ -2887,20 +3809,135 @@ class TagAndCaptionDock(QDockWidget):
         grp_exp.vbox.addWidget(self._make_slider_header("Highlights", self.ft_slider_highlights))
         grp_exp.vbox.addWidget(self.ft_slider_highlights)
 
+        # Advanced Exposure Controls (Whites & Blacks)
+        self.adv_exposure_ext_widget = QWidget(grp_exp)
+        adv_exp_layout = QVBoxLayout(self.adv_exposure_ext_widget)
+        adv_exp_layout.setContentsMargins(0, 0, 0, 0)
+        adv_exp_layout.setSpacing(5)
+
+        self.ft_slider_whites = self._make_aero_slider(-100, 100, 0)
+        adv_exp_layout.addWidget(self._make_slider_header("Whites", self.ft_slider_whites))
+        adv_exp_layout.addWidget(self.ft_slider_whites)
+
+        self.ft_slider_blacks = self._make_aero_slider(-100, 100, 0)
+        adv_exp_layout.addWidget(self._make_slider_header("Blacks", self.ft_slider_blacks))
+        adv_exp_layout.addWidget(self.ft_slider_blacks)
+
+        for s_ext in (self.ft_slider_whites, self.ft_slider_blacks):
+            s_ext.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+            s_ext.valueChanged.connect(self._emit_fine_tune_exposure_ext)
+            s_ext.sliderReleased.connect(
+                lambda: self._on_fine_tune_slider_released("Adjust Exposure")
+            )
+
+        self.ft_slider_structure = self._make_aero_slider(-100, 100, 0)
+        adv_exp_layout.addWidget(self._make_slider_header("Structure", self.ft_slider_structure))
+        adv_exp_layout.addWidget(self.ft_slider_structure)
+        self.ft_slider_structure.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+        self.ft_slider_structure.valueChanged.connect(self._emit_fine_tune_structure)
+        self.ft_slider_structure.sliderReleased.connect(
+            lambda: self._on_fine_tune_slider_released("Structure")
+        )
+        grp_exp.vbox.addWidget(self.adv_exposure_ext_widget)
+
         self.ft_slider_clarity = self._make_aero_slider(-100, 100, 0)
         grp_exp.vbox.addWidget(self._make_slider_header("Clarity", self.ft_slider_clarity))
         grp_exp.vbox.addWidget(self.ft_slider_clarity)
 
+        self.histogram_container = QWidget(grp_exp)
+        hist_c_vbox = QVBoxLayout(self.histogram_container)
+        hist_c_vbox.setContentsMargins(0, 0, 0, 0)
+        hist_c_vbox.setSpacing(2)
+
         hist_header = self._make_slider_header("Histogram")
-        grp_exp.vbox.addWidget(hist_header)
         self.lbl_hist_levels = hist_header.findChild(QLabel, "val_lbl")
         if self.lbl_hist_levels:
             self.lbl_hist_levels.setText("0 - 255")
-        self.histogram_widget = HistogramWidget(grp_exp)
+        self.btn_pin_histogram = QPushButton("📌", hist_header)
+        self.btn_pin_histogram.setObjectName("FineTuneSubBtn")
+        self.btn_pin_histogram.setCheckable(True)
+        self.btn_pin_histogram.setFixedSize(22, 18)
+        self.btn_pin_histogram.setCursor(Qt.PointingHandCursor)
+        self.btn_pin_histogram.setToolTip("Pin Histogram to top of Fine Tune pane")
+        self.btn_pin_histogram.toggled.connect(lambda c: self.set_histogram_pinned(c))
+        if isinstance(hist_header.layout(), QHBoxLayout):
+            hist_header.layout().addWidget(self.btn_pin_histogram)
+        hist_c_vbox.addWidget(hist_header)
+
+        self.histogram_widget = HistogramWidget(self.histogram_container)
         self.histogram_widget.points_changed.connect(self._on_histogram_points_changed)
         self.histogram_widget.slider_pressed.connect(self.fine_tune_slider_pressed.emit)
         self.histogram_widget.slider_released.connect(self.fine_tune_slider_released.emit)
-        grp_exp.vbox.addWidget(self.histogram_widget)
+        hist_c_vbox.addWidget(self.histogram_widget)
+        self._exp_hist_insert_idx = grp_exp.vbox.count()
+        grp_exp.vbox.addWidget(self.histogram_container)
+
+        # Advanced Drawer: Tone Curve (Coloured circle channels + taller plot + Point Curve presets & Reset below)
+        self.drawer_tone_curve = _CollapsibleDrawer("Tone Curve", grp_exp, expanded=False)
+        curve_ch_row = QHBoxLayout()
+        curve_ch_row.setSpacing(6)
+        curve_ch_row.setContentsMargins(2, 2, 2, 2)
+        self._curve_ch_buttons: dict[str, QPushButton] = {}
+        ch_tips = {
+            "rgb": "RGB Master Tone Curve",
+            "r": "Red Channel Tone Curve",
+            "g": "Green Channel Tone Curve",
+            "b": "Blue Channel Tone Curve",
+        }
+        for ch_key in ("rgb", "r", "g", "b"):
+            b_ch = QPushButton("", self.drawer_tone_curve.body)
+            b_ch.setObjectName("CurveCircleBtn")
+            b_ch.setCheckable(True)
+            b_ch.setChecked(ch_key == "rgb")
+            b_ch.setFixedSize(26, 24)
+            b_ch.setIcon(self._make_curve_channel_icon(ch_key, is_checked=(ch_key == "rgb")))
+            b_ch.setIconSize(QSize(18, 20))
+            b_ch.setCursor(Qt.PointingHandCursor)
+            b_ch.setToolTip(ch_tips[ch_key])
+            b_ch.clicked.connect(lambda _=False, k=ch_key: self._select_curve_channel(k))
+            curve_ch_row.addWidget(b_ch)
+            self._curve_ch_buttons[ch_key] = b_ch
+        curve_ch_row.addStretch(1)
+        self.drawer_tone_curve.body_layout.addLayout(curve_ch_row)
+
+        self.tone_curve_widget = _ToneCurveCanvas(self.drawer_tone_curve.body)
+        self.histogram_widget.histogram_updated.connect(self.tone_curve_widget.set_histogram_counts)
+        self.tone_curve_widget.curve_pressed.connect(self.fine_tune_slider_pressed.emit)
+        self.tone_curve_widget.curve_changed.connect(self._emit_fine_tune_curve)
+        self.tone_curve_widget.curve_released.connect(
+            lambda: self._on_fine_tune_slider_released("Tone Curve")
+        )
+        self.drawer_tone_curve.body_layout.addWidget(self.tone_curve_widget)
+
+        curve_bot_row = QHBoxLayout()
+        curve_bot_row.setSpacing(6)
+        curve_bot_row.setContentsMargins(2, 2, 2, 0)
+        lbl_pt_curve = QLabel("Point Curve", self.drawer_tone_curve.body)
+        lbl_pt_curve.setObjectName("SliderHeaderLabel")
+        curve_bot_row.addWidget(lbl_pt_curve)
+
+        self.cmb_curve_preset = QComboBox(self.drawer_tone_curve.body)
+        self.cmb_curve_preset.setFixedHeight(22)
+        self.cmb_curve_preset.addItem("Linear", "linear")
+        self.cmb_curve_preset.addItem("Medium Contrast (S-Curve)", "scurve_med")
+        self.cmb_curve_preset.addItem("Strong Contrast (S-Curve)", "scurve_strong")
+        self.cmb_curve_preset.setToolTip("Choose a Tone Curve preset")
+        self.cmb_curve_preset.currentIndexChanged.connect(self._on_curve_preset_changed)
+        curve_bot_row.addWidget(self.cmb_curve_preset, 1)
+
+        self.btn_curve_scurve = QPushButton("S-Curve", self.drawer_tone_curve.body)
+        self.btn_curve_scurve.setVisible(False)
+        self.btn_curve_scurve.clicked.connect(lambda: self.tone_curve_widget.apply_s_curve_preset())
+
+        self.btn_curve_reset = QPushButton("Reset", self.drawer_tone_curve.body)
+        self.btn_curve_reset.setObjectName("FineTuneSubBtn")
+        self.btn_curve_reset.setFixedHeight(22)
+        self.btn_curve_reset.setMinimumWidth(48)
+        self.btn_curve_reset.setCursor(Qt.PointingHandCursor)
+        self.btn_curve_reset.clicked.connect(self._on_curve_reset_clicked)
+        curve_bot_row.addWidget(self.btn_curve_reset)
+        self.drawer_tone_curve.body_layout.addLayout(curve_bot_row)
+        grp_exp.vbox.addWidget(self.drawer_tone_curve)
 
         for s in (
             self.ft_slider_brightness,
@@ -2917,17 +3954,61 @@ class TagAndCaptionDock(QDockWidget):
 
         vbox.addWidget(grp_exp)
 
-        # Group 2: Adjust color
-        grp_color = _FineTuneGroup("Adjust color", content)
+        # Group 2: Adjust colour
+        self._grp_color = _FineTuneGroup("Adjust colour", content)
+        grp_color = self._grp_color
+        self._wb_presets = (
+            ("as_shot", "As Shot", 0, 0),
+            ("daylight", "Daylight (5500K)", 8, 2),
+            ("cloudy", "Cloudy (6500K)", 22, 5),
+            ("shade", "Shade (7500K)", 35, 8),
+            ("tungsten", "Tungsten (2850K)", -42, -4),
+            ("fluorescent", "Fluorescent (4000K)", -18, 18),
+            ("flash", "Flash (5500K)", 12, 3),
+            ("custom", "Custom", None, None),
+        )
+        wb_row = QHBoxLayout()
+        wb_row.setContentsMargins(0, 0, 0, 2)
+        wb_row.setSpacing(4)
+        lbl_wb = QLabel("White Balance:", grp_color)
+        lbl_wb.setObjectName("SliderHeaderLabel")
+        wb_row.addWidget(lbl_wb)
+        self.cmb_wb_preset = QComboBox(grp_color)
+        self.cmb_wb_preset.setFixedHeight(22)
+        for wb_key, wb_lbl, _t, _ti in self._wb_presets:
+            self.cmb_wb_preset.addItem(wb_lbl, wb_key)
+        self.cmb_wb_preset.setToolTip("White Balance lighting preset (As Shot, Daylight, Cloudy, Shade, Tungsten, Fluorescent, Flash)")
+        self.cmb_wb_preset.currentIndexChanged.connect(self._on_wb_preset_changed)
+        wb_row.addWidget(self.cmb_wb_preset, 1)
+
+        self.btn_wb_eyedropper = QPushButton(grp_color)
+        self.btn_wb_eyedropper.setObjectName("FineTuneActionBtn")
+        self.btn_wb_eyedropper.setCheckable(True)
+        self.btn_wb_eyedropper.setFixedSize(26, 22)
+        self.btn_wb_eyedropper.setIcon(make_wlpg_icon("eyedropper", 15))
+        self.btn_wb_eyedropper.setIconSize(QSize(15, 15))
+        self.btn_wb_eyedropper.setCursor(Qt.PointingHandCursor)
+        self.btn_wb_eyedropper.setToolTip(
+            "White Balance Eyedropper\nClick any neutral gray or white area on the photo to auto-balance Temperature & Tint"
+        )
+        self.btn_wb_eyedropper.toggled.connect(self.wb_eyedropper_toggled.emit)
+        wb_row.addWidget(self.btn_wb_eyedropper)
+        self.wb_picker_row_widget = QWidget(grp_color)
+        self.wb_picker_row_widget.setLayout(wb_row)
+        grp_color.vbox.addWidget(self.wb_picker_row_widget)
+
         self.ft_slider_temp = self._make_aero_slider(-100, 100, 0)
-        grp_color.vbox.addWidget(self._make_slider_header("Color temperature", self.ft_slider_temp))
+        self.ft_slider_temp.set_track_gradient([(0.0, "#4B8BF5"), (0.5, "#E2E8F0"), (1.0, "#F5A623")])
+        grp_color.vbox.addWidget(self._make_slider_header("Colour temperature", self.ft_slider_temp))
         grp_color.vbox.addWidget(self.ft_slider_temp)
 
         self.ft_slider_tint = self._make_aero_slider(-100, 100, 0)
+        self.ft_slider_tint.set_track_gradient([(0.0, "#34C759"), (0.5, "#E2E8F0"), (1.0, "#D946EF")])
         grp_color.vbox.addWidget(self._make_slider_header("Tint", self.ft_slider_tint))
         grp_color.vbox.addWidget(self.ft_slider_tint)
 
         self.ft_slider_sat = self._make_aero_slider(-100, 100, 0)
+        self.ft_slider_sat.set_track_gradient([(0.0, "#8E9AAF"), (0.45, "#CBD5E1"), (0.75, "#F97316"), (1.0, "#EC4899")])
         grp_color.vbox.addWidget(self._make_slider_header("Saturation", self.ft_slider_sat))
         grp_color.vbox.addWidget(self.ft_slider_sat)
 
@@ -2942,10 +4023,61 @@ class TagAndCaptionDock(QDockWidget):
                 lambda: self._on_fine_tune_slider_released("Adjust Color")
             )
 
+        # Advanced Drawer: 8-Band Color Mixer (HSL)
+        from src.imaging.opencv_engine import HSL_COLOR_BANDS
+
+        self.drawer_color_mixer = _CollapsibleDrawer("Colour Mixer (HSL)", grp_color, expanded=False)
+        hsl_tab_row = QHBoxLayout()
+        hsl_tab_row.setSpacing(3)
+        self._hsl_mode: str = "sat"
+        self._hsl_hue_vals: dict[str, int] = {k: 0 for k, _, _, _ in HSL_COLOR_BANDS}
+        self._hsl_sat_vals: dict[str, int] = {k: 0 for k, _, _, _ in HSL_COLOR_BANDS}
+        self._hsl_lum_vals: dict[str, int] = {k: 0 for k, _, _, _ in HSL_COLOR_BANDS}
+        self._hsl_tab_buttons: dict[str, QPushButton] = {}
+        for m_key, m_lbl in (("hue", "Hue"), ("sat", "Saturation"), ("lum", "Luminance")):
+            bt = QPushButton(m_lbl, self.drawer_color_mixer.body)
+            bt.setObjectName("FineTuneSubBtn")
+            bt.setCheckable(True)
+            bt.setChecked(m_key == "sat")
+            bt.setFixedHeight(20)
+            bt.setMinimumWidth(38 if m_key == "hue" else 64)
+            bt.setCursor(Qt.PointingHandCursor)
+            bt.clicked.connect(lambda _=False, k=m_key: self._select_hsl_mode(k))
+            hsl_tab_row.addWidget(bt)
+            self._hsl_tab_buttons[m_key] = bt
+        hsl_tab_row.addStretch(1)
+        self.btn_hsl_reset = QPushButton("Reset", self.drawer_color_mixer.body)
+        self.btn_hsl_reset.setObjectName("FineTuneSubBtn")
+        self.btn_hsl_reset.setFixedHeight(20)
+        self.btn_hsl_reset.setMinimumWidth(44)
+        self.btn_hsl_reset.setCursor(Qt.PointingHandCursor)
+        self.btn_hsl_reset.clicked.connect(self._reset_hsl_sliders)
+        hsl_tab_row.addWidget(self.btn_hsl_reset)
+        self.drawer_color_mixer.body_layout.addLayout(hsl_tab_row)
+
+        self._hsl_sliders: dict[str, _AeroFineTuneSlider] = {}
+        for band_key, band_name, _, hex_col in HSL_COLOR_BANDS:
+            sl = self._make_aero_slider(-100, 100, 0)
+            hdr = self._make_slider_header(f"● {band_name}", sl)
+            lbl_hdr = hdr.findChild(QLabel, "SliderHeaderLabel")
+            if lbl_hdr is not None:
+                lbl_hdr.setStyleSheet(f"color: {hex_col}; font-weight: 600;")
+            sl.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+            sl.valueChanged.connect(lambda val, bk=band_key: self._on_hsl_slider_changed(bk, val))
+            sl.sliderReleased.connect(
+                lambda: self._on_fine_tune_slider_released("Color Mixer (HSL)")
+            )
+            self.drawer_color_mixer.body_layout.addWidget(hdr)
+            self.drawer_color_mixer.body_layout.addWidget(sl)
+            self._hsl_sliders[band_key] = sl
+        self._update_hsl_slider_gradients()
+        grp_color.vbox.addWidget(self.drawer_color_mixer)
+
         vbox.addWidget(grp_color)
 
         # Group 3: Straighten photo
-        grp_str = _FineTuneGroup("Straighten photo", content)
+        self._grp_str = _FineTuneGroup("Straighten photo", content)
+        grp_str = self._grp_str
         str_row = QHBoxLayout()
         self.btn_auto_straighten = QPushButton("Auto straighten", grp_str)
         self.btn_auto_straighten.setObjectName("FineTuneActionBtn")
@@ -2966,32 +4098,87 @@ class TagAndCaptionDock(QDockWidget):
         grp_str.vbox.addWidget(self.ft_slider_straighten)
         vbox.addWidget(grp_str)
 
-        # Group 4: Adjust detail
-        grp_det = _FineTuneGroup("Adjust detail", content)
-        self.ft_slider_sharpen = self._make_aero_slider(0, 100, 0)
-        grp_det.vbox.addWidget(self._make_slider_header("Sharpen", self.ft_slider_sharpen))
-        grp_det.vbox.addWidget(self.ft_slider_sharpen)
+        # Group 4: Adjust detail (Reduce noise first, Sharpen second; each with its Advanced controls directly beneath)
+        self._grp_det = _FineTuneGroup("Adjust detail", content)
+        grp_det = self._grp_det
 
         self.ft_slider_denoise = self._make_aero_slider(0, 100, 0)
         grp_det.vbox.addWidget(self._make_slider_header("Reduce noise", self.ft_slider_denoise))
         grp_det.vbox.addWidget(self.ft_slider_denoise)
-
-        self.ft_slider_sharpen.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
-        self.ft_slider_sharpen.valueChanged.connect(self._emit_fine_tune_detail)
-        self.ft_slider_sharpen.sliderReleased.connect(
-            lambda: self._on_fine_tune_slider_released("Adjust Detail")
-        )
-
         self.ft_slider_denoise.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
         self.ft_slider_denoise.valueChanged.connect(self._emit_fine_tune_detail)
         self.ft_slider_denoise.sliderReleased.connect(
             lambda: self._on_fine_tune_slider_released("Adjust Detail")
         )
 
+        # Advanced Noise Reduction Controls (directly below Reduce noise)
+        self.adv_denoise_ext_widget = QWidget(grp_det)
+        adv_dn_layout = QVBoxLayout(self.adv_denoise_ext_widget)
+        adv_dn_layout.setContentsMargins(0, 2, 0, 0)
+        adv_dn_layout.setSpacing(5)
+
+        self.ft_slider_denoise_chroma = self._make_aero_slider(0, 100, 0)
+        adv_dn_layout.addWidget(self._make_slider_header("Colour noise", self.ft_slider_denoise_chroma))
+        adv_dn_layout.addWidget(self.ft_slider_denoise_chroma)
+        self.ft_slider_denoise_chroma.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+        self.ft_slider_denoise_chroma.valueChanged.connect(self._emit_fine_tune_detail_ext)
+        self.ft_slider_denoise_chroma.sliderReleased.connect(
+            lambda: self._on_fine_tune_slider_released("Color Noise Reduction")
+        )
+
+        self.ft_slider_denoise_detail = self._make_aero_slider(0, 100, 50)
+        self.ft_slider_denoise_detail.setValue(50)
+        self.ft_slider_denoise_detail.setEnabled(False)
+        adv_dn_layout.addWidget(self._make_slider_header("Detail preservation", self.ft_slider_denoise_detail))
+        adv_dn_layout.addWidget(self.ft_slider_denoise_detail)
+        self.ft_slider_denoise_detail.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+        self.ft_slider_denoise_detail.valueChanged.connect(self._emit_fine_tune_detail_ext)
+        self.ft_slider_denoise_detail.sliderReleased.connect(
+            lambda: self._on_fine_tune_slider_released("Denoise Detail")
+        )
+        grp_det.vbox.addWidget(self.adv_denoise_ext_widget)
+
+        self.ft_slider_sharpen = self._make_aero_slider(0, 100, 0)
+        grp_det.vbox.addWidget(self._make_slider_header("Sharpen", self.ft_slider_sharpen))
+        grp_det.vbox.addWidget(self.ft_slider_sharpen)
+        self.ft_slider_sharpen.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+        self.ft_slider_sharpen.valueChanged.connect(self._emit_fine_tune_detail)
+        self.ft_slider_sharpen.sliderReleased.connect(
+            lambda: self._on_fine_tune_slider_released("Adjust Detail")
+        )
+
+        # Advanced Sharpen Controls (directly below Sharpen)
+        self.adv_detail_ext_widget = QWidget(grp_det)
+        adv_det_layout = QVBoxLayout(self.adv_detail_ext_widget)
+        adv_det_layout.setContentsMargins(0, 2, 0, 0)
+        adv_det_layout.setSpacing(5)
+
+        self.ft_slider_sharpen_radius = self._make_aero_slider(0, 100, 25)
+        adv_det_layout.addWidget(self._make_slider_header("Sharpen radius", self.ft_slider_sharpen_radius))
+        adv_det_layout.addWidget(self.ft_slider_sharpen_radius)
+        self.ft_slider_sharpen_radius.setEnabled(False)
+        self.ft_slider_sharpen_radius.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+        self.ft_slider_sharpen_radius.valueChanged.connect(self._emit_fine_tune_detail_ext)
+        self.ft_slider_sharpen_radius.sliderReleased.connect(
+            lambda: self._on_fine_tune_slider_released("Sharpen Radius")
+        )
+
+        self.ft_slider_sharpen_masking = self._make_aero_slider(0, 100, 0)
+        adv_det_layout.addWidget(self._make_slider_header("Sharpen masking", self.ft_slider_sharpen_masking))
+        adv_det_layout.addWidget(self.ft_slider_sharpen_masking)
+        self.ft_slider_sharpen_masking.setEnabled(False)
+        self.ft_slider_sharpen_masking.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+        self.ft_slider_sharpen_masking.valueChanged.connect(self._emit_fine_tune_detail_ext)
+        self.ft_slider_sharpen_masking.sliderReleased.connect(
+            lambda: self._on_fine_tune_slider_released("Sharpen Masking")
+        )
+        grp_det.vbox.addWidget(self.adv_detail_ext_widget)
+
         vbox.addWidget(grp_det)
 
-        # Group 5: Vignette & Optics
-        grp_optics = _FineTuneGroup("Vignette & optics", content)
+        # Group 5: Vignette & Grain (Effects)
+        self._grp_optics = _FineTuneGroup("Vignette & optics", content)
+        grp_optics = self._grp_optics
         self.ft_slider_vignette = self._make_aero_slider(-100, 100, 0)
         grp_optics.vbox.addWidget(self._make_slider_header("Vignette", self.ft_slider_vignette))
         grp_optics.vbox.addWidget(self.ft_slider_vignette)
@@ -3001,6 +4188,58 @@ class TagAndCaptionDock(QDockWidget):
         self.ft_slider_vignette.sliderReleased.connect(
             lambda: self._on_fine_tune_slider_released("Adjust Vignette")
         )
+
+        # Advanced Effects Controls: Vignette Feather + Film Grain
+        self.adv_optics_ext_widget = QWidget(grp_optics)
+        adv_opt_layout = QVBoxLayout(self.adv_optics_ext_widget)
+        adv_opt_layout.setContentsMargins(0, 2, 0, 0)
+        adv_opt_layout.setSpacing(5)
+
+        self.ft_slider_vignette_feather = self._make_aero_slider(0, 100, 50)
+        self.ft_slider_vignette_feather.setValue(50)
+        self.ft_slider_vignette_feather.setEnabled(False)
+        adv_opt_layout.addWidget(self._make_slider_header("Vignette feather", self.ft_slider_vignette_feather))
+        adv_opt_layout.addWidget(self.ft_slider_vignette_feather)
+
+        self.ft_slider_grain_amount = self._make_aero_slider(0, 100, 0)
+        adv_opt_layout.addWidget(self._make_slider_header("Film grain", self.ft_slider_grain_amount))
+        adv_opt_layout.addWidget(self.ft_slider_grain_amount)
+
+        self.ft_slider_grain_size = self._make_aero_slider(0, 100, 25)
+        self.ft_slider_grain_size.setValue(25)
+        self.ft_slider_grain_size.setEnabled(False)
+        adv_opt_layout.addWidget(self._make_slider_header("Grain size", self.ft_slider_grain_size))
+        adv_opt_layout.addWidget(self.ft_slider_grain_size)
+
+        self.ft_slider_vignette_feather.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+        self.ft_slider_vignette_feather.valueChanged.connect(self._emit_fine_tune_optics)
+        self.ft_slider_vignette_feather.sliderReleased.connect(
+            lambda: self._on_fine_tune_slider_released("Adjust Vignette Feather")
+        )
+
+        for s in (self.ft_slider_grain_amount, self.ft_slider_grain_size):
+            s.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+            s.valueChanged.connect(self._emit_fine_tune_detail_ext)
+            s.sliderReleased.connect(
+                lambda: self._on_fine_tune_slider_released("Film Grain")
+            )
+
+        self.ft_slider_orton_glow = self._make_aero_slider(0, 100, 0)
+        adv_opt_layout.addWidget(self._make_slider_header("Orton glow", self.ft_slider_orton_glow))
+        adv_opt_layout.addWidget(self.ft_slider_orton_glow)
+
+        self.ft_slider_golden_hour = self._make_aero_slider(0, 100, 0)
+        self.ft_slider_golden_hour.set_track_gradient([(0.0, "#CBD5E1"), (0.5, "#FBBF24"), (1.0, "#EA580C")])
+        adv_opt_layout.addWidget(self._make_slider_header("Golden hour", self.ft_slider_golden_hour))
+        adv_opt_layout.addWidget(self.ft_slider_golden_hour)
+
+        for s_glow in (self.ft_slider_orton_glow, self.ft_slider_golden_hour):
+            s_glow.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+            s_glow.valueChanged.connect(self._emit_fine_tune_optics)
+            s_glow.sliderReleased.connect(
+                lambda: self._on_fine_tune_slider_released("Atmospheric Glow")
+            )
+        grp_optics.vbox.addWidget(self.adv_optics_ext_widget)
 
         vbox.addWidget(grp_optics)
 
@@ -3030,7 +4269,815 @@ class TagAndCaptionDock(QDockWidget):
         vbox.addStretch(1)
 
         scroll.setWidget(content)
-        return scroll
+
+        # Initialize Basic | Advanced visibility from persisted QSettings (default Basic)
+        try:
+            from PySide6.QtCore import QSettings
+
+            qs = QSettings("PhotoGallery64", "PhotoGallery64")
+            saved_adv = bool(qs.value("ui/fine_tune_advanced", False, type=bool))
+            saved_pin = bool(qs.value("ui/fine_tune_pin_histogram", True, type=bool))
+        except Exception:
+            saved_adv = False
+            saved_pin = True
+        self._histogram_pinned = saved_pin
+        if hasattr(self, "btn_pin_histogram"):
+            self.btn_pin_histogram.blockSignals(True)
+            self.btn_pin_histogram.setChecked(saved_pin)
+            self.btn_pin_histogram.blockSignals(False)
+        self.set_fine_tune_advanced_mode(saved_adv, persist=False)
+
+        self._apply_fine_tune_tooltips()
+        return page_wrap
+
+    def _apply_fine_tune_tooltips(self) -> None:
+        tips = {
+            "btn_ft_basic": "Basic Mode: clean, classic exposure, color, detail, and luminance histogram controls",
+            "btn_ft_advanced": "Advanced Mode: unlocks RGB histogram, Tone Curve, WB Eyedropper, HSL Color Mixer, Film Grain, and Regional Masking",
+            "cmb_look_profile": "Choose a non-destructive color Look Profile or custom .cube 3D LUT",
+            "btn_import_cube_lut": "Import a custom .cube 3D LUT file",
+            "ft_slider_look_amount": "Blend strength (0–200%) of the active Look Profile or .cube LUT",
+            "cmb_wb_preset": "White Balance lighting preset (As Shot, Daylight, Cloudy, Shade, Tungsten, Fluorescent, Flash)",
+            "histogram_widget": "Live tonal histogram — drag the bottom black/white point triangles to clip shadows or highlights",
+            "tone_curve_widget": "Click to add control points, drag to shape tone response, right-click a point to remove it",
+            "drawer_tone_curve": "Expand to shape contrast and color channels with a Tone Curve or 1-click S-Curve preset",
+            "drawer_color_mixer": "Expand to adjust Hue, Saturation, and Luminance across 8 individual color bands",
+            "ft_slider_smart_enhance": "One-slider adaptive enhance: balances shadows, midtone contrast, and vibrance automatically",
+            "ft_slider_brightness": "Exposure: brighten or darken the photo with filmic highlight roll-off (double-click to reset)",
+            "ft_slider_contrast": "Contrast: expand or soften tonal separation between shadows and highlights",
+            "ft_slider_shadows": "Shadows: recover detail in dark areas without washing out blacks",
+            "ft_slider_highlights": "Highlights: pull back bright skies and specular areas to recover detail",
+            "ft_slider_whites": "Whites: set the upper white point brightness",
+            "ft_slider_blacks": "Blacks: deepen or lift the darkest shadow tones",
+            "ft_slider_clarity": "Clarity: boost midtone local contrast for crisp texture and punch",
+            "ft_slider_structure": "Structure: enhance architectural and landscape micro-detail while protecting skin tones and skies",
+            "ft_slider_temp": "Color temperature: shift white balance cooler (blue) or warmer (amber)",
+            "ft_slider_tint": "Tint: fine-tune green vs. magenta white balance cast",
+            "ft_slider_sat": "Saturation: boost color richness while protecting natural skin tones",
+            "ft_slider_dehaze": "Dehaze: cut through atmospheric haze, fog, and low-contrast veil",
+            "ft_slider_straighten": "Straighten angle (-15° to +15°) with automatic edge-free crop",
+            "btn_auto_straighten": "Automatically detect the horizon or dominant lines and straighten the photo",
+            "ft_slider_sharpen": "Sharpen: enhance fine edge crispness in luminance",
+            "ft_slider_sharpen_radius": "Sharpen radius: adjust edge halo width (small for fine detail, larger for soft lenses)",
+            "ft_slider_sharpen_masking": "Sharpen masking: restrict sharpening to real edges so smooth skies stay noise-free",
+            "ft_slider_denoise": "Reduce noise: smooth luminance grain while preserving sharp edges",
+            "ft_slider_denoise_detail": "Detail preservation: keep fine textures crisp while denoising flat areas",
+            "ft_slider_denoise_chroma": "Color noise: remove red/green/blue chroma blotches from high-ISO shots",
+            "ft_slider_vignette": "Vignette: darken or lighten photo corners to draw focus to the center",
+            "ft_slider_vignette_feather": "Vignette feather: control how softly the vignette fades toward the center",
+            "ft_slider_grain_amount": "Film grain: add organic analog film texture",
+            "ft_slider_grain_size": "Grain size: adjust film grain particle coarseness",
+            "ft_slider_orton_glow": "Orton glow: add dreamy highlight bloom and soft contrast",
+            "ft_slider_golden_hour": "Golden hour: bathe highlights and midtones in warm sunset light",
+            "btn_hold_compare": "Click and hold to compare with the original unedited photo (\\)",
+            "btn_reset_default": "Reset all Fine Tune adjustments back to their defaults",
+        }
+        for attr, tip in tips.items():
+            w = getattr(self, attr, None)
+            if w is not None:
+                w.setToolTip(tip)
+
+    def is_fine_tune_advanced_mode(self) -> bool:
+        return bool(getattr(self, "_fine_tune_advanced_mode", False))
+
+    def set_fine_tune_advanced_mode(self, enabled: bool, persist: bool = True) -> None:
+        adv = bool(enabled)
+        self._fine_tune_advanced_mode = adv
+        if hasattr(self, "btn_ft_basic"):
+            self.btn_ft_basic.blockSignals(True)
+            self.btn_ft_basic.setChecked(not adv)
+            self.btn_ft_basic.blockSignals(False)
+        if hasattr(self, "btn_ft_advanced"):
+            self.btn_ft_advanced.blockSignals(True)
+            self.btn_ft_advanced.setChecked(adv)
+            self.btn_ft_advanced.blockSignals(False)
+        if hasattr(self, "histogram_widget"):
+            self.histogram_widget.set_rgb_mode(adv)
+        for attr in (
+            "_grp_mask",
+            "btn_import_cube_lut",
+            "adv_exposure_ext_widget",
+            "drawer_tone_curve",
+            "wb_picker_row_widget",
+            "drawer_color_mixer",
+            "adv_denoise_ext_widget",
+            "adv_detail_ext_widget",
+            "adv_optics_ext_widget",
+        ):
+            w = getattr(self, attr, None)
+            if w is not None:
+                w.setVisible(adv)
+        if hasattr(self, "_grp_optics"):
+            self._grp_optics.set_title("Vignette & grain" if adv else "Vignette & optics")
+        for grp in ("_grp_mask", "_grp_presets", "_grp_exp", "_grp_color", "_grp_str", "_grp_det", "_grp_optics"):
+            g = getattr(self, grp, None)
+            if g is not None:
+                g.set_collapsible(adv)
+        if hasattr(self, "btn_pin_histogram"):
+            self.btn_pin_histogram.setVisible(adv)
+        self._apply_histogram_pin_state()
+        if adv:
+            if hasattr(self, "_grp_str") and abs(self.ft_slider_straighten.value()) == 0:
+                self._grp_str.set_expanded(False)
+            if hasattr(self, "_grp_det") and (
+                self.ft_slider_sharpen.value() == 0
+                and self.ft_slider_denoise.value() == 0
+                and self.ft_slider_denoise_chroma.value() == 0
+            ):
+                self._grp_det.set_expanded(False)
+        else:
+            self.clear_mask_editing_session()
+        if not adv and hasattr(self, "btn_wb_eyedropper") and self.btn_wb_eyedropper.isChecked():
+            self.btn_wb_eyedropper.setChecked(False)
+        if persist:
+            try:
+                from PySide6.QtCore import QSettings
+
+                QSettings("PhotoGallery64", "PhotoGallery64").setValue("ui/fine_tune_advanced", adv)
+            except Exception:
+                pass
+
+    def set_histogram_pinned(self, pinned: bool, persist: bool = True) -> None:
+        self._histogram_pinned = bool(pinned)
+        if hasattr(self, "btn_pin_histogram"):
+            self.btn_pin_histogram.blockSignals(True)
+            self.btn_pin_histogram.setChecked(self._histogram_pinned)
+            self.btn_pin_histogram.blockSignals(False)
+        self._apply_histogram_pin_state()
+        if persist:
+            try:
+                from PySide6.QtCore import QSettings
+
+                QSettings("PhotoGallery64", "PhotoGallery64").setValue(
+                    "ui/fine_tune_pin_histogram", self._histogram_pinned
+                )
+            except Exception:
+                pass
+
+    def _apply_histogram_pin_state(self) -> None:
+        if not hasattr(self, "histogram_container") or not hasattr(self, "ft_pinned_hist_slot"):
+            return
+        should_pin = bool(getattr(self, "_fine_tune_advanced_mode", False)) and bool(
+            getattr(self, "_histogram_pinned", True)
+        )
+        if should_pin:
+            if self.histogram_container.parentWidget() is not self.ft_pinned_hist_slot:
+                self._pinned_hist_layout.addWidget(self.histogram_container)
+            self.ft_pinned_hist_slot.setVisible(True)
+        else:
+            self.ft_pinned_hist_slot.setVisible(False)
+            if hasattr(self, "_grp_exp") and self.histogram_container.parentWidget() is not self._grp_exp:
+                idx = getattr(self, "_exp_hist_insert_idx", -1)
+                if 0 <= idx <= self._grp_exp.vbox.count():
+                    self._grp_exp.vbox.insertWidget(idx, self.histogram_container)
+                else:
+                    self._grp_exp.vbox.addWidget(self.histogram_container)
+
+    def _on_mask_invert_clicked(self) -> None:
+        reg = getattr(self, "_active_region_scope", "whole")
+        if reg == "whole":
+            self.set_active_region_scope("custom")
+            reg = "custom"
+        self._set_mask_preview_visible(True)
+        self.region_mask_invert_requested.emit(reg)
+
+    def _capture_active_region_sliders(self) -> dict[str, Any]:
+        curves = self.tone_curve_widget.get_curves() if hasattr(self, "tone_curve_widget") else {}
+        return {
+            "brightness": int(self.ft_slider_brightness.value()),
+            "contrast": int(self.ft_slider_contrast.value()),
+            "shadows": int(self.ft_slider_shadows.value()),
+            "highlights": int(self.ft_slider_highlights.value()),
+            "whites": int(self.ft_slider_whites.value()) if hasattr(self, "ft_slider_whites") else 0,
+            "blacks": int(self.ft_slider_blacks.value()) if hasattr(self, "ft_slider_blacks") else 0,
+            "clarity": int(self.ft_slider_clarity.value()),
+            "structure": int(self.ft_slider_structure.value()) if hasattr(self, "ft_slider_structure") else 0,
+            "temperature": int(self.ft_slider_temp.value()),
+            "tint": int(self.ft_slider_tint.value()),
+            "saturation": int(self.ft_slider_sat.value()),
+            "dehaze": int(self.ft_slider_dehaze.value()),
+            "curve_rgb": [tuple(p) for p in curves.get("rgb", [(0.0, 0.0), (1.0, 1.0)])],
+            "curve_r": [tuple(p) for p in curves.get("r", [(0.0, 0.0), (1.0, 1.0)])],
+            "curve_g": [tuple(p) for p in curves.get("g", [(0.0, 0.0), (1.0, 1.0)])],
+            "curve_b": [tuple(p) for p in curves.get("b", [(0.0, 0.0), (1.0, 1.0)])],
+        }
+
+    def _load_region_dict_into_sliders(self, data: dict[str, Any]) -> None:
+        self._updating_ui = True
+        try:
+            self.ft_slider_brightness.setValue(int(round(data.get("brightness", 0))))
+            self.ft_slider_contrast.setValue(int(round(data.get("contrast", 0))))
+            self.ft_slider_shadows.setValue(int(round(data.get("shadows", 0))))
+            self.ft_slider_highlights.setValue(int(round(data.get("highlights", 0))))
+            if hasattr(self, "ft_slider_whites"):
+                self.ft_slider_whites.setValue(int(round(data.get("whites", 0))))
+            if hasattr(self, "ft_slider_blacks"):
+                self.ft_slider_blacks.setValue(int(round(data.get("blacks", 0))))
+            self.ft_slider_clarity.setValue(int(round(data.get("clarity", 0))))
+            if hasattr(self, "ft_slider_structure"):
+                self.ft_slider_structure.setValue(int(round(data.get("structure", 0))))
+            self.ft_slider_temp.setValue(int(round(data.get("temperature", 0))))
+            self.ft_slider_tint.setValue(int(round(data.get("tint", 0))))
+            self.ft_slider_sat.setValue(int(round(data.get("saturation", 0))))
+            self.ft_slider_dehaze.setValue(int(round(data.get("dehaze", 0))))
+            if hasattr(self, "tone_curve_widget"):
+                self.tone_curve_widget.set_curves(
+                    {
+                        "rgb": [tuple(p) for p in data.get("curve_rgb", [(0.0, 0.0), (1.0, 1.0)])],
+                        "r": [tuple(p) for p in data.get("curve_r", [(0.0, 0.0), (1.0, 1.0)])],
+                        "g": [tuple(p) for p in data.get("curve_g", [(0.0, 0.0), (1.0, 1.0)])],
+                        "b": [tuple(p) for p in data.get("curve_b", [(0.0, 0.0), (1.0, 1.0)])],
+                    }
+                )
+            self._sync_wb_preset_combo()
+            self._update_drawer_indicators()
+        finally:
+            self._updating_ui = False
+
+    def set_active_region_scope(self, region: str) -> None:
+        reg = region if region in ("whole", "subject", "background", "sky", "custom") else "whole"
+        prev = getattr(self, "_active_region_scope", "whole")
+        if prev != reg:
+            if prev == "whole":
+                self._global_region_mirror = self._capture_active_region_sliders()
+            else:
+                self._region_edits[prev] = self._capture_active_region_sliders()
+            self._active_region_scope = reg
+            if reg == "whole":
+                self._load_region_dict_into_sliders(self._global_region_mirror)
+            else:
+                self._load_region_dict_into_sliders(self._region_edits.get(reg, {}))
+
+        for rk, btn in getattr(self, "_region_scope_buttons", {}).items():
+            btn.blockSignals(True)
+            btn.setChecked(rk == reg)
+            btn.blockSignals(False)
+
+        is_sub = reg != "whole"
+        if is_sub:
+            self._last_preview_region = reg
+        if hasattr(self, "btn_mask_show") and hasattr(self, "btn_mask_hide"):
+            self.btn_mask_show.setEnabled(True)
+            self.btn_mask_hide.setEnabled(True)
+            if prev == "whole" and is_sub:
+                # Clicking a specific region (e.g. Sky/Subject/Bg) toggles Show mask on automatically
+                self._set_mask_preview_visible(True)
+            elif self.btn_mask_show.isChecked():
+                preview_reg = reg if is_sub else getattr(self, "_last_preview_region", "subject")
+                self.region_mask_preview_toggled.emit(preview_reg)
+        if hasattr(self, "region_brush_row_widget"):
+            self.region_brush_row_widget.setVisible(is_sub)
+            if not is_sub:
+                self._clear_region_brush_buttons()
+                self.region_brush_mode_changed.emit("", "", self.slider_region_brush_size.value(), True)
+            else:
+                mode = self._active_region_brush_mode()
+                if reg == "custom" and not mode:
+                    self.btn_region_paint.blockSignals(True)
+                    self.btn_region_paint.setChecked(True)
+                    self.btn_region_paint.blockSignals(False)
+                    self._set_mask_preview_visible(True)
+                    mode = "paint"
+                if mode:
+                    self.region_brush_mode_changed.emit(reg, mode, self.slider_region_brush_size.value(), True)
+        if hasattr(self, "ft_slider_smart_enhance"):
+            self.ft_slider_smart_enhance.setEnabled(not is_sub)
+        if hasattr(self, "histogram_widget"):
+            self.histogram_widget.set_handles_enabled(not is_sub)
+        if hasattr(self, "drawer_color_mixer"):
+            self.drawer_color_mixer.setEnabled(not is_sub)
+        self._refresh_region_indicators()
+        self.region_scope_changed.emit(reg)
+
+    def _active_region_brush_mode(self) -> str:
+        if hasattr(self, "btn_region_paint") and self.btn_region_paint.isChecked():
+            return "paint"
+        if hasattr(self, "btn_region_erase") and self.btn_region_erase.isChecked():
+            return "erase"
+        return ""
+
+    def _set_mask_preview_visible(self, visible: bool) -> None:
+        reg = getattr(self, "_active_region_scope", "whole")
+        vis = bool(visible)
+        preview_reg = reg if reg != "whole" else getattr(self, "_last_preview_region", "subject")
+        if hasattr(self, "btn_mask_show") and hasattr(self, "btn_mask_hide"):
+            self.btn_mask_show.blockSignals(True)
+            self.btn_mask_hide.blockSignals(True)
+            self.btn_mask_show.setChecked(vis)
+            self.btn_mask_hide.setChecked(not vis)
+            self.btn_mask_show.blockSignals(False)
+            self.btn_mask_hide.blockSignals(False)
+        self.region_mask_preview_toggled.emit(preview_reg if vis else "")
+
+    @staticmethod
+    def _make_mask_fill_icon(filled: bool, size: int = 16) -> QIcon:
+        """Draw a dotted circle icon; filled red when active, hollow dotted circle when off."""
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(QColor("#E13860") if filled else QColor("#475569"), 1.6, Qt.DotLine)
+        p.setPen(pen)
+        p.setBrush(QColor(225, 56, 96, 170) if filled else Qt.NoBrush)
+        p.drawEllipse(QRectF(2.5, 2.5, size - 5.0, size - 5.0))
+        p.end()
+        return QIcon(pm)
+
+    def _on_mask_fill_toggled(self, checked: bool) -> None:
+        if hasattr(self, "btn_mask_fill"):
+            self.btn_mask_fill.setIcon(self._make_mask_fill_icon(bool(checked), 16))
+        self.region_mask_fill_toggled.emit(bool(checked))
+
+    def _on_brush_tool_clicked(self, *, smart: bool, checked: bool) -> None:
+        if not checked:
+            self._clear_region_brush_buttons()
+            self.region_brush_mode_changed.emit("", "", self.slider_region_brush_size.value(), smart)
+            return
+        if hasattr(self, "btn_brush_normal") and hasattr(self, "btn_brush_smart"):
+            self.btn_brush_normal.blockSignals(True)
+            self.btn_brush_smart.blockSignals(True)
+            self.btn_brush_normal.setChecked(not smart)
+            self.btn_brush_smart.setChecked(smart)
+            self.btn_brush_normal.blockSignals(False)
+            self.btn_brush_smart.blockSignals(False)
+        if getattr(self, "_active_region_scope", "whole") == "whole":
+            self.set_active_region_scope("custom")
+            return
+        if not self._active_region_brush_mode():
+            self.btn_region_paint.blockSignals(True)
+            self.btn_region_paint.setChecked(True)
+            self.btn_region_paint.blockSignals(False)
+        self._set_mask_preview_visible(True)
+        self.region_brush_mode_changed.emit(
+            self._active_region_scope,
+            self._active_region_brush_mode() or "paint",
+            self.slider_region_brush_size.value(),
+            smart,
+        )
+
+    def _clear_region_brush_buttons(self) -> None:
+        for attr in ("btn_region_paint", "btn_region_erase", "btn_brush_normal", "btn_brush_smart"):
+            b = getattr(self, attr, None)
+            if b is not None:
+                b.blockSignals(True)
+                b.setChecked(False)
+                b.blockSignals(False)
+
+    def _on_region_brush_toggled(self, mode: str, checked: bool) -> None:
+        reg = getattr(self, "_active_region_scope", "whole")
+        if not checked:
+            self._clear_region_brush_buttons()
+            self._refresh_region_indicators()
+            self.region_brush_mode_changed.emit("", "", self.slider_region_brush_size.value(), True)
+            return
+        other = self.btn_region_erase if mode == "paint" else self.btn_region_paint
+        other.blockSignals(True)
+        other.setChecked(False)
+        other.blockSignals(False)
+        if reg == "whole":
+            # Clicking + or - while Whole is selected automatically starts a Custom Smart Brush mask
+            self.btn_region_paint.blockSignals(True)
+            self.btn_region_erase.blockSignals(True)
+            self.btn_region_paint.setChecked(mode == "paint")
+            self.btn_region_erase.setChecked(mode == "erase")
+            self.btn_region_paint.blockSignals(False)
+            self.btn_region_erase.blockSignals(False)
+            self.set_active_region_scope("custom")
+            self._set_mask_preview_visible(True)
+            return
+        if hasattr(self, "btn_region_mask_preview") and not self.btn_region_mask_preview.isChecked():
+            self._set_mask_preview_visible(True)
+        self._refresh_region_indicators()
+        self.region_brush_mode_changed.emit(reg, mode, self.slider_region_brush_size.value(), True)
+
+    def _make_mask_tool_icon(
+        self,
+        kind: str,
+        size: int = 20,
+        *,
+        has_edits: bool = False,
+        is_checked: bool = False,
+        is_dark: bool | None = None,
+    ) -> QIcon:
+        """Render bespoke antialiased Photoshop/Lightroom-style vector icons for Auto Mask & Brush tools."""
+        dark = getattr(self, "_is_dark", False) if is_dark is None else bool(is_dark)
+        fg = QColor("#FFFFFF") if is_checked else (QColor("#E2E8F0") if dark else QColor("#1E395B"))
+        accent = QColor("#DBEAFE") if is_checked else (QColor("#60A5FA") if dark else QColor("#2563EB"))
+        fill_soft = QColor(255, 255, 255, 55) if is_checked else (QColor(96, 165, 250, 48) if dark else QColor(37, 99, 235, 38))
+
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        s = float(size)
+
+        if kind == "whole":
+            # Full photo frame with mountain horizon & sun
+            p.setPen(QPen(fg, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(fill_soft)
+            p.drawRoundedRect(QRectF(s * 0.12, s * 0.16, s * 0.76, s * 0.68), 2.5, 2.5)
+            p.setBrush(accent)
+            p.drawEllipse(QRectF(s * 0.24, s * 0.28, s * 0.14, s * 0.14))
+            poly = QPainterPath()
+            poly.moveTo(s * 0.15, s * 0.80)
+            poly.lineTo(s * 0.42, s * 0.50)
+            poly.lineTo(s * 0.58, s * 0.65)
+            poly.lineTo(s * 0.72, s * 0.46)
+            poly.lineTo(s * 0.85, s * 0.80)
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(poly)
+
+        elif kind == "subject":
+            # Portrait subject silhouette (head + shoulders) inside focus brackets
+            p.setPen(QPen(accent, 1.3, Qt.SolidLine, Qt.RoundCap))
+            for x0, y0, dx, dy in (
+                (0.14, 0.16, 0.12, 0.12),
+                (0.86, 0.16, -0.12, 0.12),
+                (0.14, 0.84, 0.12, -0.12),
+                (0.86, 0.84, -0.12, -0.12),
+            ):
+                p.drawLine(QPointF(s * x0, s * y0), QPointF(s * (x0 + dx), s * y0))
+                p.drawLine(QPointF(s * x0, s * y0), QPointF(s * x0, s * (y0 + dy)))
+            p.setPen(QPen(fg, 1.5))
+            p.setBrush(fill_soft)
+            p.drawEllipse(QRectF(s * 0.36, s * 0.20, s * 0.28, s * 0.28))
+            body = QPainterPath()
+            body.moveTo(s * 0.24, s * 0.82)
+            body.quadTo(s * 0.26, s * 0.54, s * 0.50, s * 0.54)
+            body.quadTo(s * 0.74, s * 0.54, s * 0.76, s * 0.82)
+            body.closeSubpath()
+            p.drawPath(body)
+
+        elif kind == "background":
+            # Shaded background frame with dashed cutout person in center
+            p.setPen(QPen(fg, 1.4))
+            p.setBrush(fill_soft)
+            p.drawRoundedRect(QRectF(s * 0.12, s * 0.16, s * 0.76, s * 0.68), 2.5, 2.5)
+            p.setPen(QPen(accent, 1.1, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(QPointF(s * 0.16, s * 0.34), QPointF(s * 0.34, s * 0.18))
+            p.drawLine(QPointF(s * 0.66, s * 0.18), QPointF(s * 0.84, s * 0.34))
+            dash_pen = QPen(fg, 1.3, Qt.DashLine)
+            p.setPen(dash_pen)
+            p.setBrush(QColor("#1E242E") if dark else QColor("#FFFFFF"))
+            p.drawEllipse(QRectF(s * 0.39, s * 0.26, s * 0.22, s * 0.22))
+            cut = QPainterPath()
+            cut.moveTo(s * 0.30, s * 0.82)
+            cut.quadTo(s * 0.32, s * 0.54, s * 0.50, s * 0.54)
+            cut.quadTo(s * 0.68, s * 0.54, s * 0.70, s * 0.82)
+            p.drawPath(cut)
+
+        elif kind == "sky":
+            # Cloud + sun above a crisp horizon line
+            p.setPen(QPen(accent, 1.4, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(QPointF(s * 0.12, s * 0.78), QPointF(s * 0.88, s * 0.78))
+            p.setPen(QPen(fg, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(fill_soft)
+            cloud = QPainterPath()
+            cloud.moveTo(s * 0.26, s * 0.62)
+            cloud.cubicTo(s * 0.14, s * 0.62, s * 0.14, s * 0.42, s * 0.28, s * 0.42)
+            cloud.cubicTo(s * 0.32, s * 0.24, s * 0.58, s * 0.22, s * 0.64, s * 0.38)
+            cloud.cubicTo(s * 0.82, s * 0.38, s * 0.84, s * 0.62, s * 0.68, s * 0.62)
+            cloud.closeSubpath()
+            p.drawPath(cloud)
+
+        elif kind in ("brush", "smart_brush"):
+            # Angled artist paintbrush with soft tip
+            p.setPen(QPen(fg, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(fill_soft)
+            # Handle
+            p.drawLine(QPointF(s * 0.78, s * 0.18), QPointF(s * 0.44, s * 0.52))
+            # Bristle tip drop
+            tip = QPainterPath()
+            tip.moveTo(s * 0.44, s * 0.52)
+            tip.quadTo(s * 0.26, s * 0.52, s * 0.18, s * 0.78)
+            tip.quadTo(s * 0.44, s * 0.72, s * 0.44, s * 0.52)
+            p.drawPath(tip)
+            if kind == "smart_brush":
+                # Magic 4-point sparkle star + dashed edge-snap arc
+                p.setPen(QPen(accent, 1.4, Qt.SolidLine, Qt.RoundCap))
+                cx, cy = s * 0.28, s * 0.26
+                p.drawLine(QPointF(cx - s * 0.12, cy), QPointF(cx + s * 0.12, cy))
+                p.drawLine(QPointF(cx, cy - s * 0.12), QPointF(cx, cy + s * 0.12))
+                p.setPen(QPen(accent, 1.2, Qt.DotLine, Qt.RoundCap))
+                p.setBrush(Qt.NoBrush)
+                p.drawArc(QRectF(s * 0.12, s * 0.40, s * 0.46, s * 0.46), -110 * 16, 170 * 16)
+
+        elif kind in ("add", "subtract"):
+            p.setPen(QPen(fg, 1.5, Qt.SolidLine, Qt.RoundCap))
+            p.setBrush(fill_soft)
+            p.drawEllipse(QRectF(s * 0.16, s * 0.16, s * 0.68, s * 0.68))
+            p.setPen(QPen(fg, 1.9, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(QPointF(s * 0.33, s * 0.50), QPointF(s * 0.67, s * 0.50))
+            if kind == "add":
+                p.drawLine(QPointF(s * 0.50, s * 0.33), QPointF(s * 0.50, s * 0.67))
+
+        elif kind == "invert":
+            # Split-contrast circle (half filled / half outline) representing Mask Invert
+            p.setPen(QPen(fg, 1.5, Qt.SolidLine, Qt.RoundCap))
+            p.setBrush(Qt.NoBrush)
+            rect = QRectF(s * 0.16, s * 0.16, s * 0.68, s * 0.68)
+            p.drawEllipse(rect)
+            half = QPainterPath()
+            half.moveTo(s * 0.50, s * 0.16)
+            half.arcTo(rect, 90, 180)
+            half.closeSubpath()
+            p.setPen(Qt.NoPen)
+            p.setBrush(fg)
+            p.drawPath(half)
+
+        elif kind == "eyedropper":
+            # Crisp vector eyedropper oriented 45 deg
+            p.setPen(QPen(fg, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(fill_soft)
+            # Tip + barrel
+            barrel = QPainterPath()
+            barrel.moveTo(s * 0.18, s * 0.82)
+            barrel.lineTo(s * 0.24, s * 0.68)
+            barrel.lineTo(s * 0.54, s * 0.38)
+            barrel.lineTo(s * 0.62, s * 0.46)
+            barrel.lineTo(s * 0.32, s * 0.76)
+            barrel.closeSubpath()
+            p.drawPath(barrel)
+            # Collar + rubber bulb
+            p.setPen(QPen(accent, 1.8, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(QPointF(s * 0.49, s * 0.33), QPointF(s * 0.67, s * 0.51))
+            bulb = QPainterPath()
+            bulb.moveTo(s * 0.56, s * 0.36)
+            bulb.quadTo(s * 0.74, s * 0.14, s * 0.84, s * 0.24)
+            bulb.quadTo(s * 0.90, s * 0.32, s * 0.64, s * 0.44)
+            p.setBrush(accent)
+            p.setPen(QPen(fg, 1.3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.drawPath(bulb)
+
+        if has_edits:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#F59E0B") if is_checked else QColor("#2563EB"))
+            p.drawEllipse(QRectF(s - 5.5, 1.5, 4.0, 4.0))
+
+        p.end()
+        return QIcon(pm)
+
+    def _on_region_brush_size_changed(self, size: int) -> None:
+        if hasattr(self, "lbl_brush_size_val"):
+            self.lbl_brush_size_val.setText(f"{int(size)}px")
+        reg = getattr(self, "_active_region_scope", "whole")
+        mode = self._active_region_brush_mode()
+        if reg != "whole" and mode:
+            self.region_brush_mode_changed.emit(reg, mode, int(size), True)
+
+    def _on_region_brush_clear(self) -> None:
+        reg = getattr(self, "_active_region_scope", "whole")
+        if reg != "whole":
+            self.region_brush_cleared.emit(reg)
+
+    def _on_region_mask_preview_toggled(self, checked: bool) -> None:
+        reg = getattr(self, "_active_region_scope", "whole")
+        preview_reg = reg if reg != "whole" else getattr(self, "_last_preview_region", "subject")
+        self.region_mask_preview_toggled.emit(preview_reg if checked else "")
+
+    def _reset_active_region(self) -> None:
+        reg = getattr(self, "_active_region_scope", "whole")
+        if reg == "whole":
+            return
+        self._region_edits.pop(reg, None)
+        self._load_region_dict_into_sliders({})
+        self._refresh_region_indicators()
+        self.fine_tune_region_changed.emit(reg, {})
+        self.fine_tune_slider_released.emit(f"Reset {reg.title()} Region")
+
+    def _refresh_region_indicators(self) -> None:
+        from src.imaging.opencv_engine import _region_dict_has_edits
+
+        cur = getattr(self, "_active_region_scope", "whole")
+        tips = getattr(self, "_region_scope_tips", {})
+        for rk, btn in getattr(self, "_region_scope_buttons", {}).items():
+            btn.setText("")
+            if rk == "whole":
+                has_ed = False
+            else:
+                data = self._capture_active_region_sliders() if cur == rk else self._region_edits.get(rk, {})
+                has_ed = _region_dict_has_edits(data)
+            btn.setIcon(self._make_mask_tool_icon(rk, 20, has_edits=has_ed, is_checked=btn.isChecked()))
+            base_tip = tips.get(rk, rk.title())
+            btn.setToolTip(f"{base_tip}\n(Has active adjustments)" if has_ed else base_tip)
+        for t_btn, t_kind in (
+            (getattr(self, "btn_region_paint", None), "add"),
+            (getattr(self, "btn_region_erase", None), "subtract"),
+            (getattr(self, "btn_mask_invert", None), "invert"),
+        ):
+            if t_btn is not None:
+                t_btn.setIcon(self._make_mask_tool_icon(t_kind, 18, is_checked=t_btn.isChecked()))
+        if hasattr(self, "btn_region_reset"):
+            if cur != "whole":
+                has_cur = _region_dict_has_edits(self._capture_active_region_sliders())
+                self.btn_region_reset.setVisible(has_cur)
+            else:
+                self.btn_region_reset.setVisible(False)
+        self._refresh_group_indicators()
+
+    def _refresh_group_indicators(self) -> None:
+        from src.imaging.opencv_engine import _is_identity_curve
+
+        if hasattr(self, "_grp_exp"):
+            exp_sliders = [
+                self.ft_slider_brightness,
+                self.ft_slider_contrast,
+                self.ft_slider_shadows,
+                self.ft_slider_highlights,
+                self.ft_slider_clarity,
+            ]
+            for attr in ("ft_slider_smart_enhance", "ft_slider_whites", "ft_slider_blacks", "ft_slider_structure"):
+                if hasattr(self, attr):
+                    exp_sliders.append(getattr(self, attr))
+            exp_active = (
+                any(abs(s.value()) > 0 for s in exp_sliders)
+                or self.histogram_widget.black_point != 0
+                or self.histogram_widget.white_point != 255
+                or any(not _is_identity_curve(pts) for pts in self.tone_curve_widget.get_curves().values())
+            )
+            self._grp_exp.set_active_indicator(exp_active)
+        if hasattr(self, "_grp_color"):
+            col_active = any(
+                abs(s.value()) > 0
+                for s in (self.ft_slider_temp, self.ft_slider_tint, self.ft_slider_sat, self.ft_slider_dehaze)
+            ) or any(
+                abs(v) > 0
+                for d in (self._hsl_hue_vals, self._hsl_sat_vals, self._hsl_lum_vals)
+                for v in d.values()
+            )
+            self._grp_color.set_active_indicator(col_active)
+        if hasattr(self, "_grp_str"):
+            self._grp_str.set_active_indicator(abs(self.ft_slider_straighten.value()) > 0)
+        if hasattr(self, "_grp_det"):
+            det_active = (
+                self.ft_slider_sharpen.value() > 0
+                or self.ft_slider_denoise.value() > 0
+                or (hasattr(self, "ft_slider_denoise_chroma") and self.ft_slider_denoise_chroma.value() > 0)
+            )
+            self._grp_det.set_active_indicator(det_active)
+        if hasattr(self, "_grp_optics"):
+            opt_active = (
+                abs(self.ft_slider_vignette.value()) > 0
+                or (hasattr(self, "ft_slider_grain_amount") and self.ft_slider_grain_amount.value() > 0)
+                or (hasattr(self, "ft_slider_orton_glow") and self.ft_slider_orton_glow.value() > 0)
+                or (hasattr(self, "ft_slider_golden_hour") and self.ft_slider_golden_hour.value() > 0)
+            )
+            self._grp_optics.set_active_indicator(opt_active)
+        if hasattr(self, "ft_slider_sharpen_radius"):
+            self.ft_slider_sharpen_radius.setEnabled(self.ft_slider_sharpen.value() > 0)
+        if hasattr(self, "ft_slider_sharpen_masking"):
+            self.ft_slider_sharpen_masking.setEnabled(self.ft_slider_sharpen.value() > 0)
+        if hasattr(self, "ft_slider_denoise_detail"):
+            self.ft_slider_denoise_detail.setEnabled(self.ft_slider_denoise.value() > 0)
+        if hasattr(self, "ft_slider_vignette_feather"):
+            self.ft_slider_vignette_feather.setEnabled(abs(self.ft_slider_vignette.value()) > 0)
+        if hasattr(self, "ft_slider_grain_size"):
+            self.ft_slider_grain_size.setEnabled(self.ft_slider_grain_amount.value() > 0)
+
+    def _make_curve_channel_icon(
+        self,
+        channel: str,
+        size: int = 18,
+        *,
+        is_checked: bool = False,
+        is_dark: bool | None = None,
+    ) -> QIcon:
+        """Render Lightroom-style coloured circle channel icons (RGB concentric / R / G / B)."""
+        dark = getattr(self, "_is_dark", False) if is_dark is None else bool(is_dark)
+        col_map = {
+            "rgb": QColor("#F1F5F9") if dark else QColor("#334155"),
+            "r": QColor("#EF4444"),
+            "g": QColor("#22C55E"),
+            "b": QColor("#3B82F6"),
+        }
+        ring_col = col_map.get(channel, QColor("#94A3B8"))
+        pm = QPixmap(size, size + 2)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        cx, cy = size / 2.0, size / 2.0 - 0.5
+        rad = size * 0.33
+        p.setPen(QPen(ring_col, 2.0 if is_checked else 1.7))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(QPointF(cx, cy), rad, rad)
+        if channel == "rgb":
+            p.setPen(Qt.NoPen)
+            p.setBrush(ring_col)
+            p.drawEllipse(QPointF(cx, cy), rad * 0.42, rad * 0.42)
+        if is_checked:
+            p.setPen(QPen(ring_col, 1.8, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(QPointF(size * 0.22, size + 0.5), QPointF(size * 0.78, size + 0.5))
+        p.end()
+        return QIcon(pm)
+
+    def _select_curve_channel(self, channel: str) -> None:
+        for k, btn in getattr(self, "_curve_ch_buttons", {}).items():
+            btn.blockSignals(True)
+            btn.setChecked(k == channel)
+            btn.setIcon(self._make_curve_channel_icon(k, is_checked=(k == channel)))
+            btn.blockSignals(False)
+        if hasattr(self, "tone_curve_widget"):
+            self.tone_curve_widget.set_active_channel(channel)
+
+    def _on_curve_preset_changed(self, idx: int) -> None:
+        if self._updating_ui or not hasattr(self, "cmb_curve_preset") or not hasattr(self, "tone_curve_widget"):
+            return
+        preset = str(self.cmb_curve_preset.itemData(idx) or "linear")
+        ch = self.tone_curve_widget._active_channel
+        if preset == "linear":
+            self.tone_curve_widget.reset_active_channel()
+        elif preset == "scurve_med":
+            self.tone_curve_widget.apply_s_curve_preset()
+        elif preset == "scurve_strong":
+            self.tone_curve_widget._curves[ch] = [
+                (0.0, 0.0),
+                (0.22, 0.14),
+                (0.50, 0.50),
+                (0.78, 0.86),
+                (1.0, 1.0),
+            ]
+            self.tone_curve_widget.update()
+            self.tone_curve_widget.curve_changed.emit()
+            self.tone_curve_widget.curve_released.emit()
+
+    def _on_curve_reset_clicked(self) -> None:
+        if hasattr(self, "cmb_curve_preset"):
+            self.cmb_curve_preset.blockSignals(True)
+            self.cmb_curve_preset.setCurrentIndex(0)
+            self.cmb_curve_preset.blockSignals(False)
+        if hasattr(self, "tone_curve_widget"):
+            self.tone_curve_widget.reset_active_channel()
+
+    def _update_hsl_slider_gradients(self) -> None:
+        from src.imaging.opencv_engine import HSL_COLOR_BANDS
+
+        n = len(HSL_COLOR_BANDS)
+        for idx, (band_key, _, _, hex_col) in enumerate(HSL_COLOR_BANDS):
+            sl = self._hsl_sliders.get(band_key)
+            if sl is None:
+                continue
+            if self._hsl_mode == "hue":
+                prev_col = HSL_COLOR_BANDS[(idx - 1) % n][3]
+                next_col = HSL_COLOR_BANDS[(idx + 1) % n][3]
+                sl.set_track_gradient([(0.0, prev_col), (0.5, hex_col), (1.0, next_col)])
+            elif self._hsl_mode == "sat":
+                sl.set_track_gradient([(0.0, "#7A828E"), (0.5, "#C8D0DA"), (1.0, hex_col)])
+            else:
+                sl.set_track_gradient([(0.0, "#1E242B"), (0.5, hex_col), (1.0, "#F1F5F9")])
+
+    def _select_hsl_mode(self, mode: str) -> None:
+        self._hsl_mode = mode
+        for k, btn in getattr(self, "_hsl_tab_buttons", {}).items():
+            btn.blockSignals(True)
+            btn.setChecked(k == mode)
+            btn.blockSignals(False)
+        self._update_hsl_slider_gradients()
+        store = {"hue": self._hsl_hue_vals, "sat": self._hsl_sat_vals, "lum": self._hsl_lum_vals}[mode]
+        self._updating_ui = True
+        try:
+            for band_key, sl in self._hsl_sliders.items():
+                sl.setValue(int(store.get(band_key, 0)))
+        finally:
+            self._updating_ui = False
+
+    def _on_hsl_slider_changed(self, band_key: str, val: int) -> None:
+        store = {"hue": self._hsl_hue_vals, "sat": self._hsl_sat_vals, "lum": self._hsl_lum_vals}[self._hsl_mode]
+        store[band_key] = int(val)
+        self._update_drawer_indicators()
+        if self._updating_ui:
+            return
+        self._emit_fine_tune_hsl()
+
+    def _reset_hsl_sliders(self) -> None:
+        for d in (self._hsl_hue_vals, self._hsl_sat_vals, self._hsl_lum_vals):
+            for k in d:
+                d[k] = 0
+        self._updating_ui = True
+        try:
+            for sl in self._hsl_sliders.values():
+                sl.setValue(0)
+        finally:
+            self._updating_ui = False
+        self._update_drawer_indicators()
+        self.fine_tune_hsl_changed.emit(
+            dict(self._hsl_hue_vals), dict(self._hsl_sat_vals), dict(self._hsl_lum_vals)
+        )
+        self.fine_tune_slider_released.emit("Reset Color Mixer")
+
+    def _update_drawer_indicators(self) -> None:
+        if hasattr(self, "drawer_tone_curve") and hasattr(self, "tone_curve_widget"):
+            from src.imaging.opencv_engine import _is_identity_curve
+
+            curves = self.tone_curve_widget.get_curves()
+            curve_active = any(not _is_identity_curve(pts) for pts in curves.values())
+            self.drawer_tone_curve.set_active_indicator(curve_active)
+        if hasattr(self, "drawer_color_mixer"):
+            hsl_active = any(
+                abs(v) > 0
+                for d in (self._hsl_hue_vals, self._hsl_sat_vals, self._hsl_lum_vals)
+                for v in d.values()
+            )
+            self.drawer_color_mixer.set_active_indicator(hsl_active)
 
     @staticmethod
     def _make_slider_header(text: str, slider: _AeroFineTuneSlider | None = None, unit: str = "") -> QWidget:
@@ -3052,11 +5099,14 @@ class TagAndCaptionDock(QDockWidget):
         h_layout.addWidget(val_lbl)
 
         if slider is not None:
+            slider._header_widget = container
+            container.setEnabled(slider.isEnabled())
             lbl.setToolTip(f"Double-click to reset {text} to default")
             val_lbl.setToolTip(f"Double-click to reset {text} to default")
 
             def on_double_click(event):
-                slider.setValue(slider.default_val)
+                if slider.isEnabled():
+                    slider.setValue(slider.default_val)
                 event.accept()
 
             lbl.mouseDoubleClickEvent = on_double_click
@@ -3101,6 +5151,58 @@ class TagAndCaptionDock(QDockWidget):
                 self.ft_slider_vignette,
             ):
                 s.setValue(s.default_val)
+            for attr in (
+                "ft_slider_smart_enhance",
+                "ft_slider_whites",
+                "ft_slider_blacks",
+                "ft_slider_structure",
+                "ft_slider_sharpen_radius",
+                "ft_slider_sharpen_masking",
+                "ft_slider_denoise_detail",
+                "ft_slider_denoise_chroma",
+                "ft_slider_grain_amount",
+                "ft_slider_grain_size",
+                "ft_slider_vignette_feather",
+                "ft_slider_orton_glow",
+                "ft_slider_golden_hour",
+            ):
+                sl = getattr(self, attr, None)
+                if sl is not None:
+                    sl.setValue(sl.default_val)
+            self._region_edits = {}
+            self._global_region_mirror = {
+                "brightness": 0, "contrast": 0, "shadows": 0, "highlights": 0,
+                "whites": 0, "blacks": 0, "clarity": 0, "structure": 0,
+                "temperature": 0, "tint": 0, "saturation": 0, "dehaze": 0,
+                "curve_rgb": [(0.0, 0.0), (1.0, 1.0)],
+                "curve_r": [(0.0, 0.0), (1.0, 1.0)],
+                "curve_g": [(0.0, 0.0), (1.0, 1.0)],
+                "curve_b": [(0.0, 0.0), (1.0, 1.0)],
+            }
+            if getattr(self, "_active_region_scope", "whole") != "whole":
+                self._active_region_scope = "whole"
+                for rk, btn in getattr(self, "_region_scope_buttons", {}).items():
+                    btn.blockSignals(True)
+                    btn.setChecked(rk == "whole")
+                    btn.blockSignals(False)
+                self._set_mask_preview_visible(False)
+            if hasattr(self, "tone_curve_widget"):
+                self.tone_curve_widget.set_curves({})
+            if hasattr(self, "cmb_look_profile"):
+                self.cmb_look_profile.blockSignals(True)
+                self.cmb_look_profile.setCurrentIndex(0)
+                self.cmb_look_profile.blockSignals(False)
+            if hasattr(self, "ft_slider_look_amount"):
+                self.ft_slider_look_amount.setValue(100)
+                self.ft_slider_look_amount.setEnabled(False)
+            self._sync_wb_preset_combo()
+            for d in (getattr(self, "_hsl_hue_vals", {}), getattr(self, "_hsl_sat_vals", {}), getattr(self, "_hsl_lum_vals", {})):
+                for k in d:
+                    d[k] = 0
+            for sl in getattr(self, "_hsl_sliders", {}).values():
+                sl.setValue(0)
+            self._update_drawer_indicators()
+            self._refresh_region_indicators()
             self.histogram_widget.reset_points()
         finally:
             self._updating_ui = False
@@ -3312,33 +5414,198 @@ class TagAndCaptionDock(QDockWidget):
         vbox.addStretch(1)
 
         scroll.setWidget(content)
+
+        self._apply_fine_tune_tooltips()
         return scroll
+
+    def _apply_fine_tune_tooltips(self) -> None:
+        tips = {
+            "btn_ft_basic": "Basic Mode: clean, classic exposure, color, detail, and luminance histogram controls",
+            "btn_ft_advanced": "Advanced Mode: unlocks RGB histogram, Tone Curve, WB Eyedropper, HSL Color Mixer, Film Grain, and Regional Masking",
+            "cmb_look_profile": "Choose a non-destructive color Look Profile or custom .cube 3D LUT",
+            "btn_import_cube_lut": "Import a custom .cube 3D LUT file",
+            "ft_slider_look_amount": "Blend strength (0–200%) of the active Look Profile or .cube LUT",
+            "cmb_wb_preset": "White Balance lighting preset (As Shot, Daylight, Cloudy, Shade, Tungsten, Fluorescent, Flash)",
+            "histogram_widget": "Live tonal histogram — drag the bottom black/white point triangles to clip shadows or highlights",
+            "tone_curve_widget": "Click to add control points, drag to shape tone response, right-click a point to remove it",
+            "drawer_tone_curve": "Expand to shape contrast and color channels with a Tone Curve or 1-click S-Curve preset",
+            "drawer_color_mixer": "Expand to adjust Hue, Saturation, and Luminance across 8 individual color bands",
+            "ft_slider_smart_enhance": "One-slider adaptive enhance: balances shadows, midtone contrast, and vibrance automatically",
+            "ft_slider_brightness": "Exposure: brighten or darken the photo with filmic highlight roll-off (double-click to reset)",
+            "ft_slider_contrast": "Contrast: expand or soften tonal separation between shadows and highlights",
+            "ft_slider_shadows": "Shadows: recover detail in dark areas without washing out blacks",
+            "ft_slider_highlights": "Highlights: pull back bright skies and specular areas to recover detail",
+            "ft_slider_whites": "Whites: set the upper white point brightness",
+            "ft_slider_blacks": "Blacks: deepen or lift the darkest shadow tones",
+            "ft_slider_clarity": "Clarity: boost midtone local contrast for crisp texture and punch",
+            "ft_slider_structure": "Structure: enhance architectural and landscape micro-detail while protecting skin tones and skies",
+            "ft_slider_temp": "Color temperature: shift white balance cooler (blue) or warmer (amber)",
+            "ft_slider_tint": "Tint: fine-tune green vs. magenta white balance cast",
+            "ft_slider_sat": "Saturation: boost color richness while protecting natural skin tones",
+            "ft_slider_dehaze": "Dehaze: cut through atmospheric haze, fog, and low-contrast veil",
+            "ft_slider_straighten": "Straighten angle (-15° to +15°) with automatic edge-free crop",
+            "btn_auto_straighten": "Automatically detect the horizon or dominant lines and straighten the photo",
+            "ft_slider_sharpen": "Sharpen: enhance fine edge crispness in luminance",
+            "ft_slider_sharpen_radius": "Sharpen radius: adjust edge halo width (small for fine detail, larger for soft lenses)",
+            "ft_slider_sharpen_masking": "Sharpen masking: restrict sharpening to real edges so smooth skies stay noise-free",
+            "ft_slider_denoise": "Reduce noise: smooth luminance grain while preserving sharp edges",
+            "ft_slider_denoise_detail": "Detail preservation: keep fine textures crisp while denoising flat areas",
+            "ft_slider_denoise_chroma": "Color noise: remove red/green/blue chroma blotches from high-ISO shots",
+            "ft_slider_vignette": "Vignette: darken or lighten photo corners to draw focus to the center",
+            "ft_slider_vignette_feather": "Vignette feather: control how softly the vignette fades toward the center",
+            "ft_slider_grain_amount": "Film grain: add organic analog film texture",
+            "ft_slider_grain_size": "Grain size: adjust film grain particle coarseness",
+            "ft_slider_orton_glow": "Orton glow: add dreamy highlight bloom and soft contrast",
+            "ft_slider_golden_hour": "Golden hour: bathe highlights and midtones in warm sunset light",
+            "btn_hold_compare": "Click and hold to compare with the original unedited photo (\\)",
+            "btn_reset_default": "Reset all Fine Tune adjustments back to their defaults",
+        }
+        for attr, tip in tips.items():
+            w = getattr(self, attr, None)
+            if w is not None:
+                w.setToolTip(tip)
 
     @staticmethod
     def _make_aero_slider(min_val: int, max_val: int, default_val: int) -> _AeroFineTuneSlider:
         return _AeroFineTuneSlider(min_val, max_val, default_val)
 
     def _emit_fine_tune_exposure(self) -> None:
+        self._refresh_region_indicators()
         if self._updating_ui:
             return
         if not getattr(self, "_is_sliding_ft", False):
             self._is_sliding_ft = True
             self.fine_tune_slider_pressed.emit()
-        self._pending_ft_exposure = True
+        if getattr(self, "_active_region_scope", "whole") != "whole":
+            self._pending_ft_region = True
+        else:
+            self._pending_ft_exposure = True
+        if not self._ft_timer.isActive():
+            self._ft_timer.start()
+
+    def _emit_fine_tune_exposure_ext(self) -> None:
+        self._refresh_region_indicators()
+        if self._updating_ui:
+            return
+        if not getattr(self, "_is_sliding_ft", False):
+            self._is_sliding_ft = True
+            self.fine_tune_slider_pressed.emit()
+        if getattr(self, "_active_region_scope", "whole") != "whole":
+            self._pending_ft_region = True
+        else:
+            self._pending_ft_exposure_ext = True
+        if not self._ft_timer.isActive():
+            self._ft_timer.start()
+
+    def _emit_fine_tune_smart_enhance(self) -> None:
+        self._refresh_group_indicators()
+        if self._updating_ui:
+            return
+        if not getattr(self, "_is_sliding_ft", False):
+            self._is_sliding_ft = True
+            self.fine_tune_slider_pressed.emit()
+        self._pending_ft_smart_enhance = True
+        if not self._ft_timer.isActive():
+            self._ft_timer.start()
+
+    def _emit_fine_tune_structure(self) -> None:
+        self._refresh_region_indicators()
+        if self._updating_ui:
+            return
+        if not getattr(self, "_is_sliding_ft", False):
+            self._is_sliding_ft = True
+            self.fine_tune_slider_pressed.emit()
+        if getattr(self, "_active_region_scope", "whole") != "whole":
+            self._pending_ft_region = True
+        else:
+            self._pending_ft_structure = True
+        if not self._ft_timer.isActive():
+            self._ft_timer.start()
+
+    def _sync_wb_preset_combo(self) -> None:
+        if not hasattr(self, "cmb_wb_preset"):
+            return
+        cur_t = int(self.ft_slider_temp.value())
+        cur_ti = int(self.ft_slider_tint.value())
+        matched_key = "custom"
+        for wb_key, _lbl, pt, pti in getattr(self, "_wb_presets", ()):
+            if pt is not None and pti is not None and pt == cur_t and pti == cur_ti:
+                matched_key = wb_key
+                break
+        self.cmb_wb_preset.blockSignals(True)
+        idx = self.cmb_wb_preset.findData(matched_key)
+        if idx >= 0:
+            self.cmb_wb_preset.setCurrentIndex(idx)
+        self.cmb_wb_preset.blockSignals(False)
+
+    def _on_wb_preset_changed(self, idx: int) -> None:
+        if self._updating_ui or not hasattr(self, "cmb_wb_preset"):
+            return
+        key = self.cmb_wb_preset.itemData(idx)
+        for wb_key, _lbl, pt, pti in getattr(self, "_wb_presets", ()):
+            if wb_key == key and pt is not None and pti is not None:
+                self._updating_ui = True
+                try:
+                    self.ft_slider_temp.setValue(int(pt))
+                    self.ft_slider_tint.setValue(int(pti))
+                finally:
+                    self._updating_ui = False
+                self._emit_fine_tune_color()
+                self._on_fine_tune_slider_released("White Balance Preset")
+                break
+
+    def _on_look_profile_combo_changed(self, idx: int) -> None:
+        if self._updating_ui or not hasattr(self, "cmb_look_profile"):
+            return
+        effect_key = str(self.cmb_look_profile.itemData(idx) or "none")
+        if hasattr(self, "ft_slider_look_amount"):
+            self.ft_slider_look_amount.setEnabled(effect_key not in ("none", "as_shot", ""))
+        intensity = self.ft_slider_look_amount.value() if hasattr(self, "ft_slider_look_amount") else 100
+        self.fine_tune_look_profile_changed.emit(effect_key, int(intensity))
+        self.fine_tune_slider_released.emit("Look Profile")
+
+    def _on_import_cube_lut_clicked(self) -> None:
+        from pathlib import Path
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import 3D LUT (.cube)", "", "3D LUT Files (*.cube);;All Files (*)"
+        )
+        if not path:
+            return
+        key = f"cube:{path}"
+        lbl = f"LUT: {Path(path).stem}"
+        idx = self.cmb_look_profile.findData(key)
+        if idx < 0:
+            self.cmb_look_profile.addItem(lbl, key)
+            idx = self.cmb_look_profile.count() - 1
+        self.cmb_look_profile.setCurrentIndex(idx)
+
+    def _emit_fine_tune_look(self) -> None:
+        if self._updating_ui:
+            return
+        if not getattr(self, "_is_sliding_ft", False):
+            self._is_sliding_ft = True
+            self.fine_tune_slider_pressed.emit()
+        self._pending_ft_look = True
         if not self._ft_timer.isActive():
             self._ft_timer.start()
 
     def _emit_fine_tune_color(self) -> None:
+        self._refresh_region_indicators()
+        self._sync_wb_preset_combo()
         if self._updating_ui:
             return
         if not getattr(self, "_is_sliding_ft", False):
             self._is_sliding_ft = True
             self.fine_tune_slider_pressed.emit()
-        self._pending_ft_color = True
+        if getattr(self, "_active_region_scope", "whole") != "whole":
+            self._pending_ft_region = True
+        else:
+            self._pending_ft_color = True
         if not self._ft_timer.isActive():
             self._ft_timer.start()
 
     def _emit_fine_tune_optics(self) -> None:
+        self._refresh_group_indicators()
         if self._updating_ui:
             return
         if not getattr(self, "_is_sliding_ft", False):
@@ -3349,6 +5616,7 @@ class TagAndCaptionDock(QDockWidget):
             self._ft_timer.start()
 
     def _emit_fine_tune_straighten(self) -> None:
+        self._refresh_group_indicators()
         if self._updating_ui:
             return
         if not getattr(self, "_is_sliding_ft", False):
@@ -3359,12 +5627,49 @@ class TagAndCaptionDock(QDockWidget):
             self._ft_timer.start()
 
     def _emit_fine_tune_detail(self) -> None:
+        self._refresh_group_indicators()
         if self._updating_ui:
             return
         if not getattr(self, "_is_sliding_ft", False):
             self._is_sliding_ft = True
             self.fine_tune_slider_pressed.emit()
         self._pending_ft_detail = True
+        if not self._ft_timer.isActive():
+            self._ft_timer.start()
+
+    def _emit_fine_tune_detail_ext(self) -> None:
+        self._refresh_group_indicators()
+        if self._updating_ui:
+            return
+        if not getattr(self, "_is_sliding_ft", False):
+            self._is_sliding_ft = True
+            self.fine_tune_slider_pressed.emit()
+        self._pending_ft_detail_ext = True
+        if not self._ft_timer.isActive():
+            self._ft_timer.start()
+
+    def _emit_fine_tune_curve(self) -> None:
+        self._update_drawer_indicators()
+        self._refresh_region_indicators()
+        if self._updating_ui:
+            return
+        if not getattr(self, "_is_sliding_ft", False):
+            self._is_sliding_ft = True
+            self.fine_tune_slider_pressed.emit()
+        if getattr(self, "_active_region_scope", "whole") != "whole":
+            self._pending_ft_region = True
+        else:
+            self._pending_ft_curve = True
+        if not self._ft_timer.isActive():
+            self._ft_timer.start()
+
+    def _emit_fine_tune_hsl(self) -> None:
+        if self._updating_ui:
+            return
+        if not getattr(self, "_is_sliding_ft", False):
+            self._is_sliding_ft = True
+            self.fine_tune_slider_pressed.emit()
+        self._pending_ft_hsl = True
         if not self._ft_timer.isActive():
             self._ft_timer.start()
 
@@ -3380,6 +5685,21 @@ class TagAndCaptionDock(QDockWidget):
                 self.ft_slider_highlights.value(),
                 self.ft_slider_clarity.value(),
             )
+        if self._pending_ft_exposure_ext:
+            self._pending_ft_exposure_ext = False
+            if hasattr(self, "ft_slider_whites") and hasattr(self, "ft_slider_blacks"):
+                self.fine_tune_exposure_ext_changed.emit(
+                    self.ft_slider_whites.value(),
+                    self.ft_slider_blacks.value(),
+                )
+        if self._pending_ft_smart_enhance:
+            self._pending_ft_smart_enhance = False
+            if hasattr(self, "ft_slider_smart_enhance"):
+                self.fine_tune_smart_enhance_changed.emit(self.ft_slider_smart_enhance.value())
+        if self._pending_ft_structure:
+            self._pending_ft_structure = False
+            if hasattr(self, "ft_slider_structure"):
+                self.fine_tune_structure_changed.emit(self.ft_slider_structure.value())
         if self._pending_ft_color:
             self._pending_ft_color = False
             self.fine_tune_color_changed.emit(
@@ -3388,9 +5708,28 @@ class TagAndCaptionDock(QDockWidget):
                 self.ft_slider_sat.value(),
                 self.ft_slider_dehaze.value(),
             )
+        if getattr(self, "_pending_ft_look", False):
+            self._pending_ft_look = False
+            if hasattr(self, "cmb_look_profile") and hasattr(self, "ft_slider_look_amount"):
+                effect_key = str(self.cmb_look_profile.currentData() or "none")
+                self.fine_tune_look_profile_changed.emit(effect_key, int(self.ft_slider_look_amount.value()))
         if self._pending_ft_optics:
             self._pending_ft_optics = False
             self.fine_tune_optics_changed.emit(self.ft_slider_vignette.value())
+            if hasattr(self, "ft_slider_vignette_feather"):
+                self.fine_tune_optics_ext_changed.emit(
+                    self.ft_slider_vignette.value(),
+                    self.ft_slider_vignette_feather.value(),
+                    self.ft_slider_orton_glow.value() if hasattr(self, "ft_slider_orton_glow") else 0,
+                    self.ft_slider_golden_hour.value() if hasattr(self, "ft_slider_golden_hour") else 0,
+                )
+        if self._pending_ft_region:
+            self._pending_ft_region = False
+            reg = getattr(self, "_active_region_scope", "whole")
+            if reg != "whole":
+                data = self._capture_active_region_sliders()
+                self._region_edits[reg] = data
+                self.fine_tune_region_changed.emit(reg, dict(data))
         if self._pending_ft_straighten:
             self._pending_ft_straighten = False
             self.fine_tune_straighten_changed.emit(float(self.ft_slider_straighten.value()))
@@ -3399,6 +5738,26 @@ class TagAndCaptionDock(QDockWidget):
             self.fine_tune_detail_changed.emit(
                 self.ft_slider_sharpen.value(),
                 self.ft_slider_denoise.value(),
+            )
+        if self._pending_ft_detail_ext:
+            self._pending_ft_detail_ext = False
+            self.fine_tune_detail_ext_changed.emit(
+                self.ft_slider_denoise_chroma.value(),
+                self.ft_slider_grain_amount.value(),
+                self.ft_slider_grain_size.value(),
+                self.ft_slider_sharpen_masking.value() if hasattr(self, "ft_slider_sharpen_masking") else 0,
+                self.ft_slider_sharpen_radius.value() if hasattr(self, "ft_slider_sharpen_radius") else 25,
+                self.ft_slider_denoise_detail.value() if hasattr(self, "ft_slider_denoise_detail") else 50,
+            )
+        if self._pending_ft_curve:
+            self._pending_ft_curve = False
+            self.fine_tune_curve_changed.emit(self.tone_curve_widget.get_curves())
+        if self._pending_ft_hsl:
+            self._pending_ft_hsl = False
+            self.fine_tune_hsl_changed.emit(
+                dict(self._hsl_hue_vals),
+                dict(self._hsl_sat_vals),
+                dict(self._hsl_lum_vals),
             )
 
     def _on_fine_tune_slider_released(self, action_name: str) -> None:
@@ -3481,22 +5840,37 @@ class TagAndCaptionDock(QDockWidget):
         self._updating_ui = True
         try:
             if recipe is None:
-                b = c = s = h = cl = t = ti = sat = dh = str_deg = sh = dn = vig = 0
+                b = se = c = s = h = w_val = bl_val = cl = st_val = t = ti = sat = dh = str_deg = sh = sh_mask = dn = vig = og_val = gh_val = 0
+                sh_rad = 25
+                dn_det = 50
                 d_blur = d_focal = d_glow = d_bshift = d_bfeather = d_near = d_far = d_wn = d_wf = d_haze = d_hw = 0
             else:
                 b = int(round(getattr(recipe, "brightness", 0.0)))
+                se = int(round(getattr(recipe, "smart_enhance", 0.0)))
                 c = int(round(getattr(recipe, "contrast", 0.0)))
                 s = int(round(getattr(recipe, "shadows", 0.0)))
                 h = int(round(getattr(recipe, "highlights", 0.0)))
+                w_val = int(round(getattr(recipe, "whites", 0.0)))
+                bl_val = int(round(getattr(recipe, "blacks", 0.0)))
                 cl = int(round(getattr(recipe, "clarity", 0.0)))
+                st_val = int(round(getattr(recipe, "structure", 0.0)))
                 t = int(round(getattr(recipe, "temperature", 0.0)))
                 ti = int(round(getattr(recipe, "tint", 0.0)))
                 sat = int(round(getattr(recipe, "saturation", 0.0)))
                 dh = int(round(getattr(recipe, "dehaze", 0.0)))
                 str_deg = int(round(getattr(recipe, "straighten_deg", 0.0)))
                 sh = int(round(getattr(recipe, "sharpen", 0.0)))
+                sh_rad = int(round(getattr(recipe, "sharpen_radius", 25.0)))
+                sh_mask = int(round(getattr(recipe, "sharpen_masking", 0.0)))
                 dn = int(round(getattr(recipe, "denoise", 0.0)))
+                dn_det = int(round(getattr(recipe, "denoise_detail", 50.0)))
+                dn_c = int(round(getattr(recipe, "denoise_chroma", 0.0)))
+                gr_amt = int(round(getattr(recipe, "grain_amount", 0.0)))
+                gr_sz = int(round(getattr(recipe, "grain_size", 25.0)))
                 vig = int(round(getattr(recipe, "vignette", 0.0)))
+                vig_f = int(round(getattr(recipe, "vignette_feather", 50.0)))
+                og_val = int(round(getattr(recipe, "orton_glow", 0.0)))
+                gh_val = int(round(getattr(recipe, "golden_hour", 0.0)))
 
                 d_blur = int(round(getattr(recipe, "depth_blur", 0.0)))
                 d_focal = int(round(getattr(recipe, "focal_plane", 0.0)))
@@ -3511,11 +5885,15 @@ class TagAndCaptionDock(QDockWidget):
                 d_hw = int(round(getattr(recipe, "depth_haze_warmth", 0.0)))
 
             if hasattr(self, "ft_slider_brightness"):
+                if hasattr(self, "ft_slider_smart_enhance"):
+                    self.ft_slider_smart_enhance.setValue(se)
                 self.ft_slider_brightness.setValue(b)
                 self.ft_slider_contrast.setValue(c)
                 self.ft_slider_shadows.setValue(s)
                 self.ft_slider_highlights.setValue(h)
                 self.ft_slider_clarity.setValue(cl)
+                if hasattr(self, "ft_slider_structure"):
+                    self.ft_slider_structure.setValue(st_val)
                 self.ft_slider_temp.setValue(t)
                 self.ft_slider_tint.setValue(ti)
                 self.ft_slider_sat.setValue(sat)
@@ -3524,6 +5902,105 @@ class TagAndCaptionDock(QDockWidget):
                 self.ft_slider_sharpen.setValue(sh)
                 self.ft_slider_denoise.setValue(dn)
                 self.ft_slider_vignette.setValue(vig)
+                if hasattr(self, "ft_slider_whites"):
+                    self.ft_slider_whites.setValue(w_val)
+                    self.ft_slider_blacks.setValue(bl_val)
+                if hasattr(self, "ft_slider_vignette_feather"):
+                    self.ft_slider_vignette_feather.setValue(50 if recipe is None else vig_f)
+                if hasattr(self, "ft_slider_orton_glow"):
+                    self.ft_slider_orton_glow.setValue(og_val)
+                    self.ft_slider_golden_hour.setValue(gh_val)
+                if hasattr(self, "ft_slider_sharpen_radius"):
+                    self.ft_slider_sharpen_radius.setValue(sh_rad)
+                if hasattr(self, "ft_slider_sharpen_masking"):
+                    self.ft_slider_sharpen_masking.setValue(sh_mask)
+                if hasattr(self, "ft_slider_denoise_detail"):
+                    self.ft_slider_denoise_detail.setValue(dn_det)
+                if hasattr(self, "ft_slider_denoise_chroma"):
+                    self.ft_slider_denoise_chroma.setValue(0 if recipe is None else dn_c)
+                    self.ft_slider_grain_amount.setValue(0 if recipe is None else gr_amt)
+                    self.ft_slider_grain_size.setValue(25 if recipe is None else gr_sz)
+                raw_regions = {} if recipe is None else getattr(recipe, "region_edits", {}) or {}
+                self._region_edits = {
+                    str(rk): {
+                        fk: (list(fv) if str(fk).startswith("curve_") or fk == "mask_strokes" else fv)
+                        for fk, fv in rd.items()
+                    }
+                    for rk, rd in raw_regions.items()
+                }
+                self._global_region_mirror = {
+                    "brightness": b,
+                    "contrast": c,
+                    "shadows": s,
+                    "highlights": h,
+                    "whites": w_val,
+                    "blacks": bl_val,
+                    "clarity": cl,
+                    "structure": st_val,
+                    "temperature": t,
+                    "tint": ti,
+                    "saturation": sat,
+                    "dehaze": dh,
+                    "curve_rgb": [(0.0, 0.0), (1.0, 1.0)]
+                    if recipe is None
+                    else [tuple(p) for p in getattr(recipe, "curve_rgb", [(0.0, 0.0), (1.0, 1.0)])],
+                    "curve_r": [(0.0, 0.0), (1.0, 1.0)]
+                    if recipe is None
+                    else [tuple(p) for p in getattr(recipe, "curve_r", [(0.0, 0.0), (1.0, 1.0)])],
+                    "curve_g": [(0.0, 0.0), (1.0, 1.0)]
+                    if recipe is None
+                    else [tuple(p) for p in getattr(recipe, "curve_g", [(0.0, 0.0), (1.0, 1.0)])],
+                    "curve_b": [(0.0, 0.0), (1.0, 1.0)]
+                    if recipe is None
+                    else [tuple(p) for p in getattr(recipe, "curve_b", [(0.0, 0.0), (1.0, 1.0)])],
+                }
+                cur_scope = getattr(self, "_active_region_scope", "whole")
+                if cur_scope != "whole":
+                    self._load_region_dict_into_sliders(self._region_edits.get(cur_scope, {}))
+                elif hasattr(self, "tone_curve_widget"):
+                    if recipe is None:
+                        self.tone_curve_widget.set_curves({})
+                    else:
+                        self.tone_curve_widget.set_curves(
+                            {
+                                "rgb": getattr(recipe, "curve_rgb", [(0.0, 0.0), (1.0, 1.0)]),
+                                "r": getattr(recipe, "curve_r", [(0.0, 0.0), (1.0, 1.0)]),
+                                "g": getattr(recipe, "curve_g", [(0.0, 0.0), (1.0, 1.0)]),
+                                "b": getattr(recipe, "curve_b", [(0.0, 0.0), (1.0, 1.0)]),
+                            }
+                        )
+                if hasattr(self, "_hsl_sliders"):
+                    src_h = {} if recipe is None else getattr(recipe, "hsl_hue", {})
+                    src_s = {} if recipe is None else getattr(recipe, "hsl_sat", {})
+                    src_l = {} if recipe is None else getattr(recipe, "hsl_lum", {})
+                    for k in self._hsl_hue_vals:
+                        self._hsl_hue_vals[k] = int(round(src_h.get(k, 0.0)))
+                        self._hsl_sat_vals[k] = int(round(src_s.get(k, 0.0)))
+                        self._hsl_lum_vals[k] = int(round(src_l.get(k, 0.0)))
+                    active_store = {
+                        "hue": self._hsl_hue_vals,
+                        "sat": self._hsl_sat_vals,
+                        "lum": self._hsl_lum_vals,
+                    }[self._hsl_mode]
+                    for k, sl in self._hsl_sliders.items():
+                        sl.setValue(active_store.get(k, 0))
+                self._update_drawer_indicators()
+                self._refresh_region_indicators()
+                self._sync_wb_preset_combo()
+                if hasattr(self, "cmb_look_profile"):
+                    from pathlib import Path
+                    eff_val = "none" if recipe is None else str(getattr(recipe, "effect", "none") or "none")
+                    eff_int = 100 if recipe is None else int(round(getattr(recipe, "effect_intensity", 100.0)))
+                    self.cmb_look_profile.blockSignals(True)
+                    idx = self.cmb_look_profile.findData(eff_val)
+                    if idx < 0 and eff_val.startswith("cube:"):
+                        self.cmb_look_profile.addItem(f"LUT: {Path(eff_val[5:]).stem}", eff_val)
+                        idx = self.cmb_look_profile.count() - 1
+                    self.cmb_look_profile.setCurrentIndex(max(0, idx))
+                    self.cmb_look_profile.blockSignals(False)
+                    if hasattr(self, "ft_slider_look_amount"):
+                        self.ft_slider_look_amount.setValue(eff_int)
+                        self.ft_slider_look_amount.setEnabled(eff_val not in ("none", "as_shot", ""))
 
             if hasattr(self, "dl_slider_blur"):
                 self.dl_slider_blur.setValue(d_blur)
@@ -3703,7 +6180,11 @@ class TagAndCaptionDock(QDockWidget):
                     self.people_chips_layout.addWidget(unknown_chip)
                 else:
                     # Confirmed person (state == 1) or unconfirmed suggestion (state == 0 with person_name)
-                    is_boxless_val = bool(st == 1 and (float(p.get("rect_w") or 0.0) <= 0.005 or float(p.get("rect_h") or 0.0) <= 0.005))
+                    is_boxless_val = bool(
+                        count == 1
+                        and st == 1
+                        and (float(p.get("rect_w") or 0.0) <= 0.005 or float(p.get("rect_h") or 0.0) <= 0.005)
+                    )
                     chip = _PersonTagCardWidget(
                         pid or fid,
                         pname,
@@ -4301,29 +6782,35 @@ class TagAndCaptionDock(QDockWidget):
                     border: 1px solid #2D323B;
                     border-radius: 4px;
                 }
-                QLabel#FineTuneGroupTitle {
+                QPushButton#FineTuneGroupTitle {
                     color: #60A5FA;
                     font-family: 'Segoe UI';
-                    font-size: 9.5pt;
-                    font-weight: 600;
+                    font-size: 11.5pt;
+                    font-weight: 500;
                     border: none;
                     background: transparent;
+                    text-align: left;
+                    padding: 0 0 2px 0;
                 }
                 QLabel#SliderHeaderLabel {
                     color: #E2E8F0;
                     font-family: 'Segoe UI';
-                    font-size: 8pt;
+                    font-size: 9pt;
                     border: none;
                     background: transparent;
                 }
                 QLabel#val_lbl {
                     color: #94A3B8;
                     font-family: 'Segoe UI';
-                    font-size: 8pt;
+                    font-size: 9pt;
                     font-weight: 600;
                     border: none;
                     background: transparent;
                     padding-right: 2px;
+                }
+                QLabel#SliderHeaderLabel:disabled,
+                QLabel#val_lbl:disabled {
+                    color: #64748B;
                 }
                 QPushButton#FineTuneActionBtn,
                 QPushButton#FineTuneResetBtn,
@@ -4355,6 +6842,117 @@ class TagAndCaptionDock(QDockWidget):
                 QPushButton#DepthCutoutBtn:pressed {
                     background: #1E3A5F;
                     border-color: #3B82F6;
+                }
+                QPushButton#FineTuneActionBtn:checked {
+                    background: #2563EB;
+                    border-color: #60A5FA;
+                    color: #FFFFFF;
+                }
+                QFrame#RegionScopeBar {
+                    background: #1C2129;
+                    border: 1px solid #303846;
+                    border-radius: 5px;
+                }
+                QPushButton#FineTuneSegmentBtn {
+                    background: #222730;
+                    border: 1px solid #3B4252;
+                    border-right: none;
+                    color: #CBD5E1;
+                    font-family: 'Segoe UI';
+                    font-size: 8pt;
+                    padding: 2px 4px;
+                }
+                QPushButton#FineTuneSegmentBtn[seg="first"] {
+                    border-top-left-radius: 4px;
+                    border-bottom-left-radius: 4px;
+                }
+                QPushButton#FineTuneSegmentBtn[seg="last"] {
+                    border-right: 1px solid #3B4252;
+                    border-top-right-radius: 4px;
+                    border-bottom-right-radius: 4px;
+                }
+                QPushButton#FineTuneSegmentBtn:hover {
+                    background: #2E3440;
+                    color: #F8FAFC;
+                }
+                QPushButton#FineTuneSegmentBtn:checked {
+                    background: #2563EB;
+                    color: #FFFFFF;
+                    border-color: #3B82F6;
+                    font-weight: 600;
+                }
+                QPushButton#FineTuneMaskToggleBtn {
+                    background: #222730;
+                    border: 1px solid #3B4252;
+                    border-radius: 3px;
+                    color: #CBD5E1;
+                    font-family: 'Segoe UI';
+                    font-size: 7.5pt;
+                    padding: 1px 7px;
+                }
+                QPushButton#FineTuneMaskToggleBtn:hover {
+                    background: #2E3440;
+                    border-color: #60A5FA;
+                    color: #F8FAFC;
+                }
+                QPushButton#FineTuneMaskToggleBtn:checked {
+                    background: #DC2626;
+                    border-color: #EF4444;
+                    color: #FFFFFF;
+                    font-weight: 600;
+                }
+                QPushButton#FineTuneMaskToggleBtn:disabled {
+                    background: transparent;
+                    border-color: #2A303C;
+                    color: #64748B;
+                }
+                QPushButton#FineTuneSubBtn {
+                    background-color: #222730;
+                    border: 1px solid #3B4252;
+                    border-radius: 3px;
+                    color: #CBD5E1;
+                    font-family: 'Segoe UI';
+                    font-size: 7.5pt;
+                    padding: 1px 6px;
+                }
+                QPushButton#FineTuneSubBtn {
+                    background-color: #252B36;
+                    border: 1px solid #3B4252;
+                    border-radius: 3px;
+                    color: #E2E8F0;
+                    padding: 1px 6px;
+                    font-size: 11px;
+                }
+                QPushButton#FineTuneSubBtn:hover {
+                    background-color: #2E3440;
+                    border-color: #60A5FA;
+                    color: #F8FAFC;
+                }
+                QPushButton#FineTuneSubBtn:checked {
+                    background-color: #2563EB;
+                    border: 1px solid #3B82F6;
+                    color: #FFFFFF;
+                    font-weight: 600;
+                }
+                QPushButton#FineTunePillBtn {
+                    padding: 2px 10px;
+                    border: 1px solid #3B4252;
+                    background: #222730;
+                    color: #CBD5E1;
+                    border-radius: 3px;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                }
+                QPushButton#FineTunePillBtn:hover {
+                    background: #2E3440;
+                    border-color: #60A5FA;
+                    color: #F8FAFC;
+                }
+                QPushButton#FineTunePillBtn:checked {
+                    background: #2563EB;
+                    color: #FFFFFF;
+                    border-color: #1D4ED8;
+                    font-weight: 600;
                 }
                 QToolButton#OcrToggleBtn {
                     border: none;
@@ -4425,6 +7023,7 @@ class TagAndCaptionDock(QDockWidget):
                 }
                 """
             )
+            self._apply_fine_tune_contrast_styles(True)
             return
 
         self.container.setStyleSheet(
@@ -4482,34 +7081,40 @@ class TagAndCaptionDock(QDockWidget):
                 border: 1px solid #D2DFEE;
                 border-radius: 4px;
             }
-            QLabel#FineTuneGroupTitle {
-                color: #29588C;
+            QPushButton#FineTuneGroupTitle {
+                color: #1B5E9E;
                 font-family: 'Segoe UI';
-                font-size: 9.5pt;
-                font-weight: 600;
+                font-size: 11.5pt;
+                font-weight: 500;
                 border: none;
                 background: transparent;
+                text-align: left;
+                padding: 0 0 2px 0;
             }
             QLabel#SliderHeaderLabel {
                 color: #1E395B;
                 font-family: 'Segoe UI';
-                font-size: 8pt;
+                font-size: 9pt;
                 border: none;
                 background: transparent;
             }
             QLabel#val_lbl {
                 color: #5A7A9E;
                 font-family: 'Segoe UI';
-                font-size: 8pt;
+                font-size: 9pt;
                 font-weight: 600;
                 border: none;
                 background: transparent;
                 padding-right: 2px;
             }
+            QLabel#SliderHeaderLabel:disabled,
+            QLabel#val_lbl:disabled {
+                color: #94A3B8;
+            }
             QPushButton#FineTuneActionBtn,
             QPushButton#FineTuneResetBtn,
             QPushButton#DepthCutoutBtn {
-                background: #F7FAFD;
+                background-color: #F7FAFD;
                 border: 1px solid #B5D2ED;
                 border-radius: 3px;
                 color: #1E395B;
@@ -4536,6 +7141,105 @@ class TagAndCaptionDock(QDockWidget):
             QPushButton#DepthCutoutBtn:pressed {
                 background: #CCE4F7;
                 border-color: #3399FF;
+            }
+            QPushButton#FineTuneActionBtn:checked {
+                background: #2563EB;
+                border-color: #1D4ED8;
+                color: #FFFFFF;
+            }
+            QFrame#RegionScopeBar {
+                background: #F4F8FC;
+                border: 1px solid #D2DFEE;
+                border-radius: 5px;
+            }
+            QPushButton#FineTuneSegmentBtn {
+                background: #FFFFFF;
+                border: 1px solid #B5D2ED;
+                border-right: none;
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 8pt;
+                padding: 2px 4px;
+            }
+            QPushButton#FineTuneSegmentBtn[seg="first"] {
+                border-top-left-radius: 4px;
+                border-bottom-left-radius: 4px;
+            }
+            QPushButton#FineTuneSegmentBtn[seg="last"] {
+                border-right: 1px solid #B5D2ED;
+                border-top-right-radius: 4px;
+                border-bottom-right-radius: 4px;
+            }
+            QPushButton#FineTuneSegmentBtn:hover {
+                background: #E4F0FC;
+            }
+            QPushButton#FineTuneSegmentBtn:checked {
+                background: #2563EB;
+                color: #FFFFFF;
+                border-color: #1D4ED8;
+                font-weight: 600;
+            }
+            QPushButton#FineTuneMaskToggleBtn {
+                background: #FFFFFF;
+                border: 1px solid #CBD5E1;
+                border-radius: 3px;
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 7.5pt;
+                padding: 1px 7px;
+            }
+            QPushButton#FineTuneMaskToggleBtn:hover {
+                background: #E4F0FC;
+                border-color: #7BA7C9;
+            }
+            QPushButton#FineTuneMaskToggleBtn:checked {
+                background: #DC2626;
+                border-color: #B91C1C;
+                color: #FFFFFF;
+                font-weight: 600;
+            }
+            QPushButton#FineTuneMaskToggleBtn:disabled {
+                background: transparent;
+                border-color: #DCE5F0;
+                color: #94A3B8;
+            }
+            QPushButton#FineTuneSubBtn {
+                background-color: #F1F5F9;
+                border: 1px solid #CBD5E1;
+                border-radius: 3px;
+                color: #1E395B;
+                font-family: 'Segoe UI';
+                font-size: 7.5pt;
+                padding: 1px 6px;
+            }
+            QPushButton#FineTuneSubBtn:hover {
+                background-color: #E4F0FC;
+                border-color: #7BA7C9;
+            }
+            QPushButton#FineTuneSubBtn:checked {
+                background-color: #2563EB;
+                border: 1px solid #1D4ED8;
+                color: #FFFFFF;
+                font-weight: 600;
+            }
+            QPushButton#FineTunePillBtn {
+                padding: 2px 10px;
+                border: 1px solid #B5D2ED;
+                background: #F7FAFD;
+                color: #1E395B;
+                border-radius: 3px;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+            }
+            QPushButton#FineTunePillBtn:hover {
+                background: #E4F0FC;
+                border-color: #7BA7C9;
+            }
+            QPushButton#FineTunePillBtn:checked {
+                background: #2563EB;
+                color: #FFFFFF;
+                border-color: #1D4ED8;
+                font-weight: 600;
             }
             QToolButton#OcrToggleBtn {
                 border: none;
@@ -4597,6 +7301,122 @@ class TagAndCaptionDock(QDockWidget):
             }
             """
         )
+        self._apply_fine_tune_contrast_styles(is_dark)
+
+    def _apply_fine_tune_contrast_styles(self, is_dark: bool) -> None:
+        """Apply explicit widget-level contrast styles so theme QSS never turns buttons white-on-white."""
+        sub_css = (
+            "QPushButton { background-color: #252B36; border: 1px solid #475569; color: #F1F5F9; "
+            "border-radius: 3px; padding: 1px 6px; font-size: 12px; }"
+            "QPushButton:hover { background-color: #334155; border-color: #60A5FA; }"
+            "QPushButton:checked { background-color: #2563EB; border-color: #3B82F6; color: #FFFFFF; font-weight: 600; }"
+            "QPushButton:disabled { background-color: #1E242E; border-color: #2D3542; color: #64748B; }"
+            if is_dark
+            else "QPushButton { background-color: #F1F5F9; border: 1px solid #CBD5E1; color: #1E293B; "
+            "border-radius: 3px; padding: 1px 6px; font-size: 12px; }"
+            "QPushButton:hover { background-color: #E4F0FC; border-color: #7BA7C9; color: #0F172A; }"
+            "QPushButton:checked { background-color: #2563EB; border-color: #1D4ED8; color: #FFFFFF; font-weight: 600; }"
+            "QPushButton:disabled { background-color: #F8FAFC; border-color: #E2E8F0; color: #94A3B8; }"
+        )
+        widgets: list[Any] = [
+            getattr(self, "btn_curve_scurve", None),
+            getattr(self, "btn_curve_reset", None),
+            getattr(self, "btn_wb_eyedropper", None),
+            getattr(self, "btn_import_cube_lut", None),
+            getattr(self, "btn_hsl_reset", None),
+            getattr(self, "btn_mask_show", None),
+            getattr(self, "btn_mask_hide", None),
+            getattr(self, "btn_region_brush_clear", None),
+            getattr(self, "btn_region_reset", None),
+        ]
+        widgets.extend(getattr(self, "_hsl_tab_buttons", {}).values())
+        for w in widgets:
+            if w is not None:
+                w.setStyleSheet(sub_css)
+
+        circle_css = (
+            "QPushButton { background: transparent; border: none; border-radius: 4px; padding: 2px; }"
+            "QPushButton:hover { background: rgba(255, 255, 255, 0.08); }"
+            "QPushButton:checked { background: rgba(255, 255, 255, 0.12); }"
+            if is_dark
+            else "QPushButton { background: transparent; border: none; border-radius: 4px; padding: 2px; }"
+            "QPushButton:hover { background: rgba(15, 23, 42, 0.06); }"
+            "QPushButton:checked { background: rgba(37, 99, 235, 0.10); }"
+        )
+        for ch_key, cb in getattr(self, "_curve_ch_buttons", {}).items():
+            cb.setStyleSheet(circle_css)
+            cb.setIcon(self._make_curve_channel_icon(ch_key, is_checked=cb.isChecked(), is_dark=is_dark))
+
+        if hasattr(self, "btn_wb_eyedropper") and self.btn_wb_eyedropper is not None:
+            self.btn_wb_eyedropper.setIcon(
+                self._make_mask_tool_icon(
+                    "eyedropper", 16, is_checked=self.btn_wb_eyedropper.isChecked(), is_dark=is_dark
+                )
+            )
+
+        tile_css = (
+            "QPushButton { background-color: #252B36; border: 1px solid #475569; border-radius: 5px; padding: 2px; }"
+            "QPushButton:hover { background-color: #334155; border-color: #60A5FA; }"
+            "QPushButton:checked { background-color: #2563EB; border: 1px solid #3B82F6; }"
+            "QPushButton:disabled { background-color: #1E242E; border-color: #2D3542; }"
+            if is_dark
+            else "QPushButton { background-color: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 5px; padding: 2px; }"
+            "QPushButton:hover { background-color: #E4F0FC; border-color: #7BA7C9; }"
+            "QPushButton:checked { background-color: #2563EB; border: 1px solid #1D4ED8; }"
+            "QPushButton:disabled { background-color: #F1F5F9; border-color: #E2E8F0; }"
+        )
+        tile_widgets: list[Any] = [
+            getattr(self, "btn_region_paint", None),
+            getattr(self, "btn_region_erase", None),
+            getattr(self, "btn_mask_invert", None),
+        ]
+        tile_widgets.extend(getattr(self, "_region_scope_buttons", {}).values())
+        for tw in tile_widgets:
+            if tw is not None:
+                tw.setStyleSheet(tile_css)
+        if hasattr(self, "_refresh_region_indicators"):
+            self._refresh_region_indicators()
+
+        combo_css = (
+            "QComboBox { background-color: #22262E; color: #E2E8F0; border: 1px solid #475569; "
+            "border-radius: 3px; padding: 2px 6px; font-size: 12px; }"
+            "QComboBox:hover { border-color: #60A5FA; }"
+            "QComboBox QAbstractItemView { background-color: #1B1E24; color: #E2E8F0; "
+            "border: 1px solid #3E4756; selection-background-color: #2563EB; selection-color: #FFFFFF; outline: none; }"
+            if is_dark
+            else "QComboBox { background-color: #FFFFFF; color: #1E293B; border: 1px solid #CBD5E1; "
+            "border-radius: 3px; padding: 2px 6px; font-size: 12px; }"
+            "QComboBox:hover { border-color: #7BA7C9; }"
+            "QComboBox QAbstractItemView { background-color: #FFFFFF; color: #1E293B; "
+            "border: 1px solid #CBD5E1; selection-background-color: #E4F0FC; selection-color: #0F172A; outline: none; }"
+        )
+        view_css = (
+            "QAbstractItemView { background-color: #1B1E24; color: #E2E8F0; "
+            "selection-background-color: #2563EB; selection-color: #FFFFFF; outline: none; }"
+            if is_dark
+            else "QAbstractItemView { background-color: #FFFFFF; color: #1E293B; "
+            "selection-background-color: #E4F0FC; selection-color: #0F172A; outline: none; }"
+        )
+        for cmb_attr in ("cmb_look_profile", "cmb_curve_preset", "cmb_wb_preset"):
+            cmb = getattr(self, cmb_attr, None)
+            if cmb is not None:
+                cmb.setStyleSheet(combo_css)
+                if cmb.view() is not None:
+                    cmb.view().setStyleSheet(view_css)
+
+        drawer_css = (
+            "QPushButton { text-align: left; padding: 3px 8px; background: #262C36; border: 1px solid #3B4252; "
+            "border-radius: 4px; color: #F1F5F9; font-weight: 600; font-size: 12px; }"
+            "QPushButton:hover { background: #303846; border-color: #60A5FA; }"
+            if is_dark
+            else "QPushButton { text-align: left; padding: 3px 8px; background: #F1F5F9; border: 1px solid #CBD5E1; "
+            "border-radius: 4px; color: #1E293B; font-weight: 600; font-size: 12px; }"
+            "QPushButton:hover { background: #E4F0FC; border-color: #7BA7C9; }"
+        )
+        for d_attr in ("drawer_tone_curve", "drawer_color_mixer"):
+            drw = getattr(self, d_attr, None)
+            if drw is not None and hasattr(drw, "btn_toggle"):
+                drw.btn_toggle.setStyleSheet(drawer_css)
 
 
 RightTagDock = TagAndCaptionDock

@@ -385,6 +385,7 @@ class AppSettingsDialog(QDialog):
         self.compact_requested: bool = False
         self.prune_backups_requested: bool = False
         self.backup_requested: bool = False
+        self.fresh_start_requested: bool = False
         self.heal_faces_requested: bool = False
         self.purge_rescan_requested: bool = False
         self.fast_rematch_requested: bool = False
@@ -1093,6 +1094,24 @@ class AppSettingsDialog(QDialog):
         self.btn_backup_catalog.clicked.connect(self._on_backup_clicked)
         maint_layout.addWidget(self.btn_backup_catalog)
 
+        self.btn_fresh_start = QPushButton(
+            "Fresh Start (Reset Catalog && Thumbnails)...", maint_frame
+        )
+        self.btn_fresh_start.setStyleSheet(
+            "QPushButton { color: #B91C1C; border: 1px solid #FCA5A5; background: #FEF2F2; "
+            "border-radius: 3px; padding: 5px 10px; font-weight: 600; }"
+            "QPushButton:hover { background: #FEE2E2; border-color: #EF4444; }"
+            if not self._is_dark
+            else "QPushButton { color: #FCA5A5; border: 1px solid #7F1D1D; background: #2D181B; "
+            "border-radius: 3px; padding: 5px 10px; font-weight: 600; }"
+            "QPushButton:hover { background: #451A20; border-color: #EF4444; }"
+        )
+        self.btn_fresh_start.setToolTip(
+            "Deletes catalog.db and thumbnails.db to start with a clean empty gallery (your photo files on disk are NOT deleted)"
+        )
+        self.btn_fresh_start.clicked.connect(self._on_fresh_start_clicked)
+        maint_layout.addWidget(self.btn_fresh_start)
+
         self.lbl_maint_status = QLabel("", maint_frame)
         self.lbl_maint_status.setStyleSheet("color: #3B82F6; font-weight: 600;")
         maint_layout.addWidget(self.lbl_maint_status)
@@ -1233,7 +1252,8 @@ class AppSettingsDialog(QDialog):
                 self.lbl_opt_lama_status.setText(
                     f"Status: Installed ({st.get('filename')}, {st.get('size_mb', 0):.0f} MB) — {state_txt}"
                 )
-                self.btn_opt_lama_download.setText("Re-download / Update")
+                self.btn_opt_lama_download.setText("Reinstall / Repair")
+                self.btn_opt_lama_uninstall.setVisible(True)
                 self.btn_opt_lama_uninstall.setEnabled(True)
             else:
                 self.lbl_opt_lama_status.setText(
@@ -1241,6 +1261,7 @@ class AppSettingsDialog(QDialog):
                     f"Optional download: ~{st.get('size_mb', 50)} MB."
                 )
                 self.btn_opt_lama_download.setText(f"Download AI Object Eraser (~{st.get('size_mb', 50)} MB)")
+                self.btn_opt_lama_uninstall.setVisible(False)
                 self.btn_opt_lama_uninstall.setEnabled(False)
         except Exception as exc:
             self.lbl_opt_lama_status.setText(f"Status unavailable: {exc}")
@@ -1284,12 +1305,14 @@ class AppSettingsDialog(QDialog):
             if rapid_installed:
                 self.lbl_opt_rapid_status.setText(f"RapidOCR Add-on: Installed ({rapid_mb} MB)")
                 self.lbl_opt_rapid_status.setStyleSheet("color: #1B6E2D; font-size: 11px;")
-                self.btn_opt_rapid_download.setText(f"Re-download RapidOCR ({rapid_mb} MB)")
+                self.btn_opt_rapid_download.setText("Reinstall / Repair")
+                self.btn_opt_rapid_uninstall.setVisible(True)
                 self.btn_opt_rapid_uninstall.setEnabled(True)
             else:
                 self.lbl_opt_rapid_status.setText(f"RapidOCR Add-on: Not installed (~{rapid_mb} MB download)")
                 self.lbl_opt_rapid_status.setStyleSheet("color: #666; font-size: 11px;")
                 self.btn_opt_rapid_download.setText(f"Download RapidOCR (~{rapid_mb} MB)")
+                self.btn_opt_rapid_uninstall.setVisible(False)
                 self.btn_opt_rapid_uninstall.setEnabled(False)
         except Exception as exc:
             self.lbl_opt_ocr_status.setText(f"OCR status unavailable: {exc}")
@@ -1326,6 +1349,7 @@ class AppSettingsDialog(QDialog):
 
         self.btn_opt_lama_download.setEnabled(False)
         self.btn_opt_lama_download.setText("Downloading...")
+        self.btn_opt_lama_uninstall.setVisible(False)
         worker = _LamaOptDlWorker(self)
 
         def _on_prog(done: int, total: int) -> None:
@@ -1429,6 +1453,7 @@ class AppSettingsDialog(QDialog):
 
         self.btn_opt_rapid_download.setEnabled(False)
         self.btn_opt_rapid_download.setText("Downloading...")
+        self.btn_opt_rapid_uninstall.setVisible(False)
         worker = _RapidOptDlWorker(self)
 
         def _on_prog(done: int, total: int) -> None:
@@ -1614,6 +1639,25 @@ class AppSettingsDialog(QDialog):
     def _on_backup_clicked(self) -> None:
         self.backup_requested = True
         self.lbl_maint_status.setText("✓ Catalog backup queued on close.")
+
+    def _on_fresh_start_clicked(self) -> None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Fresh Start — Reset Catalog?")
+        box.setText("Delete the photo catalog and start completely fresh?")
+        box.setInformativeText(
+            "This will permanently delete your catalog database (catalog.db) and cached "
+            "thumbnails (thumbnails.db), clearing all indexed folders, tags, people, albums, "
+            "and face matches.\n\n"
+            "Your original photo and video files on disk will NOT be deleted."
+        )
+        btn_reset = box.addButton("Reset && Fresh Start", QMessageBox.DestructiveRole)
+        btn_cancel = box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(btn_cancel)
+        box.exec()
+        if box.clickedButton() == btn_reset:
+            self.fresh_start_requested = True
+            self.accept()
 
     def _on_heal_faces_clicked(self) -> None:
         self.heal_faces_requested = True
@@ -2260,6 +2304,8 @@ def prompt_and_download_lama_addon(
     prog = QProgressDialog(f"Downloading AI Neural Inpainting (~{LAMA_MODEL_SIZE_MB} MB)...", "Cancel", 0, 100, parent)
     prog.setWindowTitle("Downloading Add-on")
     prog.setWindowModality(Qt.WindowModal)
+    prog.setAutoClose(False)
+    prog.setAutoReset(False)
     prog.setMinimumDuration(0)
     prog.show()
 
@@ -2277,12 +2323,15 @@ def prompt_and_download_lama_addon(
             )
 
     t = _DlThread(parent)
-    t.progress.connect(lambda d, tot: prog.setValue(int(min(99, (d * 100) // tot))) if tot > 0 else None)
+    t.progress.connect(lambda d, tot: prog.setValue(int(min(100, (d * 100) // tot))) if tot > 0 else None)
     t.start()
     while t.isRunning():
         QApplication.processEvents()
         t.wait(30)
+    if result_holder["path"] is not None and not cancelled["v"]:
+        prog.setValue(100)
     prog.close()
+    prog.deleteLater()
 
     if result_holder["path"] is None and not cancelled["v"]:
         QMessageBox.warning(

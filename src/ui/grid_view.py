@@ -1423,6 +1423,7 @@ class EmptyStateWidget(QWidget):
     - If restricted to a folder or scoped filter, provides a clickable 'Try searching all photos and videos' link.
     """
     search_all_clicked = Signal()
+    add_folder_clicked = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1433,10 +1434,7 @@ class EmptyStateWidget(QWidget):
         layout.setSpacing(6)
         layout.setAlignment(Qt.AlignCenter)
 
-        self.btn_try_all = QPushButton("Try searching all photos and videos", self)
-        self.btn_try_all.setCursor(Qt.PointingHandCursor)
-        self.btn_try_all.setStyleSheet(
-            """
+        link_css = """
             QPushButton {
                 color: #0066CC;
                 font-family: 'Segoe UI', sans-serif;
@@ -1449,10 +1447,20 @@ class EmptyStateWidget(QWidget):
                 color: #004499;
                 text-decoration: underline;
             }
-            """
-        )
+        """
+
+        self.btn_try_all = QPushButton("Try searching all photos and videos", self)
+        self.btn_try_all.setCursor(Qt.PointingHandCursor)
+        self.btn_try_all.setStyleSheet(link_css)
         self.btn_try_all.clicked.connect(self.search_all_clicked.emit)
         layout.addWidget(self.btn_try_all, 0, Qt.AlignCenter)
+
+        self.btn_add_folder = QPushButton("Add a folder to your library...", self)
+        self.btn_add_folder.setCursor(Qt.PointingHandCursor)
+        self.btn_add_folder.setStyleSheet(link_css)
+        self.btn_add_folder.clicked.connect(self.add_folder_clicked.emit)
+        self.btn_add_folder.hide()
+        layout.addWidget(self.btn_add_folder, 0, Qt.AlignCenter)
 
         self.lbl_message = QLabel("No items match your current search.", self)
         self.lbl_message.setAlignment(Qt.AlignCenter)
@@ -1462,18 +1470,55 @@ class EmptyStateWidget(QWidget):
         layout.addWidget(self.lbl_message, 0, Qt.AlignCenter)
         self.hide()
 
-    def set_state(self, is_empty: bool, is_search: bool, is_scoped: bool) -> None:
+    def set_dark_mode(self, is_dark: bool) -> None:
+        link_col = "#60A5FA" if is_dark else "#0066CC"
+        hover_col = "#93C5FD" if is_dark else "#004499"
+        msg_col = "#94A3B8" if is_dark else "#555555"
+        css = f"""
+            QPushButton {{
+                color: {link_col};
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 11pt;
+                border: none;
+                background: transparent;
+                padding: 0;
+            }}
+            QPushButton:hover {{
+                color: {hover_col};
+                text-decoration: underline;
+            }}
+        """
+        self.btn_try_all.setStyleSheet(css)
+        self.btn_add_folder.setStyleSheet(css)
+        self.lbl_message.setStyleSheet(
+            f"color: {msg_col}; font-family: 'Segoe UI', sans-serif; font-size: 9.5pt; border: none; background: transparent;"
+        )
+
+    def set_state(
+        self,
+        is_empty: bool,
+        is_search: bool,
+        is_scoped: bool,
+        is_library_empty: bool = False,
+    ) -> None:
         if not is_empty:
             self.hide()
             return
 
-        if is_search and is_scoped:
+        if is_library_empty:
+            self.btn_try_all.hide()
+            self.btn_add_folder.show()
+            self.lbl_message.setText("No photos or videos in your gallery yet.")
+        elif is_search and is_scoped:
+            self.btn_add_folder.hide()
             self.btn_try_all.show()
             self.lbl_message.setText("No items match your current search.")
         elif is_search and not is_scoped:
+            self.btn_add_folder.hide()
             self.btn_try_all.hide()
             self.lbl_message.setText("No items match your current search.")
         else:
+            self.btn_add_folder.hide()
             self.btn_try_all.hide()
             self.lbl_message.setText("There are no pictures or videos in this view.")
 
@@ -1588,7 +1633,9 @@ class ThumbnailGridView(QListView):
     selection_ids_changed = Signal(list, int)     # selected_media_ids, lead_media_id (-1 if none)
     media_activated = Signal(int)                 # media_id on double-click or Enter
     compare_requested = Signal(list)              # list[int] selected media_ids on 'C' or context menu
-    try_search_all_requested = Signal()           # user clicked 'Try searching all photos and videos'
+    find_similar_requested = Signal(int)          # media_id for Spatial Haar Find Similar
+    try_search_all_requested = Signal()
+    add_folder_requested = Signal()           # user clicked 'Try searching all photos and videos'
     thumbnail_size_changed = Signal(int)          # emitted when thumbnail size changes (e.g. Ctrl+wheel)
     _active_drag_button: Qt.MouseButton = Qt.LeftButton
 
@@ -1613,6 +1660,7 @@ class ThumbnailGridView(QListView):
         self.scope_bar: SearchScopeBar | None = None
         self.empty_state_overlay = EmptyStateWidget(self.viewport())
         self.empty_state_overlay.search_all_clicked.connect(self.try_search_all_requested.emit)
+        self.empty_state_overlay.add_folder_clicked.connect(self.add_folder_requested.emit)
 
         self._scroll_indicator = _ScrollGroupIndicator(self.viewport())
         self._scroll_indicator.hide()
@@ -1971,9 +2019,15 @@ class ThumbnailGridView(QListView):
             y = sb_h + max(40, (vp.height() - sb_h - oh) // 2)
             self.empty_state_overlay.setGeometry(x, y, ow, oh)
 
-    def set_empty_state(self, is_empty: bool, is_search: bool = False, is_scoped: bool = False) -> None:
-        """Configures and displays the WLPG empty search/filter state."""
-        self.empty_state_overlay.set_state(is_empty, is_search, is_scoped)
+    def set_empty_state(
+        self,
+        is_empty: bool,
+        is_search: bool = False,
+        is_scoped: bool = False,
+        is_library_empty: bool = False,
+    ) -> None:
+        """Configures and displays the WLPG empty search/filter/fresh-start state."""
+        self.empty_state_overlay.set_state(is_empty, is_search, is_scoped, is_library_empty=is_library_empty)
         self._reposition_empty_state()
 
     # -------------------------------------------------------------------------
@@ -2010,6 +2064,8 @@ class ThumbnailGridView(QListView):
             self.person_header_bar.set_dark_mode(self._dark_mode)
         if hasattr(self, "_scroll_indicator") and self._scroll_indicator is not None:
             self._scroll_indicator.set_dark_mode(self._dark_mode)
+        if hasattr(self, "empty_state_overlay") and self.empty_state_overlay is not None:
+            self.empty_state_overlay.set_dark_mode(self._dark_mode)
         self.viewport().update()
 
     def paintEvent(self, event: QPaintEvent) -> None:
@@ -2889,7 +2945,7 @@ class ThumbnailGridView(QListView):
             else [int(media_id)]
         )
 
-        add_album_menu = menu.addMenu(make_wlpg_icon("pictures_library", 16), "Add to Album")
+        add_album_menu = menu.addMenu("Add to Album")
         menu._add_album_menu = add_album_menu
         add_album_menu.setFont(QFont("Segoe UI", 9))
 
@@ -3043,6 +3099,9 @@ class ThumbnailGridView(QListView):
             if len(sel_ids_for_cmp) >= 2:
                 act_cmp = menu.addAction(make_wlpg_icon("layout_grid", 16), "Compare Selected Photos (C)")
                 act_cmp.triggered.connect(lambda _chk=False, ids=list(sel_ids_for_cmp): self.compare_requested.emit(ids))
+            if not is_video:
+                act_sim = menu.addAction("Find Similar Photos...")
+                act_sim.triggered.connect(lambda _chk=False, mid=int(media_id): self.find_similar_requested.emit(mid))
 
             # 2. Open with ▸ (Populated with Windows registered apps)
             open_with_menu = menu.addMenu("Open with")

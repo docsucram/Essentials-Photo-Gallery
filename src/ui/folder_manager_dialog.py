@@ -12,7 +12,7 @@ import secrets
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import SIGNAL, QModelIndex, QPointF, QRect, QRectF, QSettings, QSize, Qt, Signal
+from PySide6.QtCore import SIGNAL, QModelIndex, QPointF, QRect, QRectF, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -206,12 +206,27 @@ def _draw_status_pixmap(mode: str, size: int = 16) -> QPixmap:
     return pm
 
 
+_STATUS_ICON_CACHE: dict[tuple[str, int], QIcon] = {}
+_FOLDER_ROW_ICON_CACHE: dict[str, QIcon] = {}
+_FEATURE_ICON_CACHE: dict[tuple[str, bool], QIcon] = {}
+
+
 def _make_status_icon(mode: str, size: int = 16) -> QIcon:
-    return QIcon(_draw_status_pixmap(mode, size))
+    key = (mode.lower(), int(size))
+    cached = _STATUS_ICON_CACHE.get(key)
+    if cached is not None:
+        return cached
+    icon = QIcon(_draw_status_pixmap(mode, size))
+    _STATUS_ICON_CACHE[key] = icon
+    return icon
 
 
 def _make_folder_row_icon(mode: str) -> QIcon:
     """Composite [Status Icon] + [Standard OS Folder Icon] for the left tree."""
+    key = mode.lower()
+    cached = _FOLDER_ROW_ICON_CACHE.get(key)
+    if cached is not None:
+        return cached
     w, h = 36, 16
     pm = QPixmap(w, h)
     pm.fill(Qt.transparent)
@@ -225,11 +240,17 @@ def _make_folder_row_icon(mode: str) -> QIcon:
         folder_pm = folder_icon.pixmap(16, 16)
         p.drawPixmap(20, 0, folder_pm)
     p.end()
-    return QIcon(pm)
+    icon = QIcon(pm)
+    _FOLDER_ROW_ICON_CACHE[key] = icon
+    return icon
 
 
 def _make_feature_icon(kind: str, enabled: bool) -> QIcon:
     """Paint compact 16x16 right-side indicator icons for Faces, OCR, and Private."""
+    key = (kind, bool(enabled))
+    cached = _FEATURE_ICON_CACHE.get(key)
+    if cached is not None:
+        return cached
     size = 16
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
@@ -266,7 +287,9 @@ def _make_feature_icon(kind: str, enabled: bool) -> QIcon:
             p.setPen(QPen(QColor("#94A3B8"), 1.5, Qt.SolidLine, Qt.RoundCap))
             p.drawLine(3, 13, 13, 3)
     p.end()
-    return QIcon(pm)
+    icon = QIcon(pm)
+    _FEATURE_ICON_CACHE[key] = icon
+    return icon
 
 
 class _FolderManagerTree(QTreeWidget):
@@ -523,7 +546,7 @@ class FolderManagerDialog(QDialog):
         ocr_cfg_row.addWidget(self.lbl_ocr_backend, 1)
         ocr_cfg_row.addWidget(self.btn_configure_ocr)
         ai_layout.addLayout(ocr_cfg_row)
-        self._refresh_ocr_backend_label()
+        QTimer.singleShot(0, self._refresh_ocr_backend_label)
         right_layout.addWidget(grp_ai)
 
         # 3. Private Folders Checkbox + Unlock / Auto-Lock
@@ -648,6 +671,29 @@ class FolderManagerDialog(QDialog):
         ):
             w.setEnabled(enabled)
 
+    def _apply_folder_to_item(self, item: QTreeWidgetItem, f: dict[str, Any]) -> None:
+        """Update an existing QTreeWidgetItem's icons and tooltips from folder policy dict."""
+        mode = str(f.get("monitor_mode") or "always").lower()
+        faces_on = int(f.get("scan_faces") if f.get("scan_faces") is not None else 1) == 1
+        ocr_on = int(f.get("scan_ocr") if f.get("scan_ocr") is not None else 0) == 1
+        is_priv = int(f.get("is_private") or 0) == 1
+
+        item.setIcon(0, _make_folder_row_icon(mode))
+        item.setToolTip(0, format_folder_badges(f))
+
+        item.setIcon(1, _make_feature_icon("faces", faces_on))
+        item.setToolTip(1, f"Scan Faces: {'On' if faces_on else 'Off'} (click to toggle)")
+
+        item.setIcon(2, _make_feature_icon("ocr", ocr_on))
+        item.setToolTip(2, f"Scan Text (OCR): {'On' if ocr_on else 'Off'} (click to toggle)")
+
+        if is_priv:
+            item.setIcon(3, _make_feature_icon("private", True))
+            item.setToolTip(3, "Private Folder (Hidden when locked)")
+        else:
+            item.setIcon(3, QIcon())
+            item.setToolTip(3, "")
+
     def refresh_tree(
         self,
         select_folder_id: int | None = None,
@@ -660,65 +706,55 @@ class FolderManagerDialog(QDialog):
         self._folder_map = {int(f["id"]): f for f in folders}
         self._item_map.clear()
 
+        self.tree_folders.setUpdatesEnabled(False)
         self.tree_folders.blockSignals(True)
-        self.tree_folders.clear()
+        try:
+            self.tree_folders.clear()
 
-        for f in folders:
-            fid = int(f["id"])
-            mode = str(f.get("monitor_mode") or "always").lower()
-            name = str(f.get("name") or Path(str(f.get("path") or "")).name or f.get("path") or "")
-            faces_on = int(f.get("scan_faces") if f.get("scan_faces") is not None else 1) == 1
-            ocr_on = int(f.get("scan_ocr") if f.get("scan_ocr") is not None else 0) == 1
-            is_priv = int(f.get("is_private") or 0) == 1
+            for f in folders:
+                fid = int(f["id"])
+                name = str(f.get("name") or Path(str(f.get("path") or "")).name or f.get("path") or "")
 
-            item = QTreeWidgetItem([name, "", "", ""])
-            item.setData(0, Qt.UserRole, fid)
-            if f.get("parent_id") is None:
-                root_font = item.font(0)
-                root_font.setBold(True)
-                item.setFont(0, root_font)
-            item.setIcon(0, _make_folder_row_icon(mode))
-            item.setToolTip(0, format_folder_badges(f))
+                item = QTreeWidgetItem([name, "", "", ""])
+                item.setData(0, Qt.UserRole, fid)
+                if f.get("parent_id") is None:
+                    root_font = item.font(0)
+                    root_font.setBold(True)
+                    item.setFont(0, root_font)
+                self._apply_folder_to_item(item, f)
+                self._item_map[fid] = item
 
-            item.setIcon(1, _make_feature_icon("faces", faces_on))
-            item.setToolTip(1, f"Scan Faces: {'On' if faces_on else 'Off'} (click to toggle)")
+            for f in folders:
+                fid = int(f["id"])
+                pid = f.get("parent_id")
+                item = self._item_map[fid]
+                if pid is not None and int(pid) in self._item_map:
+                    self._item_map[int(pid)].addChild(item)
+                else:
+                    self.tree_folders.addTopLevelItem(item)
 
-            item.setIcon(2, _make_feature_icon("ocr", ocr_on))
-            item.setToolTip(2, f"Scan Text (OCR): {'On' if ocr_on else 'Off'} (click to toggle)")
+            self.tree_folders.expandAll()
 
-            if is_priv:
-                item.setIcon(3, _make_feature_icon("private", True))
-                item.setToolTip(3, "Private Folder (Hidden when locked)")
+            targets: list[int] = []
+            if select_folder_ids:
+                targets = [int(i) for i in select_folder_ids if int(i) in self._item_map]
+            elif select_folder_id is not None and int(select_folder_id) in self._item_map:
+                targets = [int(select_folder_id)]
+            elif folders:
+                targets = [int(folders[0]["id"])]
 
-            self._item_map[fid] = item
-
-        for f in folders:
-            fid = int(f["id"])
-            pid = f.get("parent_id")
-            item = self._item_map[fid]
-            if pid is not None and int(pid) in self._item_map:
-                self._item_map[int(pid)].addChild(item)
-            else:
-                self.tree_folders.addTopLevelItem(item)
-
-        self.tree_folders.expandAll()
-
-        targets: list[int] = []
-        if select_folder_ids:
-            targets = [int(i) for i in select_folder_ids if int(i) in self._item_map]
-        elif select_folder_id is not None and int(select_folder_id) in self._item_map:
-            targets = [int(select_folder_id)]
-        elif folders:
-            targets = [int(folders[0]["id"])]
-
-        if targets:
-            for tid in targets:
-                self._item_map[tid].setSelected(True)
-            self.tree_folders.setCurrentItem(self._item_map[targets[0]])
-        self.tree_folders.blockSignals(False)
+            if targets:
+                for tid in targets:
+                    self._item_map[tid].setSelected(True)
+                self.tree_folders.setCurrentItem(self._item_map[targets[0]])
+        finally:
+            self.tree_folders.blockSignals(False)
+            self.tree_folders.setUpdatesEnabled(True)
 
         if vbar is not None:
             vbar.setValue(prev_scroll)
+            if prev_scroll > 0:
+                QTimer.singleShot(0, lambda v=prev_scroll, bar=vbar: bar.setValue(v))
 
         if targets:
             self._load_folders_into_controls(targets)
@@ -744,8 +780,12 @@ class FolderManagerDialog(QDialog):
                 item.setExpanded(True)
             return visible
 
-        for i in range(self.tree_folders.topLevelItemCount()):
-            _filter_item(self.tree_folders.topLevelItem(i))
+        self.tree_folders.setUpdatesEnabled(False)
+        try:
+            for i in range(self.tree_folders.topLevelItemCount()):
+                _filter_item(self.tree_folders.topLevelItem(i))
+        finally:
+            self.tree_folders.setUpdatesEnabled(True)
 
     def _on_add_folder_clicked(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Add Folder to Catalog")
@@ -845,15 +885,31 @@ class FolderManagerDialog(QDialog):
         if column == 1:
             cur_on = int(f0.get("scan_faces") if f0.get("scan_faces") is not None else 1) == 1
             new_val = not cur_on
+            if hasattr(self.repo, "update_folders_policy_batch"):
+                self.repo.update_folders_policy_batch(target_ids, scan_faces=new_val)
+            else:
+                for tid in target_ids:
+                    self.repo.update_folder_policy(tid, scan_faces=new_val)
             for tid in target_ids:
-                self.repo.update_folder_policy(tid, scan_faces=new_val)
+                if tid in self._folder_map:
+                    self._folder_map[tid]["scan_faces"] = 1 if new_val else 0
+                    if tid in self._item_map:
+                        self._apply_folder_to_item(self._item_map[tid], self._folder_map[tid])
         elif column == 2:
-            cur_on = int(f0.get("scan_ocr") if f0.get("scan_ocr") is not None else 1) == 1
+            cur_on = int(f0.get("scan_ocr") if f0.get("scan_ocr") is not None else 0) == 1
             new_val = not cur_on
+            if hasattr(self.repo, "update_folders_policy_batch"):
+                self.repo.update_folders_policy_batch(target_ids, scan_ocr=new_val)
+            else:
+                for tid in target_ids:
+                    self.repo.update_folder_policy(tid, scan_ocr=new_val)
             for tid in target_ids:
-                self.repo.update_folder_policy(tid, scan_ocr=new_val)
+                if tid in self._folder_map:
+                    self._folder_map[tid]["scan_ocr"] = 1 if new_val else 0
+                    if tid in self._item_map:
+                        self._apply_folder_to_item(self._item_map[tid], self._folder_map[tid])
 
-        self.refresh_tree(select_folder_ids=sel_ids or target_ids)
+        self._load_folders_into_controls(sel_ids or target_ids)
         self.policies_changed.emit()
 
     def _load_folder_into_controls(self, folder_id: int) -> None:
@@ -954,15 +1010,41 @@ class FolderManagerDialog(QDialog):
         ocr_arg = None if self.chk_scan_ocr.checkState() == Qt.PartiallyChecked else self.chk_scan_ocr.isChecked()
         priv_arg = None if self.chk_is_private.checkState() == Qt.PartiallyChecked else self.chk_is_private.isChecked()
 
-        for fid in fids:
-            self.repo.update_folder_policy(
-                fid,
+        if hasattr(self.repo, "update_folders_policy_batch"):
+            self.repo.update_folders_policy_batch(
+                fids,
                 monitor_mode=new_mode,
                 scan_faces=faces_arg,
                 scan_ocr=ocr_arg,
                 is_private=priv_arg,
             )
-        self.refresh_tree(select_folder_ids=fids)
+        else:
+            for fid in fids:
+                self.repo.update_folder_policy(
+                    fid,
+                    monitor_mode=new_mode,
+                    scan_faces=faces_arg,
+                    scan_ocr=ocr_arg,
+                    is_private=priv_arg,
+                )
+
+        if new_mode == "excluded":
+            self.refresh_tree(select_folder_ids=fids)
+        else:
+            for fid in fids:
+                f_dict = self._folder_map.get(fid)
+                if f_dict is not None:
+                    if new_mode is not None:
+                        f_dict["monitor_mode"] = new_mode
+                    if faces_arg is not None:
+                        f_dict["scan_faces"] = 1 if faces_arg else 0
+                    if ocr_arg is not None:
+                        f_dict["scan_ocr"] = 1 if ocr_arg else 0
+                    if priv_arg is not None:
+                        f_dict["is_private"] = 1 if priv_arg else 0
+                    item = self._item_map.get(fid)
+                    if item is not None:
+                        self._apply_folder_to_item(item, f_dict)
         self.policies_changed.emit()
 
     def _on_apply_to_subfolders(self) -> None:
@@ -970,11 +1052,38 @@ class FolderManagerDialog(QDialog):
         if not fids:
             return
         updated = 0
+        is_excluded = self._current_mode_value() == "excluded"
         for fid in fids:
             updated += self.repo.apply_folder_policy_to_subfolders(fid)
-            if self._current_mode_value() == "excluded":
+            if is_excluded:
                 self.repo.exclude_folder_from_catalog(fid)
-        self.refresh_tree(select_folder_ids=fids)
+
+        if is_excluded:
+            self.refresh_tree(select_folder_ids=fids)
+        else:
+            # Update descendant items in place so tree scroll position does not jump
+            children_by_parent: dict[int, list[int]] = {}
+            for cid, f_row in self._folder_map.items():
+                pid = f_row.get("parent_id")
+                if pid is not None:
+                    children_by_parent.setdefault(int(pid), []).append(int(cid))
+            for fid in fids:
+                src = self._folder_map.get(fid)
+                if src is None:
+                    continue
+                queue = list(children_by_parent.get(fid, []))
+                while queue:
+                    cid = queue.pop(0)
+                    queue.extend(children_by_parent.get(cid, []))
+                    dst = self._folder_map.get(cid)
+                    if dst is not None:
+                        dst["monitor_mode"] = src.get("monitor_mode")
+                        dst["scan_faces"] = src.get("scan_faces")
+                        dst["scan_ocr"] = src.get("scan_ocr")
+                        dst["is_private"] = src.get("is_private")
+                        item = self._item_map.get(cid)
+                        if item is not None:
+                            self._apply_folder_to_item(item, dst)
         self.policies_changed.emit()
         QMessageBox.information(
             self,

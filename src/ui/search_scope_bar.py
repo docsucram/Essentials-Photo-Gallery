@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -196,6 +197,7 @@ class SearchScopeBar(QFrame):
     special_people_clear_requested = Signal()
     media_type_clear_requested = Signal()
     orientation_clear_requested = Signal()
+    similarity_threshold_changed = Signal(int)  # 70..98 %
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -206,6 +208,11 @@ class SearchScopeBar(QFrame):
         self._debounce_timer.setSingleShot(True)
         self._debounce_timer.setInterval(180)
         self._debounce_timer.timeout.connect(self._emit_search_text)
+
+        self._sim_debounce_timer = QTimer(self)
+        self._sim_debounce_timer.setSingleShot(True)
+        self._sim_debounce_timer.setInterval(120)
+        self._sim_debounce_timer.timeout.connect(self._emit_similarity_threshold)
 
         self._apply_style()
 
@@ -388,6 +395,36 @@ class SearchScopeBar(QFrame):
         self.chips_layout.setContentsMargins(6, 0, 0, 0)
         self.chips_layout.setSpacing(4)
         self.r2_layout.addWidget(self.chips_widget)
+
+        # Contextual Similarity Threshold Slider (visible only when Find Similar is active)
+        self.similar_controls_widget = QWidget(r2_container)
+        self.similar_controls_widget.setStyleSheet("background: transparent;")
+        sim_hbox = QHBoxLayout(self.similar_controls_widget)
+        sim_hbox.setContentsMargins(6, 0, 4, 0)
+        sim_hbox.setSpacing(5)
+
+        lbl_sim = QLabel("Match ≥", self.similar_controls_widget)
+        lbl_sim.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
+        sim_hbox.addWidget(lbl_sim)
+
+        self.slider_similarity = QSlider(Qt.Horizontal, self.similar_controls_widget)
+        self.slider_similarity.setRange(70, 98)
+        self.slider_similarity.setValue(81)
+        self.slider_similarity.setFixedWidth(105)
+        self.slider_similarity.setFixedHeight(16)
+        self.slider_similarity.setCursor(Qt.SizeHorCursor)
+        self.slider_similarity.setToolTip("Adjust minimum visual similarity threshold (70%–98%)")
+        self.slider_similarity.valueChanged.connect(self._on_similarity_slider_changed)
+        self.slider_similarity.sliderReleased.connect(self._emit_similarity_threshold)
+        sim_hbox.addWidget(self.slider_similarity)
+
+        self.lbl_similarity_val = QLabel("81%", self.similar_controls_widget)
+        self.lbl_similarity_val.setStyleSheet(
+            "color: #1E395B; font-weight: bold; font-family: 'Segoe UI'; font-size: 8.5pt; min-width: 28px;"
+        )
+        sim_hbox.addWidget(self.lbl_similarity_val)
+        self.similar_controls_widget.setVisible(False)
+        self.r2_layout.addWidget(self.similar_controls_widget)
 
         self.r2_layout.addStretch(1)
         r2_scroll.setWidget(r2_container)
@@ -629,11 +666,12 @@ class SearchScopeBar(QFrame):
             chip.remove_clicked.connect(self.date_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 
-        # 6. Active Location Chip: "Location: Paris"
+        # 6. Active Location or Find Similar Chip
         if location_label:
-            lbl_loc = QLabel("Location:", self.chips_widget)
-            lbl_loc.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
-            self.chips_layout.addWidget(lbl_loc)
+            if not str(location_label).startswith("Similar to "):
+                lbl_loc = QLabel("Location:", self.chips_widget)
+                lbl_loc.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
+                self.chips_layout.addWidget(lbl_loc)
 
             chip = FilterChip(location_label, self.chips_widget)
             chip.remove_clicked.connect(self.location_clear_requested.emit)
@@ -727,3 +765,25 @@ class SearchScopeBar(QFrame):
 
     def _emit_search_text(self) -> None:
         self.search_text_changed.emit(self.txt_search.text().strip())
+
+    def set_similarity_controls(self, visible: bool, threshold_pct: int = 81) -> None:
+        if hasattr(self, "similar_controls_widget"):
+            self.similar_controls_widget.setVisible(bool(visible))
+        if hasattr(self, "slider_similarity"):
+            pct = max(70, min(98, int(threshold_pct)))
+            self.slider_similarity.blockSignals(True)
+            self.slider_similarity.setValue(pct)
+            self.slider_similarity.blockSignals(False)
+            if hasattr(self, "lbl_similarity_val"):
+                self.lbl_similarity_val.setText(f"{pct}%")
+
+    def _on_similarity_slider_changed(self, val: int) -> None:
+        if hasattr(self, "lbl_similarity_val"):
+            self.lbl_similarity_val.setText(f"{int(val)}%")
+        self._sim_debounce_timer.start()
+
+    def _emit_similarity_threshold(self) -> None:
+        if self._sim_debounce_timer.isActive():
+            self._sim_debounce_timer.stop()
+        if hasattr(self, "slider_similarity"):
+            self.similarity_threshold_changed.emit(int(self.slider_similarity.value()))

@@ -386,7 +386,7 @@ class CatalogRepository:
                    COALESCE(f.ocr_scanned_count, 0) AS ocr_scanned_count
             FROM folders f
             WHERE {clause}
-            ORDER BY f.path ASC;
+            ORDER BY f.name COLLATE NOCASE ASC, f.path COLLATE NOCASE ASC;
             """
         ).fetchall()
         return [dict(r) for r in rows]
@@ -402,9 +402,15 @@ class CatalogRepository:
                    COALESCE(f.scan_ocr, 0) AS scan_ocr,
                    COALESCE(f.is_private, 0) AS is_private,
                    COALESCE(f.ocr_scanned_count, 0) AS ocr_scanned_count,
-                   (SELECT COUNT(*) FROM media m WHERE m.folder_id = f.id AND COALESCE(m.is_missing, 0) = 0) AS media_count
+                   COALESCE(mc.media_count, 0) AS media_count
             FROM folders f
-            ORDER BY f.path ASC;
+            LEFT JOIN (
+                SELECT folder_id, COUNT(*) AS media_count
+                FROM media
+                WHERE COALESCE(is_missing, 0) = 0
+                GROUP BY folder_id
+            ) mc ON mc.folder_id = f.id
+            ORDER BY f.name COLLATE NOCASE ASC, f.path COLLATE NOCASE ASC;
             """
         ).fetchall()
         return [dict(r) for r in rows]
@@ -435,6 +441,27 @@ class CatalogRepository:
         is_private: bool | None = None,
     ) -> None:
         """Persist Folder Manager policy flags for a single folder."""
+        self.update_folders_policy_batch(
+            [int(folder_id)],
+            monitor_mode=monitor_mode,
+            scan_faces=scan_faces,
+            scan_ocr=scan_ocr,
+            is_private=is_private,
+        )
+
+    def update_folders_policy_batch(
+        self,
+        folder_ids: Sequence[int],
+        *,
+        monitor_mode: str | None = None,
+        scan_faces: bool | None = None,
+        scan_ocr: bool | None = None,
+        is_private: bool | None = None,
+    ) -> None:
+        """Persist Folder Manager policy flags for one or more folders in a single transaction."""
+        fids = [int(fid) for fid in folder_ids]
+        if not fids:
+            return
         updates: list[str] = []
         params: list[Any] = []
         if monitor_mode is not None:
@@ -454,13 +481,15 @@ class CatalogRepository:
             params.append(1 if is_private else 0)
         if not updates:
             return
-        params.append(int(folder_id))
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
-            conn.execute(
-                f"UPDATE folders SET {', '.join(updates)} WHERE id = ?;",
-                params,
-            )
+            set_clause = ", ".join(updates)
+            for chunk in _iter_id_chunks(fids, 900):
+                ph = ",".join("?" for _ in chunk)
+                conn.execute(
+                    f"UPDATE folders SET {set_clause} WHERE id IN ({ph});",
+                    [*params, *chunk],
+                )
             conn.commit()
 
     def apply_folder_policy_to_subfolders(self, folder_id: int) -> int:
@@ -1918,6 +1947,189 @@ class CatalogRepository:
                 items,
             )
             conn.commit()
+
+    def get_gps_matching_candidates(
+        self,
+        *,
+        selected_ids: Sequence[int] | None = None,
+        bbox: tuple[float, float, float, float] | None = None,
+        pad_seconds: int = 172800,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+        """
+        Loads (targets, donors, scope_label) for Companion Phone GPS Matching.
+        Targets are untagged photos with valid date_taken; donors are geotagged photos
+        with valid date_taken.
+        """
+        conn = self.engine.catalog_conn()
+        priv_clause = self._private_folder_clause("f")
+        sel = [int(i) for i in (selected_ids or [])]
+
+        def _row_to_dict(r: Any) -> dict[str, Any]:
+            return {
+                "id": int(r["id"]),
+                "path": str(r["path"] or ""),
+                "filename": str(r["filename"] or ""),
+                "date_taken": int(r["date_taken"] or 0),
+                "camera_model": str(r["camera_model"] or ""),
+                "lat": float(r["lat"]) if r["lat"] is not None else None,
+                "lon": float(r["lon"]) if r["lon"] is not None else None,
+                "location_name": str(r["location_name"] or ""),
+            }
+
+        base_cols = (
+            "m.id, (f.path || '/' || m.filename) AS path, m.filename, m.date_taken, "
+            "m.camera_model, m.lat, m.lon, m.location_name"
+        )
+
+        # Case 1: World Map View (viewport bbox or clicked cluster)
+        if bbox is not None:
+            min_lat, max_lat, min_lon, max_lon = bbox
+            if sel:
+                donors: list[dict[str, Any]] = []
+                for chunk in _iter_id_chunks(sel, 900):
+                    ph = ",".join("?" for _ in chunk)
+                    rows = conn.execute(
+                        f"""
+                        SELECT {base_cols}
+                        FROM media m
+                        JOIN folders f ON f.id = m.folder_id
+                        WHERE COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
+                          AND m.date_taken IS NOT NULL AND m.date_taken > 0
+                          AND m.lat IS NOT NULL AND m.lon IS NOT NULL
+                          AND m.id IN ({ph})
+                        ORDER BY m.date_taken ASC;
+                        """,
+                        list(chunk),
+                    ).fetchall()
+                    donors.extend(_row_to_dict(r) for r in rows)
+                scope_label = f"Selected map cluster ({len(donors)} geotagged donor(s))"
+            else:
+                rows = conn.execute(
+                    f"""
+                    SELECT {base_cols}
+                    FROM media m
+                    JOIN folders f ON f.id = m.folder_id
+                    WHERE COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
+                      AND m.date_taken IS NOT NULL AND m.date_taken > 0
+                      AND m.lat BETWEEN ? AND ?
+                      AND m.lon BETWEEN ? AND ?
+                    ORDER BY m.date_taken ASC;
+                    """,
+                    (float(min_lat), float(max_lat), float(min_lon), float(max_lon)),
+                ).fetchall()
+                donors = [_row_to_dict(r) for r in rows]
+                scope_label = f"Map viewport ({len(donors)} geotagged donor(s))"
+
+            if not donors:
+                return [], [], scope_label
+
+            min_ts = min(d["date_taken"] for d in donors) - int(pad_seconds)
+            max_ts = max(d["date_taken"] for d in donors) + int(pad_seconds)
+            t_rows = conn.execute(
+                f"""
+                SELECT {base_cols}
+                FROM media m
+                JOIN folders f ON f.id = m.folder_id
+                WHERE COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
+                  AND m.date_taken BETWEEN ? AND ?
+                  AND (m.lat IS NULL OR m.lon IS NULL)
+                ORDER BY m.date_taken ASC
+                LIMIT 2500;
+                """,
+                (min_ts, max_ts),
+            ).fetchall()
+            targets = [_row_to_dict(r) for r in t_rows]
+            return targets, donors, scope_label
+
+        # Case 2: Gallery / Grid selection
+        if sel:
+            sel_rows: list[dict[str, Any]] = []
+            for chunk in _iter_id_chunks(sel, 900):
+                ph = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT {base_cols}
+                    FROM media m
+                    JOIN folders f ON f.id = m.folder_id
+                    WHERE COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
+                      AND m.date_taken IS NOT NULL AND m.date_taken > 0
+                      AND m.id IN ({ph})
+                    ORDER BY m.date_taken ASC;
+                    """,
+                    list(chunk),
+                ).fetchall()
+                sel_rows.extend(_row_to_dict(r) for r in rows)
+
+            sel_donors = [r for r in sel_rows if r["lat"] is not None and r["lon"] is not None]
+            sel_targets = [r for r in sel_rows if r["lat"] is None or r["lon"] is None]
+
+            if len(sel) >= 2 and sel_donors and sel_targets:
+                return sel_targets, sel_donors, f"Selection ({len(sel_targets)} untagged, {len(sel_donors)} donors)"
+
+            if sel_targets:
+                min_ts = min(t["date_taken"] for t in sel_targets) - int(pad_seconds)
+                max_ts = max(t["date_taken"] for t in sel_targets) + int(pad_seconds)
+                d_rows = conn.execute(
+                    f"""
+                    SELECT {base_cols}
+                    FROM media m
+                    JOIN folders f ON f.id = m.folder_id
+                    WHERE COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
+                      AND m.date_taken BETWEEN ? AND ?
+                      AND m.lat IS NOT NULL AND m.lon IS NOT NULL
+                    ORDER BY m.date_taken ASC;
+                    """,
+                    (min_ts, max_ts),
+                ).fetchall()
+                donors = [_row_to_dict(r) for r in d_rows]
+                return sel_targets, donors, f"Selected {len(sel_targets)} untagged photo(s) + catalog donors"
+
+            if sel_donors:
+                min_ts = min(d["date_taken"] for d in sel_donors) - int(pad_seconds)
+                max_ts = max(d["date_taken"] for d in sel_donors) + int(pad_seconds)
+                t_rows = conn.execute(
+                    f"""
+                    SELECT {base_cols}
+                    FROM media m
+                    JOIN folders f ON f.id = m.folder_id
+                    WHERE COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
+                      AND m.date_taken BETWEEN ? AND ?
+                      AND (m.lat IS NULL OR m.lon IS NULL)
+                    ORDER BY m.date_taken ASC
+                    LIMIT 2500;
+                    """,
+                    (min_ts, max_ts),
+                ).fetchall()
+                targets = [_row_to_dict(r) for r in t_rows]
+                return targets, sel_donors, f"Selected {len(sel_donors)} donor(s) → untagged catalog photos"
+
+        # Case 3: Catalog-wide fallback
+        t_rows = conn.execute(
+            f"""
+            SELECT {base_cols}
+            FROM media m
+            JOIN folders f ON f.id = m.folder_id
+            WHERE COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
+              AND m.date_taken IS NOT NULL AND m.date_taken > 0
+              AND (m.lat IS NULL OR m.lon IS NULL)
+            ORDER BY m.date_taken DESC
+            LIMIT 2500;
+            """
+        ).fetchall()
+        d_rows = conn.execute(
+            f"""
+            SELECT {base_cols}
+            FROM media m
+            JOIN folders f ON f.id = m.folder_id
+            WHERE COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
+              AND m.date_taken IS NOT NULL AND m.date_taken > 0
+              AND m.lat IS NOT NULL AND m.lon IS NOT NULL
+            ORDER BY m.date_taken ASC;
+            """
+        ).fetchall()
+        targets = sorted((_row_to_dict(r) for r in t_rows), key=lambda r: r["date_taken"])
+        donors = [_row_to_dict(r) for r in d_rows]
+        return targets, donors, f"Catalog ({len(targets)} untagged, {len(donors)} donors)"
 
     def get_geotag_bounds(self) -> tuple[float, float, float, float] | None:
         """
@@ -6136,6 +6348,81 @@ class ThumbnailRepository:
                 for mid_val, blob_val, _ in rows:
                     result[int(mid_val)] = bytes(blob_val)
         return result
+
+    def get_signatures_batch(
+        self,
+        media_ids: Sequence[int],
+    ) -> dict[int, tuple[int, int, int, float, bytes]]:
+        """
+        Returns cached perceptual signatures {media_id: (mtime, phash64_u64, dhash64_u64, sharpness, lab_haar)}
+        from thumbnails.db.
+        """
+        if not media_ids:
+            return {}
+        conn = self.engine.thumbnails_conn()
+        cur = conn.cursor()
+        cur.row_factory = None
+        result: dict[int, tuple[int, int, int, float, bytes]] = {}
+        try:
+            for chunk in _iter_id_chunks(media_ids, 900):
+                ph = ",".join("?" for _ in chunk)
+                rows = cur.execute(
+                    f"SELECT media_id, mtime, phash64, dhash64, sharpness, lab_haar "
+                    f"FROM media_signatures WHERE media_id IN ({ph});",
+                    list(chunk),
+                ).fetchall()
+                for mid_v, mt_v, ph_v, dh_v, sh_v, lh_v in rows:
+                    result[int(mid_v)] = (
+                        int(mt_v),
+                        int(ph_v) & 0xFFFFFFFFFFFFFFFF,
+                        int(dh_v) & 0xFFFFFFFFFFFFFFFF,
+                        float(sh_v or 0.0),
+                        bytes(lh_v) if lh_v is not None else b"",
+                    )
+        except Exception:
+            pass
+        return result
+
+    def upsert_signatures_batch(
+        self,
+        rows: Sequence[tuple[int, int, int, int, float, bytes]],
+    ) -> None:
+        """
+        Persists perceptual signatures [(media_id, mtime, phash64_u64, dhash64_u64, sharpness, lab_haar)]
+        into thumbnails.db.
+        """
+        if not rows:
+            return
+        converted = [
+            (
+                int(mid),
+                int(mt),
+                int.from_bytes((int(ph) & 0xFFFFFFFFFFFFFFFF).to_bytes(8, "big"), "big", signed=True),
+                int.from_bytes((int(dh) & 0xFFFFFFFFFFFFFFFF).to_bytes(8, "big"), "big", signed=True),
+                float(sh),
+                bytes(lh) if lh else b"",
+            )
+            for mid, mt, ph, dh, sh, lh in rows
+        ]
+        try:
+            with self._write_lock:
+                conn = self.engine.thumbnails_conn()
+                conn.executemany(
+                    """
+                    INSERT INTO media_signatures(media_id, mtime, phash64, dhash64, sharpness, lab_haar)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(media_id) DO UPDATE SET
+                        mtime = excluded.mtime,
+                        phash64 = excluded.phash64,
+                        dhash64 = excluded.dhash64,
+                        sharpness = excluded.sharpness,
+                        lab_haar = excluded.lab_haar;
+                    """,
+                    converted,
+                )
+                conn.commit()
+        except Exception:
+            pass
 
     def get_first_cached_media_id(self, media_ids: Sequence[int]) -> int | None:
         """Returns the first media_id from media_ids that already has a cached thumbnail."""

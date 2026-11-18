@@ -47,7 +47,7 @@ The **Edit & Create Engine** pairs deterministic floating-point / LUT-accelerate
 3. **Precomputed Look-Up Tables (`cv2.LUT`):** Levels, Filmic Exposure, and Filmic Contrast combine into a single 256-entry `uint8` LUT executing in **`1.1 ms`**, paired with precomputed sRGB/linear (`_LUT_SRGB_TO_LIN`, `_LUT_LIN_TO_SRGB`, `_VIBRANCE_POW_LUT`) and 4x downsampled base/detail illumination decomposition.
 4. **Non-Destructive File Protocol (`.OriginalFiles/`):** Saving over an original file stashes a byte-identical untouched copy inside `<folder>/.OriginalFiles/<filename>` (never overwriting an existing backup), enabling exact **Revert to original** and preserving EXIF/XMP blocks and spatial face coordinates.
 5. **Embedded JPEG Fast-Path for Camera RAW Files (`decode_raw_embedded_preview`):** Thumbnails and initial Single Image View opens extract the camera's embedded JPEG/bitmap preview (`raw.extract_thumb()` with EXIF orientation) for instant browsing, deferring full `rawpy` demosaicing (`_upgrade_raw_to_full_demosaic_async()`) until active slider editing.
-6. **Focus-Aware Fine Tune Ergonomics & Live RGB Histogram:** `_AeroFineTuneSlider` uses `Qt.StrongFocus` (ignoring wheel events when unfocused unless `Alt` is held, stepping `±1` or `±5` with `Shift`), while `HistogramWidget` renders translucent `R`, `G`, and `B` channel histograms behind the Luminance curve.
+6. **Two-Tier Fine Tune (`Basic | Advanced`) & Live Masked Histogram:** Defaults to classic WLPG simplicity with a `94px` single-color luminance histogram (`HistogramWidget`), while toggling **Advanced** unlocks a `128px` multi-channel `R/G/B` histogram, **Smart Enhance**, **Whites/Blacks**, content-aware **Structure**, **Tone Curve** (`RGB/R/G/B` + S-Curve), **WB Eyedropper**, **8-Band Color Mixer (HSL)**, **Sharpen Radius/Masking**, **Denoise Detail/Color**, **Orton Glow / Golden Hour**, **Film Grain**, and **Regional Masking (`Whole | Subject | Bg | Sky`)** with mask-restricted live histogram updates (`set_histogram_mask`). `_AeroFineTuneSlider` uses `Qt.StrongFocus` (ignoring wheel events when unfocused unless `Alt` is held, stepping `±1` or `±5` with `Shift`) and propagates disabled states cleanly to paired headers.
 
 ---
 
@@ -60,24 +60,40 @@ Defined in [`src/imaging/opencv_engine.py`](../src/imaging/opencv_engine.py), al
 class PhotoAdjustmentRecipe:
     # Tone & Exposure
     brightness: float = 0.0          # -100.0 .. +100.0 (Filmic shoulder roll-off)
+    smart_enhance: float = 0.0       # 0.0 .. 100.0 (Adaptive single-slider balance)
     contrast: float = 0.0            # -100.0 .. +100.0 (Filmic S-curve on L*)
     shadows: float = 0.0             # -100.0 .. +100.0 (Edge-aware shadow lift/crush)
     highlights: float = 0.0          # -100.0 .. +100.0 (Highlight recovery)
+    whites: float = 0.0              # -100.0 .. +100.0 (Upper highlight stretch)
+    blacks: float = 0.0              # -100.0 .. +100.0 (Deep shadow toe stretch)
     clarity: float = 0.0             # -100.0 .. +100.0 (Midtone local contrast)
+    structure: float = 0.0           # -100.0 .. +100.0 (Skin/sky-safe detail)
     black_point: float = 0.0         # 0.0 .. 255.0 (Histogram shadow clip)
     white_point: float = 255.0       # 0.0 .. 255.0 (Histogram highlight clip)
+    curve_rgb/r/g/b: list[tuple]     # PCHIP tone curve control points
 
-    # Color & Atmospheric
+    # Color, Glow & Atmospheric
     temperature: float = 0.0         # -100.0 .. +100.0 (Cool Blue <-> Warm Amber)
     tint: float = 0.0                # -100.0 .. +100.0 (Green <-> Magenta)
     saturation: float = 0.0          # -100.0 .. +100.0 (Skin-safe vibrance)
     dehaze: float = 0.0              # -100.0 .. +100.0 (Dark channel prior recovery)
+    hsl_hue/sat/lum: dict            # 8-band perceptual HSL color mixer
     vignette: float = 0.0            # -100.0 .. +100.0 (Elliptical corner shading)
+    vignette_feather: float = 50.0   # 0.0 .. 100.0 (Vignette falloff softness)
+    orton_glow: float = 0.0          # 0.0 .. 100.0 (Dreamy highlight bloom)
+    golden_hour: float = 0.0         # 0.0 .. 100.0 (Warm sunset highlight glow)
 
-    # Detail & Geometry
+    # Detail, Grain & Geometry
     straighten_deg: float = 0.0      # -15.0 .. +15.0 degrees
     sharpen: float = 0.0             # 0.0 .. 100.0 (Luminance unsharp mask)
-    denoise: float = 0.0             # 0.0 .. 100.0 (Dual-domain bilateral filter)
+    sharpen_radius: float = 25.0     # 0.0 .. 100.0 (0.5x .. 2.5x radius scale)
+    sharpen_masking: float = 0.0     # 0.0 .. 100.0 (Sobel edge-only mask)
+    denoise: float = 0.0             # 0.0 .. 100.0 (2D Sobel edge-guided luma denoise)
+    denoise_detail: float = 50.0     # 0.0 .. 100.0 (Luma edge preservation weight)
+    denoise_chroma: float = 0.0      # 0.0 .. 100.0 (Independent chroma denoise)
+    grain_amount: float = 0.0        # 0.0 .. 100.0 (Organic film grain)
+    grain_size: float = 25.0         # 0.0 .. 100.0 (Grain particle size)
+    region_edits: dict[str, dict]    # Per-region overrides ("subject"|"background"|"sky" + mask_strokes)
     crop_rect: tuple[int, ...] | None = None  # (left, top, right, bottom)
 
     # Creative Presets & Selective Control Points
@@ -101,18 +117,19 @@ class PhotoAdjustmentRecipe:
 
 ## 3. Mathematical & Algorithmic Specifications
 
-### 3.1 Dual-Domain Denoise & MAD Noise Estimation
+### 3.1 Dual-Domain Denoise, 2D Sobel Edge Preservation & MAD Noise Estimation
 Laplacian MAD noise estimate:
 $$\hat{\sigma} = \frac{\text{median}(|\nabla^2 I - \text{median}(\nabla^2 I)|)}{0.6745}$$
-Resolution-scaled bilateral smoothing runs with $\text{res\_scale} = \max(W, H) / 1280.0$ across luminance ($L^*$, stronger detail protection $\sigma_c = 0.45 \cdot \text{denoise}$) and chrominance ($A^*, B^*$, wider $\sigma_c = 0.85 \cdot \text{denoise}$) to remove color mottling without blurring edges.
+Resolution-scaled bilateral smoothing separates chrominance (`denoise_chroma`, wide $\sigma_c$) from luminance (`denoise`). When `denoise >= 1.0`, full 2D Sobel gradient magnitude (`cv2.magnitude(gx, gy)`) computes `edge_weight`, modulated by **Detail preservation** (`denoise_detail`, scaling edge protection between `0.35` and `0.95`) so skies and flat shadows smooth cleanly while textures remain crisp.
 
-### 3.2 Filmic Exposure, Contrast, Levels & Ambience
-- **Levels Stretching:** $f_{\text{out}} = \text{clip}\left(\frac{f_{\text{in}} - bp/255}{wp/255 - bp/255}, 0, 1\right)$.
+### 3.2 Filmic Exposure, Smart Enhance, Content-Aware Structure & AgX Roll-Off
+- **Levels & Whites/Blacks Stretching:** Baked with Filmic Exposure into the 256-entry uint8 `cv2.LUT` (`1.1 ms`).
 - **Positive Exposure Shoulder:** $f_{\text{scaled}} = f \cdot (1 + 1.4 b)$, asymptotically compressed above $\text{knee} = 0.65$ via $f_{\text{compressed}} = \text{knee} + \frac{\Delta}{1 + 1.8\Delta}$ to avoid harsh highlight clipping.
 - **Negative Exposure Toe:** Attenuates in stops ($2^{1.5 b}$) with subtle shadow toe lift $0.05 |b| f (1 - f)$ preserving deep shadow detail.
-- **CIE LAB Shadows/Highlights + Ambience:** Bilateral base/detail separation ($L = L_{\text{base}} + L_{\text{detail}}$) lifts dark regions ($L_{\text{base}}/255 < 0.65$) while boosting micro-contrast on $L_{\text{detail}}$ so lifted shadows stay punchy rather than muddy.
-- **AgX-Style Highlight Chroma Roll-Off:** Inside the CIE $L^*a^*b^*$ tonal pass (`need_tone_lab`), extreme highlights ($L^* > 220$) smoothly desaturate toward paper-white via $w_{\text{desat}} = \text{clip}((L^* - 220)/35, 0, 1)^2$ and $\text{rolloff} = 1 - 0.65 w_{\text{desat}}$ so boosted highlights do not clip to harsh yellow/magenta.
-- **Clarity:** Midtone bell-curve weight $w_{\text{mid}} = \text{clip}(1 - 4(L_{\text{base}}/255 - 0.5)^2, 0, 1)$ modulates $L_{\text{detail}}$ selectively in midtones.
+- **Smart Enhance (`0..100`):** Measures mean frame luminance to adaptively lift underexposed shadows/midtones, gently pull harsh highlights, add mild midtone contrast, and boost skin-safe vibrance from a single slider.
+- **Content-Aware Structure (`-100..+100`):** Extracts high-frequency luminance detail and attenuates positive boosts by `75%` across warm human skin locus and `65%` across smooth bright sky/highlights.
+- **CIE LAB Shadows/Highlights + Ambience & AgX Roll-Off:** Bilateral base/detail separation ($L = L_{\text{base}} + L_{\text{detail}}$) lifts dark regions while keeping micro-contrast punchy; highlights ($L^* > 220$) smoothly desaturate toward paper-white.
+- **Clarity & Orton Glow / Golden Hour:** Midtone bell-curve `Clarity`, screen-blended `Orton Glow`, and warm highlight-weighted `Golden Hour`.
 
 ### 3.3 Color Temperature, Tint & Skin-Safe Vibrance in CIE LAB
 - **Temperature ($B^*$) & Tint ($A^*$):** Orthogonal chromatic offsets in perceptual LAB space.
@@ -122,9 +139,13 @@ Resolution-scaled bilateral smoothing runs with $\text{res\_scale} = \max(W, H) 
 
 ### 3.4 Atmospheric Dehaze & Halo-Free Sharpening
 - **Koschmieder Dark Channel Prior:** Estimates atmospheric light $A$ (99th percentile luminance $\ge 100$) and refines the transmission map $t(x)$ with a bilateral filter before recovering $J(x) = \frac{I(x) - A}{t(x)} + A$ without sky/horizon halos.
-- **Luminance Unsharp Mask:** Applies $\pm 3.0$ dead-zone soft thresholding on $d = L - G_{\sigma}*L$ so sensor grain isn't amplified.
+- **Luminance Unsharp Mask with Radius, Masking & Halo Clamping:** Evaluates Gaussian radius from `sharpen_radius` (`0.5x..2.5x`, floored proxy `res_scale >= 0.5`), applies $\pm 3.0$ dead-zone soft thresholding, clamps `sharp_delta` to `[-14, +18]` in `L*` to eliminate overshoot halos, and optionally gates flat regions via `sharpen_masking` (`Sobel` edge magnitude).
 
-### 3.5 Analytical Inscribed-Rectangle Auto-Straighten & U-Point Selective Controls
+### 3.5 Regional Masking (`Whole | Subject | Bg | Sky`) & Interactive Mask Brush
+- **Region Segmentation (`DepthAndMatteEngine.get_region_mask`):** Derives `subject` and `background` from `alpha_matte` and segments `sky` by combining upper-frame depth priors, blue/overcast/golden-hour sunset chromaticity, $5 \times 5$ local luminance standard deviation + 4-neighbor Laplacian texture rejection (excluding foliage/roofs), top-edge connected components, $3 \times 3$ morphological close, and Joint Guided Filter edge snapping.
+- **Interactive Brush Touch-Up (`apply_region_mask_strokes`):** Supports normalized `Paint` and `Erase` edge-aware bilateral brush strokes per region (`mask_strokes`), reflected live in both the **Show mask** overlay and the region-masked histogram (`HistogramWidget.set_histogram_mask`).
+
+### 3.6 Analytical Inscribed-Rectangle Auto-Straighten & U-Point Selective Controls
 - **Zero-Border Auto-Straighten:** Rotates by $|\theta| \le 15^\circ$ and analytically crops to the maximum inscribed rectangle matching original aspect ratio $R = W_0 / H_0$:
   $$W_{\text{crop}} = \frac{W_0\cos\alpha - H_0\sin\alpha}{\cos 2\alpha}, \quad H_{\text{crop}} = \frac{H_0\cos\alpha - W_0\sin\alpha}{\cos 2\alpha}$$
 - **U-Point Control Points:** Combines spatial falloff $w_s$ and LAB photometric affinity $w_c = \exp(-(\Delta E / 28)^2)$ using normalized $[0, 1]$ coordinates identical across proxy and master renders.
@@ -150,8 +171,9 @@ All presets blend continuously from $0\%$ to $100\%$ intensity.
 
 ## 5. Interactive Spot Fix (Retouch & Red Eye) and WYSIWYG Markup
 
-### 5.1 Unified Spot Fix (`src/ui/media_viewer.py`)
-- **Mutual-Exclusion Modes:** Compact floating toolbar toggles **Blemish** healing, **Object eraser** (optional neural LaMa ONNX inpainting via `LaMaInpaintEngine`, also available as an optional AI Generative Fill toggle in Crop & Straighten and manageable/disableable under *Options → AI Downloads*), and **Red eye** reduction sharing a continuous $6\text{px}..80\text{px}$ slider and `[` / `]` keyboard sizing. `get_lama_model_status()` inspects disk state without eagerly loading ONNX Runtime into memory.
+### 5.1 Unified Spot Fix & Neural LaMa Inpainting (`src/ui/media_viewer.py`, `src/imaging/lama_inpaint.py`)
+- **Mutual-Exclusion Modes:** Compact floating toolbar toggles **Blemish** healing, **Object eraser** (powered by `LaMaInpaintEngine` with automatic frequency-separation + Telea fallback when the add-on is not installed), and **Red eye** reduction sharing a continuous $6\text{px}..80\text{px}$ slider and `[` / `]` keyboard sizing.
+- **Unified LaMa ONNX Inpainting (`LaMaInpaintEngine`):** Runs `lama_fp32.onnx` (Fast Fourier Convolutions with image-wide receptive field) inside padded $512 \times 512$ local bounding-box crops with $21\text{px}$ feathered Gaussian alpha blending into surrounding pixels. Reused across **Spot Fix Object Eraser**, **Crop & Straighten Generative Corner Fill** (`chk_gen_fill`), **Panorama Stitcher Boundary Fill**, **3D Cinematic Motion Disocclusion Fill**, and **Depth & Light Background Removal Fill**. Managed via *File → Options → Add-ons*, where `get_lama_model_status()` inspects disk state without eagerly loading ONNX Runtime into memory.
 - **Exact 1:1 View-Scale Geometry:** Brush radius maps dynamically through graphics transform scale $M_{11}$ ($r_{\text{scene}} = r_{\text{screen}} / \text{scale}$, $r_{\text{master}} = \max(2, \text{round}(r_{\text{scene}}))$) paired with a dual-ring high-contrast cursor.
 - **Frequency-Separation Texture Transfer (Blemish):** Splits local illumination via Gaussian blur ($L_{\text{low}}$ inpainted via Telea), extracts high-frequency pores/grain ($I_{\text{high}} = I - I_{\text{low}}$), copies unblemished texture from an 8-direction surrounding donor ring via `cv2.warpAffine`, variance-normalizes ($\sigma_{\text{donor}} / \sigma_{\text{transferred}}$), and recombines cleanly without smudging.
 - **Dual-Mode Red Eye:** Connected-component pupil detection (`r_ratio >= 1.25`, morphological closing to protect white corneal glints, neutral dark replacement) triggered either by brush click/stroke or legacy box drag.
@@ -191,6 +213,7 @@ All presets blend continuously from $0\%$ to $100\%$ intensity.
 - **WLPG Crop / Uncrop:** Entering Crop mode on previously cropped photos displays the full uncropped image with the existing crop rectangle adjustable outward or resettable via `"Full Image (Uncrop)"`.
 - **Metadata & Face Coordinate Healing:** Spatial edits (crop, straighten, 90° rotate) re-project `[0, 1]` face boxes, purge cached thumbnails, preserve orientation consistency, and mark `metadata_dirty = 1` for XMP/EXIF sync.
 - **Authentic Windows `Open with ▸` & Edit Nomenclature:** Inspects Windows Registry (`QFileIconProvider`) for registered apps, opens native `rundll32 shell32.dll,OpenAs_RunDLL`, standardizes **Colour** spelling, and maintains a self-healing thumbnail paint queue (`visible_media_ids(buffer_rows=4)` + decode error flag cleanup).
+- **Single Media Viewer Context Actions:** Includes **Find Similar** (launching `find_similar_to_photo` at the `81%` default threshold) and **Compare** integration alongside non-destructive Fine Tune, Crop, Spot Fix, and Markup modes.
 
 ---
 

@@ -547,11 +547,12 @@ def refine_mask_brush(
     brush_center: tuple[int, int],
     radius: int = 24,
     mode: str = "keep_color",
+    smart: bool = True,
 ) -> np.ndarray:
     """
     Edge-aware bilateral brush for interactive mask touch-up:
     - Guaranteed responsive painting with smooth radial falloff.
-    - Bilateral edge affinity prevents overshooting across strong color boundaries.
+    - When smart=True, bilateral edge affinity snaps to object boundaries (Smart Select style).
     """
     if mask is None or image_bgr is None:
         return mask
@@ -577,12 +578,28 @@ def refine_mask_brush(
     spatial_w = np.clip(1.0 - dist / float(r), 0.0, 1.0)
     spatial_w = spatial_w * spatial_w * (3.0 - 2.0 * spatial_w)
 
-    # Bilateral edge factor (color difference to center point)
-    color_diff = np.linalg.norm(roi_img - sample_col, axis=2)
-    edge_factor = np.exp(-color_diff / 75.0)
-
-    # Combined alpha ensuring responsive painting with edge-aware feather
-    brush_alpha = np.clip(spatial_w * (0.45 + 0.55 * edge_factor), 0.0, 1.0).astype(np.float32)
+    if smart:
+        # Photoshop-style connected Quick Selection inside the brush ROI:
+        # Lab perceptual distance + C++ floodFill connectivity from brush center + soft feather.
+        roi_u8 = np.clip(roi_img, 0, 255).astype(np.uint8)
+        roi_lab = cv2.cvtColor(roi_u8, cv2.COLOR_BGR2Lab).astype(np.float32)
+        sy_loc = min(roi_lab.shape[0] - 1, max(0, cy - y1))
+        sx_loc = min(roi_lab.shape[1] - 1, max(0, cx - x1))
+        seed_lab = roi_lab[sy_loc, sx_loc]
+        d_lab = roi_lab - seed_lab
+        # Weight chroma (a, b) slightly higher than luminance so hue boundaries snap cleanly
+        dist_lab = np.sqrt(0.55 * d_lab[:, :, 0] ** 2 + 1.25 * d_lab[:, :, 1] ** 2 + 1.25 * d_lab[:, :, 2] ** 2)
+        tol_mask = (dist_lab <= 28.0).astype(np.uint8) * 255
+        tol_mask[sy_loc, sx_loc] = 255
+        ff_mask = np.zeros((tol_mask.shape[0] + 2, tol_mask.shape[1] + 2), dtype=np.uint8)
+        cv2.floodFill(tol_mask, ff_mask, (sx_loc, sy_loc), 128)
+        connected = (tol_mask == 128).astype(np.float32)
+        soft_edge = np.exp(-dist_lab / 22.0).astype(np.float32)
+        smart_affinity = np.clip(0.85 * connected + 0.15 * soft_edge, 0.0, 1.0)
+        smart_affinity = cv2.GaussianBlur(smart_affinity, (3, 3), 0.7)
+        brush_alpha = np.clip(spatial_w * smart_affinity, 0.0, 1.0).astype(np.float32)
+    else:
+        brush_alpha = spatial_w.astype(np.float32)
 
     updated = mask.copy()
     if mode == "keep_color":
@@ -1084,6 +1101,208 @@ class DepthAndMatteEngine:
         far_w = (depth_map * (1.0 - alpha_matte)).astype(np.float32)
         self._cache[w_key] = (near_w, far_w)
         return depth_map, alpha_matte, near_w, far_w
+
+    def get_region_mask(
+        self,
+        image_rgb: np.ndarray,
+        region: str,
+        media_id: Any = None,
+    ) -> np.ndarray:
+        """
+        Returns a soft float32 [0.0, 1.0] mask of shape (H, W) for regional Fine Tune edits:
+        - 'subject': foreground alpha matte
+        - 'background': 1.0 - alpha matte
+        - 'sky': far upper-frame sky segmented via depth + chromaticity + top-edge connected
+          components + Joint Guided Filter edge snapping.
+        """
+        h, w = image_rgb.shape[:2]
+        reg = (region or "whole").lower()
+        if reg == "custom":
+            return np.zeros((h, w), dtype=np.float32)
+        if reg not in ("subject", "background", "sky"):
+            return np.ones((h, w), dtype=np.float32)
+
+        depth_map, alpha_matte = self.get_depth_and_matte(image_rgb, media_id=media_id)
+        if media_id is not None:
+            cache_id = media_id
+        else:
+            cache_id = (
+                image_rgb.shape,
+                int(image_rgb[0, 0, 0]),
+                int(image_rgb[-1, -1, 0]),
+                int(image_rgb[h // 2, w // 2, 0]),
+            )
+        r_key = (cache_id, w, h, f"region_{reg}")
+        if r_key in self._cache:
+            return self._cache[r_key]
+
+        if reg == "subject":
+            mask = np.clip(alpha_matte, 0.0, 1.0).astype(np.float32)
+        elif reg == "background":
+            mask = np.clip(1.0 - alpha_matte, 0.0, 1.0).astype(np.float32)
+        else:
+            # Sky detection on fast 320px proxy
+            scale = min(1.0, 320.0 / max(1, max(h, w)))
+            sw = max(24, int(round(w * scale)))
+            sh = max(24, int(round(h * scale)))
+            small_rgb = cv2.resize(image_rgb, (sw, sh), interpolation=cv2.INTER_AREA)
+            small_depth = cv2.resize(depth_map, (sw, sh), interpolation=cv2.INTER_LINEAR)
+            small_bg = 1.0 - cv2.resize(alpha_matte, (sw, sh), interpolation=cv2.INTER_LINEAR)
+
+            hsv = cv2.cvtColor(small_rgb, cv2.COLOR_RGB2HSV)
+            rf = small_rgb[:, :, 0].astype(np.float32)
+            gf = small_rgb[:, :, 1].astype(np.float32)
+            bf = small_rgb[:, :, 2].astype(np.float32)
+            lum = 0.299 * rf + 0.587 * gf + 0.114 * bf
+            sat = hsv[:, :, 1].astype(np.float32)
+
+            # Texture variance + 4-neighbor Laplacian check so rough foliage/brick/roofs in upper frame are suppressed
+            mean_l = cv2.blur(lum, (5, 5))
+            mean_l2 = cv2.blur(lum * lum, (5, 5))
+            local_std = np.sqrt(np.maximum(0.0, mean_l2 - mean_l * mean_l))
+            lap_l = cv2.blur(np.abs(cv2.Laplacian(lum, cv2.CV_32F, ksize=1)) * 0.35, (5, 5))
+            grad = np.maximum(local_std * 1.4, lap_l)
+            smooth_prior = np.clip(1.0 - (grad - 18.0) / 42.0, 0.0, 1.0)
+
+            y_norm = np.linspace(0.0, 1.0, sh, dtype=np.float32)[:, None]
+            # Blue/cyan sky, low-sat overcast sky, OR warm golden-hour / sunset sky
+            is_blue_sky = (bf >= rf - 8.0) & (bf >= 75.0) & (gf >= 55.0)
+            is_overcast_sky = (lum >= 145.0) & (sat <= 95.0)
+            is_sunset_sky = (
+                (lum >= 115.0)
+                & (rf >= gf)
+                & (gf >= bf * 0.65)
+                & ((rf - bf) >= 18.0)
+                & (y_norm <= 0.62)
+                & (grad <= 28.0)
+            )
+            upper_prior = np.clip((0.78 - y_norm) / 0.25, 0.0, 1.0)
+            far_prior = np.clip((small_depth - 0.35) / 0.35, 0.0, 1.0)
+
+            cand = (
+                (is_blue_sky | is_overcast_sky | is_sunset_sky).astype(np.float32)
+                * (0.15 + 0.85 * smooth_prior)
+                * (upper_prior > 0.05).astype(np.float32)
+                * (small_bg > 0.35).astype(np.float32)
+                * (0.35 + 0.65 * far_prior)
+            )
+            bin_cand = (cand > 0.30).astype(np.uint8)
+
+            # Keep only connected components touching the top 15% of the frame
+            num_labels, labels = cv2.connectedComponents(bin_cand, connectivity=8)
+            top_band_h = max(2, int(round(sh * 0.15)))
+            top_labels = set(np.unique(labels[:top_band_h, :]).tolist()) - {0}
+            if top_labels:
+                anchored = np.isin(labels, list(top_labels)).astype(np.float32)
+                anchored = cv2.morphologyEx(anchored, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+            else:
+                anchored = np.zeros((sh, sw), dtype=np.float32)
+
+            soft_small = anchored * upper_prior * np.clip(small_bg, 0.0, 1.0)
+            guide_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+            soft_up = cv2.resize(soft_small, (w, h), interpolation=cv2.INTER_LINEAR)
+            mask = guided_filter_matte(guide_bgr, soft_up, radius=12, eps=1e-3, subsample=2)
+            mask = np.clip(mask, 0.0, 1.0).astype(np.float32)
+
+        self._cache[r_key] = mask
+        return mask
+
+
+_STROKE_MASK_CACHE: dict[tuple[Any, ...], np.ndarray] = {}
+
+
+def apply_region_mask_strokes(
+    mask: np.ndarray,
+    image_bgr: np.ndarray,
+    strokes: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> np.ndarray:
+    """Applies normalized paint/erase brush strokes onto a [0..1] float32 region mask with O(1) incremental cache."""
+    if mask is None or image_bgr is None or not strokes:
+        return mask
+    h, w = mask.shape[:2]
+    dim = max(1, max(h, w))
+
+    stroke_sig = tuple(
+        (
+            round(float(st.get("x", 0.5)), 4),
+            round(float(st.get("y", 0.5)), 4),
+            round(float(st.get("r", 0.04)), 4),
+            str(st.get("mode", "paint")).lower(),
+            bool(st.get("smart", True)),
+            bool(st.get("cont", False)),
+        )
+        for st in strokes
+    )
+    img_sig = (
+        h,
+        w,
+        int(image_bgr[0, 0, 0]),
+        int(image_bgr[h // 2, w // 2, 1]),
+        float(mask[0, 0]),
+        float(mask[h // 2, w // 2]),
+    )
+    full_key = (img_sig, stroke_sig)
+    if full_key in _STROKE_MASK_CACHE:
+        return _STROKE_MASK_CACHE[full_key].copy()
+
+    start_idx = 0
+    updated: np.ndarray | None = None
+    if len(stroke_sig) > 1:
+        prev_key = (img_sig, stroke_sig[:-1])
+        if prev_key in _STROKE_MASK_CACHE:
+            updated = _STROKE_MASK_CACHE[prev_key].copy()
+            start_idx = len(stroke_sig) - 1
+    if updated is None:
+        updated = mask.astype(np.float32, copy=True)
+
+    prev_pt: tuple[float, float, str] | None = None
+    if start_idx > 0:
+        ps = strokes[start_idx - 1]
+        pmode = "keep_color" if str(ps.get("mode", "paint")).lower() == "paint" else "make_bw"
+        prev_pt = (float(np.clip(float(ps.get("x", 0.5)), 0.0, 1.0)), float(np.clip(float(ps.get("y", 0.5)), 0.0, 1.0)), pmode)
+
+    for st in strokes[start_idx:]:
+        try:
+            raw_mode = str(st.get("mode", "paint")).lower()
+            if raw_mode == "invert":
+                updated = np.clip(1.0 - updated, 0.0, 1.0)
+                prev_pt = None
+                continue
+            nx = float(np.clip(float(st.get("x", 0.5)), 0.0, 1.0))
+            ny = float(np.clip(float(st.get("y", 0.5)), 0.0, 1.0))
+            nr = float(st.get("r", 0.04))
+            mode = "keep_color" if raw_mode == "paint" else "make_bw"
+            smart = bool(st.get("smart", True))
+            cont = bool(st.get("cont", False))
+            rad_px = max(4, int(round(nr * dim)))
+
+            pts: list[tuple[float, float]] = [(nx, ny)]
+            if cont and prev_pt is not None and prev_pt[2] == mode:
+                px0, py0, _ = prev_pt
+                dist_norm = math.hypot(nx - px0, ny - py0)
+                step = max(1e-4, nr * 0.25)
+                if dist_norm > step:
+                    steps = min(32, int(math.ceil(dist_norm / step)))
+                    pts = [
+                        (px0 + (nx - px0) * (k / float(steps)), py0 + (ny - py0) * (k / float(steps)))
+                        for k in range(1, steps + 1)
+                    ]
+
+            for sx, sy in pts:
+                px = int(round(sx * (w - 1)))
+                py = int(round(sy * (h - 1)))
+                updated = refine_mask_brush(
+                    updated, image_bgr, (px, py), radius=rad_px, mode=mode, smart=smart
+                )
+            prev_pt = (nx, ny, mode)
+        except Exception:
+            continue
+
+    res = np.clip(updated, 0.0, 1.0).astype(np.float32)
+    if len(_STROKE_MASK_CACHE) >= 32:
+        _STROKE_MASK_CACHE.pop(next(iter(_STROKE_MASK_CACHE)))
+    _STROKE_MASK_CACHE[full_key] = res.copy()
+    return res
 
 
 _SHARED_DEPTH_ENGINE: DepthAndMatteEngine | None = None
@@ -2160,24 +2379,25 @@ class LaMaInpaintEngine:
             return roi_rgb.copy()
 
         # 1. Try LaMa neural session (ONNXRuntime first for 2.7x faster CPU inference, then OpenCV 5.0 DNN)
-        if self._cv_net is None and self._session is None:
-            self._init_session()
+        if is_lama_enabled():
+            if self._cv_net is None and self._session is None:
+                self._init_session()
 
-        if self._session is not None and self._backend in ("auto", "onnxruntime"):
-            try:
-                return self._run_onnxruntime(roi_rgb, bin_mask)
-            except Exception as e:
-                logger.debug("LaMa ONNXRuntime inference failed: %s", e)
-                if self._backend == "auto" and self._cv_net is None:
-                    model_path = self._find_model_file()
-                    if model_path is not None:
-                        self._init_opencv_dnn(model_path)
+            if self._session is not None and self._backend in ("auto", "onnxruntime"):
+                try:
+                    return self._run_onnxruntime(roi_rgb, bin_mask)
+                except Exception as e:
+                    logger.debug("LaMa ONNXRuntime inference failed: %s", e)
+                    if self._backend == "auto" and self._cv_net is None:
+                        model_path = self._find_model_file()
+                        if model_path is not None:
+                            self._init_opencv_dnn(model_path)
 
-        if self._cv_net is not None and self._backend in ("auto", "opencv_dnn"):
-            try:
-                return self._run_opencv_dnn(roi_rgb, bin_mask)
-            except Exception as e:
-                logger.debug("LaMa OpenCV DNN inference failed, using multi-scale fallback: %s", e)
+            if self._cv_net is not None and self._backend in ("auto", "opencv_dnn"):
+                try:
+                    return self._run_opencv_dnn(roi_rgb, bin_mask)
+                except Exception as e:
+                    logger.debug("LaMa OpenCV DNN inference failed, using multi-scale fallback: %s", e)
 
         # 2. High-Fidelity Frequency Separation + Coherent 2D Spatial Texture Transfer Fallback
         pts_y, pts_x = np.where(bin_mask > 0)
@@ -2400,7 +2620,8 @@ def download_lama_model(
         tmp_path.replace(dest_path)
         engine = get_lama_inpaint_engine()
         engine.reset_session()
-        engine._init_session()
+        if progress_cb is not None and total > 0:
+            progress_cb(total, total)
         return dest_path
     except Exception as e:
         logger.warning("LaMa model download failed or cancelled: %s", e)

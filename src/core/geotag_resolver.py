@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import re
+import unicodedata
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -162,6 +163,159 @@ _BUILTIN_RECORDS: list[PlaceRecord] = [
     for p in BUILTIN_PLACES
 ]
 
+_ISO_COUNTRY_NAMES_EN: dict[str, str] = {
+    p.cc.upper(): p.country for p in _BUILTIN_RECORDS if p.cc and p.country
+}
+_ISO_COUNTRY_NAMES_EN.update(
+    {
+        "AE": "United Arab Emirates",
+        "AR": "Argentina",
+        "AT": "Austria",
+        "AU": "Australia",
+        "BE": "Belgium",
+        "BR": "Brazil",
+        "CA": "Canada",
+        "CH": "Switzerland",
+        "CL": "Chile",
+        "CN": "China",
+        "CO": "Colombia",
+        "CZ": "Czechia",
+        "DE": "Germany",
+        "DK": "Denmark",
+        "EG": "Egypt",
+        "ES": "Spain",
+        "FI": "Finland",
+        "FR": "France",
+        "GB": "United Kingdom",
+        "GR": "Greece",
+        "HK": "Hong Kong",
+        "HR": "Croatia",
+        "HU": "Hungary",
+        "ID": "Indonesia",
+        "IE": "Ireland",
+        "IL": "Israel",
+        "IN": "India",
+        "IS": "Iceland",
+        "IT": "Italy",
+        "JP": "Japan",
+        "KH": "Cambodia",
+        "KR": "South Korea",
+        "LA": "Laos",
+        "LK": "Sri Lanka",
+        "MA": "Morocco",
+        "MM": "Myanmar",
+        "MX": "Mexico",
+        "MY": "Malaysia",
+        "NL": "Netherlands",
+        "NO": "Norway",
+        "NP": "Nepal",
+        "NZ": "New Zealand",
+        "PE": "Peru",
+        "PH": "Philippines",
+        "PL": "Poland",
+        "PT": "Portugal",
+        "RO": "Romania",
+        "RU": "Russia",
+        "SA": "Saudi Arabia",
+        "SE": "Sweden",
+        "SG": "Singapore",
+        "TH": "Thailand",
+        "TR": "Turkey",
+        "TW": "Taiwan",
+        "UA": "Ukraine",
+        "US": "United States",
+        "VN": "Vietnam",
+        "ZA": "South Africa",
+    }
+)
+
+
+def _is_latin_text(text: str) -> bool:
+    """Returns True when all alphabetic characters belong to Latin scripts."""
+    for ch in text or "":
+        if ch.isalpha():
+            if ord(ch) >= 0x0250 and "LATIN" not in unicodedata.name(ch, ""):
+                return False
+    return True
+
+
+def _extract_english_nominatim_place(
+    item: dict[str, Any], query: str = ""
+) -> PlaceRecord:
+    """Builds an English-normalized PlaceRecord from a Nominatim search entry."""
+    addr = item.get("address") or {}
+    if not isinstance(addr, dict):
+        addr = {}
+    nd = item.get("namedetails") or {}
+    if not isinstance(nd, dict):
+        nd = {}
+
+    query_clean = (query or "").strip()
+    query_leaf = query_clean.split(",")[0].strip() if query_clean else ""
+    prefer_latin = _is_latin_text(query_clean) if query_clean else True
+
+    candidates = [
+        nd.get("name:en"),
+        nd.get("int_name"),
+        nd.get("name:latin"),
+        nd.get("official_name:en"),
+        addr.get("city"),
+        addr.get("town"),
+        addr.get("village"),
+        addr.get("hamlet"),
+        addr.get("suburb"),
+        addr.get("municipality"),
+        item.get("name"),
+    ]
+    cleaned_candidates = [str(c).strip() for c in candidates if c and str(c).strip()]
+
+    city = ""
+    if prefer_latin:
+        for cand in cleaned_candidates:
+            if _is_latin_text(cand):
+                city = cand
+                break
+        if not city:
+            city = query_leaf or (cleaned_candidates[0] if cleaned_candidates else query_clean)
+    else:
+        city = cleaned_candidates[0] if cleaned_candidates else query_clean
+
+    cc = str(addr.get("country_code") or "").strip().upper()
+    raw_country = str(addr.get("country") or "").strip()
+    if cc in _ISO_COUNTRY_NAMES_EN:
+        country = _ISO_COUNTRY_NAMES_EN[cc]
+    elif raw_country and (not prefer_latin or _is_latin_text(raw_country)):
+        country = raw_country
+    else:
+        country = cc
+
+    if (
+        query_leaf
+        and _is_latin_text(query_leaf)
+        and country
+        and city.lower() == country.lower()
+        and query_leaf.lower() != country.lower()
+    ):
+        city = query_leaf
+
+    admin2 = str(addr.get("county") or addr.get("state_district") or "").strip()
+    admin1 = str(addr.get("state") or addr.get("region") or "").strip()
+    if prefer_latin:
+        if admin2 and not _is_latin_text(admin2):
+            admin2 = ""
+        if admin1 and not _is_latin_text(admin1):
+            admin1 = ""
+
+    return PlaceRecord(
+        name=city or query_clean,
+        admin2=admin2,
+        admin1=admin1,
+        country=country,
+        cc=cc,
+        lat=float(item["lat"]),
+        lon=float(item["lon"]),
+    )
+
 # Fast spatial KDTree index for reverse geocoding
 _KDTREE_INSTANCE: Any = None
 _KDTREE_RECORDS: list[PlaceRecord] = []
@@ -268,6 +422,7 @@ def search_places_offline(
                 """,
                 (like_pat, like_pat),
             ).fetchall()
+            query_is_latin = _is_latin_text(clean)
             for r in rows:
                 rec = PlaceRecord(
                     name=str(r["name"]),
@@ -279,6 +434,8 @@ def search_places_offline(
                     lon=float(r["lon"]),
                 )
                 fmt = rec.formatted_address
+                if query_is_latin and (not _is_latin_text(rec.name) or not _is_latin_text(fmt)):
+                    continue
                 if fmt not in seen_addresses:
                     seen_addresses.add(fmt)
                     score = 0 if rec.name.lower().startswith(q_lower) else 10
@@ -373,7 +530,7 @@ def search_places_online(
     encoded = urllib.parse.quote(clean)
     url = (
         f"https://nominatim.openstreetmap.org/search"
-        f"?format=jsonv2&addressdetails=1&accept-language=en&limit={limit}&q={encoded}"
+        f"?format=jsonv2&addressdetails=1&namedetails=1&accept-language=en&limit={limit}&q={encoded}"
     )
     req = urllib.request.Request(
         url,
@@ -390,32 +547,7 @@ def search_places_online(
                 payload = json.loads(response.read().decode("utf-8"))
                 if isinstance(payload, list):
                     for item in payload:
-                        addr = item.get("address", {})
-                        city = (
-                            addr.get("city")
-                            or addr.get("town")
-                            or addr.get("village")
-                            or addr.get("hamlet")
-                            or addr.get("suburb")
-                            or item.get("name")
-                            or clean
-                        )
-                        admin2 = addr.get("county", "")
-                        admin1 = addr.get("state", "")
-                        country = addr.get("country", "")
-                        cc = str(addr.get("country_code") or "").upper()
-                        lat = float(item["lat"])
-                        lon = float(item["lon"])
-
-                        rec = PlaceRecord(
-                            name=city,
-                            admin2=admin2,
-                            admin1=admin1,
-                            country=country,
-                            cc=cc,
-                            lat=lat,
-                            lon=lon,
-                        )
+                        rec = _extract_english_nominatim_place(item, clean)
                         p_dict = rec.to_dict()
                         results.append(p_dict)
                         if db_engine is not None:

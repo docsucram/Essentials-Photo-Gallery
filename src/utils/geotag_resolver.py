@@ -237,10 +237,16 @@ def query_nominatim(
         return None
 
     encoded = urllib.parse.quote(place_clean)
-    url = f"https://nominatim.openstreetmap.org/search?q={encoded}&format=json&limit=1"
+    url = (
+        f"https://nominatim.openstreetmap.org/search"
+        f"?q={encoded}&format=jsonv2&addressdetails=1&namedetails=1&accept-language=en&limit=1"
+    )
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "PhotoGallery64/1.0 (Desktop Gallery Geotagger)"},
+        headers={
+            "User-Agent": "PhotoGallery64/1.0 (Desktop Gallery Geotagger)",
+            "Accept-Language": "en",
+        },
     )
 
     try:
@@ -248,11 +254,12 @@ def query_nominatim(
             if response.status == 200:
                 payload = json.loads(response.read().decode("utf-8"))
                 if isinstance(payload, list) and payload:
+                    from src.core.geotag_resolver import _extract_english_nominatim_place
+
                     top = payload[0]
-                    lat = float(top["lat"])
-                    lon = float(top["lon"])
-                    display_name = str(top.get("display_name") or place_clean)
-                    return lat, lon, display_name
+                    rec = _extract_english_nominatim_place(top, place_clean)
+                    display_name = rec.formatted_address or str(top.get("display_name") or place_clean)
+                    return rec.lat, rec.lon, display_name
     except Exception:
         # Gracefully swallow timeout, network errors, or rate limits
         return None

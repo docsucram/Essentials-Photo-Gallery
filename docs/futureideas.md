@@ -1,119 +1,158 @@
-# Essentials Photo Gallery — Future Ideas & Innovation Roadmap (`docs/futureideas.md`)
+# Future Ideas & Architectural Roadmap
 
-This document tracks forward-looking enhancements and unimplemented capabilities planned for **Essentials Photo Gallery**. Completed systems—such as the 32-bit perceptual tone engine, U-Point selective control points, Depth & Light bokeh/relighting, ICE-style panorama stitching, Photo Fuse, vector privacy redaction, Duplicate & Burst Finder, Interactive Leaflet World Map & Hierarchical Places Tree, **Static & 17-Dimension Boolean Smart Albums**, **Next-Gen Codecs (`HEIC`/`AVIF`/`JPEG XL`)**, **Offline Text-in-Photo OCR Search (`FTS5` + Tesseract/RapidOCR/WinRT)**, **LaMa ONNX Generative Inpainting** (Spot Fix Object Eraser, 3D Cinematic Motion disocclusion fill, Panorama gap fill, optional Straighten/Crop AI fill), and **Picasa-Style Folder Manager & Private Mode (with PIN/Auto-Lock)**—are implemented in the codebase.
+This document tracks **genuinely unbuilt future enhancements** for **Essentials Photo Gallery**, maintaining the classic Windows Live Photo Gallery (WLPG) ease-of-use and speed while expanding optional local AI, heritage migration, and enthusiast editing capabilities.
 
-All future ideas follow the core philosophy of **100% local, private, offline execution** with zero external cloud telemetry and sub-10ms UI query responsiveness at 500,000+ item scale.
-
----
-
-## 1. Local Semantic & Natural-Language Visual Search
-
-### 1.1 Local Multi-Modal CLIP Embeddings (`MobileCLIP` / `SigLIP2` ONNX)
-- **Concept:** Search by conceptual descriptions (e.g., `"red convertible in rain"`, `"family playing board game"`, `"snowy garden sunset"`, `"plate of pasta"`) with zero manual descriptive tags required.
-- **Architecture:**
-  - Background worker feeds pre-decoded $256 \times 256$ WebP thumbnails from `thumbnails.db` through an ONNX-quantized `MobileCLIP-S1` or `SigLIP2-Base` vision encoder via `onnxruntime-directml` (or multi-threaded CPU).
-  - Stores L2-normalized 512-dimensional `float16` vectors (~1 KB per asset) in a memory-mapped binary file (`clip_embeddings.bin`) paired with an SQLite offset lookup table (`media_embeddings(media_id, offset)`).
-  - Ranks 400,000+ vectors via single-matrix dot product (`embeddings @ query_vec`) in `<15 ms`.
-- **UI Integration:** Mode toggle inside the top-right Search Box (`[AI Semantic Search]`).
-
-### 1.2 "Find Visually Similar Photos" Right-Click Action
-- **UX:** Right-click any photo $\to$ *"Find visually similar photos"*.
-- Computes cosine similarity against the catalog embedding matrix in `<5 ms` and filters the grid to the top 100 matches ordered by visual affinity.
+> **Graduated Features:** Completed initiatives—including **Visual Similarity Search (`Find Similar` with 24-byte LAB Haar + pHash/dHash, `81%` default & `70%–98%` Scope Bar slider)**, **Database Fresh Start Reset & Empty-Library Prompt**, **Session-Cached `FaceEngine` & Folder Manager Performance Optimizations**, **Companion Phone GPS Matching & GPX Interpolation**, **Fine Tune Two-Tier `Basic | Advanced` Mode** (`Smart Enhance`, `Whites`/`Blacks`, content-aware `Structure`, `Tone Curve`, `WB Eyedropper`, `8-Band Color Mixer (HSL)`, `Sharpen Radius/Masking`, `Split Denoise`, `Orton Glow`/`Golden Hour`, `Film Grain`), **Phase 1 Regional Masking (`Whole | Subject | Bg | Sky`) with Interactive Paint/Erase Mask Brush & Live Masked Histogram**, **Home Ribbon `People` & `Geotag` Split Buttons**, SQLite FTS5 RapidOCR search, Per-Folder Scan & Privacy Controls with PBKDF2 PIN lock, Unified `LaMa` ONNX Generative Inpainting, Embedded JPEG Fast-Path for Camera RAW, AgX Highlight Chroma Roll-Off, Focus-Aware Sliders, and Interactive Map Pin Adjustment—have been graduated into [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) and [`docs/editing_engine.md`](editing_engine.md).
 
 ---
 
-## 2. Offline Text-in-Photo OCR Search *(Implemented — Future Extensions)*
+## 1. Picasa Heritage Migration & Sidecar Support (`.picasa.ini` & `contacts.xml`)
 
-### 2.1 SQLite FTS5 Full-Text Search Integration ✅ *(Implemented)*
-- Implemented in `src/core/ocr_engine.py`, `src/workers/ocr_worker.py`, `media_ocr_fts`, Smart Album `OCR Text` rule, and Right Info Dock copyable OCR preview.
-- **Next Steps:**
-  - Multi-language RapidOCR ONNX model pack downloads inside **Options → AI & Downloads**.
-  - On-image bounding-box text highlighting / click-to-copy directly in Single Image View.
-
----
-
-## 3. Geolocation & Mapping Next Steps
-
-### 3.1 GPX / KML Track Log Auto-Geotagging
-- **Concept:** Correlate timestamps of photos shot on cameras without GPS against a smartphone or smartwatch GPX/KML track log.
-- **Workflow:** Right-click selection $\to$ *"Geotag from GPX Track..."*, adjust camera clock offset if needed, linearly interpolate `(lat, lon, elevation)` between track points, preview pins on the Leaflet map, and commit to `catalog.db` + XMP sidecars.
-
-### 3.2 Map Polygon Geofencing & Geographic Smart Albums
-- **Concept:** Interactive polygon / lasso and circular radius selection directly on the World Map View.
-- **Pipeline:** Spatial R*Tree bounding-box pre-filter followed by ray-casting point-in-polygon tests, with 1-click export to persistent Smart Album rules.
+### 1.1 Non-Destructive Picasa Sidecar & Contact Importer
+* **User Value:** Allow longtime Google Picasa 3 users to migrate decades of organization—face tags, named people, starred photos, captions, albums, and non-destructive crops—directly into Essentials Photo Gallery without losing metadata trapped in `.picasa.ini` files.
+* **What We Parse & Map:**
+  * **Face Regions (`faces=rect64(...),contact_id`):** Decode Picasa's 64-bit hex rectangle format (four 16-bit unsigned integers `0..65535` representing `[left, top, right, bottom]`) directly into our normalized `[0.0 .. 1.0]` `media_people` face boxes.
+  * **People Identity Mapping (`[Contacts2]` & `contacts.xml`):** Resolve Picasa 16-char hex contact IDs against local `[Contacts2]` sections and `%LOCALAPPDATA%\Google\Picasa2\contacts\contacts.xml`, matching or creating named people in `people` (`state = 1`).
+  * **Starred Photos (`star=yes`) & Captions (`description=...`):** Map Picasa stars to Flagged (`flag = 1`) and/or a configurable Star Rating (`4★` or `5★`), and import file captions.
+  * **Picasa Albums (`.pal` & `[.album:...]`):** Reconstruct Picasa virtual albums as Static Albums (`My Albums`) in `catalog.db`.
+  * **Non-Destructive Crops (`crop64`) & `.picasaoriginals` / `.OriginalFiles`:** Recognize existing `.picasaoriginals` backup folders alongside `.OriginalFiles/` and map `crop64` / `tilt` parameters into `PhotoAdjustmentRecipe`.
+* **UX Workflow:**
+  * Accessible via **`File → Import → Import Picasa Metadata (.picasa.ini)...`** (or an opt-in checkbox in **Folder Manager**) with a fast dry-run summary dialog before committing to `catalog.db`.
 
 ---
 
-## 4. Memories & Discovery UX
+## 2. Contextual Markup & Social Post Design Studio ("Canva-Lite" Workflow)
 
-### 4.1 "On This Day" Collapsible Strip Above Grid View
-- **Current State:** `"On This Day"` is seeded as a dynamic Smart Album in the left `Albums -> Smart Albums` tree.
-- **Next Step:** Optional collapsible horizontal header strip above Grid View highlighting top-rated memories from today's month/day across past years (`1 year ago`, `5 years ago`, `10+ years ago`).
-
----
-
-## 5. Archival Restoration, OpenCV 5.0 & ONNXRuntime Opportunities
-
-- **Archival Scan Restoration & 2x Super-Resolution (`Real-ESRGAN` / `GFPGAN` ONNX):**
-  Dedicated tool for scanned 1950s–1980s film prints and early-2000s low-res digital captures to remove JPEG block artifacts, scanner dust scratches, and gently restore facial clarity (downloadable via **Options → AI & Downloads**).
-- **Large-Mask Generative Inpainting (`LaMa` ONNX) ✅ *(Implemented for Object Eraser, 3D Motion, Panorama, Optional Crop/Straighten)*:**
-  - **Next Extensions:** 4-point Perspective / Keystone corner fill, Photo Fuse burst-alignment edge fill, and 1-click **"Remove Date Stamp"** / **"Heal Film Scratch"** archival presets.
-- **Learned Panorama Feature Matching (`ALIKED` / `DISK` + `LightGlue` ONNX):**
-  Surface the OpenCV 5.0 learned matcher models (`_find_learned_matcher_models` in `src/imaging/create_tools.py`) in **Options → AI & Downloads** to improve panorama alignment on low-texture skies, water, and indoor scenes.
-
----
-
-## 6. 3D LUT Presets (`.cube`) Importer
-
-- Add a standard `.cube` 3D LUT loader ($17^3$ to $65^3$ lattices) with NumPy trilinear interpolation (`<8 ms` per proxy) alongside the 8 built-in presets in `opencv_engine.py`.
+### 2.1 Promote Markup to a Dedicated Contextual `Markup & Design` Ribbon Tab
+* **User Value:** Replace the cramped floating Markup toolbar with a full contextual **`Markup`** Ribbon tab (whilst keeping **`Spot Fix`** strictly focused on `Blemish` | `Object Eraser` | `Red Eye` healing), unlocking rich Canva-style vector graphics, typography, and social media framing right inside Single Image View.
+* **Architecture:**
+  * **Contextual `Markup` Ribbon Tab Groups:**
+    1. **Insert & Tools:** `Select / Transform (Move, Resize, Rotate)`, `Text Box / Headline`, `Speech / Thought Callout`, `Arrow / Line`, `Shapes (Rectangle, Rounded Pill, Circle, Star, Badge, Polygon)`, `Sticker / Emoji / Watermark Image`, `Freehand Pen`, `Highlighter`, `Magnifier Loupe`, `Privacy Blur / Pixelate`.
+    2. **Shape & Border Style:** `Fill Colour` (Solid, Semi-Transparent Frosted Glass, Gradient, or Transparent), `Border / Stroke Colour`, `Border Thickness (0–24px)`, `Dash Style`, `Corner Rounding`, `Drop Shadow (Soft / Retro Hard)`.
+    3. **Typography:** `Font Family` (System + bundled clean display fonts), `Font Size`, `Bold / Italic / Uppercase`, `Text Colour`, `Text Outline / Shadow`, `Background Pill Toggle`, `Layer Order (Bring Forward / Send Backward)`.
+    4. **Social Canvas & Aspect Ratio Pad (`Frame for Social`):** One-click aspect-ratio canvas presets that pad or frame the photo without destructive cropping:
+       * `Instagram Post (4:5 Portrait — 1080×1350)`
+       * `Instagram Square (1:1 — 1080×1080)`
+       * `Instagram Story / Reel (9:16 — 1080×1920)`
+       * `Facebook / X Landscape (16:9 / 1.91:1)`
+       * **Pad Background Styles:** *Blurred Photo Backdrop*, *Dominant Palette Colour*, *Clean White Gallery Mat (with optional EXIF camera/lens caption stamp)*, or *Dark Charcoal*.
+* **Quick Social Export & Carousel Slicer:**
+  * **`Copy Social Post to Clipboard` (`Ctrl+Shift+C`) + Quick Launch** to paste straight into Instagram, Facebook, WhatsApp Web, or Discord.
+  * **Seamless Panorama Carousel Slicer:** Slice a wide panorama or collage into 2–5 swipeable `1080×1350` (`4:5`) Instagram carousel frames automatically.
 
 ---
 
-## 7. Per-Folder Scan & Privacy Controls ✅ *(Implemented — Future Extensions)*
+## 3. Thumbnail Grid Image Stacking (Bursts, RAW+JPEG Pairs & Edited Copies)
 
-- Implemented in `FolderManagerDialog` (`Scan Always`, `Scan Once`, `Exclude from catalog`, per-folder `Scan Faces` / `Scan OCR`, `Private Folder` isolation, and optional PBKDF2 PIN + idle auto-lock).
-- **Next Steps:** Windows Hello biometric unlock integration on Windows 10/11 and per-folder CLIP semantic indexing toggle.
-
----
-
-## 8. Social Media Export & Crop Presets
-
-- Quick export workflow tailored for Instagram, Facebook, X, and messaging platforms:
-  - Aspect-ratio templates (`1:1`, `4:5`, `9:16`, `16:9`), optional EXIF/GPS metadata stripping for privacy, maximum pixel dimension scaling, and quality/size presets.
-
-
+### 3.1 Zero-Overhead Catalog Stacking (`stack_parent_id`)
+* **User Value:** Declutter the Thumbnail Grid by grouping high-speed camera bursts, `.RAF`/`.CR3` + `.JPG` camera pairs, or `{stem}_edited` copies into a single collapsible stack card with a top-right **`[⧉ N]`** stack counter badge.
+* **High-Performance SQLite Architecture (`< 1 ms` Overhead at 500k Scale):**
+  * **Schema:** Add `stack_parent_id INTEGER DEFAULT NULL` and `stack_count INTEGER NOT NULL DEFAULT 1` to `media`, backed by a partial index `CREATE INDEX idx_media_stack_parent ON media(stack_parent_id) WHERE stack_parent_id IS NOT NULL;`.
+  * **Query Speed:** Never run dynamic clustering in Python during grid loads. When `Collapse Stacks` is enabled in the `View` ribbon, `CatalogRepository.query_media_records()` appends `AND m.stack_parent_id IS NULL`. Because stack children are filtered out by an indexed `IS NULL` check, 500,000-photo queries execute with zero `GROUP BY` penalty.
+  * **UX & Controls:**
+    * Clicking the **`[⧉ N]`** badge on a thumbnail (or pressing **`S`**) expands/collapses that stack inline in the grid (or opens all stack members directly in **Compare Mode (`C`)**).
+    * Right-click context menu: **`Stack ▸`** (`Group Selected into Stack`, `Unstack`, `Set Selected as Top of Stack`, `Open Stack in Compare View`).
+    * Auto-stacking helpers: **`Auto-Stack RAW + JPEG Pairs`** and **`Auto-Stack Rapid Bursts (< 2s)`** (picking the highest Laplacian sharpness shot as the stack parent).
 
 ---
 
-## 9. Fine Tune & Pipeline Upgrades (Inspired by Greycard)
+## 4. Semantic Search, Auto-Tagging, Persistent Signatures & Redesigned Duplicates Workspace
 
-### 9.1 Pre-Computed Text Embeddings for Zero-Bloat Semantic Masking (`sam3_presets.bin`)
-- **Concept:** Enable instant 1-click semantic masking (*Sky, Subject, Person, Face, Skin, Eyes, Lips, Teeth, Hair, Clothes, Background, Building, Vegetation, Water, Ground*) without shipping a massive 500 MB text encoder model.
-- **Architecture:**
-  - Pre-compute the text prompt embeddings offline once for the 16 standard photographic masking categories and pack them into a tiny (~524 KB) binary asset (`sam3_presets.bin` / `semantic_mask_presets.bin`).
-  - At runtime, only the lightweight vision encoder/decoder (e.g., quantized MobileSAM / SAM-3 ONNX) runs against the image, multiplying its image features against the pre-computed `524 KB` preset vectors in `<15 ms` to generate instant, edge-accurate local adjustment masks.
-- **Selective / Masked Fine Tune Integration:** Allow Fine Tune sliders (Exposure, Contrast, Saturation, Clarity, Shadows/Highlights) to target an AI-generated *Subject*, *Sky*, or *Background* mask or brush mask.
+### 4.1 Optional `MobileCLIP-S1` Add-on & Persistent `media_signatures` Cache
+* **Building on v0.14.0's 24-Byte LAB Haar `Find Similar`:** Keep the built-in, zero-download `24-byte` CIE LAB Haar + `64-bit` pHash/dHash engine as the instant Tier 1 visual similarity matcher, and persist computed `(fast_hash, phash64, dhash64, laplacian_sharpness, lab_haar)` signatures in a `thumbnails.db` `media_signatures` table keyed by `(media_id, mtime)` so scans across 10,000+ photos execute in `< 50 ms` without re-reading image files.
+* **Tier 2 — Optional `MobileCLIP-S1` INT8 ONNX Add-on (~80 MB in `File → Options → Add-ons`):**
+  * Background low-priority `SemanticIndexWorker` stores L2-normalized `512-d float16` (`1 KB`/photo) vectors in a separate `semantic_vectors.db`, controlled per folder in **Folder Manager**.
+  * **1. Natural-Language Search:** Type conceptual queries (`"dog on beach"`, `"birthday cake"`, `"snowy garden"`) in the Search Box (`< 15 ms` across 100k photos, fused with FTS5 keyword/tag/OCR matches via Reciprocal Rank Fusion).
+  * **2. Pre-Computed Zero-Shot Auto-Tagging (`concept_presets.bin`):** Ship a tiny `~64 KB` file of pre-computed text embeddings for ~120 common photographic categories (*Beach, Sunset, Mountain, Dog, Cat, Car, Food, Wedding, Document, Receipt, Screenshot, Concert, Wildlife*). Comparing photo embeddings against `concept_presets.bin` enables optional **Suggested Smart Tags** (analogous to face suggestions) with zero extra model overhead.
+  * **3. AI Conceptual Similarity & Contextual `Duplicates` Ribbon Workspace:** Adds a 4th mode inside a contextual **`Duplicates & Similar`** Ribbon tab alongside *Exact Copies*, *Visual & Bursts*, and *Color / Haar Similar* (with linked 2-up loupe, auto-pick presets, and non-destructive **"Merge Tags, People, Caption & Rating into Kept Photo"** on recycle).
 
-### 9.2 Embedded JPEG Fast-Path for Camera RAW Files (`.RAF`, `.CR3`, `.NEF`, `.ARW`) ✅ *(Implemented)*
-- **Concept:** Achieve instantaneous (`<5 ms`) thumbnail generation and initial Single Image View loading for 40–80 MB camera RAW files (such as Fujifilm X-Trans `.RAF` files) while preserving the camera's built-in Film Simulation preview.
-- **Implemented (`src/imaging/image_loader.py`, `src/workers/scanner_thumb_worker.py`, `src/ui/media_viewer.py`):**
-  - `decode_raw_embedded_preview()` and `ThumbnailDecodeWorker` extract and decode the camera's embedded JPEG/bitmap stream (with EXIF orientation applied) for instant browsing and culling, deferring heavy `rawpy` demosaicing strictly until active slider editing (`_upgrade_raw_to_full_demosaic_async()`).
+### 4.2 Multi-Language OCR & Interactive Text Selection
+* **Multi-Language Recognition Packs:** Optional CJK / Latin / Cyrillic RapidOCR packs in **File → Options → Add-ons**.
+* **Interactive Text Selection in Single Image View:** Optional overlay button when viewing screenshots or documents that highlights detected text bounding boxes for direct click-to-copy on the image canvas.
 
-### 9.3 AgX-Style Highlight Chroma Roll-Off ("Film Shoulder Desaturation") ✅ *(Implemented)*
-- **Concept:** Prevent bright specular highlights (sunset clouds, neon signs, sun-lit skin) from looking artificially clipped or posterized yellow/magenta when boosting exposure or contrast.
-- **Implemented (`src/imaging/opencv_engine.py`):**
-  - Inside the Unified CIE $L^*a^*b^*$ pass (`need_tone_lab`), couples the Filmic Soft-Knee luminance curve with an AgX-inspired chromaticity roll-off above the highlight shoulder threshold ($L^* > 220.0$ on the $0..255$ scale):
-    $$w_{\text{desat}} = \text{clip}\left(\frac{L^* - 220.0}{35.0}, 0.0, 1.0\right)^2$$
-    $$A^{*\prime} = 128.0 + (A^* - 128.0) \cdot (1.0 - 0.65 \cdot w_{\text{desat}})$$
-    $$B^{*\prime} = 128.0 + (B^* - 128.0) \cdot (1.0 - 0.65 \cdot w_{\text{desat}})$$
-  - Gently desaturates extreme highlights toward clean paper-white as $L^* \to 255$, emulating analog color negative film behavior.
+### 4.3 Automatic Trip & Event Clustering
+* Combine temporal gap detection ($\Delta t > 6\text{ hours}$ or multi-day travel away from the user's home coordinate centroid) with `location_city` / `location_country` transitions to power an **`Arrange by: Events / Trips`** mode and one-click **"Save Trip as Album"**.
 
-### 9.4 Focus-Aware Mouse-Wheel Slider Ergonomics ✅ *(Implemented)*
-- **Concept:** Prevent accidental slider changes when scrolling the right-hand editing sidebar, while enabling fast precision mouse-wheel scrubbing when a slider is intentionally targeted.
-- **Implemented (`_AeroFineTuneSlider` in `src/ui/right_tag_dock.py`):**
-  - **Unfocused Hover:** Uses `Qt.StrongFocus`; unfocused sliders ignore wheel events (`event.ignore()`) so the parent Fine Tune sidebar scrolls normally.
-  - **Focused / Active Slider (or `Alt + Wheel`):** Accepts wheel events in clean `±1` (`Shift + Wheel` for `±5`) steps without scrolling the parent sidebar away from the cursor.
+---
 
-### 9.5 Live RGB / Luminance Histogram ✅ *(Implemented — Future: "Subject-Only" Scope Toggle)*
-- **Implemented (`HistogramWidget` in `src/ui/right_tag_dock.py`):** Renders translucent `R`, `G`, and `B` channel curves behind the Luminance histogram with interactive Black/White point markers.
-- **Next Step:** Add an optional **"Subject-Only"** scope toggle that computes the histogram strictly inside the detected foreground/subject mask so bright skies don't skew skin-tone exposure decisions.
+## 5. Keyboard Shortcuts, Ribbon KeyTips & Custom Tag Hotkeys
+
+### 5.1 Comprehensive Keyboard Ergonomics
+* **Microsoft Ribbon `Alt` KeyTips:** Pressing `Alt` overlays classic keyboard navigation badges (`H` Home, `E` Edit, `F` Find, `C` Create, `V` View) and two-stroke command activation across the Ribbon.
+* **Custom Quick-Tag Hotkeys (`Alt+1` .. `Alt+9`):** Allow users to bind their top 9 Descriptive Tags or People to `Alt+1..9` (or `Ctrl+1..9`) for single-keystroke tagging while culling in Grid, Single Image Viewer, or Compare Mode.
+* **Unified Keyboard Shortcuts Cheat-Sheet (`F1` / `Help → Keyboard Shortcuts`):** Searchable modal grouping all navigation, rating/culling (`0–5`, `P`/`Insert`), viewer, Compare (`C`, `F`), and batch people (`Space`, `Enter`, `Del`, `I`) shortcuts.
+
+---
+
+## 6. UI Theme Architecture Consolidation & Automated Contrast Auditing
+
+### 6.1 Eliminating Inline `setStyleSheet()` Sprawl (`ThemeTokens` + Semantic QSS Roles)
+* **Problem:** Hardcoded inline `widget.setStyleSheet(...)` calls inside individual dialogs and docks override global `.qss` files (`wlpg_aero.qss`, `dark.qss`, `modern.qss`), causing recurring text-contrast, border, and disabled-state bugs when switching between Classic Aero, Fluent, and Dark Studio themes.
+* **Safe, Incremental Remediation Plan (Zero Layout Risk):**
+  1. **Central `ThemeTokens` Palette (`src/ui/theme_tokens.py`):** Define a single source of truth for custom-painted `QPainter` delegates and dynamic widgets (`bg_surface`, `bg_elevated`, `text_primary`, `text_secondary`, `border_subtle`, `accent`, `danger`).
+  2. **Semantic QSS Property Roles:** Replace inline widget color stylesheets with semantic Qt properties (e.g., `widget.setProperty("uiRole", "card")`, `lbl.setProperty("uiRole", "muted")`) styled centrally in the 3 `.qss` stylesheets followed by `style().unpolish(w); style().polish(w)`.
+  3. **Automated Headless Theme Contrast Test (`tests/test_theme_contrast_audit.py`):** Add a unit test that instantiates every dialog and dock across all 3 themes and asserts that no visible label, button, or input has unreadable foreground-to-background luminance contrast (`< 3.0:1`) or stale inline hex overrides.
+
+---
+
+## 7. Additional Editing, Generative Restoration & Semantic Masking
+
+### 7.1 `LaMa` Context-Aware Fill Remaining Extensions (`Photo Fuse` & `Perspective/Keystone`)
+* Extend the implemented `LaMaInpaintEngine` (`lama_fp32.onnx`) to the remaining geometric tools:
+  * **Photo Fuse Boundary Fill:** Fill thin outer edge slivers when handheld burst shots have slight framing drift after homography alignment, instead of cropping in.
+  * **Perspective / Keystone Correction & Corner Fill:** Add `Vertical Perspective (-100..+100)` and `Horizontal Perspective (-100..+100)` sliders inside the Crop & Straighten tool, solved via 4-point projective homography (`cv2.getPerspectiveTransform` + `cv2.warpPerspective(..., flags=cv2.INTER_LANCZOS4)`), paired with analytical auto-crop or optional `LaMa` corner-wedge fill.
+
+### 7.2 Archival Restoration Presets in Spot Fix
+* **Auto "Remove Orange Date Stamp" Preset:** Automatically detect saturated orange/red LED quartz date-stamp digits in the bottom corners of 1980s–2000s film/compact scans and feed the dilated digit mask into `LaMaInpaintEngine`.
+* **Dust & Film Scratch Line Mode:** Hold `Shift` in Spot Fix to click-drag straight scratch lines across scanned slides/negatives and heal them in one stroke.
+
+### 7.3 Creative `.cube` 3D LUT Importer & Look Profiles
+* **Look Profiles Dropdown (`As Shot`, `Natural`, `Warm Print`, `Vivid`, `Portrait`, `Monochrome`)** with an importable **`.cube` 3D LUT** parser evaluated via fast trilinear `numpy` lookup and continuous `Amount (0–200%)` intensity blending.
+
+### 7.4 Semantic Masking Phase 2 (`MobileSAM` / `EdgeSAM` + Pre-Computed `sam3_presets.bin`)
+* **Optional Add-on in `File → Options → Add-ons`:** Adds `mobile_sam_encoder_int8.onnx` (~18 MB) + `sam_mask_decoder.onnx` (~16 MB) extending **Fine Tune Regional Masking** (`Whole | Subject | Bg | Sky` + Mask Brush) with interactive **Click / Box-to-Select Any Object**, cached per `media_id`.
+* **Pre-Computed Text Embeddings (`sam3_presets.bin` / `semantic_mask_presets.bin`, ~524 KB):** Ship pre-computed text embeddings for ~150 common masking categories (*Foliage, Water, Architecture, Road, Skin, Pet, Vehicle*) so instant 1-click semantic masks run without bundling a heavy text encoder.
+* **Live Histogram "Subject-Only" Scope Toggle:** Compute the live histogram strictly inside the detected foreground/subject mask so bright skies don't skew skin-tone exposure decisions.
+
+---
+
+## 8. Geolocation, Memories, Video & Library Portability Extensions
+
+### 8.1 Map Polygon Geofencing, KML Track Import & Memories Strip
+* **KML Track Import:** Extend **Companion Phone GPS Matching** (`GpsMatchDialog`) alongside `.gpx` to also parse Google Timeline `.kml` exports.
+* **Map Polygon Geofencing & Geographic Smart Albums:** Draw a lasso or polygon on **World Map View** to filter photos inside custom geographic regions or save the boundary as a Smart Album rule.
+* **"On This Day" Collapsible Memories Strip:** Optional collapsible horizontal strip above the Thumbnail Grid highlighting photos from 1, 2, 5, and 10 years ago today.
+
+### 8.2 Video Frame Capture ("Save Still Photo") & Beat-Synced MP4 Slideshows
+* **Video Frame Capture:** Add a **"Save Frame as Photo"** button in the Single Media Viewer video transport bar that exports the current full-resolution decoded frame as `.jpg`/`.png` into the same folder, copies `date_taken` (offset by playback position) + GPS coordinates, and immediately indexes it into the catalog.
+* **Beat-Synced Slideshow Music & MP4 Export:** Detect onset peaks in `.mp3`/`.wav` audio tracks via short-time Fourier flux (NumPy FFT, zero heavy audio dependencies) and snap Ken Burns pan/zoom slide transitions to musical bars in 1080p MP4 exports.
+
+### 8.3 Dominant Color Swatch Filtering (`Find` Tab) & Portable Catalog Bundles (`.epgbackup`)
+* **Dominant Color Swatch Filtering:** Add a 10-swatch clickable color filter bar to the `Find` ribbon tab matching precomputed Tier 1 `media_signatures` CIE LAB color data.
+* **Multi-PC Library Portability (`.epgbackup`):** Extend **File → Options → Database** with **"Export / Import Portable Catalog Bundle..."** packaging `catalog.db`, `thumbnails.db`, and relative root-folder path mappings so drive-letter differences (`D:\Pictures` vs. `C:\Users\...\Pictures`) remap automatically on the target PC.
+
+
+## 9. Depth & Light 2.0 — 3D Surface-Normal Relighting & Virtual Light Studio
+
+### 9.1 Why Upgrade Beyond Flat Z-Slice Relighting
+* **Current Limitation:** Our v0.14.0 `Depth & Light` relighting (`relight_near`, `relight_far`) modulates exposure strictly by 2D depth slice $D(x, y)$ and subject matte $M(x, y)$. While fast, it brightens subjects uniformly like a flat 2D cutout rather than wrapping light directionally around 3D contours (faces, coats, umbrellas, wet pavement) or casting specular reflections.
+* **Target Experience (Inspired by Clipdrop/SwitchLight Relight & Luminar Neo Relight AI):** Combine fast Luminar-style Near/Far sliders with an interactive **3D Virtual Light Studio** supporting draggable on-canvas Point/Spot lights, 3D surface normals, wet/skin specular gloss, old-light suppression, and 1-click lighting sphere presets.
+
+### 9.2 Technical Architecture (`src/imaging/creative_effects.py`, `src/ui/right_tag_dock.py`)
+1. **Joint-Guided Depth Edge Refinement & 3D Surface Normal Reconstruction (`< 4 ms`):**
+   * Refine the raw `Depth-Anything-V2` depth map $D(x, y)$ against the RGB proxy via a fast He et al. **Joint Guided Filter** so depth edges snap cleanly to hair, coat lapels, and umbrellas without halo bleeding.
+   * Compute a dense **3D Surface Normal Map** $\vec{N}(x, y) = (N_x, N_y, N_z)$ from multi-scale Scharr/Sobel spatial gradients of the refined depth map blended with a smooth 3D hemispherical volume prior on detected faces/subjects (with optional upgrade hook for an explicit normal-map ONNX estimator such as `DSINE` / ` Bae-Normal` in *Options → Add-ons*).
+2. **Albedo-Preserving De-Lighting ("Old Light" Dimming) & Linear Shading:**
+   * Separate intrinsic surface reflectance (albedo) from ambient illumination in linear sRGB so darkening the existing scene (*"Dim Original Light"*) or boosting `Relight Near` preserves deep blacks (e.g., dark coats stay rich black rather than turning milky grey).
+3. **Interactive Multi-Light 3D Shader (Point, Spot & Directional Rim Lights):**
+   * Support up to **3 independent virtual 3D lights** in `PhotoAdjustmentRecipe.virtual_lights: list[dict]`:
+     * **On-Canvas Gizmo:** Draggable **Light Source (`●`)** and **Aim Point (`◎`)** directly on `SingleMediaViewer`.
+     * **Light Types:** `Point` (3D omnidirectional with inverse-square falloff), `Spot` (cone angle aimed at `◎`), and `Directional / Rim` (edge-hugging backlight where $\vec{N} \cdot \vec{V}_{\text{cam}} \to 0$).
+     * **Per-Light Controls:**
+       * `Temperature (1800K–10000K)` & `Color Swatch / Hex Picker` (e.g., `#ff7e28` sodium streetlamp, `#ffe8d5` warm key, neon cyan/magenta).
+       * `Intensity (0–100)`, `Softness / Diffusion` (Lambertian wrap factor), and `Close to Far` (light Z-coordinate $z_L \in [0, 1]$).
+       * `Gloss (0–100)`: Blinn-Phong specular highlight reflection ($\max(0, \vec{N} \cdot \vec{H})^p$) modulated by local luminance so wet pavement, eyes, skin catchlights, and umbrella fabric glint realistically toward the light source.
+       * `Depth Range (From / To)`: Restricts light contribution to specific depth intervals.
+       * `Pattern (Gobo)`: Optional projected light mask (*None*, *Venetian Blinds*, *Window Pane*, *Dappled Foliage*).
+4. **1-Click "Relight Looks" Sphere Presets:**
+   * Visual sphere grid at the top of the Relight panel (*Warm Streetlamp*, *Golden Rim Light*, *Studio Rembrandt*, *Dual Neon Cyberpunk*, *Moonlit Backlight*, *Window Gobo*) that populates light positions, Kelvin colors, and gloss in one click.

@@ -972,6 +972,18 @@ class DualDatabaseEngine:
                 );
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS media_signatures (
+                    media_id INTEGER PRIMARY KEY,
+                    mtime INTEGER NOT NULL,
+                    phash64 INTEGER NOT NULL,
+                    dhash64 INTEGER NOT NULL,
+                    sharpness REAL NOT NULL DEFAULT 0.0,
+                    lab_haar BLOB
+                );
+                """
+            )
             conn.commit()
         except Exception:
             pass
@@ -1061,3 +1073,18 @@ class DualDatabaseEngine:
                 conn.close()
             except Exception:
                 pass
+
+    def reset_all_databases(self) -> None:
+        """Closes all connections, deletes catalog.db & thumbnails.db (+ WAL/SHM), and recreates fresh schemas."""
+        with self.write_lock, self.thumb_write_lock:
+            self.close_all()
+            for db_p in (self.catalog_path, self.thumbnails_path):
+                if str(db_p) == ":memory:":
+                    continue
+                for suffix in ("", "-wal", "-shm"):
+                    p = db_p if not suffix else db_p.with_name(db_p.name + suffix)
+                    try:
+                        p.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            self.initialize_schemas()

@@ -66,6 +66,7 @@ from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsItemGroup,
     QGraphicsLineItem,
+    QGraphicsOpacityEffect,
     QGraphicsPathItem,
     QGraphicsEllipseItem,
     QGraphicsPixmapItem,
@@ -82,6 +83,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QStyle,
+    QStyleOptionSlider,
     QStackedWidget,
     QTextEdit,
     QToolButton,
@@ -1017,6 +1020,10 @@ class _TagSomeonePopup(QFrame):
             """
         )
         self._people_data: list[dict] = []
+        self._opacity_fx = QGraphicsOpacityEffect(self)
+        self._opacity_fx.setOpacity(1.0)
+        self.setGraphicsEffect(self._opacity_fx)
+        self._fade_anim: QPropertyAnimation | None = None
 
         vbox = QVBoxLayout(self)
         vbox.setContentsMargins(10, 8, 10, 10)
@@ -1122,6 +1129,29 @@ class _TagSomeonePopup(QFrame):
         self.txt_search.setFocus(Qt.ActiveWindowFocusReason)
         self.txt_search.selectAll()
         QTimer.singleShot(0, lambda: (self.txt_search.setFocus(Qt.ActiveWindowFocusReason), self.txt_search.selectAll()))
+
+    def showEvent(self, event: Any) -> None:
+        if getattr(self, "_fade_anim", None) is not None:
+            self._fade_anim.stop()
+        if hasattr(self, "_opacity_fx"):
+            self._opacity_fx.setOpacity(1.0)
+        super().showEvent(event)
+
+    def fade_out_and_hide(self) -> None:
+        if not self.isVisible():
+            return
+        from PySide6.QtCore import QEasingCurve, QPropertyAnimation
+
+        if getattr(self, "_fade_anim", None) is not None:
+            self._fade_anim.stop()
+        anim = QPropertyAnimation(self._opacity_fx, b"opacity", self)
+        anim.setDuration(140)
+        anim.setStartValue(float(self._opacity_fx.opacity()))
+        anim.setEndValue(0.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.finished.connect(self.hide)
+        self._fade_anim = anim
+        anim.start()
 
     def _filter_list(self, text: str) -> None:
         self._rebuild_rows(text.strip())
@@ -1454,6 +1484,8 @@ class SingleMediaViewer(QWidget):
     zoom_percent_changed = Signal(int)
     image_changed = Signal(object)                                # emitted with current PIL Image
     recipe_changed = Signal(object)                               # emitted with current PhotoAdjustmentRecipe
+    wb_eyedropper_finished = Signal()                             # emitted when WB eyedropper finishes or cancels
+    region_brush_size_shortcut_changed = Signal(int)              # synced back to Fine Tune brush size slider
     status_message_requested = Signal(str, int)                  # (message, timeout_ms)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -1488,6 +1520,13 @@ class SingleMediaViewer(QWidget):
         self.current_zoom_mode: Literal["fit", "fill", "100", "custom"] = "fit"
         self.is_crop_mode: bool = False
         self.is_face_tag_mode: bool = False
+        self.is_wb_eyedropper_mode: bool = False
+        self._region_brush_region: str = ""
+        self._region_brush_mode: str = ""
+        self._region_brush_size: int = 40
+        self._region_brush_smart: bool = True
+        self._is_painting_region_mask: bool = False
+        self._region_brush_before_recipe: PhotoAdjustmentRecipe | None = None
 
         # Retouch (Magic Eraser) state
         self.is_retouch_mode: bool = False
@@ -1659,8 +1698,51 @@ class SingleMediaViewer(QWidget):
         self.btn_play_pause.clicked.connect(self.toggle_video_playback)
         t_hbox.addWidget(self.btn_play_pause)
 
-        self.slider_position = QSlider(Qt.Horizontal, transport)
+        class _ClickJumpSeekSlider(QSlider):
+            """Horizontal seek slider that jumps immediately to any clicked position."""
+
+            def _pos_to_value(self, x: float) -> int:
+                opt = QStyleOptionSlider()
+                self.initStyleOption(opt)
+                groove = self.style().subControlRect(QStyle.CC_Slider, opt, QStyle.SC_SliderGroove, self)
+                handle = self.style().subControlRect(QStyle.CC_Slider, opt, QStyle.SC_SliderHandle, self)
+                span = max(1, groove.width() - handle.width())
+                pos_x = int(round(x - groove.left() - handle.width() / 2.0))
+                return QStyle.sliderValueFromPosition(
+                    self.minimum(), self.maximum(), max(0, min(span, pos_x)), span
+                )
+
+            def mousePressEvent(self, event) -> None:
+                if event.button() == Qt.LeftButton:
+                    val = self._pos_to_value(event.position().x())
+                    self.setSliderDown(True)
+                    self.setValue(val)
+                    self.sliderPressed.emit()
+                    self.sliderMoved.emit(val)
+                    event.accept()
+                    return
+                super().mousePressEvent(event)
+
+            def mouseMoveEvent(self, event) -> None:
+                if event.buttons() & Qt.LeftButton:
+                    val = self._pos_to_value(event.position().x())
+                    self.setValue(val)
+                    self.sliderMoved.emit(val)
+                    event.accept()
+                    return
+                super().mouseMoveEvent(event)
+
+            def mouseReleaseEvent(self, event) -> None:
+                if event.button() == Qt.LeftButton and self.isSliderDown():
+                    self.setSliderDown(False)
+                    self.sliderReleased.emit()
+                    event.accept()
+                    return
+                super().mouseReleaseEvent(event)
+
+        self.slider_position = _ClickJumpSeekSlider(Qt.Horizontal, transport)
         self.slider_position.setRange(0, 1000)
+        self.slider_position.setCursor(Qt.PointingHandCursor)
         self.slider_position.sliderMoved.connect(self.media_player.setPosition)
         self.media_player.positionChanged.connect(self._on_video_position_changed)
         self.media_player.durationChanged.connect(self._on_video_duration_changed)
@@ -1684,6 +1766,7 @@ class SingleMediaViewer(QWidget):
         self.slider_volume.setRange(0, 100)
         self.slider_volume.setValue(100)
         self.slider_volume.setFixedWidth(65)
+        self.slider_volume.setCursor(Qt.SizeHorCursor)
         self.slider_volume.setToolTip("Volume")
         self.slider_volume.valueChanged.connect(self._on_volume_changed)
         t_hbox.addWidget(self.slider_volume)
@@ -1739,12 +1822,14 @@ class SingleMediaViewer(QWidget):
         self.slider_brightness = QSlider(Qt.Horizontal, self.fix_pane)
         self.slider_brightness.setRange(-100, 100)
         self.slider_brightness.setValue(0)
+        self.slider_brightness.setCursor(Qt.SizeHorCursor)
         fix_vbox.addWidget(self.slider_brightness)
 
         fix_vbox.addWidget(QLabel("Contrast:", self.fix_pane))
         self.slider_contrast = QSlider(Qt.Horizontal, self.fix_pane)
         self.slider_contrast.setRange(-100, 100)
         self.slider_contrast.setValue(0)
+        self.slider_contrast.setCursor(Qt.SizeHorCursor)
         fix_vbox.addWidget(self.slider_contrast)
 
         self.btn_apply_exposure = QPushButton("Apply exposure", self.fix_pane)
@@ -1760,6 +1845,7 @@ class SingleMediaViewer(QWidget):
         self.slider_saturation = QSlider(Qt.Horizontal, self.fix_pane)
         self.slider_saturation.setRange(-100, 100)
         self.slider_saturation.setValue(0)
+        self.slider_saturation.setCursor(Qt.SizeHorCursor)
         fix_vbox.addWidget(self.slider_saturation)
 
         self.btn_apply_color = QPushButton("Apply color", self.fix_pane)
@@ -1773,6 +1859,7 @@ class SingleMediaViewer(QWidget):
         self.slider_straighten = QSlider(Qt.Horizontal, self.fix_pane)
         self.slider_straighten.setRange(-15, 15)
         self.slider_straighten.setValue(0)
+        self.slider_straighten.setCursor(Qt.SizeHorCursor)
         fix_vbox.addWidget(self.slider_straighten)
 
         self.chk_straighten_ai_fill = QCheckBox("Fill rotated corners (AI)", self.fix_pane)
@@ -2155,6 +2242,7 @@ class SingleMediaViewer(QWidget):
         self.slider_retouch_size.setRange(6, 80)
         self.slider_retouch_size.setValue(20)
         self.slider_retouch_size.setFixedWidth(85)
+        self.slider_retouch_size.setCursor(Qt.SizeHorCursor)
         self.slider_retouch_size.valueChanged.connect(self._on_retouch_size_changed)
 
         self.btn_lama_model = QPushButton("Enable AI (208 MB)", self.retouch_toolbar)
@@ -2256,6 +2344,7 @@ class SingleMediaViewer(QWidget):
             self._magnify_source_pt = None
             self._cleanup_magnify_preview()
         self._on_markup_settings_changed()
+        self._position_floating_toolbars()
 
     def _on_magnifier_zoom_changed(self, zoom: float) -> None:
         self._show_status(f"Magnifier Zoom: {zoom:.1f}x", 2500)
@@ -2308,12 +2397,26 @@ class SingleMediaViewer(QWidget):
     def _position_floating_toolbars(self) -> None:
         gw = self.graphics_view.width()
         gh = self.graphics_view.height()
+        compact_markup = gw < 1180
+        ultra_markup = gw < 760
         if hasattr(self, "markup_toolbar") and hasattr(self.markup_toolbar, "set_compact_mode"):
-            self.markup_toolbar.set_compact_mode(gw < 980)
+            self.markup_toolbar.set_compact_mode(compact_markup, ultra_compact=ultra_markup)
         for tb in (self.crop_toolbar, self.retouch_toolbar, self.red_eye_toolbar, self.markup_toolbar):
             if tb.isVisible():
                 tb.adjustSize()
                 sh = tb.sizeHint()
+                if (
+                    tb is self.markup_toolbar
+                    and sh.width() > max(200, gw - 16)
+                    and hasattr(self.markup_toolbar, "set_compact_mode")
+                ):
+                    self.markup_toolbar.set_compact_mode(True, ultra_compact=ultra_markup)
+                    tb.adjustSize()
+                    sh = tb.sizeHint()
+                    if sh.width() > max(200, gw - 16):
+                        self.markup_toolbar.set_compact_mode(True, ultra_compact=True)
+                        tb.adjustSize()
+                        sh = tb.sizeHint()
                 if getattr(tb, "_user_positioned", False):
                     cur_x = tb.x()
                     cur_y = tb.y()
@@ -2676,6 +2779,59 @@ class SingleMediaViewer(QWidget):
         self.update_revert_state()
         return True
 
+    def _apply_region_mask_overlay(self, rendered_np: np.ndarray) -> np.ndarray:
+        """Render a high-contrast tint + dashed black/white contour outline for the active region mask."""
+        try:
+            from src.imaging.creative_effects import (
+                apply_region_mask_strokes,
+                get_depth_and_matte_engine,
+            )
+
+            engine = get_depth_and_matte_engine()
+            # Evaluate mask against the unadjusted proxy so slider scrubs hit _STROKE_MASK_CACHE 100%
+            src_rgb = (
+                self.preview_proxy_rgb
+                if getattr(self, "preview_proxy_rgb", None) is not None
+                and self.preview_proxy_rgb.shape[:2] == rendered_np.shape[:2]
+                else rendered_np
+            )
+            raw_reg = engine.get_region_mask(
+                src_rgb, self._region_mask_preview, media_id=self.current_media_id
+            )
+            reg_strokes = (
+                self.current_recipe.region_edits.get(self._region_mask_preview, {}).get("mask_strokes")
+                if hasattr(self.current_recipe, "region_edits")
+                else None
+            )
+            if reg_strokes:
+                raw_reg = apply_region_mask_strokes(
+                    raw_reg, cv2.cvtColor(src_rgb, cv2.COLOR_RGB2BGR), reg_strokes
+                )
+            hide_fill_for_adjust = getattr(self, "_is_sliding", False) and not getattr(
+                self, "_is_painting_region_mask", False
+            )
+            if getattr(self, "_region_mask_fill", True) and not hide_fill_for_adjust:
+                reg_mask = raw_reg[:, :, None]
+                overlay_color = np.array([225.0, 56.0, 96.0], dtype=np.float32)
+                blended = rendered_np.astype(np.float32) * (1.0 - reg_mask * 0.32) + overlay_color * (reg_mask * 0.32)
+                out = np.clip(blended, 0.0, 255.0).astype(np.uint8)
+            else:
+                out = rendered_np.copy()
+
+            # High-contrast dotted/dashed boundary outline (visible over blue sky & white clouds)
+            binary = (raw_reg >= 0.45).astype(np.uint8)
+            kernel = np.ones((3, 3), dtype=np.uint8)
+            edge = cv2.morphologyEx(binary, cv2.MORPH_GRADIENT, kernel) > 0
+            if np.any(edge):
+                h, w = out.shape[:2]
+                yy, xx = np.ogrid[:h, :w]
+                dash_white = ((xx + yy) // 5) % 2 == 0
+                out[edge & dash_white] = (255, 255, 255)
+                out[edge & (~dash_white)] = (24, 24, 28)
+            return out
+        except Exception:
+            return rendered_np
+
     def _render_proxy_to_viewport(
         self,
         proxy_rgb: np.ndarray,
@@ -2721,6 +2877,8 @@ class SingleMediaViewer(QWidget):
                     rendered_np = np.clip(blended, 0.0, 255.0).astype(np.uint8)
             except Exception:
                 pass
+        elif getattr(self, "_region_mask_preview", ""):
+            rendered_np = self._apply_region_mask_overlay(rendered_np)
 
         pix = self._build_pixmap_from_rgb_and_alpha(rendered_np, proxy_alpha)
         target_w = int(round(w / proxy_scale))
@@ -2781,6 +2939,8 @@ class SingleMediaViewer(QWidget):
                     rendered_np = np.clip(blended, 0.0, 255.0).astype(np.uint8)
             except Exception:
                 pass
+        elif getattr(self, "_region_mask_preview", ""):
+            rendered_np = self._apply_region_mask_overlay(rendered_np)
 
         pix = self._build_pixmap_from_rgb_and_alpha(rendered_np, rendered_alpha)
         self._adjusted_pixmap = pix
@@ -3013,7 +3173,7 @@ class SingleMediaViewer(QWidget):
             self.crop_toolbar.setStyleSheet(tb_style)
         if hasattr(self, "retouch_toolbar"):
             self.retouch_toolbar.setStyleSheet(tb_style)
-        for b_name in ("btn_spot_retouch", "btn_spot_erase", "btn_spot_redeye"):
+        for b_name in ("btn_spot_retouch", "btn_spot_erase", "btn_spot_red_eye"):
             btn = getattr(self, b_name, None)
             if btn is not None:
                 btn.setStyleSheet(spot_btn_style)
@@ -3043,6 +3203,10 @@ class SingleMediaViewer(QWidget):
         self.current_zoom_mode = "custom"
         self.graphics_view.zoom(0.8)
 
+    def set_suppress_face_overlays(self, suppress: bool) -> None:
+        self._suppress_face_overlays = bool(suppress)
+        self._update_face_overlays_visibility()
+
     def is_in_edit_mode(self) -> bool:
         return bool(
             getattr(self, "is_crop_mode", False)
@@ -3050,6 +3214,7 @@ class SingleMediaViewer(QWidget):
             or getattr(self, "is_red_eye_mode", False)
             or getattr(self, "is_straighten_active", False)
             or getattr(self, "is_markup_mode", False)
+            or getattr(self, "_suppress_face_overlays", False)
         )
 
     def _update_face_overlays_visibility(self) -> None:
@@ -3482,7 +3647,7 @@ class SingleMediaViewer(QWidget):
         elif mode == "erase":
             from src.ui.dialogs import prompt_and_download_lama_addon
             if not prompt_and_download_lama_addon(self, "Object Eraser"):
-                self._set_spot_fix_sub_mode("retouch")
+                self.set_spot_fix_sub_mode("retouch")
                 return
             self.is_retouch_mode = True
             self.is_red_eye_mode = False
@@ -3665,7 +3830,6 @@ class SingleMediaViewer(QWidget):
             self.retouch_toolbar.show()
             self._position_floating_toolbars()
             self.retouch_toolbar.raise_()
-            QTimer.singleShot(150, self._warmup_lama_async)
         else:
             if not getattr(self, "is_red_eye_mode", False):
                 self.retouch_toolbar.hide()
@@ -3822,14 +3986,24 @@ class SingleMediaViewer(QWidget):
             from PySide6.QtWidgets import QApplication
             from src.imaging.creative_effects import inpaint_object_lama
 
+            self._show_status("Applying AI Object Eraser...", 0)
             QApplication.setOverrideCursor(Qt.WaitCursor)
+            QApplication.processEvents()
+            erase_ok = False
             try:
                 self.master_np_rgb = inpaint_object_lama(self.master_np_rgb, mask_dilated)
+                erase_ok = True
             finally:
                 QApplication.restoreOverrideCursor()
+                if erase_ok:
+                    self._show_status("✓ Object erased", 3000)
+                else:
+                    self._show_status("", 0)
+            self._update_display_proxy()
             self._clear_retouch_overlay()
             cmd = PixelArrayUndoCommand(self, before, self.master_np_rgb.copy(), "Erase Object")
-            self.undo_stack.push(cmd)  # calls redo() -> _update_display_proxy() + _render_current_recipe()
+            self.undo_stack.push(cmd)
+            self._render_current_recipe()
             if self.current_media_id is not None:
                 self.pixel_edit_saved.emit(self.current_media_id, "")
             return
@@ -3925,7 +4099,6 @@ class SingleMediaViewer(QWidget):
             self.retouch_toolbar.show()
             self._position_floating_toolbars()
             self.retouch_toolbar.raise_()
-            QTimer.singleShot(150, self._warmup_lama_async)
         else:
             if not getattr(self, "is_retouch_mode", False):
                 self.retouch_toolbar.hide()
@@ -5025,6 +5198,8 @@ class SingleMediaViewer(QWidget):
                     rendered_np = np.clip(blended, 0.0, 255.0).astype(np.uint8)
             except Exception:
                 pass
+        elif getattr(self, "_region_mask_preview", ""):
+            rendered_np = self._apply_region_mask_overlay(rendered_np)
 
         pix = self._build_pixmap_from_rgb_and_alpha(rendered_np, rendered_alpha)
         self._adjusted_pixmap = pix
@@ -5140,6 +5315,28 @@ class SingleMediaViewer(QWidget):
         self.current_recipe.clarity = float(clarity)
         self._render_current_recipe()
 
+    def set_exposure_ext_parameters(self, whites: int, blacks: int) -> None:
+        if self._recipe_before_slider is None:
+            self._recipe_before_slider = self.current_recipe.copy()
+        self._is_sliding = True
+        self.current_recipe.whites = float(whites)
+        self.current_recipe.blacks = float(blacks)
+        self._render_current_recipe()
+
+    def set_smart_enhance_parameters(self, smart_enhance: int) -> None:
+        if self._recipe_before_slider is None:
+            self._recipe_before_slider = self.current_recipe.copy()
+        self._is_sliding = True
+        self.current_recipe.smart_enhance = float(smart_enhance)
+        self._render_current_recipe()
+
+    def set_structure_parameters(self, structure: int) -> None:
+        if self._recipe_before_slider is None:
+            self._recipe_before_slider = self.current_recipe.copy()
+        self._is_sliding = True
+        self.current_recipe.structure = float(structure)
+        self._render_current_recipe()
+
     def set_color_parameters(
         self, temperature: int, tint: int, saturation: int, dehaze: int = 0
     ) -> None:
@@ -5158,6 +5355,175 @@ class SingleMediaViewer(QWidget):
         self._is_sliding = True
         self.current_recipe.vignette = float(vignette)
         self._render_current_recipe()
+
+    def set_optics_ext_parameters(
+        self,
+        vignette: int = 0,
+        vignette_feather: int = 50,
+        orton_glow: int = 0,
+        golden_hour: int = 0,
+    ) -> None:
+        if self._recipe_before_slider is None:
+            self._recipe_before_slider = self.current_recipe.copy()
+        self._is_sliding = True
+        self.current_recipe.vignette = float(vignette)
+        self.current_recipe.vignette_feather = float(vignette_feather)
+        self.current_recipe.orton_glow = float(orton_glow)
+        self.current_recipe.golden_hour = float(golden_hour)
+        self._render_current_recipe()
+
+    def set_look_profile_parameters(self, effect: str, intensity: int = 100) -> None:
+        if self._recipe_before_slider is None:
+            self._recipe_before_slider = self.current_recipe.copy()
+        self._is_sliding = True
+        self.current_recipe.effect = str(effect or "none")
+        self.current_recipe.effect_intensity = float(intensity)
+        self._render_current_recipe()
+
+    def set_region_parameters(self, region: str, data: dict[str, Any]) -> None:
+        from src.imaging.opencv_engine import _region_dict_has_edits
+
+        if self._recipe_before_slider is None:
+            self._recipe_before_slider = self.current_recipe.copy()
+        self._is_sliding = True
+        reg = str(region).lower()
+        existing_strokes = list(self.current_recipe.region_edits.get(reg, {}).get("mask_strokes", []))
+        if _region_dict_has_edits(data):
+            new_dict: dict[str, Any] = {
+                k: ([tuple(p) for p in v] if str(k).startswith("curve_") else (list(v) if k == "mask_strokes" else float(v)))
+                for k, v in data.items()
+            }
+            if existing_strokes and "mask_strokes" not in new_dict:
+                new_dict["mask_strokes"] = existing_strokes
+            self.current_recipe.region_edits[reg] = new_dict
+        else:
+            self.current_recipe.region_edits.pop(reg, None)
+        self._render_current_recipe()
+
+    @staticmethod
+    def _make_round_brush_cursor(radius_px: int, mode: str) -> QCursor:
+        r = max(6, min(48, int(radius_px)))
+        sz = r * 2 + 8
+        pix = QPixmap(sz, sz)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        cx = cy = sz / 2.0
+        # Outer white halo + inner dark ring for visibility on any photo
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(255, 255, 255, 210), 2.0))
+        p.drawEllipse(QPointF(cx, cy), float(r), float(r))
+        ring_col = QColor("#2563EB") if mode == "paint" else QColor("#DC2626")
+        p.setPen(QPen(ring_col, 1.3))
+        p.drawEllipse(QPointF(cx, cy), float(r), float(r))
+        # Center + (paint) or - (erase)
+        p.setPen(QPen(QColor(255, 255, 255, 230), 2.2))
+        p.drawLine(QPointF(cx - 3.5, cy), QPointF(cx + 3.5, cy))
+        if mode == "paint":
+            p.drawLine(QPointF(cx, cy - 3.5), QPointF(cx, cy + 3.5))
+        p.setPen(QPen(QColor("#0F172A"), 1.1))
+        p.drawLine(QPointF(cx - 3.0, cy), QPointF(cx + 3.0, cy))
+        if mode == "paint":
+            p.drawLine(QPointF(cx, cy - 3.0), QPointF(cx, cy + 3.0))
+        p.end()
+        return QCursor(pix, int(cx), int(cy))
+
+    def set_region_brush_mode(
+        self, region: str, mode: str, size: int = 40, smart: bool = True
+    ) -> None:
+        self._region_brush_region = str(region or "").lower()
+        self._region_brush_mode = str(mode or "").lower()
+        self._region_brush_size = max(8, int(size))
+        self._region_brush_smart = bool(smart)
+        if self._region_brush_region and self._region_brush_mode in ("paint", "erase"):
+            self.graphics_view.viewport().setCursor(
+                self._make_round_brush_cursor(self._region_brush_size // 2, self._region_brush_mode)
+            )
+            smart_lbl = "Smart Select" if self._region_brush_smart else "Soft Brush"
+            self._show_status(
+                f"Region Mask ({self._region_brush_mode.title()} • {smart_lbl} on {self._region_brush_region.title()}) • Drag on photo",
+                4000,
+            )
+        else:
+            self._is_painting_region_mask = False
+            if not getattr(self, "is_wb_eyedropper_mode", False):
+                self.graphics_view.viewport().unsetCursor()
+
+    def clear_region_mask_strokes(self, region: str) -> None:
+        reg = str(region or "").lower()
+        if reg not in self.current_recipe.region_edits:
+            return
+        if "mask_strokes" not in self.current_recipe.region_edits[reg]:
+            return
+        before = self.current_recipe.copy()
+        after = self.current_recipe.copy()
+        after.region_edits[reg].pop("mask_strokes", None)
+        cmd = RecipeUndoCommand(self, before, after, f"Clear {reg.title()} Mask Brush")
+        self.current_recipe = after
+        self.undo_stack.push(cmd)
+        self._render_current_recipe()
+        self.recipe_changed.emit(self.current_recipe)
+
+    def invert_region_mask(self, region: str) -> None:
+        reg = str(region or "").lower()
+        if not reg or reg == "whole":
+            return
+        before = self.current_recipe.copy()
+        after = self.current_recipe.copy()
+        reg_dict = dict(after.region_edits.get(reg, {}))
+        strokes = list(reg_dict.get("mask_strokes", []))
+        strokes.append({"mode": "invert"})
+        reg_dict["mask_strokes"] = strokes
+        after.region_edits[reg] = reg_dict
+        cmd = RecipeUndoCommand(self, before, after, f"Invert {reg.title()} Mask")
+        self.current_recipe = after
+        self.undo_stack.push(cmd)
+        self._render_current_recipe()
+        self.recipe_changed.emit(self.current_recipe)
+
+    def _apply_region_mask_brush_at(self, scene_pos: QPointF, *, cont: bool = False) -> None:
+        if (
+            self.master_np_rgb is None
+            or not self._region_brush_region
+            or self._region_brush_mode not in ("paint", "erase")
+            or not self._is_scene_pos_on_canvas(scene_pos)
+        ):
+            return
+        mx, my = self._scene_to_master(scene_pos.x(), scene_pos.y())
+        h, w = self.master_np_rgb.shape[:2]
+        nx = float(np.clip(mx / max(1.0, float(w - 1)), 0.0, 1.0))
+        ny = float(np.clip(my / max(1.0, float(h - 1)), 0.0, 1.0))
+        nr = float(self._region_brush_size) / max(1.0, float(max(h, w)))
+        reg = self._region_brush_region
+        rdict = self.current_recipe.region_edits.setdefault(reg, {})
+        strokes = rdict.setdefault("mask_strokes", [])
+        if cont and strokes:
+            last = strokes[-1]
+            if (
+                last.get("mode") == self._region_brush_mode
+                and ((last.get("x", 0.0) - nx) ** 2 + (last.get("y", 0.0) - ny) ** 2) < (nr * 0.15) ** 2
+            ):
+                return
+        strokes.append(
+            {
+                "x": nx,
+                "y": ny,
+                "r": nr,
+                "mode": self._region_brush_mode,
+                "smart": bool(getattr(self, "_region_brush_smart", True)),
+                "cont": bool(cont),
+            }
+        )
+        self._render_current_recipe()
+
+    def set_region_mask_preview(self, region: str) -> None:
+        self._region_mask_preview = str(region or "")
+        self._render_current_recipe()
+
+    def set_region_mask_fill(self, fill: bool) -> None:
+        self._region_mask_fill = bool(fill)
+        if getattr(self, "_region_mask_preview", ""):
+            self._render_current_recipe()
 
     def set_levels(self, black_point: int = 0, white_point: int = 255) -> None:
         if self._recipe_before_slider is None:
@@ -5229,7 +5595,6 @@ class SingleMediaViewer(QWidget):
         self.current_recipe = new_rec
         self._render_current_recipe()
         self.recipe_changed.emit(self.current_recipe)
-
     def copy_subject_to_clipboard(self) -> bool:
         """
         Extracts the foreground subject with a transparent background (RGBA) using DepthAndMatteEngine
@@ -5315,7 +5680,6 @@ class SingleMediaViewer(QWidget):
         self.current_recipe = new_rec
         self._render_current_recipe()
         self.recipe_changed.emit(self.current_recipe)
-
     def set_compare_mode(self, active: bool) -> None:
         """Temporarily toggles between adjusted view and unedited original view."""
         self._is_comparing = active
@@ -5430,6 +5794,132 @@ class SingleMediaViewer(QWidget):
         self.current_recipe.denoise = float(denoise)
         self._render_current_recipe()
 
+    def set_detail_ext(
+        self,
+        denoise_chroma: int,
+        grain_amount: int,
+        grain_size: int,
+        sharpen_masking: int = 0,
+        sharpen_radius: int = 25,
+        denoise_detail: int = 50,
+    ) -> None:
+        if self._recipe_before_slider is None:
+            self._recipe_before_slider = self.current_recipe.copy()
+        self._is_sliding = True
+        self.current_recipe.denoise_chroma = float(denoise_chroma)
+        self.current_recipe.grain_amount = float(grain_amount)
+        self.current_recipe.grain_size = float(grain_size)
+        self.current_recipe.sharpen_masking = float(sharpen_masking)
+        self.current_recipe.sharpen_radius = float(sharpen_radius)
+        self.current_recipe.denoise_detail = float(denoise_detail)
+        self._render_current_recipe()
+
+    def set_tone_curves(self, curves: dict[str, list[tuple[float, float]]]) -> None:
+        if self._recipe_before_slider is None:
+            self._recipe_before_slider = self.current_recipe.copy()
+        self._is_sliding = True
+        if "rgb" in curves:
+            self.current_recipe.curve_rgb = [tuple(p) for p in curves["rgb"]]
+        if "r" in curves:
+            self.current_recipe.curve_r = [tuple(p) for p in curves["r"]]
+        if "g" in curves:
+            self.current_recipe.curve_g = [tuple(p) for p in curves["g"]]
+        if "b" in curves:
+            self.current_recipe.curve_b = [tuple(p) for p in curves["b"]]
+        self._render_current_recipe()
+
+    def set_hsl_parameters(
+        self, hsl_hue: dict[str, int | float], hsl_sat: dict[str, int | float], hsl_lum: dict[str, int | float]
+    ) -> None:
+        if self._recipe_before_slider is None:
+            self._recipe_before_slider = self.current_recipe.copy()
+        self._is_sliding = True
+        self.current_recipe.hsl_hue = {str(k): float(v) for k, v in hsl_hue.items() if abs(float(v)) >= 0.1}
+        self.current_recipe.hsl_sat = {str(k): float(v) for k, v in hsl_sat.items() if abs(float(v)) >= 0.1}
+        self.current_recipe.hsl_lum = {str(k): float(v) for k, v in hsl_lum.items() if abs(float(v)) >= 0.1}
+        self._render_current_recipe()
+
+    @staticmethod
+    def _make_wb_eyedropper_cursor() -> QCursor:
+        from PySide6.QtGui import QPainterPath
+
+        pix = QPixmap(24, 24)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        # Dropper tip at bottom-left (3, 20)
+        # Rubber bulb (top-right)
+        p.setPen(QPen(QColor("#1E293B"), 1.4))
+        p.setBrush(QColor("#3B82F6"))
+        bulb = QPainterPath()
+        bulb.moveTo(13.5, 5.5)
+        bulb.lineTo(17.5, 1.8)
+        bulb.quadTo(20.5, 1.5, 21.8, 4.2)
+        bulb.quadTo(22.2, 6.2, 18.5, 10.5)
+        bulb.closeSubpath()
+        p.drawPath(bulb)
+        # Collar ring
+        p.setPen(QPen(QColor("#0F172A"), 1.6))
+        p.drawLine(QPointF(11.5, 4.5), QPointF(19.5, 12.5))
+        # Glass barrel & tapered tip
+        barrel = QPainterPath()
+        barrel.moveTo(12.5, 6.5)
+        barrel.lineTo(5.2, 13.8)
+        barrel.lineTo(3.2, 19.6)
+        barrel.lineTo(4.4, 20.8)
+        barrel.lineTo(10.2, 18.8)
+        barrel.lineTo(17.5, 11.5)
+        barrel.closeSubpath()
+        p.setPen(QPen(QColor("#0F172A"), 1.3))
+        p.setBrush(QColor(255, 255, 255, 225))
+        p.drawPath(barrel)
+        # Precise 1px sample target dot at tip hotspot (3, 20)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#EF4444"))
+        p.drawEllipse(QPointF(3.0, 20.0), 1.3, 1.3)
+        p.end()
+        return QCursor(pix, 3, 20)
+
+    def set_wb_eyedropper_mode(self, enabled: bool) -> None:
+        self.is_wb_eyedropper_mode = bool(enabled)
+        if self.is_wb_eyedropper_mode:
+            self.graphics_view.viewport().setCursor(self._make_wb_eyedropper_cursor())
+            self._show_status("White Balance Picker: Click a neutral gray or white area on the photo • Esc to cancel", 5000)
+        else:
+            self.graphics_view.viewport().unsetCursor()
+
+    def _apply_wb_eyedropper_at(self, scene_pos: QPointF) -> None:
+        if self.master_np_rgb is None or not self._is_scene_pos_on_canvas(scene_pos):
+            self.set_wb_eyedropper_mode(False)
+            self.wb_eyedropper_finished.emit()
+            return
+        from src.imaging.opencv_engine import compute_wb_from_rgb_sample
+
+        mx, my = self._scene_to_master(scene_pos.x(), scene_pos.y())
+        h, w = self.master_np_rgb.shape[:2]
+        x1, x2 = max(0, mx - 2), min(w, mx + 3)
+        y1, y2 = max(0, my - 2), min(h, my + 3)
+        patch = self.master_np_rgb[y1:y2, x1:x2]
+        if patch.size == 0:
+            self.set_wb_eyedropper_mode(False)
+            self.wb_eyedropper_finished.emit()
+            return
+        mean_rgb = patch.reshape(-1, 3).mean(axis=0)
+        temp, tint = compute_wb_from_rgb_sample(float(mean_rgb[0]), float(mean_rgb[1]), float(mean_rgb[2]))
+
+        before = self.current_recipe.copy()
+        after = self.current_recipe.copy()
+        after.temperature = temp
+        after.tint = tint
+        cmd = RecipeUndoCommand(self, before, after, "White Balance Picker")
+        self.current_recipe = after
+        self.undo_stack.push(cmd)
+        self._render_current_recipe()
+        self.recipe_changed.emit(self.current_recipe)
+        self.set_wb_eyedropper_mode(False)
+        self.wb_eyedropper_finished.emit()
+        self._show_status(f"White Balance updated (Temp {int(round(temp)):+d}, Tint {int(round(tint)):+d})", 3000)
+
     def apply_auto_adjust(self) -> None:
         """Analyzes scene dynamic range & color cast using OpenCV and applies balanced parameters."""
         if self.master_np_rgb is None:
@@ -5442,7 +5932,6 @@ class SingleMediaViewer(QWidget):
         self.undo_stack.push(cmd)
         self._render_current_recipe()
         self.recipe_changed.emit(self.current_recipe)
-
     def apply_auto_straighten(self) -> float:
         """Detects dominant horizon/vertical tilt using Canny & Hough line transforms."""
         if self.master_np_rgb is None:
@@ -5457,7 +5946,6 @@ class SingleMediaViewer(QWidget):
         self.undo_stack.push(cmd)
         self._render_current_recipe()
         self.recipe_changed.emit(self.current_recipe)
-        return angle
 
     def apply_exposure_contrast(self, brightness: int, contrast: int) -> None:
         before = self.current_recipe.copy()
@@ -5467,7 +5955,6 @@ class SingleMediaViewer(QWidget):
         self.undo_stack.push(cmd)
         self._render_current_recipe()
         self.recipe_changed.emit(self.current_recipe)
-
     def apply_color_saturation(self, saturation: int) -> None:
         before = self.current_recipe.copy()
         self.current_recipe.saturation = float(saturation)
@@ -5475,7 +5962,6 @@ class SingleMediaViewer(QWidget):
         self.undo_stack.push(cmd)
         self._render_current_recipe()
         self.recipe_changed.emit(self.current_recipe)
-
     def apply_straighten(self, angle_deg: float) -> None:
         before = self.current_recipe.copy()
         self.current_recipe.straighten_deg = float(angle_deg)
@@ -5486,7 +5972,6 @@ class SingleMediaViewer(QWidget):
         self.undo_stack.push(cmd)
         self._render_current_recipe()
         self.recipe_changed.emit(self.current_recipe)
-
     def apply_preset_effect(
         self, effect: str
     ) -> None:
@@ -5497,7 +5982,6 @@ class SingleMediaViewer(QWidget):
         self.undo_stack.push(cmd)
         self._render_current_recipe()
         self.recipe_changed.emit(self.current_recipe)
-
     def preview_recipe(self, recipe: PhotoAdjustmentRecipe | None) -> None:
         """Previews an adjustment recipe in real-time on the viewer without modifying undo stack or current_recipe."""
         if self.master_np_rgb is None or self.current_is_video:
@@ -5543,7 +6027,6 @@ class SingleMediaViewer(QWidget):
         self.undo_stack.push(cmd)
         self._render_current_recipe()
         self.recipe_changed.emit(self.current_recipe)
-
     def apply_auto_exposure(self) -> None:
         """Analyzes and applies balanced exposure parameters without changing color or effects."""
         if self.master_np_rgb is None:
@@ -6002,42 +6485,82 @@ class SingleMediaViewer(QWidget):
         btn_discard = msg_box.addButton("Discard Changes", QMessageBox.DestructiveRole)
         btn_cancel = msg_box.addButton("Cancel", QMessageBox.RejectRole)
 
+        is_dark = bool(getattr(self, "_is_dark", False))
         chk_dont_ask = QCheckBox("Do not ask again (use this choice in the future)", msg_box)
-        chk_dont_ask.setStyleSheet("color: #1E395B; font-size: 9pt; padding-top: 6px;")
+        chk_dont_ask.setStyleSheet(
+            f"color: {'#E2E8F0' if is_dark else '#1E395B'}; font-size: 9pt; padding-top: 6px;"
+        )
         msg_box.setCheckBox(chk_dont_ask)
 
         msg_box.setDefaultButton(btn_save)
         msg_box.setEscapeButton(btn_cancel)
 
-        msg_box.setStyleSheet("""
-            QMessageBox {
-                background-color: #FBFDFF;
-                font-family: 'Segoe UI';
-                min-width: 530px;
-            }
-            QLabel {
-                font-family: 'Segoe UI';
-                font-size: 9pt;
-            }
-            QPushButton {
-                padding: 6px 12px;
-                border: 1px solid #7DA2CE;
-                border-radius: 3px;
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FBFDFF, stop:1 #E0ECF8);
-                color: #1E395B;
-                font-family: 'Segoe UI';
-                font-size: 9pt;
-                min-width: 105px;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #EAF4FD, stop:1 #C6E0F8);
-                border-color: #3C7FB1;
-            }
-            QPushButton:default {
-                font-weight: bold;
-                border-color: #005A9E;
-            }
-        """)
+        if is_dark:
+            msg_box.setStyleSheet("""
+                QMessageBox {
+                    background-color: #1E242C;
+                    color: #E2E8F0;
+                    font-family: 'Segoe UI';
+                    min-width: 530px;
+                }
+                QLabel {
+                    color: #E2E8F0;
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                }
+                QPushButton {
+                    padding: 6px 12px;
+                    border: 1px solid #3B4252;
+                    border-radius: 3px;
+                    background: #262B34;
+                    color: #E2E8F0;
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                    min-width: 105px;
+                }
+                QPushButton:hover {
+                    background: #2E3440;
+                    border-color: #60A5FA;
+                }
+                QPushButton:default {
+                    font-weight: bold;
+                    background: #2563EB;
+                    border-color: #3B82F6;
+                    color: #FFFFFF;
+                }
+            """)
+        else:
+            msg_box.setStyleSheet("""
+                QMessageBox {
+                    background-color: #FBFDFF;
+                    color: #1E395B;
+                    font-family: 'Segoe UI';
+                    min-width: 530px;
+                }
+                QLabel {
+                    color: #1E395B;
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                }
+                QPushButton {
+                    padding: 6px 12px;
+                    border: 1px solid #7DA2CE;
+                    border-radius: 3px;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FBFDFF, stop:1 #E0ECF8);
+                    color: #1E395B;
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                    min-width: 105px;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #EAF4FD, stop:1 #C6E0F8);
+                    border-color: #3C7FB1;
+                }
+                QPushButton:default {
+                    font-weight: bold;
+                    border-color: #005A9E;
+                }
+            """)
 
         msg_box.exec()
         clicked = msg_box.clickedButton()
@@ -6680,7 +7203,10 @@ class SingleMediaViewer(QWidget):
                 self.scene.removeItem(self._face_target_item)
             self._face_target_item = None
         if hasattr(self, "_tag_someone_popup") and self._tag_someone_popup is not None:
-            self._tag_someone_popup.hide()
+            if hasattr(self._tag_someone_popup, "fade_out_and_hide"):
+                self._tag_someone_popup.fade_out_and_hide()
+            else:
+                self._tag_someone_popup.hide()
         if getattr(self, "is_face_adjust_mode", False):
             self.stop_face_adjust_mode()
 
@@ -7328,6 +7854,38 @@ class SingleMediaViewer(QWidget):
                     self._finish_retouch()
                     return True
 
+            if getattr(self, "is_wb_eyedropper_mode", False):
+                if event.type() == QEvent.MouseButtonPress and getattr(event, "button", lambda: None)() == Qt.LeftButton:
+                    sp = self.graphics_view.mapToScene(event.position().toPoint())
+                    self._apply_wb_eyedropper_at(sp)
+                    return True
+
+            if getattr(self, "_region_brush_mode", "") in ("paint", "erase") and getattr(self, "_region_brush_region", ""):
+                if event.type() == QEvent.MouseButtonPress and getattr(event, "button", lambda: None)() == Qt.LeftButton:
+                    sp = self.graphics_view.mapToScene(event.position().toPoint())
+                    if self._is_scene_pos_on_canvas(sp):
+                        self._region_brush_before_recipe = self.current_recipe.copy()
+                        self._is_painting_region_mask = True
+                        self._is_sliding = True
+                        self._apply_region_mask_brush_at(sp, cont=False)
+                        return True
+                elif event.type() == QEvent.MouseMove and getattr(self, "_is_painting_region_mask", False):
+                    sp = self.graphics_view.mapToScene(event.position().toPoint())
+                    self._apply_region_mask_brush_at(sp, cont=True)
+                    return True
+                elif event.type() == QEvent.MouseButtonRelease and getattr(event, "button", lambda: None)() == Qt.LeftButton and getattr(self, "_is_painting_region_mask", False):
+                    self._is_painting_region_mask = False
+                    self._is_sliding = False
+                    before = self._region_brush_before_recipe
+                    self._region_brush_before_recipe = None
+                    if before is not None:
+                        after = self.current_recipe.copy()
+                        cmd = RecipeUndoCommand(self, before, after, "Region Mask Brush")
+                        self.undo_stack.push(cmd)
+                        self.recipe_changed.emit(self.current_recipe)
+                    self._render_current_recipe()
+                    return True
+
             if self.is_red_eye_mode:
                 if event.type() == QEvent.MouseButtonPress and getattr(event, "button", lambda: None)() == Qt.LeftButton:
                     sp = self.graphics_view.mapToScene(event.position().toPoint())
@@ -7418,6 +7976,17 @@ class SingleMediaViewer(QWidget):
                     elif getattr(self, "_markup_active", False):
                         self._finish_markup(sp)
                         return True
+                elif event.type() == QEvent.Leave:
+                    if getattr(self, "_region_brush_mode", "") in ("paint", "erase") and not getattr(self, "_is_painting_region_mask", False):
+                        self.graphics_view.viewport().unsetCursor()
+                elif event.type() == QEvent.Enter:
+                    if getattr(self, "_region_brush_mode", "") in ("paint", "erase") and getattr(self, "_region_brush_region", ""):
+                        self.graphics_view.viewport().setCursor(
+                            self._make_round_brush_cursor(
+                                getattr(self, "_region_brush_size", 40) // 2,
+                                self._region_brush_mode,
+                            )
+                        )
                 elif event.type() in (QEvent.FocusOut, QEvent.Leave) and getattr(self, "_markup_active", False):
                     self._cleanup_markup_temp_items()
                     return True
@@ -7458,6 +8027,22 @@ class SingleMediaViewer(QWidget):
                     event.accept()
                     return True
                 return super().eventFilter(watched, event)
+
+            if (
+                getattr(self, "_region_brush_region", "")
+                and getattr(self, "_region_brush_mode", "") in ("paint", "erase")
+                and event.key() in (Qt.Key_BracketLeft, Qt.Key_BracketRight)
+            ):
+                cur_sz = int(getattr(self, "_region_brush_size", 40))
+                new_sz = max(10, cur_sz - 6) if event.key() == Qt.Key_BracketLeft else min(120, cur_sz + 6)
+                self._region_brush_size = new_sz
+                self.graphics_view.viewport().setCursor(
+                    self._make_round_brush_cursor(new_sz // 2, self._region_brush_mode)
+                )
+                self.region_brush_size_shortcut_changed.emit(new_sz)
+                self._show_status(f"Mask Brush Size: {new_sz}px", 1500)
+                event.accept()
+                return True
 
             if getattr(self, "is_retouch_mode", False) or getattr(self, "is_red_eye_mode", False):
                 if event.key() == Qt.Key_BracketLeft:
@@ -7547,6 +8132,11 @@ class SingleMediaViewer(QWidget):
                 if getattr(self, "_red_eye_active", False):
                     self._clear_retouch_overlay()
                     self._red_eye_active = False
+                    event.accept()
+                    return True
+                if getattr(self, "is_wb_eyedropper_mode", False):
+                    self.set_wb_eyedropper_mode(False)
+                    self.wb_eyedropper_finished.emit()
                     event.accept()
                     return True
                 if self.is_crop_mode:
@@ -7796,6 +8386,10 @@ class SingleMediaViewer(QWidget):
                 act_b.triggered.connect(
                     lambda checked=False, pid_val=b_pid, name_val=b_name: self.start_face_tag_mode_for_person(pid_val, name_val)
                 )
+
+        if not is_vid and is_mw and hasattr(mw, "open_find_similar_for_media") and mid is not None:
+            act_sim = menu.addAction("Find Similar Photos...")
+            act_sim.triggered.connect(lambda: mw.open_find_similar_for_media(mid))
 
         if is_mw and hasattr(mw, "open_file_location_for_media"):
             act_loc = menu.addAction("Open file location")

@@ -1166,6 +1166,7 @@ class CompareMediaView(QWidget):
     media_deleted = Signal(int)                 # media_id
     open_in_editor_requested = Signal(int)      # media_id
     keep_winner_requested = Signal(int)         # media_id
+    focused_media_changed = Signal(object)      # media_id | None
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1849,10 +1850,18 @@ class CompareMediaView(QWidget):
     # ------------------------------------------------------------------
     # Internal Slots
     # ------------------------------------------------------------------
+    def focused_media_id(self) -> int | None:
+        if 0 <= self._focused_slot < len(self._active_ids):
+            return int(self._active_ids[self._focused_slot])
+        if self._active_ids:
+            return int(self._active_ids[0])
+        return None
+
     def _on_pane_focused(self, slot_idx: int) -> None:
         self._focused_slot = slot_idx
         for idx, p in enumerate(self._panes):
             p.set_focused(idx == slot_idx)
+        self.focused_media_changed.emit(self.focused_media_id())
 
     def _on_pane_pin_toggled(self, slot_idx: int, checked: bool) -> None:
         self._pinned_slot = slot_idx if checked else None

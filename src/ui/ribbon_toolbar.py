@@ -730,6 +730,24 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawLine(QPointF(s * 0.24, s * 0.24), QPointF(s * 0.76, s * 0.76))
         p.drawLine(QPointF(s * 0.76, s * 0.24), QPointF(s * 0.24, s * 0.76))
 
+    elif kind in ("recycle_bin", "trash"):
+        # Crisp Recycle Bin / trash can icon distinct from Close red X
+        p.setPen(QPen(QColor("#475569"), max(1.4, s * 0.06), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        body_grad = QLinearGradient(s * 0.24, s * 0.28, s * 0.76, s * 0.86)
+        body_grad.setColorAt(0.0, QColor("#E2E8F0"))
+        body_grad.setColorAt(1.0, QColor("#94A3B8"))
+        p.setBrush(body_grad)
+        p.drawRoundedRect(QRectF(s * 0.25, s * 0.30, s * 0.50, s * 0.56), 2.0, 2.0)
+        # Lid & handle
+        p.setBrush(QColor("#CBD5E1"))
+        p.drawRoundedRect(QRectF(s * 0.18, s * 0.22, s * 0.64, s * 0.09), 1.5, 1.5)
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(QRectF(s * 0.38, s * 0.13, s * 0.24, s * 0.09), 1.5, 1.5)
+        # Vertical ribs
+        p.setPen(QPen(QColor("#64748B"), max(1.1, s * 0.045), Qt.SolidLine, Qt.RoundCap))
+        for rx in (0.38, 0.50, 0.62):
+            p.drawLine(QPointF(s * rx, s * 0.40), QPointF(s * rx, s * 0.76))
+
     elif kind in ("check", "confirm", "checkmark"):
         # Glossy Aero vibrant green checkmark
         path = QPainterPath()
@@ -2050,6 +2068,48 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         ):
             p.setBrush(QColor(fc))
             p.drawRoundedRect(QRectF(s * rx, s * ry, s * 0.30, s * 0.30), 2.0, 2.0)
+
+    elif kind in ("sort", "reverse_sort"):
+        # Up / down Aero sort arrows
+        p.setPen(QPen(QColor("#1E63B5"), max(1.5, s * 0.08), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.drawLine(QPointF(s * 0.34, s * 0.78), QPointF(s * 0.34, s * 0.22))
+        p.drawLine(QPointF(s * 0.20, s * 0.36), QPointF(s * 0.34, s * 0.22))
+        p.drawLine(QPointF(s * 0.48, s * 0.36), QPointF(s * 0.34, s * 0.22))
+        p.setPen(QPen(QColor("#2F80ED"), max(1.5, s * 0.08), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.drawLine(QPointF(s * 0.68, s * 0.22), QPointF(s * 0.68, s * 0.78))
+        p.drawLine(QPointF(s * 0.54, s * 0.64), QPointF(s * 0.68, s * 0.78))
+        p.drawLine(QPointF(s * 0.82, s * 0.64), QPointF(s * 0.68, s * 0.78))
+
+    elif kind == "group_by":
+        # Stacked Aero section header bars
+        p.setPen(QPen(QColor("#1E63B5"), 1.1))
+        for ry, fc in ((0.20, "#6BB3EB"), (0.46, "#89C4F4"), (0.72, "#AED7FA")):
+            p.setBrush(QColor(fc))
+            p.drawRoundedRect(QRectF(s * 0.14, s * ry, s * 0.72, s * 0.16), 2.0, 2.0)
+
+    elif kind == "eyedropper":
+        p.setPen(QPen(QColor("#1E63B5"), max(1.3, s * 0.08), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(QColor("#DCECFB"))
+        p.drawPolygon(QPolygonF([
+            QPointF(s * 0.22, s * 0.78),
+            QPointF(s * 0.30, s * 0.62),
+            QPointF(s * 0.64, s * 0.28),
+            QPointF(s * 0.72, s * 0.36),
+            QPointF(s * 0.38, s * 0.70),
+        ]))
+        p.setBrush(QColor("#3B82F6"))
+        p.drawEllipse(QRectF(s * 0.58, s * 0.14, s * 0.28, s * 0.28))
+
+    elif kind == "equals":
+        p.setPen(QPen(QColor("#1E63B5"), max(2.0, s * 0.11), Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.22, s * 0.38), QPointF(s * 0.78, s * 0.38))
+        p.drawLine(QPointF(s * 0.22, s * 0.62), QPointF(s * 0.78, s * 0.62))
+
+    elif kind == "burst_stack":
+        p.setPen(QPen(QColor("#2B6CB0"), 1.0))
+        for dx, dy, fc in ((0.28, 0.14, "#D8EAF9"), (0.20, 0.22, "#A8D0F5"), (0.12, 0.30, "#6BB3EB")):
+            p.setBrush(QColor(fc))
+            p.drawRoundedRect(QRectF(s * dx, s * dy, s * 0.58, s * 0.54), 2.0, 2.0)
 
     else:
         p.setPen(QPen(QColor("#3E6B99"), 1.1))
@@ -5723,6 +5783,7 @@ class RibbonToolbar(QWidget):
         self.tab_batch_people = self._build_batch_people_tab()
         self.tab_map = self._build_map_tab()
         self.tab_compare = self._build_compare_tab()
+        self.tab_duplicates = self._build_duplicates_tab()
 
         self.tab_widget.addTab(self.tab_home, "Home")
         self.tab_widget.addTab(self.tab_edit, "Edit")
@@ -5732,9 +5793,11 @@ class RibbonToolbar(QWidget):
         self.tab_widget.addTab(self.tab_batch_people, "Batch people tagging")
         self.tab_widget.addTab(self.tab_map, "Map")
         self.tab_widget.addTab(self.tab_compare, "Compare")
+        self.tab_widget.addTab(self.tab_duplicates, "Duplicates")
         self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_batch_people), False)
         self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_map), False)
         self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_compare), False)
+        self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_duplicates), False)
 
         self.tab_widget.tabBarDoubleClicked.connect(self._on_tab_bar_double_clicked)
         self.tab_widget.tabBarClicked.connect(self._on_tab_bar_clicked)
@@ -7271,7 +7334,29 @@ class RibbonToolbar(QWidget):
         o_right_col.setSpacing(1)
 
         self.btn_geotag = self._make_btn("Geotag", "geotag", grp_org)
+        self.btn_geotag.setPopupMode(QToolButton.MenuButtonPopup)
+        self.btn_geotag.setToolTip("Geotag photos, adjust map pin, or match GPS from timed photos")
+        self.btn_geotag._tooltip_override = "Geotag photos, adjust map pin, or match GPS from timed photos"
         self.btn_geotag.clicked.connect(lambda: self.action_triggered.emit("geotag"))
+        geotag_menu = QMenu(self.btn_geotag)
+        geotag_menu.addAction(
+            "Add / Edit Place Name...",
+            lambda: self.action_triggered.emit("focus_geotag_box"),
+        )
+        geotag_menu.addAction(
+            "Adjust Location on Map...",
+            lambda: self.action_triggered.emit("adjust_geotag_pin"),
+        )
+        geotag_menu.addAction(
+            "Match Locations from Timed Photos...",
+            lambda: self.action_triggered.emit("match_gps_locations"),
+        )
+        geotag_menu.addSeparator()
+        geotag_menu.addAction(
+            "Open World Map",
+            lambda: self.action_triggered.emit("open_map"),
+        )
+        self.btn_geotag.setMenu(geotag_menu)
 
         self.btn_home_rate = self._make_btn("Rate", "rate", grp_org)
         self.btn_home_rate.setPopupMode(QToolButton.InstantPopup)
@@ -8446,6 +8531,7 @@ class RibbonToolbar(QWidget):
 
         # Thumbnail zoom slider kept for API/status bar compatibility, hidden from ribbon to match WLPG
         self.slider_zoom = QSlider(Qt.Horizontal, self)
+        self.slider_zoom.setCursor(Qt.SizeHorCursor)
         self.slider_zoom.setRange(72, 320)
         self.slider_zoom.setValue(150)
         self.slider_zoom.setFixedWidth(80)
@@ -9193,7 +9279,14 @@ class RibbonToolbar(QWidget):
         self.btn_cmp_edit.setToolTip("Open Selected in Editor\nOpen the focused (or pinned) photo directly in the Photo Editor.")
         self.btn_cmp_edit.clicked.connect(lambda: self.action_triggered.emit("compare_open_editor"))
 
-        for b in (self.btn_cmp_auto_advance, self.btn_cmp_edit):
+        self.btn_cmp_tag_pane = self._make_btn("Tag &\nCaption", "tag_caption_pane", self.grp_cmp_cull, large=True, checkable=True)
+        self.btn_cmp_tag_pane.setChecked(False)
+        self.btn_cmp_tag_pane.setToolTip("Show Tag & Caption Pane\nInspect and edit tags, people, ratings, and captions for the highlighted photo.")
+        self.btn_cmp_tag_pane.toggled.connect(
+            lambda checked: self.action_triggered.emit(f"compare_toggle_tag_pane:{1 if checked else 0}")
+        )
+
+        for b in (self.btn_cmp_auto_advance, self.btn_cmp_edit, self.btn_cmp_tag_pane):
             self.grp_cmp_cull.content_layout.addWidget(b)
         self.grp_cmp_cull.adjust_to_content()
         hbox.addWidget(self.grp_cmp_cull)
@@ -9210,6 +9303,329 @@ class RibbonToolbar(QWidget):
         hbox.addStretch(1)
 
         return page
+
+    def _build_duplicates_tab(self) -> QWidget:
+        """Contextual 'Duplicates' Ribbon tab for Find Duplicates & Similar Photos."""
+        page = _RibbonPage()
+        hbox = QHBoxLayout(page)
+        hbox.setContentsMargins(2, 2, 2, 2)
+        hbox.setSpacing(2)
+
+        # Group 1: Scan & Similarity
+        self.grp_dup_scan = _RibbonGroupBox("Scan & Similarity", page)
+
+        from PySide6.QtWidgets import QCheckBox
+        checks_col = QWidget(self.grp_dup_scan)
+        checks_v = QVBoxLayout(checks_col)
+        checks_v.setContentsMargins(4, 2, 4, 2)
+        checks_v.setSpacing(2)
+
+        self.btn_dup_exact = QCheckBox("Exact", checks_col)
+        self.btn_dup_exact.setChecked(True)
+        self.btn_dup_exact.setToolTip("Include Exact Copies in Scan\nDetect bit-identical files using size and SHA-256 hash.")
+        self.btn_dup_exact.toggled.connect(lambda c: self.action_triggered.emit(f"dup_toggle_exact:{1 if c else 0}"))
+
+        self.btn_dup_visual = QCheckBox("Similar", checks_col)
+        self.btn_dup_visual.setChecked(True)
+        self.btn_dup_visual.setToolTip(
+            "Include Visually Similar Pairs in Scan\n"
+            "Detect resized, re-compressed, or slightly cropped versions of the same photo."
+        )
+        self.btn_dup_visual.toggled.connect(lambda c: self.action_triggered.emit(f"dup_toggle_visual:{1 if c else 0}"))
+
+        self.btn_dup_bursts = QCheckBox("Bursts", checks_col)
+        self.btn_dup_bursts.setChecked(False)
+        self.btn_dup_bursts.setToolTip("Include Burst Sequences in Scan\nGroup rapid-fire burst shots captured within 2–3 seconds.")
+        self.btn_dup_bursts.toggled.connect(lambda c: self.action_triggered.emit(f"dup_toggle_bursts:{1 if c else 0}"))
+
+        checks_v.addStretch(1)
+        checks_v.addWidget(self.btn_dup_exact)
+        checks_v.addWidget(self.btn_dup_visual)
+        checks_v.addWidget(self.btn_dup_bursts)
+        checks_v.addStretch(1)
+        self.grp_dup_scan.content_layout.addWidget(checks_col)
+
+        sim_col = QWidget(self.grp_dup_scan)
+        sim_v = QVBoxLayout(sim_col)
+        sim_v.setContentsMargins(6, 2, 6, 2)
+        sim_v.setSpacing(2)
+        sim_v.addStretch(1)
+        self.lbl_dup_sim = QLabel("Similarity: 96%", sim_col)
+        self.lbl_dup_sim.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_dup_sim.setStyleSheet("font-size: 11px; font-weight: 600;")
+        self.slider_dup_sim = QSlider(Qt.Orientation.Horizontal, sim_col)
+        self.slider_dup_sim.setCursor(Qt.SizeHorCursor)
+        self.slider_dup_sim.setRange(65, 98)
+        self.slider_dup_sim.setValue(96)
+        self.slider_dup_sim.setFixedWidth(104)
+        self.slider_dup_sim.setToolTip("Visual Similarity Threshold (65%–98%)\nHigher values require closer visual matches.")
+        self.slider_dup_sim.valueChanged.connect(self._on_dup_similarity_changed)
+        sim_hints = QHBoxLayout()
+        sim_hints.setContentsMargins(0, 0, 0, 0)
+        lbl_loose = QLabel("65%", sim_col)
+        lbl_loose.setStyleSheet("font-size: 9px; color: #64748B;")
+        lbl_strict = QLabel("98%", sim_col)
+        lbl_strict.setStyleSheet("font-size: 9px; color: #64748B;")
+        sim_hints.addWidget(lbl_loose)
+        sim_hints.addStretch(1)
+        sim_hints.addWidget(lbl_strict)
+        sim_v.addWidget(self.lbl_dup_sim)
+        sim_v.addWidget(self.slider_dup_sim)
+        sim_v.addLayout(sim_hints)
+        sim_v.addStretch(1)
+        self.grp_dup_scan.content_layout.addWidget(sim_col)
+
+        scan_col = QWidget(self.grp_dup_scan)
+        scan_v = QVBoxLayout(scan_col)
+        scan_v.setContentsMargins(4, 2, 4, 2)
+        scan_v.addStretch(1)
+        self.btn_dup_scan = self._make_btn("Scan Now", "duplicates", scan_col, large=False)
+        self.btn_dup_scan.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.btn_dup_scan.setFixedSize(112, 40)
+        self.btn_dup_scan.setIconSize(QSize(24, 24))
+        self.btn_dup_scan.setStyleSheet(
+            "QToolButton { background-color: rgba(0, 120, 212, 24); border: 1px solid rgba(0, 120, 212, 110); "
+            "border-radius: 4px; font-weight: 700; font-size: 12px; padding: 4px 10px; }"
+            "QToolButton:hover { background-color: rgba(0, 120, 212, 46); border-color: #0078D4; }"
+            "QToolButton:disabled { background-color: rgba(148, 163, 184, 24); border: 1px solid rgba(148, 163, 184, 120); color: #94A3B8; }"
+        )
+        self.btn_dup_scan.setToolTip("Scan for Duplicates\nRun exact, visual similarity, and burst detection across the selected scope in the left pane.")
+        self.btn_dup_scan.clicked.connect(lambda: self.action_triggered.emit("dup_scan"))
+        scan_v.addWidget(self.btn_dup_scan)
+        scan_v.addStretch(1)
+        self.grp_dup_scan.content_layout.addWidget(scan_col)
+
+        self.btn_dup_stop = self._make_btn("Stop\nScan", "reject", self.grp_dup_scan, large=True)
+        self.btn_dup_stop.setToolTip("Stop Scan\nCancel the active duplicate scan.")
+        self.btn_dup_stop.setEnabled(False)
+        self.btn_dup_stop.clicked.connect(lambda: self.action_triggered.emit("dup_stop"))
+        self.grp_dup_scan.content_layout.addWidget(self.btn_dup_stop)
+
+        self.grp_dup_scan.adjust_to_content()
+        hbox.addWidget(self.grp_dup_scan)
+
+        # Group 2: View & Compare
+        self.grp_dup_view = _RibbonGroupBox("View & Compare", page)
+        self.btn_dup_compare = self._make_btn("Compare\nSelected", "compare", self.grp_dup_view, large=True)
+        self.btn_dup_compare.setToolTip(
+            "Open in Light Table Compare Mode\n"
+            "Inspect the active duplicate group side-by-side (2-Up, 3-Up, 2×2 Quad, Wipe Slider, Focus Peaking).\n"
+            "Tip: Double-click any photo card to compare its group."
+        )
+        self.btn_dup_compare.clicked.connect(lambda: self.action_triggered.emit("dup_compare_selected"))
+
+        zoom_col = QWidget(self.grp_dup_view)
+        zoom_v = QVBoxLayout(zoom_col)
+        zoom_v.setContentsMargins(3, 1, 3, 1)
+        zoom_v.setSpacing(4)
+        zoom_v.addStretch(1)
+        self.btn_dup_zoom_in = self._make_btn("Zoom In", "zoom_in", zoom_col, large=False)
+        self.btn_dup_zoom_in.setFixedWidth(90)
+        self.btn_dup_zoom_in.setToolTip("Increase card thumbnail size.")
+        self.btn_dup_zoom_in.clicked.connect(lambda: self.action_triggered.emit("dup_zoom_in"))
+        self.btn_dup_zoom_out = self._make_btn("Zoom Out", "zoom_out", zoom_col, large=False)
+        self.btn_dup_zoom_out.setFixedWidth(90)
+        self.btn_dup_zoom_out.setToolTip("Decrease card thumbnail size.")
+        self.btn_dup_zoom_out.clicked.connect(lambda: self.action_triggered.emit("dup_zoom_out"))
+        zoom_v.addWidget(self.btn_dup_zoom_in)
+        zoom_v.addWidget(self.btn_dup_zoom_out)
+        zoom_v.addStretch(1)
+
+        self.btn_dup_tag_pane = self._make_btn("Info\nPane", "tag_caption_pane", self.grp_dup_view, large=True, checkable=True)
+        self.btn_dup_tag_pane.setChecked(False)
+        self.btn_dup_tag_pane.setToolTip("Show Info Pane\nInspect and edit tags, people, ratings, and captions for the selected duplicate card.")
+        self.btn_dup_tag_pane.toggled.connect(
+            lambda checked: self.action_triggered.emit(f"dup_toggle_tag_pane:{1 if checked else 0}")
+        )
+
+        self.grp_dup_view.content_layout.addWidget(self.btn_dup_compare)
+        self.grp_dup_view.content_layout.addWidget(zoom_col)
+        self.grp_dup_view.content_layout.addWidget(self.btn_dup_tag_pane)
+        self.grp_dup_view.adjust_to_content()
+        hbox.addWidget(self.grp_dup_view)
+
+        # Group 2b: Organize (single square button, arrow inline on line 2, never 3rd line)
+        self.grp_dup_sort = _RibbonGroupBox("Organize", page)
+        self.btn_dup_sort_group = self._make_btn("Sort &\nGroup ▾", "sort", self.grp_dup_sort, large=True)
+        self.btn_dup_sort_group.setMinimumWidth(68)
+        self.btn_dup_sort_group.setToolTip("Sort & Group\nOrganize and sort duplicate groups (also available via right-click in the workspace).")
+        sg_menu = QMenu(self.btn_dup_sort_group)
+        grp_sub = sg_menu.addMenu("Group by")
+        self._dup_group_actions: dict[str, Any] = {}
+        for g_lbl, g_key in (
+            ("None (Flat Feed)", "none"),
+            ("Match Type", "match_type"),
+            ("Folder", "folder"),
+            ("Month taken", "month"),
+        ):
+            act = grp_sub.addAction(g_lbl)
+            act.setCheckable(True)
+            act.setChecked(g_key == "none")
+            act.triggered.connect(lambda _=False, k=g_key: self._on_dup_group_selected(k))
+            self._dup_group_actions[g_key] = act
+
+        sort_sub = sg_menu.addMenu("Sort by")
+        self._dup_sort_actions: dict[str, Any] = {}
+        for s_lbl, s_key in (
+            ("Recoverable Space", "reclaimable"),
+            ("Similarity %", "similarity"),
+            ("Photo Count", "count"),
+            ("Newest Date", "date_desc"),
+            ("Oldest Date", "date_asc"),
+            ("Folder (A–Z)", "folder"),
+        ):
+            act = sort_sub.addAction(s_lbl)
+            act.setCheckable(True)
+            act.setChecked(s_key == "reclaimable")
+            act.triggered.connect(lambda _=False, k=s_key: self._on_dup_sort_selected(k))
+            self._dup_sort_actions[s_key] = act
+
+        sg_menu.addSeparator()
+        act_refresh = sg_menu.addAction("Refresh Scan")
+        act_refresh.triggered.connect(lambda: self.action_triggered.emit("dup_scan"))
+        self.btn_dup_sort_group.clicked.connect(
+            lambda: sg_menu.exec(self.btn_dup_sort_group.mapToGlobal(QPoint(0, self.btn_dup_sort_group.height())))
+        )
+        self.grp_dup_sort.content_layout.addWidget(self.btn_dup_sort_group)
+        self.grp_dup_sort.adjust_to_content()
+        hbox.addWidget(self.grp_dup_sort)
+
+        # Group 3: Auto-Pick & Clean Up
+        self.grp_dup_clean = _RibbonGroupBox("Auto-Pick & Clean Up", page)
+        self._dup_rule_short_labels = {
+            "Highest Resolution": "Highest Res",
+            "Largest File": "Largest File",
+            "Oldest Date": "Oldest Date",
+            "Most Metadata": "Most Metadata",
+            "Best Sharpness": "Best Sharpness",
+            "Original Filename": "Original Name",
+        }
+        pick_col = QWidget(self.grp_dup_clean)
+        pick_grid = QGridLayout(pick_col)
+        pick_grid.setContentsMargins(4, 2, 4, 2)
+        pick_grid.setHorizontalSpacing(6)
+        pick_grid.setVerticalSpacing(4)
+
+        lbl_ap = QLabel("Auto-Pick:", pick_col)
+        lbl_ap.setStyleSheet("font-size: 11px; color: #475569; font-weight: 600;")
+        self.btn_dup_autopick = self._make_btn("Highest Res", "star", pick_col, large=False)
+        self.btn_dup_autopick.setFixedWidth(122)
+        self.btn_dup_autopick.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.btn_dup_autopick.setToolTip("Auto-Pick Rule\nChoose which photo to keep in every group (applies immediately across all groups).")
+        autopick_menu = QMenu(self.btn_dup_autopick)
+        for rule_label in ("Highest Resolution", "Largest File", "Oldest Date", "Most Metadata", "Best Sharpness", "Original Filename"):
+            act = autopick_menu.addAction(rule_label)
+            act.triggered.connect(lambda _=False, r=rule_label: self._on_dup_autopick_selected(r))
+        self.btn_dup_autopick.setMenu(autopick_menu)
+
+        from PySide6.QtCore import QSettings
+        saved_meta_mode = str(QSettings("PhotoGallery64", "PhotoGallery64").value("ui/dup_metadata_mode", "ask") or "ask")
+        self._dup_meta_short_labels = {
+            "ask": "Ask on Delete",
+            "always": "Auto-Merge",
+            "never": "Don't Merge",
+        }
+        lbl_mm = QLabel("Metadata:", pick_col)
+        lbl_mm.setStyleSheet("font-size: 11px; color: #475569; font-weight: 600;")
+        self.btn_dup_meta_mode = self._make_btn(
+            self._dup_meta_short_labels.get(saved_meta_mode, "Ask on Delete"),
+            "tag",
+            pick_col,
+            large=False,
+        )
+        self.btn_dup_meta_mode.setFixedWidth(122)
+        self.btn_dup_meta_mode.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.btn_dup_meta_mode.setToolTip(
+            "Metadata Merge Policy\n"
+            "Choose whether unique tags, people, captions, and higher star ratings "
+            "from deleted duplicates are copied onto kept photos."
+        )
+        meta_menu = QMenu(self.btn_dup_meta_mode)
+        for m_lbl, m_key in (
+            ("Ask in Confirmation", "ask"),
+            ("Always Auto-Merge", "always"),
+            ("Do Not Merge", "never"),
+        ):
+            act = meta_menu.addAction(m_lbl)
+            act.triggered.connect(lambda _=False, m=m_key: self._on_dup_meta_mode_selected(m))
+        self.btn_dup_meta_mode.setMenu(meta_menu)
+
+        pick_grid.addWidget(lbl_ap, 0, 0)
+        pick_grid.addWidget(self.btn_dup_autopick, 0, 1)
+        pick_grid.addWidget(lbl_mm, 1, 0)
+        pick_grid.addWidget(self.btn_dup_meta_mode, 1, 1)
+
+        self.btn_dup_backup = self._make_btn("Move\nDuplicates...", "folder_open", self.grp_dup_clean, large=True)
+        self.btn_dup_backup.setEnabled(False)
+        self.btn_dup_backup.setToolTip(
+            "Move Duplicate Photos to Folder\n"
+            "Archive all duplicate photos (marked REMOVE) to a folder outside your library and remove them from the catalog."
+        )
+        self.btn_dup_backup.clicked.connect(lambda: self.action_triggered.emit("dup_backup"))
+
+        self.btn_dup_recycle = self._make_btn("Delete All\nDuplicates", "recycle_bin", self.grp_dup_clean, large=True)
+        self.btn_dup_recycle.setEnabled(False)
+        self.btn_dup_recycle.setToolTip(
+            "Delete All Duplicates\n"
+            "Move all duplicate photos (marked REMOVE) to the Windows Recycle Bin while keeping your best originals."
+        )
+        self.btn_dup_recycle.clicked.connect(lambda: self.action_triggered.emit("dup_recycle"))
+
+        for b in (pick_col, self.btn_dup_backup, self.btn_dup_recycle):
+            self.grp_dup_clean.content_layout.addWidget(b)
+        self.grp_dup_clean.adjust_to_content()
+        hbox.addWidget(self.grp_dup_clean)
+
+        # Group 4: Close
+        self.grp_dup_close = _RibbonGroupBox("Close", page)
+        self.btn_dup_close = self._make_btn("Close\nView", "close_file", self.grp_dup_close, large=True)
+        self.btn_dup_close.setToolTip("Close Duplicate Finder (Esc)\nReturn to the photo gallery.")
+        self.btn_dup_close.clicked.connect(lambda: self.action_triggered.emit("dup_close"))
+        self.grp_dup_close.content_layout.addWidget(self.btn_dup_close)
+        self.grp_dup_close.adjust_to_content()
+        hbox.addWidget(self.grp_dup_close)
+
+        hbox.addStretch(1)
+        return page
+
+    def _on_dup_autopick_selected(self, rule_label: str) -> None:
+        if hasattr(self, "btn_dup_autopick"):
+            short = getattr(self, "_dup_rule_short_labels", {}).get(rule_label, rule_label)
+            self.btn_dup_autopick.setText(short)
+        self.action_triggered.emit(f"dup_rule:{rule_label}")
+
+    def _on_dup_sort_selected(self, sort_key: str) -> None:
+        for k, act in getattr(self, "_dup_sort_actions", {}).items():
+            act.setChecked(k == sort_key)
+        self.action_triggered.emit(f"dup_sort:{sort_key}")
+
+    def _on_dup_group_selected(self, group_key: str) -> None:
+        for k, act in getattr(self, "_dup_group_actions", {}).items():
+            act.setChecked(k == group_key)
+        self.action_triggered.emit(f"dup_group_by:{group_key}")
+
+    def _on_dup_meta_mode_selected(self, mode: str) -> None:
+        if hasattr(self, "btn_dup_meta_mode"):
+            short = getattr(self, "_dup_meta_short_labels", {}).get(mode, "Ask on Delete")
+            self.btn_dup_meta_mode.setText(short)
+        self.action_triggered.emit(f"dup_meta_mode:{mode}")
+
+    def _on_dup_similarity_changed(self, value: int) -> None:
+        if hasattr(self, "lbl_dup_sim"):
+            self.lbl_dup_sim.setText(f"Similarity: {int(value)}%")
+        self.action_triggered.emit(f"dup_similarity:{int(value)}")
+
+    def update_duplicates_state(self, *, scanning: bool, marked_count: int = 0) -> None:
+        """Synchronize contextual Duplicates Ribbon buttons with DuplicateFinderView state."""
+        if hasattr(self, "btn_dup_scan"):
+            self.btn_dup_scan.setEnabled(not scanning)
+        if hasattr(self, "btn_dup_stop"):
+            self.btn_dup_stop.setEnabled(scanning)
+        if hasattr(self, "btn_dup_recycle"):
+            self.btn_dup_recycle.setEnabled(marked_count > 0)
+            self.btn_dup_recycle.setText(f"Delete All\nDuplicates ({marked_count})" if marked_count > 0 else "Delete All\nDuplicates")
+        if hasattr(self, "btn_dup_backup"):
+            self.btn_dup_backup.setEnabled(marked_count > 0)
 
     def _build_map_tab(self) -> QWidget:
         from src.ui.map_view import _MapLocationSearchBox
@@ -9606,11 +10022,24 @@ class RibbonToolbar(QWidget):
         if idx >= 0:
             self.tab_widget.tabBar().setTabVisible(idx, visible)
 
-    def set_active_mode(self, mode: Literal["grid", "viewer", "map", "batch_people", "people", "albums", "compare"]) -> None:
-        """Switches Ribbon context when entering/exiting Single Media Viewer, World Map, People, Compare, or Batch People Tagging."""
+    def set_active_mode(self, mode: Literal["grid", "viewer", "map", "batch_people", "people", "albums", "compare", "duplicates"]) -> None:
+        """Switches Ribbon context when entering/exiting Single Media Viewer, World Map, People, Compare, Duplicates, or Batch People Tagging."""
         tab_map = getattr(self, "tab_map", None)
         tab_batch = getattr(self, "tab_batch_people", None)
         tab_compare = getattr(self, "tab_compare", None)
+        tab_duplicates = getattr(self, "tab_duplicates", None)
+
+        if mode == "duplicates":
+            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map, tab_batch, tab_compare):
+                self._set_tab_visible(tab, False)
+            self._set_tab_visible(tab_duplicates, True)
+            if tab_duplicates is not None:
+                self.tab_widget.setCurrentWidget(tab_duplicates)
+            if hasattr(self, "scope_bar") and self.scope_bar is not None:
+                self.scope_bar.setVisible(False)
+            return
+
+        self._set_tab_visible(tab_duplicates, False)
 
         if mode == "compare":
             for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map, tab_batch):

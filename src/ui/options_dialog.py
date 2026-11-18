@@ -58,6 +58,8 @@ class FaceRecognitionOptionsTab(QWidget):
         self.engine = engine
         self.repo = CatalogRepository(engine) if engine is not None else None
         self._settings = QSettings("PhotoGallery64", "PhotoGallery64")
+        self._face_dl_thread: Any = None
+        self._face_models_installed: bool = False
 
         self._setup_ui()
         self._load_settings()
@@ -77,36 +79,19 @@ class FaceRecognitionOptionsTab(QWidget):
         self.lbl_hw_provider = QLabel(self)
         self.lbl_hw_provider.setWordWrap(True)
 
-        try:
-            st = FaceEngine.probe_status()
-            if st.get("available"):
-                m_name = str(st.get("model_name") or "buffalo_l")
-                p_name = str(st.get("active_provider") or "CPUExecutionProvider")
-                self.lbl_status_badge.setText("●  Engine Status: Ready (High Accuracy Model)")
-                self.lbl_status_badge.setStyleSheet("color: #16A34A; font-weight: bold; font-size: 9.5pt;")
-                hw_desc = "GPU Accelerated" if any(k in p_name for k in ("CUDA", "DirectML", "Tensorrt", "Dml")) else f"Standard CPU ({p_name})"
-                self.lbl_hw_provider.setText(f"Hardware Processing: {hw_desc}")
-                self.lbl_hw_provider.setStyleSheet("color: #475569; font-size: 8.5pt;")
-                tech_text = (
-                    f"Model: InsightFace {m_name} ONNX\n"
-                    f"Architecture: ArcFace 512-D + SCRFD Landmark Geometry\n"
-                    f"Active Execution Provider: {p_name}"
-                )
-            else:
-                self.lbl_status_badge.setText("●  Engine Status: Not Downloaded / Offline")
-                self.lbl_status_badge.setStyleSheet("color: #D97706; font-weight: bold; font-size: 9.5pt;")
-                self.lbl_hw_provider.setText("Models will be initialized on demand when face scanning runs.")
-                self.lbl_hw_provider.setStyleSheet("color: #475569; font-size: 8.5pt;")
-                tech_text = f"InsightFace models not yet cached in {st.get('models_root', '~/.insightface/models')}."
-        except Exception as ex:
-            self.lbl_status_badge.setText("●  Engine Status: Error Checking Status")
-            self.lbl_status_badge.setStyleSheet("color: #DC2626; font-weight: bold; font-size: 9.5pt;")
-            self.lbl_hw_provider.setText(str(ex))
-            self.lbl_hw_provider.setStyleSheet("color: #EF4444; font-size: 8.5pt;")
-            tech_text = str(ex)
-
         status_layout.addWidget(self.lbl_status_badge)
         status_layout.addWidget(self.lbl_hw_provider)
+
+        # Download / Reinstall / Uninstall action row
+        face_btn_row = QHBoxLayout()
+        self.btn_face_download = QPushButton("Download Face Models (~281 MB)", self)
+        self.btn_face_uninstall = QPushButton("Uninstall Models", self)
+        self.btn_face_download.clicked.connect(self._on_face_download_clicked)
+        self.btn_face_uninstall.clicked.connect(self._on_face_uninstall_clicked)
+        face_btn_row.addWidget(self.btn_face_download)
+        face_btn_row.addWidget(self.btn_face_uninstall)
+        face_btn_row.addStretch(1)
+        status_layout.addLayout(face_btn_row)
 
         # Technical details toggleable view
         self.btn_toggle_tech = QPushButton("▸ Show Technical Details", self)
@@ -115,7 +100,7 @@ class FaceRecognitionOptionsTab(QWidget):
             "QPushButton { border: none; background: transparent; color: #2563EB; text-align: left; padding: 2px 0px; font-size: 8pt; }"
             "QPushButton:hover { text-decoration: underline; color: #1D4ED8; }"
         )
-        self.lbl_tech_details = QLabel(tech_text, self)
+        self.lbl_tech_details = QLabel("", self)
         self.lbl_tech_details.setStyleSheet(
             "background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 3px; padding: 6px 8px; color: #475569; font-family: monospace; font-size: 8pt;"
         )
@@ -129,6 +114,7 @@ class FaceRecognitionOptionsTab(QWidget):
         self.btn_toggle_tech.clicked.connect(_toggle_tech)
         status_layout.addWidget(self.btn_toggle_tech)
         status_layout.addWidget(self.lbl_tech_details)
+        self._refresh_engine_status()
 
         main_layout.addWidget(status_group)
 
@@ -418,6 +404,99 @@ class FaceRecognitionOptionsTab(QWidget):
             except Exception as e:
                 logger.exception("Scan unscanned photos failed: %s", e)
                 QMessageBox.critical(self, "Error", f"Failed to queue photos: {e}")
+
+    def _refresh_engine_status(self) -> None:
+        try:
+            st = FaceEngine.probe_status()
+            installed = bool(st.get("available"))
+            self._face_models_installed = installed
+            if installed:
+                m_name = str(st.get("model_name") or "buffalo_l")
+                p_name = str(st.get("active_provider") or "CPUExecutionProvider")
+                self.lbl_status_badge.setText("●  Engine Status: Ready (High Accuracy Model)")
+                self.lbl_status_badge.setStyleSheet("color: #16A34A; font-weight: bold; font-size: 9.5pt;")
+                hw_desc = "GPU Accelerated" if any(k in p_name for k in ("CUDA", "DirectML", "Tensorrt", "Dml")) else f"Standard CPU ({p_name})"
+                self.lbl_hw_provider.setText(f"Hardware Processing: {hw_desc}")
+                self.lbl_hw_provider.setStyleSheet("color: #475569; font-size: 8.5pt;")
+                tech_text = (
+                    f"Model: InsightFace {m_name} ONNX\n"
+                    f"Architecture: ArcFace 512-D + SCRFD Landmark Geometry\n"
+                    f"Active Execution Provider: {p_name}"
+                )
+                self.btn_face_download.setText("Reinstall / Repair")
+                self.btn_face_uninstall.setVisible(True)
+                self.btn_face_uninstall.setEnabled(True)
+            else:
+                self.lbl_status_badge.setText("●  Engine Status: Not Downloaded / Offline")
+                self.lbl_status_badge.setStyleSheet("color: #D97706; font-weight: bold; font-size: 9.5pt;")
+                self.lbl_hw_provider.setText("Download the face models below, or they will download automatically on first scan.")
+                self.lbl_hw_provider.setStyleSheet("color: #475569; font-size: 8.5pt;")
+                tech_text = f"InsightFace models not yet cached in {st.get('models_root', '~/.insightface/models')}."
+                self.btn_face_download.setText("Download Face Models (~281 MB)")
+                self.btn_face_uninstall.setVisible(False)
+                self.btn_face_uninstall.setEnabled(False)
+            self.btn_face_download.setEnabled(bool(st.get("insightface_installed", True)))
+        except Exception as ex:
+            self._face_models_installed = False
+            self.lbl_status_badge.setText("●  Engine Status: Error Checking Status")
+            self.lbl_status_badge.setStyleSheet("color: #DC2626; font-weight: bold; font-size: 9.5pt;")
+            self.lbl_hw_provider.setText(str(ex))
+            self.lbl_hw_provider.setStyleSheet("color: #EF4444; font-size: 8.5pt;")
+            tech_text = str(ex)
+            self.btn_face_download.setText("Download Face Models (~281 MB)")
+            self.btn_face_uninstall.setVisible(False)
+            self.btn_face_uninstall.setEnabled(False)
+        self.lbl_tech_details.setText(tech_text)
+
+    def _on_face_download_clicked(self) -> None:
+        if self._face_dl_thread is not None and self._face_dl_thread.isRunning():
+            return
+        from PySide6.QtCore import QThread, Signal as QtSignal
+
+        force_reinstall = bool(self._face_models_installed)
+
+        class _FaceDlWorker(QThread):
+            finished_ok = QtSignal(bool)
+
+            def run(self) -> None:
+                ok = FaceEngine.download_models("buffalo_l", force_reinstall=force_reinstall)
+                self.finished_ok.emit(bool(ok))
+
+        self.btn_face_download.setEnabled(False)
+        self.btn_face_download.setText("Reinstalling..." if force_reinstall else "Downloading (~281 MB)...")
+        self.btn_face_uninstall.setVisible(False)
+
+        worker = _FaceDlWorker(self)
+
+        def _on_done(ok: bool) -> None:
+            self._face_dl_thread = None
+            self.btn_face_download.setEnabled(True)
+            self._refresh_engine_status()
+            if not ok:
+                QMessageBox.warning(
+                    self,
+                    "Download Failed",
+                    "Could not download or initialize InsightFace models. Check your internet connection and try again.",
+                )
+
+        worker.finished_ok.connect(_on_done)
+        self._face_dl_thread = worker
+        worker.start()
+
+    def _on_face_uninstall_clicked(self) -> None:
+        reply = QMessageBox.question(
+            self,
+            "Uninstall Face Models",
+            "Remove cached InsightFace recognition models from this PC?\n\n"
+            "Existing confirmed people and face tags in your catalog are kept, "
+            "but new face scanning will pause until models are downloaded again.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            if FaceEngine.uninstall_models():
+                QMessageBox.information(self, "Uninstalled", "InsightFace models removed.")
+            self._refresh_engine_status()
 
 
 from src.ui.dialogs import AppSettingsDialog

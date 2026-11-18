@@ -412,3 +412,13 @@ CREATE TABLE IF NOT EXISTS face_thumbnails (
     face_id         INTEGER PRIMARY KEY,                                -- References media_people(id) in catalog.db
     crop_webp       BLOB    NOT NULL                                    -- Pre-cropped 96x96 WebP face region
 );
+
+-- Persistent perceptual signatures for instant Find Duplicates & Similar Photos
+CREATE TABLE IF NOT EXISTS media_signatures (
+    media_id        INTEGER PRIMARY KEY,                                -- References media(id) in catalog.db
+    mtime           INTEGER NOT NULL,
+    phash64         INTEGER NOT NULL,
+    dhash64         INTEGER NOT NULL,
+    sharpness       REAL    NOT NULL DEFAULT 0.0,
+    lab_haar        BLOB                                                -- 24-byte 4x2x3 spatial CIE LAB signature
+);

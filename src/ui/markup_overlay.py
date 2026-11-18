@@ -1049,7 +1049,8 @@ class MarkupFloatingToolbar(QFrame):
             QToolButton {{
                 border: 1px solid transparent;
                 border-radius: 3px;
-                padding: 2px 6px;
+                padding: 2px 4px;
+                min-width: 0px;
                 min-height: 22px;
                 font-size: 11px;
                 font-weight: 500;
@@ -1066,8 +1067,8 @@ class MarkupFloatingToolbar(QFrame):
                 color: #0E294B;
             }}
             QToolButton#btn_shape {{
-                min-width: 68px;
-                padding-right: 18px;
+                min-width: 54px;
+                padding-right: 15px;
             }}
             QToolButton#btn_shape::menu-button {{
                 border-left: none;
@@ -1221,7 +1222,6 @@ class MarkupFloatingToolbar(QFrame):
         btn_mag = QToolButton()
         btn_mag.setObjectName("btn_magnify")
         btn_mag.setText("Magnify")
-        btn_mag.setMinimumWidth(66)
         btn_mag.setIcon(make_wlpg_icon("magnify", 16))
         btn_mag.setIconSize(QSize(16, 16))
         btn_mag.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
@@ -1260,6 +1260,7 @@ class MarkupFloatingToolbar(QFrame):
         self.slider_width.setRange(2, 36)
         self.slider_width.setValue(self.stroke_width)
         self.slider_width.setFixedWidth(60)
+        self.slider_width.setCursor(Qt.SizeHorCursor)
         self.slider_width.setToolTip("Adjust stroke width ([ and ] keys)")
         self.slider_width.valueChanged.connect(self._on_slider_width_changed)
         layout.addWidget(self.slider_width)
@@ -1409,7 +1410,8 @@ class MarkupFloatingToolbar(QFrame):
                 font-weight: bold;
                 border: 1px solid #1A5494;
                 border-radius: 3px;
-                padding: 3px 10px;
+                padding: 3px 7px;
+                min-width: 0px;
                 font-size: 11px;
             }
             QPushButton:hover {
@@ -1455,7 +1457,8 @@ class MarkupFloatingToolbar(QFrame):
                 QToolButton {{
                     border: 1px solid transparent;
                     border-radius: 3px;
-                    padding: 2px 6px;
+                    padding: 2px 4px;
+                    min-width: 0px;
                     min-height: 22px;
                     font-size: 11px;
                     font-weight: 500;
@@ -1472,8 +1475,8 @@ class MarkupFloatingToolbar(QFrame):
                     color: #FFFFFF;
                 }}
                 QToolButton#btn_shape {{
-                    min-width: 68px;
-                    padding-right: 18px;
+                    min-width: 54px;
+                    padding-right: 15px;
                 }}
                 QToolButton#btn_shape:hover::menu-button,
                 QToolButton#btn_shape:checked::menu-button {{
@@ -1489,7 +1492,8 @@ class MarkupFloatingToolbar(QFrame):
                     background: #262B34;
                     border: 1px solid #3B4252;
                     border-radius: 3px;
-                    padding: 3px 8px;
+                    padding: 3px 7px;
+                    min-width: 0px;
                     font-size: 11px;
                     font-weight: 600;
                     color: #E2E8F0;
@@ -1500,6 +1504,22 @@ class MarkupFloatingToolbar(QFrame):
                     border-color: #60A5FA;
                 }}
             """)
+            if hasattr(self, "btn_magnify_zoom"):
+                self.btn_magnify_zoom.setStyleSheet("""
+                    QToolButton {
+                        font-weight: bold;
+                        font-size: 10px;
+                        padding: 2px 4px;
+                        border: 1px solid #475569;
+                        border-radius: 3px;
+                        background: #252B36;
+                        color: #93C5FD;
+                    }
+                    QToolButton:hover {
+                        background: #334155;
+                        border-color: #60A5FA;
+                    }
+                """)
         else:
             self.setStyleSheet(f"""
                 MarkupFloatingToolbar {{
@@ -1522,7 +1542,8 @@ class MarkupFloatingToolbar(QFrame):
                 QToolButton {{
                     border: 1px solid transparent;
                     border-radius: 3px;
-                    padding: 2px 6px;
+                    padding: 2px 4px;
+                    min-width: 0px;
                     min-height: 22px;
                     font-size: 11px;
                     font-weight: 500;
@@ -1539,8 +1560,8 @@ class MarkupFloatingToolbar(QFrame):
                     color: #0E294B;
                 }}
                 QToolButton#btn_shape {{
-                    min-width: 68px;
-                    padding-right: 18px;
+                    min-width: 54px;
+                    padding-right: 15px;
                 }}
                 QToolButton#btn_shape:hover::menu-button,
                 QToolButton#btn_shape:checked::menu-button {{
@@ -1555,7 +1576,8 @@ class MarkupFloatingToolbar(QFrame):
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FDFDFE, stop:1 #EFF4F9);
                     border: 1px solid #7DA2CE;
                     border-radius: 3px;
-                    padding: 3px 8px;
+                    padding: 3px 7px;
+                    min-width: 0px;
                     font-size: 11px;
                     font-weight: 600;
                     color: #1E395B;
@@ -1569,6 +1591,7 @@ class MarkupFloatingToolbar(QFrame):
                     border: 1px solid #CBD5E1;
                     border-radius: 3px;
                     padding: 3px 7px;
+                    min-width: 0px;
                     font-size: 11px;
                     color: #1E293B;
                 }}
@@ -1577,6 +1600,22 @@ class MarkupFloatingToolbar(QFrame):
                     border-color: #94A3B8;
                 }}
             """)
+            if hasattr(self, "btn_magnify_zoom"):
+                self.btn_magnify_zoom.setStyleSheet("""
+                    QToolButton {
+                        font-weight: bold;
+                        font-size: 10px;
+                        padding: 2px 4px;
+                        border: 1px solid #94A3B8;
+                        border-radius: 3px;
+                        background: #F1F5F9;
+                        color: #1E3A8A;
+                    }
+                    QToolButton:hover {
+                        background: #DBEAFE;
+                        border-color: #3B82F6;
+                    }
+                """)
 
     def _update_shape_button_ui(self) -> None:
         label_map = {"rect": "Box", "ellipse": "Oval", "star": "Star"}
@@ -1679,18 +1718,55 @@ class MarkupFloatingToolbar(QFrame):
                     }}
                 """)
 
-    def set_compact_mode(self, compact: bool) -> None:
+    def set_compact_mode(self, compact: bool, ultra_compact: bool = False) -> None:
         """
-        Dynamically adapts button presentation between ToolButtonTextBesideIcon (wide viewport)
-        and ToolButtonIconOnly (compact/narrow viewport) to eliminate text truncation.
+        Dynamically adapts button presentation between ToolButtonTextBesideIcon (wide viewport),
+        ToolButtonIconOnly (compact viewport), and hidden swatch circles (ultra-compact viewport).
         """
+        self._is_compact = bool(compact)
+        self._is_ultra_compact = bool(ultra_compact)
         style = Qt.ToolButtonIconOnly if compact else Qt.ToolButtonTextBesideIcon
         for btn in self.tool_buttons.values():
             btn.setToolButtonStyle(style)
-        if hasattr(self, "btn_undo"):
-            self.btn_undo.setToolButtonStyle(style)
-        if hasattr(self, "btn_clear"):
-            self.btn_clear.setToolButtonStyle(style)
+            if btn is getattr(self, "btn_shape", None):
+                continue
+            if compact:
+                btn.setFixedWidth(25)
+            else:
+                btn.setMinimumWidth(0)
+                btn.setMaximumWidth(16777215)
+        for attr in ("btn_undo", "btn_clear"):
+            b = getattr(self, attr, None)
+            if b is not None:
+                b.setToolButtonStyle(style)
+                if compact:
+                    b.setFixedWidth(25)
+                else:
+                    b.setMinimumWidth(0)
+                    b.setMaximumWidth(16777215)
+        if hasattr(self, "btn_custom_color"):
+            if compact:
+                self.btn_custom_color.setFixedWidth(22)
+            else:
+                self.btn_custom_color.setMinimumWidth(0)
+                self.btn_custom_color.setMaximumWidth(16777215)
+        if hasattr(self, "lbl_title"):
+            self.lbl_title.setVisible(not compact)
+        if hasattr(self, "lbl_size"):
+            self.lbl_size.setVisible(not compact)
+        if hasattr(self, "slider_width"):
+            self.slider_width.setFixedWidth(44 if compact else 60)
+        if hasattr(self, "btn_shape"):
+            if compact:
+                self.btn_shape.setFixedWidth(36)
+            else:
+                self.btn_shape.setMinimumWidth(54)
+                self.btn_shape.setMaximumWidth(16777215)
+        for btn_swatch in getattr(self, "swatch_buttons", {}).values():
+            btn_swatch.setVisible(not ultra_compact)
+        if self.layout() is not None:
+            self.layout().invalidate()
+            self.layout().activate()
         self.adjustSize()
 
     def _set_tool(self, tool_id: str) -> None:

@@ -1368,6 +1368,7 @@ class FolderSyncWorker(QRunnable):
                         if self.cancel_flag.is_set:
                             break
                         repo.bulk_upsert_media(fast_batch[i : i + self.BATCH_SIZE])
+                        time.sleep(0.003)
 
                 if subdirs:
                     subdirs.sort(key=lambda x: x[0].name.lower())
@@ -1377,12 +1378,20 @@ class FolderSyncWorker(QRunnable):
 
             # Stage 2: Deep EXIF / XMP Enrichment Pass in batches of BATCH_SIZE
             enriched_count = 0
+            total_enrich = len(needs_enrichment)
+            last_s2_emit = time.perf_counter()
             enrichment_rows: list[dict[str, Any]] = []
             tag_and_people_queue: list[tuple[int, str, list[str], list[dict[str, Any]]]] = []
 
-            for folder_id, fpath, is_vid, mtime_int in needs_enrichment:
+            for s2_idx, (folder_id, fpath, is_vid, mtime_int) in enumerate(needs_enrichment, start=1):
                 if self.cancel_flag.is_set:
                     break
+                if s2_idx % 25 == 0:
+                    time.sleep(0.001)
+                now_s2 = time.perf_counter()
+                if now_s2 - last_s2_emit > 0.35:
+                    self.signals.progress.emit(s2_idx, f"Metadata {s2_idx:,}/{total_enrich:,}")
+                    last_s2_emit = now_s2
                 try:
                     size_int = int(fpath.stat().st_size)
                 except OSError:
@@ -1465,6 +1474,7 @@ class FolderSyncWorker(QRunnable):
                     enriched_count += len(enrichment_rows)
                     enrichment_rows.clear()
                     tag_and_people_queue.clear()
+                    time.sleep(0.003)
 
             if enrichment_rows and not self.cancel_flag.is_set:
                 self._flush_enrichment_batch(repo, enrichment_rows, tag_and_people_queue)

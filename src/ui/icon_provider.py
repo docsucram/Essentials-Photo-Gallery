@@ -129,6 +129,8 @@ _FLUENT_MAP: dict[str, tuple[str, str]] = {
     "actual_size": ("ri.fullscreen-line", "#0078D4"),
     "actual_pixels": ("ri.fullscreen-line", "#0078D4"),
     "reverse_sort": ("ri.arrow-up-down-line", "#0078D4"),
+    "sort": ("ri.arrow-up-down-line", "#0078D4"),
+    "group_by": ("ri.stack-line", "#0078D4"),
     "detail_all": ("ri.list-check-2", "#0078D4"),
     "detail_filename": ("msc.file", "#0078D4"),
     "detail_filesize": ("ri.hard-drive-2-line", "#0078D4"),

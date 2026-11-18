@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
-from PySide6.QtCore import QObject, QRunnable, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, QThread, Signal, Slot
 
 from src.core.face_engine import DetectedFace, FaceEngine, compute_iou, compute_box_overlap
 from src.core.face_matcher import (
@@ -96,6 +96,7 @@ class FaceDetectionWorker(QRunnable):
         min_match_score: float = 0.42,
         high_match_score: float = 0.55,
         target_media_ids: Sequence[int] | None = None,
+        allow_model_download: bool = False,
     ) -> None:
         super().__init__()
         self.engine = engine
@@ -107,6 +108,7 @@ class FaceDetectionWorker(QRunnable):
         self.min_match_score = float(min_match_score)
         self.high_match_score = float(high_match_score)
         self.target_media_ids = [int(m) for m in target_media_ids] if target_media_ids else None
+        self.allow_model_download = bool(allow_model_download)
 
         self.signals = FaceWorkerSignals()
         self.repo = CatalogRepository(engine)
@@ -114,16 +116,20 @@ class FaceDetectionWorker(QRunnable):
 
     @property
     def face_engine(self) -> FaceEngine:
-        """Lazily creates FaceEngine inside worker thread instead of on GUI thread."""
+        """Lazily retrieves/initializes shared FaceEngine inside worker thread instead of on GUI thread."""
         if self._face_engine is None:
-            self._face_engine = FaceEngine()
+            self._face_engine = FaceEngine.get_shared()
         return self._face_engine
 
     def _is_cancelled(self) -> bool:
         """Checks whether cancellation has been requested via the cancel flag."""
         if self.cancel_flag is None:
             return False
-        if getattr(self.cancel_flag, "is_set", False):
+        is_set_attr = getattr(self.cancel_flag, "is_set", None)
+        if callable(is_set_attr):
+            if is_set_attr():
+                return True
+        elif is_set_attr:
             return True
         check_fn = getattr(self.cancel_flag, "is_cancelled", None)
         if callable(check_fn) and check_fn():
@@ -162,6 +168,13 @@ class FaceDetectionWorker(QRunnable):
     def run(self) -> None:
         """Main worker execution entrypoint."""
         total_faces_detected = 0
+        cur_thread = QThread.currentThread()
+        prev_priority = cur_thread.priority() if not self.target_media_ids else None
+        if prev_priority is not None:
+            try:
+                cur_thread.setPriority(QThread.LowPriority)
+            except Exception:
+                prev_priority = None
         try:
             if self._is_cancelled():
                 return
@@ -169,6 +182,18 @@ class FaceDetectionWorker(QRunnable):
             if not self._has_pending_face_work():
                 self._run_stage3_match()
                 return
+
+            if self._face_engine is None:
+                probe = FaceEngine.probe_status()
+                if probe.get("insightface_installed"):
+                    if probe.get("available"):
+                        self.signals.status_message.emit("Loading face recognition models...")
+                    elif not self.allow_model_download:
+                        logger.info("FaceDetectionWorker: models not installed and allow_model_download=False; skipping.")
+                        self.signals.status_message.emit("Face recognition models not installed.")
+                        return
+                    else:
+                        self.signals.status_message.emit("Downloading face recognition models (~280 MB)...")
 
             if not self.face_engine.is_available:
                 logger.warning("FaceDetectionWorker: FaceEngine is unavailable; skipping face scan.")
@@ -202,6 +227,16 @@ class FaceDetectionWorker(QRunnable):
         except Exception as exc:
             logger.exception("FaceDetectionWorker encountered an unhandled error: %s", exc)
         finally:
+            if prev_priority is not None:
+                try:
+                    restore_prio = (
+                        QThread.NormalPriority
+                        if prev_priority == QThread.InheritPriority
+                        else prev_priority
+                    )
+                    cur_thread.setPriority(restore_prio)
+                except Exception:
+                    pass
             try:
                 self.signals.worker_finished.emit(total_faces_detected)
             except Exception:

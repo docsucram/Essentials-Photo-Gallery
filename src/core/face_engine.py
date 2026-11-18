@@ -15,6 +15,7 @@ import io
 import logging
 import math
 import os
+import threading
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -253,6 +254,59 @@ class FaceEngine:
     and produces 96x96 WebP avatar crops.
     """
 
+    _shared_lock = threading.Lock()
+    _shared_instances: dict[tuple[Any, ...], "FaceEngine"] = {}
+
+    @classmethod
+    def get_shared(
+        cls,
+        backend: str = "auto",
+        min_size: int | None = None,
+        min_score: float | None = None,
+        providers: list[str] | None = None,
+        allow_fallback: bool = False,
+    ) -> "FaceEngine":
+        """Return a cached FaceEngine instance so heavy ONNX models are loaded once per session."""
+        eff_min_size = 40 if min_size is None else int(min_size)
+        eff_min_score = 0.65 if min_score is None else float(min_score)
+        try:
+            from PySide6.QtCore import QSettings
+
+            settings = QSettings("PhotoGallery64", "PhotoGallery64")
+            if min_size is None and settings.contains("face_min_size"):
+                eff_min_size = int(settings.value("face_min_size", 40))
+            if min_score is None and settings.contains("face_min_score"):
+                eff_min_score = float(settings.value("face_min_score", 0.65))
+        except Exception:
+            pass
+
+        key = (
+            str(backend),
+            int(eff_min_size),
+            round(float(eff_min_score), 4),
+            tuple(providers) if providers is not None else None,
+            bool(allow_fallback),
+        )
+        with cls._shared_lock:
+            inst = cls._shared_instances.get(key)
+            if inst is None or not inst.is_available:
+                inst = cls(
+                    backend=backend,
+                    min_size=eff_min_size,
+                    min_score=eff_min_score,
+                    providers=providers,
+                    allow_fallback=allow_fallback,
+                )
+                if inst.is_available:
+                    cls._shared_instances[key] = inst
+            return inst
+
+    @classmethod
+    def clear_shared_cache(cls) -> None:
+        """Drop cached FaceEngine instances (e.g., when models are uninstalled/reinstalled)."""
+        with cls._shared_lock:
+            cls._shared_instances.clear()
+
     def __init__(
         self,
         backend: str = "auto",
@@ -331,6 +385,64 @@ class FaceEngine:
             "models_root": str(models_root),
         }
 
+    @staticmethod
+    def download_models(model_name: str = "buffalo_l", force_reinstall: bool = False) -> bool:
+        """
+        Download and initialize InsightFace ONNX models into ~/.insightface/models.
+        Intended to be called from a background thread.
+        """
+        import shutil
+
+        models_root = Path.home() / ".insightface" / "models"
+        if force_reinstall:
+            shutil.rmtree(models_root / model_name, ignore_errors=True)
+            zip_path = models_root / f"{model_name}.zip"
+            if zip_path.exists():
+                try:
+                    zip_path.unlink()
+                except OSError:
+                    pass
+
+        try:
+            _ensure_insightface_frozen_objects()
+            from insightface.app import FaceAnalysis  # type: ignore[import-not-found]
+
+            try:
+                app = FaceAnalysis(
+                    name=model_name,
+                    providers=["CPUExecutionProvider"],
+                    allowed_modules=["detection", "recognition"],
+                )
+            except TypeError:
+                app = FaceAnalysis(name=model_name, providers=["CPUExecutionProvider"])
+            app.prepare(ctx_id=0, det_size=(640, 640))
+            return bool(FaceEngine.probe_status().get("available"))
+        except Exception as exc:
+            logger.warning("InsightFace model download/init failed (%s): %s", model_name, exc)
+            return False
+
+    @staticmethod
+    def uninstall_models() -> bool:
+        """Remove cached InsightFace model folders from ~/.insightface/models."""
+        import shutil
+
+        models_root = Path.home() / ".insightface" / "models"
+        removed = False
+        for candidate in ("buffalo_l", "buffalo_s"):
+            model_dir = models_root / candidate
+            if model_dir.exists():
+                shutil.rmtree(model_dir, ignore_errors=True)
+                removed = True
+            zip_path = models_root / f"{candidate}.zip"
+            if zip_path.exists():
+                try:
+                    zip_path.unlink()
+                    removed = True
+                except OSError:
+                    pass
+        FaceEngine.clear_shared_cache()
+        return removed
+
     def _init_backend(self) -> None:
         """Initializes primary InsightFace backend or falls back to OpenCV Haar cascade only if allow_fallback=True."""
         if self.backend_name in ("auto", "insightface"):
@@ -342,11 +454,25 @@ class FaceEngine:
 
                     app = None
                     try:
-                        app = FaceAnalysis(name=model_name, providers=self.providers)
+                        try:
+                            app = FaceAnalysis(
+                                name=model_name,
+                                providers=self.providers,
+                                allowed_modules=["detection", "recognition"],
+                            )
+                        except TypeError:
+                            app = FaceAnalysis(name=model_name, providers=self.providers)
                         app.prepare(ctx_id=0, det_size=(640, 640))
                         self.active_provider = self.providers[0] if self.providers else "CPUExecutionProvider"
                     except Exception:
-                        app = FaceAnalysis(name=model_name, providers=["CPUExecutionProvider"])
+                        try:
+                            app = FaceAnalysis(
+                                name=model_name,
+                                providers=["CPUExecutionProvider"],
+                                allowed_modules=["detection", "recognition"],
+                            )
+                        except TypeError:
+                            app = FaceAnalysis(name=model_name, providers=["CPUExecutionProvider"])
                         app.prepare(ctx_id=0, det_size=(640, 640))
                         self.active_provider = "CPUExecutionProvider"
 

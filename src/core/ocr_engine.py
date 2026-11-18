@@ -109,7 +109,7 @@ def download_rapidocr_models(
         for fname, url, approx_sz in RAPIDOCR_FILES:
             dest_file = dest_dir / fname
             tmp_file = dest_dir / f"{fname}.part"
-            req = urllib.request.Request(url, headers={"User-Agent": "EssentialsPhotoGallery/0.13.0"})
+            req = urllib.request.Request(url, headers={"User-Agent": "EssentialsPhotoGallery/0.14.0"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 file_done = 0
                 with open(tmp_file, "wb") as fh:

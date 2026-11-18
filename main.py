@@ -7,8 +7,13 @@ Application entrypoint initializing High-DPI Qt rendering, DualDatabaseEngine
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
+
+# Prevent NVIDIA Overlay / Optimus GPU popup on startup when Qt probes hardware OpenGL/GPU
+os.environ.setdefault("QT_OPENGL", "software")
+os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --log-level=3")
 
 from PySide6.QtCore import QEvent, QLoggingCategory, QObject, Qt
 from PySide6.QtGui import QColor, QPalette
