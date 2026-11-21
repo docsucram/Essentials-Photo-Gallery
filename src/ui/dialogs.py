@@ -2098,33 +2098,73 @@ class ResizePhotoDialog(QDialog):
 
         vbox = QVBoxLayout(self)
         vbox.setContentsMargins(18, 16, 18, 16)
-        vbox.setSpacing(10)
+        vbox.setSpacing(12)
 
-        # 1. Header
+        from src.ui.theme_tokens import get_theme_tokens
+
+        is_dark = bool(
+            (str(getattr(parent, "current_theme", "")).strip().lower() == "dark")
+            or (self.palette().window().color().lightness() < 128)
+        )
+        tok = get_theme_tokens(getattr(parent, "current_theme", None), is_dark=is_dark)
+
+        # 1. Header + Friendly Subtitle
         lbl_title = QLabel("Export / Resize", self)
         lbl_title.setFont(QFont("Segoe UI", 14, QFont.DemiBold))
         lbl_title.setProperty("uiRole", "heading")
         vbox.addWidget(lbl_title)
 
-        # 2. Presets Row + Save / Delete Preset
+        n_files = len(self.file_paths)
+        lbl_sub = QLabel(
+            f"Exporting {n_files} {'photo' if n_files == 1 else 'photos'} — originals on disk are never modified.",
+            self,
+        )
+        lbl_sub.setFont(QFont("Segoe UI", 8.5))
+        lbl_sub.setStyleSheet(f"color: {tok.text_secondary}; background: transparent;")
+        vbox.addWidget(lbl_sub)
+
+        # 2. Photo Size Group Box (Size preset selector first, custom dimensions tucked cleanly inside)
+        class _ResizeModeContainer(QGroupBox):
+            toggled = Signal(bool)
+
+            def __init__(self, title: str, parent_w: QWidget | None = None) -> None:
+                super().__init__(title, parent_w)
+                self._checked_state: bool = True
+
+            def isChecked(self) -> bool:
+                return self._checked_state
+
+            def setChecked(self, checked: bool) -> None:
+                new_v = bool(checked)
+                if self._checked_state != new_v:
+                    self._checked_state = new_v
+                    if not self.signalsBlocked():
+                        self.toggled.emit(new_v)
+
+        self.mode_group = _ResizeModeContainer("Photo Size", self)
+        mode_group = self.mode_group
+        mode_layout = QVBoxLayout(mode_group)
+        mode_layout.setSpacing(8)
+
+        # Size Preset Row (now inside Photo Size so "Original size" vs "Resize" is one clear choice)
         preset_row = QHBoxLayout()
         preset_row.setSpacing(6)
-        lbl_preset = QLabel("Preset:", self)
+        lbl_preset = QLabel("Size:", mode_group)
         lbl_preset.setFont(QFont("Segoe UI", 9))
         preset_row.addWidget(lbl_preset)
 
-        self.cmb_size = QComboBox(self)
+        self.cmb_size = QComboBox(mode_group)
         self.cmb_size.setFont(QFont("Segoe UI", 9))
         self._rebuild_presets_combo(select_index=2)  # Default: Medium — 1024 px
         preset_row.addWidget(self.cmb_size, 1)
 
-        self.btn_save_preset = QPushButton("+ Save Preset", self)
+        self.btn_save_preset = QPushButton("+ Save Preset", mode_group)
         self.btn_save_preset.setFont(QFont("Segoe UI", 9))
         self.btn_save_preset.setToolTip("Save current export & resize settings as a reusable preset")
         self.btn_save_preset.clicked.connect(self._on_save_preset_clicked)
         preset_row.addWidget(self.btn_save_preset)
 
-        self.btn_delete_preset = QPushButton("✕", self)
+        self.btn_delete_preset = QPushButton("✕", mode_group)
         self.btn_delete_preset.setFont(QFont("Segoe UI", 9, QFont.Bold))
         self.btn_delete_preset.setMinimumWidth(30)
         self.btn_delete_preset.setFixedWidth(30)
@@ -2132,85 +2172,97 @@ class ResizePhotoDialog(QDialog):
         self.btn_delete_preset.clicked.connect(self._on_delete_preset_clicked)
         self.btn_delete_preset.setVisible(False)
         preset_row.addWidget(self.btn_delete_preset)
-        vbox.addLayout(preset_row)
+        mode_layout.addLayout(preset_row)
 
-        # 3. Optional Resize Group Box + Three Resize Modes
-        self.mode_group = QGroupBox("Resize", self)
-        self.mode_group.setCheckable(True)
-        self.mode_group.setChecked(True)
-        mode_group = self.mode_group
-        mode_layout = QVBoxLayout(mode_group)
-        mode_layout.setSpacing(8)
+        # Progressive-disclosure toggle for custom dimensions
+        self.btn_toggle_custom_dims = QPushButton("▸ Customize dimensions && scaling", mode_group)
+        self.btn_toggle_custom_dims.setFlat(True)
+        self.btn_toggle_custom_dims.setCursor(Qt.PointingHandCursor)
+        self.btn_toggle_custom_dims.setStyleSheet(
+            f"QPushButton {{ border: none; background: transparent; color: {tok.accent}; "
+            "text-align: left; padding: 2px 0px; font-size: 8.5pt; }}"
+            "QPushButton:hover { text-decoration: underline; }"
+        )
+        mode_layout.addWidget(self.btn_toggle_custom_dims)
+
+        self._custom_dims_box = QWidget(mode_group)
+        custom_lay = QVBoxLayout(self._custom_dims_box)
+        custom_lay.setContentsMargins(6, 4, 0, 2)
+        custom_lay.setSpacing(7)
 
         self.mode_btn_group = QButtonGroup(self)
 
         # Mode A: Fit within (Long Edge)
         row_long = QHBoxLayout()
-        self.rb_mode_long_edge = QRadioButton("Fit within (Long Edge):", mode_group)
+        self.rb_mode_long_edge = QRadioButton("Fit within (Long Edge):", self._custom_dims_box)
         self.rb_mode_long_edge.setChecked(True)
         self.mode_btn_group.addButton(self.rb_mode_long_edge)
         row_long.addWidget(self.rb_mode_long_edge)
 
-        self.txt_dim = QLineEdit(mode_group)
+        self.txt_dim = QLineEdit(self._custom_dims_box)
         self.txt_dim.setValidator(QIntValidator(1, 99999, self))
         self.txt_dim.setText("1024")
         self.txt_dim.setFixedWidth(84)
         row_long.addWidget(self.txt_dim)
-        row_long.addWidget(QLabel("px", mode_group))
+        row_long.addWidget(QLabel("px", self._custom_dims_box))
         row_long.addStretch(1)
-        mode_layout.addLayout(row_long)
+        custom_lay.addLayout(row_long)
 
         # Mode B: Exact W x H
         row_exact = QHBoxLayout()
-        self.rb_mode_exact = QRadioButton("Exact W × H:", mode_group)
+        self.rb_mode_exact = QRadioButton("Exact W × H:", self._custom_dims_box)
         self.mode_btn_group.addButton(self.rb_mode_exact)
         row_exact.addWidget(self.rb_mode_exact)
 
         init_w = str(self._single_src_size[0]) if self._single_src_size else "1024"
         init_h = str(self._single_src_size[1]) if self._single_src_size else "768"
-        self.txt_exact_w = QLineEdit(init_w, mode_group)
+        self.txt_exact_w = QLineEdit(init_w, self._custom_dims_box)
         self.txt_exact_w.setValidator(QIntValidator(1, 99999, self))
         self.txt_exact_w.setFixedWidth(72)
-        self.txt_exact_h = QLineEdit(init_h, mode_group)
+        self.txt_exact_h = QLineEdit(init_h, self._custom_dims_box)
         self.txt_exact_h.setValidator(QIntValidator(1, 99999, self))
         self.txt_exact_h.setFixedWidth(72)
         row_exact.addWidget(self.txt_exact_w)
-        row_exact.addWidget(QLabel("×", mode_group))
+        row_exact.addWidget(QLabel("×", self._custom_dims_box))
         row_exact.addWidget(self.txt_exact_h)
-        row_exact.addWidget(QLabel("px", mode_group))
+        row_exact.addWidget(QLabel("px", self._custom_dims_box))
         row_exact.addStretch(1)
-        mode_layout.addLayout(row_exact)
+        custom_lay.addLayout(row_exact)
 
         row_exact_opts = QHBoxLayout()
         row_exact_opts.setContentsMargins(22, 0, 0, 0)
-        self.chk_lock_aspect = QCheckBox("Lock aspect ratio", mode_group)
+        self.chk_lock_aspect = QCheckBox("Lock aspect ratio", self._custom_dims_box)
         self.chk_lock_aspect.setChecked(True)
-        self.chk_center_crop = QCheckBox("Center-crop to fill", mode_group)
+        self.chk_center_crop = QCheckBox("Center-crop to fill", self._custom_dims_box)
         self.chk_center_crop.setChecked(False)
         self.chk_center_crop.setEnabled(False)
         row_exact_opts.addWidget(self.chk_lock_aspect)
         row_exact_opts.addWidget(self.chk_center_crop)
         row_exact_opts.addStretch(1)
-        mode_layout.addLayout(row_exact_opts)
+        custom_lay.addLayout(row_exact_opts)
 
         # Mode C: Percentage (%)
         row_pct = QHBoxLayout()
-        self.rb_mode_percent = QRadioButton("Percentage:", mode_group)
+        self.rb_mode_percent = QRadioButton("Percentage:", self._custom_dims_box)
         self.mode_btn_group.addButton(self.rb_mode_percent)
         row_pct.addWidget(self.rb_mode_percent)
 
-        self.spin_percent = QSpinBox(mode_group)
+        self.spin_percent = QSpinBox(self._custom_dims_box)
         self.spin_percent.setRange(10, 100)
         self.spin_percent.setValue(50)
         self.spin_percent.setSuffix("%")
         self.spin_percent.setFixedWidth(84)
         row_pct.addWidget(self.spin_percent)
         row_pct.addStretch(1)
-        mode_layout.addLayout(row_pct)
+        custom_lay.addLayout(row_pct)
 
-        self.chk_no_upscale = QCheckBox("Do not enlarge smaller photos", mode_group)
+        self.chk_no_upscale = QCheckBox("Do not enlarge smaller photos", self._custom_dims_box)
         self.chk_no_upscale.setChecked(True)
-        mode_layout.addWidget(self.chk_no_upscale)
+        custom_lay.addWidget(self.chk_no_upscale)
+
+        self._custom_dims_box.setVisible(False)
+        mode_layout.addWidget(self._custom_dims_box)
+        self.btn_toggle_custom_dims.clicked.connect(self._toggle_custom_dims_drawer)
 
         vbox.addWidget(mode_group)
 
@@ -2245,14 +2297,18 @@ class ResizePhotoDialog(QDialog):
 
         vbox.addWidget(out_group)
 
-        # 5. Live Output Summary
+        # 5. Live Output Summary Pill
         self.lbl_preview_summary = QLabel("", self)
         self.lbl_preview_summary.setProperty("uiRole", "muted")
         self.lbl_preview_summary.setWordWrap(True)
+        self.lbl_preview_summary.setStyleSheet(
+            f"background-color: {tok.bg_card}; color: {tok.text_primary}; "
+            f"border: 1px solid {tok.border_subtle}; border-radius: 6px; padding: 7px 10px; font-size: 9pt;"
+        )
         vbox.addWidget(self.lbl_preview_summary)
 
         # 6. Save to: Path + Browse...
-        lbl_save = QLabel("Save to:", self)
+        lbl_save = QLabel("Save to folder:", self)
         lbl_save.setFont(QFont("Segoe UI", 9))
         vbox.addWidget(lbl_save)
 
@@ -2277,26 +2333,33 @@ class ResizePhotoDialog(QDialog):
         self.progress_bar.setVisible(False)
         vbox.addWidget(self.progress_bar)
 
-        # 7. Action Buttons
+        # 7. Action Buttons (Right-aligned with Primary Export CTA)
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(10)
+        btn_row.setSpacing(8)
         btn_row.addStretch(1)
-
-        export_label = "Export" if len(self.file_paths) == 1 else f"Export {len(self.file_paths)} Photos"
-        self.btn_resize = QPushButton(export_label, self)
-        self.btn_resize.setFont(QFont("Segoe UI", 9))
-        self.btn_resize.setDefault(True)
-        self.btn_resize.setMinimumWidth(120)
-        self.btn_resize.clicked.connect(self._on_resize_clicked)
-        btn_row.addWidget(self.btn_resize)
 
         self.btn_cancel = QPushButton("Cancel", self)
         self.btn_cancel.setFont(QFont("Segoe UI", 9))
-        self.btn_cancel.setMinimumWidth(80)
+        self.btn_cancel.setMinimumWidth(84)
+        self.btn_cancel.setFixedHeight(30)
         self.btn_cancel.clicked.connect(self.reject)
-        btn_row.addWidget(self.btn_cancel)
 
-        btn_row.addStretch(1)
+        export_label = "Export" if len(self.file_paths) == 1 else f"Export {len(self.file_paths)} Photos"
+        self.btn_resize = QPushButton(export_label, self)
+        self.btn_resize.setFont(QFont("Segoe UI", 9, QFont.DemiBold))
+        self.btn_resize.setDefault(True)
+        self.btn_resize.setMinimumWidth(120)
+        self.btn_resize.setFixedHeight(30)
+        self.btn_resize.setStyleSheet(
+            f"QPushButton {{ background-color: {tok.accent}; color: {tok.text_on_accent}; "
+            f"border: none; border-radius: 5px; padding: 0 16px; }}"
+            f"QPushButton:hover {{ background-color: {tok.accent_hover}; }}"
+            "QPushButton:disabled { opacity: 0.5; }"
+        )
+        self.btn_resize.clicked.connect(self._on_resize_clicked)
+
+        btn_row.addWidget(self.btn_resize)
+        btn_row.addWidget(self.btn_cancel)
         vbox.addLayout(btn_row)
 
         self._worker: _ResizeWorker | None = None
@@ -2419,22 +2482,37 @@ class ResizePhotoDialog(QDialog):
             return "percent"
         return "long_edge"
 
+    def _toggle_custom_dims_drawer(self) -> None:
+        vis = self._custom_dims_box.isHidden()
+        self._custom_dims_box.setVisible(vis)
+        self.btn_toggle_custom_dims.setText(
+            "▾ Customize dimensions && scaling" if vis else "▸ Customize dimensions && scaling"
+        )
+        self.adjustSize()
+
     def _on_resize_toggled(self, checked: bool) -> None:
         if not checked:
             self.cmb_size.blockSignals(True)
             self.cmb_size.setCurrentIndex(0)  # Original size (No resize)
             self.cmb_size.blockSignals(False)
             self.btn_delete_preset.setVisible(False)
+            self.btn_toggle_custom_dims.setVisible(False)
+            self._custom_dims_box.setVisible(False)
         else:
+            self.btn_toggle_custom_dims.setVisible(True)
             if self.cmb_size.currentIndex() == 0:
                 self.cmb_size.blockSignals(True)
                 self.cmb_size.setCurrentIndex(5)  # Custom
                 self.cmb_size.blockSignals(False)
         self._sync_mode_enabled_states()
         self._update_preview_summary()
+        self.adjustSize()
 
     def _sync_mode_enabled_states(self) -> None:
-        if not self.mode_group.isChecked():
+        is_resizing = self.mode_group.isChecked()
+        self.btn_toggle_custom_dims.setVisible(is_resizing)
+        if not is_resizing:
+            self._custom_dims_box.setVisible(False)
             return
         mode = self.active_mode()
         self.txt_dim.setEnabled(mode == "long_edge")
@@ -2445,6 +2523,14 @@ class ResizePhotoDialog(QDialog):
         self.spin_percent.setEnabled(mode == "percent")
 
     def _on_mode_changed(self) -> None:
+        if not self.mode_group.isChecked():
+            self.mode_group.blockSignals(True)
+            self.mode_group.setChecked(True)
+            self.mode_group.blockSignals(False)
+            if self.cmb_size.currentIndex() == 0:
+                self.cmb_size.blockSignals(True)
+                self.cmb_size.setCurrentIndex(5)
+                self.cmb_size.blockSignals(False)
         self._sync_mode_enabled_states()
         self._update_preview_summary()
 
@@ -2453,6 +2539,16 @@ class ResizePhotoDialog(QDialog):
         is_custom_saved = isinstance(data, dict) and bool(data.get("custom"))
         self.btn_delete_preset.setVisible(is_custom_saved)
         if not isinstance(data, dict):
+            # "Custom" selected -> enable resize and expand custom dimensions drawer
+            self.mode_group.blockSignals(True)
+            self.mode_group.setChecked(True)
+            self.mode_group.blockSignals(False)
+            self.btn_toggle_custom_dims.setVisible(True)
+            self._custom_dims_box.setVisible(True)
+            self.btn_toggle_custom_dims.setText("▾ Customize dimensions && scaling")
+            self._sync_mode_enabled_states()
+            self._update_preview_summary()
+            self.adjustSize()
             return
 
         resize_enabled = bool(data.get("resize_enabled", True))
