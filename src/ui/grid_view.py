@@ -518,6 +518,7 @@ class MediaCardDelegate(QStyledItemDelegate):
 
     rating_clicked = Signal(int, int)         # media_id, rating (1..5 or 0 to clear)
     flag_toggled = Signal(int, int)           # media_id, new_flag (0 or 1)
+    stack_badge_clicked = Signal(int)         # stack head media_id
     checkbox_toggled = Signal(int, bool)      # media_id, checked
     group_header_clicked = Signal(str)        # group_key
     caption_changed = Signal(int, str)        # media_id, new_caption
@@ -626,6 +627,10 @@ class MediaCardDelegate(QStyledItemDelegate):
             img_y = card_rect.top() + (card_rect.height() - thumb_side) // 2
             return QRect(img_x + thumb_side - 20, img_y + 4, 16, 16)
         return QRect(card_rect.right() - 22, card_rect.top() + 6, 16, 16)
+
+    def stack_badge_rect(self, card_rect: QRect) -> QRect:
+        fl = self.flag_rect(card_rect)
+        return QRect(fl.left() - 44, fl.top(), 40, 16)
 
     def stars_bar_rect(self, card_rect: QRect) -> QRect:
         if getattr(self, "is_horizontal_card", False):
@@ -917,6 +922,39 @@ class MediaCardDelegate(QStyledItemDelegate):
                 ])
                 painter.setBrush(QColor("#E81123") if flag == 1 else (QColor(45, 55, 72, 190) if self.dark_mode else QColor(255, 255, 255, 190)))
                 painter.drawPolygon(banner)
+
+        # Live Photo / Offline Drive / Image Stack Badges
+        rec_meta = index.data(CatalogRoles.RecordRole)
+        if rec_meta is not None:
+            is_live = bool(getattr(rec_meta, "is_live_photo", 0))
+            is_offline = bool(getattr(rec_meta, "is_offline", 0))
+            stack_cnt = int(getattr(rec_meta, "stack_count", 1) or 1)
+            if is_live or is_offline or stack_cnt > 1:
+                painter.save()
+                badge_font = QFont("Segoe UI", 7, QFont.Weight.Bold)
+                painter.setFont(badge_font)
+                if is_live:
+                    live_rect = QRect(img_box.left() + 4, img_box.bottom() - 20, 36, 15)
+                    painter.setPen(QPen(QColor(255, 255, 255, 160), 1))
+                    painter.setBrush(QColor(15, 23, 42, 200))
+                    painter.drawRoundedRect(live_rect, 3, 3)
+                    painter.setPen(QColor("#FFFFFF"))
+                    painter.drawText(live_rect, Qt.AlignCenter, "LIVE")
+                if is_offline:
+                    off_rect = QRect(img_box.left() + 4, img_box.top() + 24, 52, 15)
+                    painter.setPen(QPen(QColor("#FBBF24"), 1))
+                    painter.setBrush(QColor(120, 53, 15, 215))
+                    painter.drawRoundedRect(off_rect, 3, 3)
+                    painter.setPen(QColor("#FEF3C7"))
+                    painter.drawText(off_rect, Qt.AlignCenter, "OFFLINE")
+                if stack_cnt > 1:
+                    st_rect = self.stack_badge_rect(card_rect)
+                    painter.setPen(QPen(QColor("#38BDF8"), 1))
+                    painter.setBrush(QColor(15, 23, 42, 215))
+                    painter.drawRoundedRect(st_rect, 3, 3)
+                    painter.setPen(QColor("#F8FAFC"))
+                    painter.drawText(st_rect, Qt.AlignCenter, f"⧉ {stack_cnt}")
+                painter.restore()
 
         # 3. Text details on the right
         text_left = img_box.right() + 10
@@ -1390,6 +1428,13 @@ class MediaCardDelegate(QStyledItemDelegate):
                     self.flag_toggled.emit(int(media_id), new_flag)
                     return True
 
+                # 2b. Check stack badge [⧉ N] hit
+                rec_meta = index.data(CatalogRoles.RecordRole)
+                if rec_meta is not None and int(getattr(rec_meta, "stack_count", 1) or 1) > 1:
+                    if self.stack_badge_rect(card_rect).contains(pos):
+                        self.stack_badge_clicked.emit(int(media_id))
+                        return True
+
                 # 3. Check bottom 5-star rating bar hit
                 stars_rect = self.stars_bar_rect(card_rect)
                 star_hit = self.star_index_at(stars_rect, pos)
@@ -1620,6 +1665,7 @@ class ThumbnailGridView(QListView):
     media_activated = Signal(int)                 # media_id on double-click or Enter
     compare_requested = Signal(list)              # list[int] selected media_ids on 'C' or context menu
     find_similar_requested = Signal(int)          # media_id for Spatial Haar Find Similar
+    stack_toggle_requested = Signal(int)          # head_id to expand/collapse stack
     try_search_all_requested = Signal()
     add_folder_requested = Signal()           # user clicked 'Try searching all photos and videos'
     thumbnail_size_changed = Signal(int)          # emitted when thumbnail size changes (e.g. Ctrl+wheel)
@@ -1706,6 +1752,7 @@ class ThumbnailGridView(QListView):
         self.card_delegate.group_header_clicked.connect(
             self.catalog_model.toggle_group_collapsed
         )
+        self.card_delegate.stack_badge_clicked.connect(self.stack_toggle_requested.emit)
         self.card_delegate.checkbox_toggled.connect(self.on_card_checkbox_toggled)
         self.catalog_model.modelReset.connect(self._on_model_reset)
         self.catalog_model.view_repaint_requested.connect(self._on_view_repaint_requested)
@@ -3234,6 +3281,20 @@ class ThumbnailGridView(QListView):
             act_res = menu.addAction("Export / Resize...")
             if is_mw:
                 act_res.triggered.connect(main_win.open_resize_dialog)
+
+            if is_mw and hasattr(main_win, "group_selection_as_stack"):
+                stack_menu = menu.addMenu("Stacks")
+                stack_menu.setFont(QFont("Segoe UI", 9))
+                act_grp = stack_menu.addAction("Group Selected as Stack")
+                act_grp.setEnabled(len(target_mids) >= 2)
+                act_grp.triggered.connect(main_win.group_selection_as_stack)
+                act_ungrp = stack_menu.addAction("Unstack")
+                act_ungrp.triggered.connect(main_win.unstack_selection)
+                stack_menu.addSeparator()
+                act_raw_jpg = stack_menu.addAction("Auto-Stack RAW + JPEG Pairs")
+                act_raw_jpg.triggered.connect(main_win.auto_stack_raw_jpeg_pairs)
+                act_bursts = stack_menu.addAction("Auto-Stack Bursts (<= 2s)")
+                act_bursts.triggered.connect(main_win.auto_stack_bursts)
 
             menu.addSeparator()
 

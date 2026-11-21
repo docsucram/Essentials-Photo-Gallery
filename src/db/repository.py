@@ -242,6 +242,8 @@ class FilterQuerySpec:
     album_id: int | None = None
     smart_album_id: int | None = None
     smart_album_rules: str | None = None
+    collapse_stacks: bool = True
+    expanded_stack_ids: tuple[int, ...] = ()
 
 
 @dataclass(slots=True)
@@ -262,6 +264,10 @@ class MediaItemRecord:
     is_video: int
     caption: str
     group_key: str
+    is_live_photo: int = 0
+    is_offline: int = 0
+    stack_count: int = 1
+    stack_parent_id: int | None = None
 
 
 _EPOCH_UTC = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
@@ -1057,9 +1063,21 @@ class CatalogRepository:
         cur.row_factory = None
 
         where_clauses: list[str] = [
-            f"EXISTS (SELECT 1 FROM folders f WHERE f.id = m.folder_id AND {self._private_folder_clause('f')})"
+            f"EXISTS (SELECT 1 FROM folders f WHERE f.id = m.folder_id AND {self._private_folder_clause('f')})",
+            "m.live_companion_for_id IS NULL",
         ]
         params: list[Any] = []
+
+        if getattr(spec, "collapse_stacks", True):
+            exp_ids = tuple(int(x) for x in (getattr(spec, "expanded_stack_ids", ()) or ()) if x)
+            if exp_ids:
+                ph = ",".join("?" for _ in exp_ids)
+                where_clauses.append(
+                    f"(m.stack_parent_id IS NULL OR m.stack_parent_id = m.id OR m.stack_parent_id IN ({ph}))"
+                )
+                params.extend(exp_ids)
+            else:
+                where_clauses.append("(m.stack_parent_id IS NULL OR m.stack_parent_id = m.id)")
 
         # 1. Folder scope
         if spec.folder_id is not None:
@@ -1465,13 +1483,16 @@ class CatalogRepository:
                     records.append(
                         _Record(mid, fid, fname, size, mtime, dt_val, rating, flag, w, h, orient, is_vid, caption, gkey)
                     )
-                return records
+                return self._annotate_media_records(cur, records)
 
             if group_mode in ("none", "flat"):
-                return [
-                    _Record(mid, fid, fname, size, mtime, dt_taken if dt_taken is not None else (mtime or 0), rating, flag, w, h, orient, is_vid, caption, "")
-                    for mid, fid, fname, size, mtime, dt_taken, rating, flag, w, h, orient, is_vid, caption in raw_rows
-                ]
+                return self._annotate_media_records(
+                    cur,
+                    [
+                        _Record(mid, fid, fname, size, mtime, dt_taken if dt_taken is not None else (mtime or 0), rating, flag, w, h, orient, is_vid, caption, "")
+                        for mid, fid, fname, size, mtime, dt_taken, rating, flag, w, h, orient, is_vid, caption in raw_rows
+                    ],
+                )
 
             if group_mode in ("year", "year taken"):
                 cur_y_start = 1
@@ -1494,7 +1515,7 @@ class CatalogRepository:
                     records.append(
                         _Record(mid, fid, fname, size, mtime, dt_val, rating, flag, w, h, orient, is_vid, caption, gkey)
                     )
-                return records
+                return self._annotate_media_records(cur, records)
 
             if group_mode in ("date", "date taken", "day"):
                 cur_d_start = 1
@@ -1517,7 +1538,7 @@ class CatalogRepository:
                     records.append(
                         _Record(mid, fid, fname, size, mtime, dt_val, rating, flag, w, h, orient, is_vid, caption, gkey)
                     )
-                return records
+                return self._annotate_media_records(cur, records)
 
         sql = f"""
             SELECT
@@ -1734,7 +1755,211 @@ class CatalogRepository:
                     group_key=gkey,
                 )
             )
+        return self._annotate_media_records(cur, records)
+
+    def _annotate_media_records(
+        self, cur: sqlite3.Cursor, records: list[MediaItemRecord]
+    ) -> list[MediaItemRecord]:
+        """Annotates live-photo, offline-volume, and stack metadata with zero overhead when unused."""
+        if not records:
+            return records
+        offline_folders = {
+            int(r[0]) for r in cur.execute("SELECT id FROM folders WHERE volume_offline = 1").fetchall()
+        }
+        live_ids = {
+            int(r[0]) for r in cur.execute("SELECT id FROM media WHERE is_live_photo = 1").fetchall()
+        }
+        stack_rows = cur.execute(
+            "SELECT id, stack_parent_id FROM media WHERE stack_parent_id IS NOT NULL AND live_companion_for_id IS NULL"
+        ).fetchall()
+        if not offline_folders and not live_ids and not stack_rows:
+            return records
+
+        stack_counts: dict[int, int] = {}
+        stack_parents: dict[int, int] = {}
+        for mid_raw, sp_raw in stack_rows:
+            mid = int(mid_raw)
+            sp = int(sp_raw)
+            stack_parents[mid] = sp
+            stack_counts[sp] = stack_counts.get(sp, 0) + 1
+
+        for rec in records:
+            if rec.folder_id in offline_folders:
+                rec.is_offline = 1
+            if rec.id in live_ids:
+                rec.is_live_photo = 1
+            sp = stack_parents.get(rec.id)
+            if sp is not None:
+                rec.stack_parent_id = sp
+                if sp == rec.id:
+                    rec.stack_count = max(1, stack_counts.get(rec.id, 1))
         return records
+
+    # -------------------------------------------------------------------------
+    # Offline Volumes, Live/Motion Photos & Image Stacking
+    # -------------------------------------------------------------------------
+    def set_folder_volume_offline(self, folder_id: int, offline: bool) -> None:
+        with self.engine.catalog_transaction() as conn:
+            conn.execute(
+                "UPDATE folders SET volume_offline = ? WHERE id = ?;",
+                (1 if offline else 0, int(folder_id)),
+            )
+
+    def update_live_photo_metadata(
+        self, updates: Sequence[tuple[int, int, str, int]]
+    ) -> None:
+        """Batch-updates `(is_live_photo, motion_offset, live_video_path, media_id)`."""
+        if not updates:
+            return
+        with self.engine.catalog_transaction() as conn:
+            conn.executemany(
+                "UPDATE media SET is_live_photo = ?, motion_offset = ?, live_video_path = ? WHERE id = ?;",
+                [(int(lp), int(off), str(vp or ""), int(mid)) for lp, off, vp, mid in updates],
+            )
+
+    def mark_live_companion_videos(self, pairs: Sequence[tuple[int, int]]) -> None:
+        """Marks `(still_media_id, mov_media_id)` so the companion .MOV is hidden from grid clutter."""
+        if not pairs:
+            return
+        with self.engine.catalog_transaction() as conn:
+            conn.executemany(
+                "UPDATE media SET live_companion_for_id = ? WHERE id = ?;",
+                [(int(still_id), int(mov_id)) for still_id, mov_id in pairs],
+            )
+
+    def create_stack(self, media_ids: Sequence[int], head_id: int | None = None) -> int | None:
+        ids = [int(x) for x in dict.fromkeys(media_ids) if int(x) > 0]
+        if len(ids) < 2:
+            return None
+        chosen_head = int(head_id) if head_id is not None and int(head_id) in ids else ids[0]
+        with self.engine.catalog_transaction() as conn:
+            conn.executemany(
+                "UPDATE media SET stack_parent_id = ? WHERE id = ?;",
+                [(chosen_head, mid) for mid in ids],
+            )
+        return chosen_head
+
+    def unstack_media(self, media_ids: Sequence[int]) -> int:
+        ids = [int(x) for x in dict.fromkeys(media_ids) if int(x) > 0]
+        if not ids:
+            return 0
+        with self.engine.catalog_transaction() as conn:
+            cur = conn.cursor()
+            placeholders = ",".join("?" for _ in ids)
+            # Clear both selected items and any children whose stack_parent_id is in ids
+            cur.execute(
+                f"UPDATE media SET stack_parent_id = NULL WHERE id IN ({placeholders}) OR stack_parent_id IN ({placeholders});",
+                ids + ids,
+            )
+            changed = int(cur.rowcount or 0)
+        return changed
+
+    def get_stack_member_ids(self, media_id: int) -> list[int]:
+        conn = self.engine.catalog_conn()
+        cur = conn.cursor()
+        row = cur.execute(
+            "SELECT stack_parent_id FROM media WHERE id = ?;", (int(media_id),)
+        ).fetchone()
+        if not row or row[0] is None:
+            return [int(media_id)]
+        head_id = int(row[0])
+        rows = cur.execute(
+            "SELECT id FROM media WHERE stack_parent_id = ? AND live_companion_for_id IS NULL ORDER BY id = ? DESC, filename ASC;",
+            (head_id, head_id),
+        ).fetchall()
+        return [int(r[0]) for r in rows] or [int(media_id)]
+
+    def auto_stack_raw_jpeg_pairs(self, folder_id: int | None = None) -> int:
+        """Pairs RAW + JPEG files with matching `(folder_id, stem)` into stacks with JPEG as head."""
+        raw_exts = {"nef", "cr2", "cr3", "arw", "dng", "raf", "orf", "rw2", "pef", "srw"}
+        jpg_exts = {"jpg", "jpeg"}
+        conn = self.engine.catalog_conn()
+        cur = conn.cursor()
+        where = "WHERE is_video = 0 AND live_companion_for_id IS NULL"
+        params: list[Any] = []
+        if folder_id is not None:
+            where += " AND folder_id = ?"
+            params.append(int(folder_id))
+        rows = cur.execute(
+            f"SELECT id, folder_id, filename, LOWER(COALESCE(ext, '')) FROM media {where};",
+            params,
+        ).fetchall()
+
+        groups: dict[tuple[int, str], dict[str, list[int]]] = {}
+        for mid, fid, fname, ext in rows:
+            clean_ext = ext.lstrip(".")
+            if clean_ext not in raw_exts and clean_ext not in jpg_exts:
+                continue
+            stem = Path(str(fname)).stem.lower()
+            bucket = groups.setdefault((int(fid), stem), {"jpg": [], "raw": []})
+            if clean_ext in jpg_exts:
+                bucket["jpg"].append(int(mid))
+            else:
+                bucket["raw"].append(int(mid))
+
+        updates: list[tuple[int, int]] = []
+        stacks_created = 0
+        for bucket in groups.values():
+            if bucket["jpg"] and bucket["raw"]:
+                head_id = bucket["jpg"][0]
+                members = bucket["jpg"] + bucket["raw"]
+                for m in members:
+                    updates.append((head_id, m))
+                stacks_created += 1
+
+        if updates:
+            with self.engine.catalog_transaction() as tx_conn:
+                tx_conn.executemany(
+                    "UPDATE media SET stack_parent_id = ? WHERE id = ?;", updates
+                )
+        return stacks_created
+
+    def auto_stack_bursts(
+        self, folder_id: int | None = None, max_gap_sec: float = 2.0
+    ) -> int:
+        """Groups consecutive photos in the same folder taken within `max_gap_sec` seconds."""
+        conn = self.engine.catalog_conn()
+        cur = conn.cursor()
+        where = "WHERE is_video = 0 AND live_companion_for_id IS NULL AND date_taken IS NOT NULL AND date_taken > 0"
+        params: list[Any] = []
+        if folder_id is not None:
+            where += " AND folder_id = ?"
+            params.append(int(folder_id))
+        rows = cur.execute(
+            f"SELECT id, folder_id, date_taken FROM media {where} ORDER BY folder_id ASC, date_taken ASC, id ASC;",
+            params,
+        ).fetchall()
+
+        stacks_created = 0
+        updates: list[tuple[int, int]] = []
+        cur_group: list[int] = []
+        prev_fid: int | None = None
+        prev_dt: int | None = None
+
+        def _flush_group(grp: list[int]) -> None:
+            nonlocal stacks_created
+            if len(grp) >= 2:
+                head = grp[0]
+                for m in grp:
+                    updates.append((head, m))
+                stacks_created += 1
+
+        for mid, fid, dt in rows:
+            if prev_fid == fid and prev_dt is not None and (int(dt) - int(prev_dt)) <= max_gap_sec:
+                cur_group.append(int(mid))
+            else:
+                _flush_group(cur_group)
+                cur_group = [int(mid)]
+            prev_fid = int(fid)
+            prev_dt = int(dt)
+        _flush_group(cur_group)
+
+        if updates:
+            with self.engine.catalog_transaction() as tx_conn:
+                tx_conn.executemany(
+                    "UPDATE media SET stack_parent_id = ? WHERE id = ?;", updates
+                )
+        return stacks_created
 
     # -------------------------------------------------------------------------
     # Instant UI Metadata Writes (Marks metadata_dirty = 1)
@@ -5665,7 +5890,7 @@ class CatalogRepository:
         conn = self.engine.catalog_conn()
         row = conn.execute(
             """
-            SELECT m.*, f.path AS folder_path, f.name AS folder_name
+            SELECT m.*, f.path AS folder_path, f.name AS folder_name, COALESCE(f.volume_offline, 0) AS volume_offline
             FROM media m
             JOIN folders f ON f.id = m.folder_id
             WHERE m.id = ?;

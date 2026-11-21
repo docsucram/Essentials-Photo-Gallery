@@ -29,6 +29,20 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 - **Spacebar Quick Preview & `Shift + Rating/Flag` Auto-Advance:** Press `Space` in Grid View for an instant lightweight Quick Preview popover (`Enter` to open full view, `Left`/`Right` to browse, `1–5` to rate, `P` to flag, `Space`/`Esc` to dismiss), and hold `Shift` with `0–5` or `P` in Grid or Single Image View to apply the rating/flag and automatically advance to the next photo.
 - **Camera Autofocus (AF) Area Overlay (`A`):** On-demand, LRU-cached parser (`src/core/af_area_parser.py`) supporting EXIF `SubjectArea`/`SubjectLocation` and Nikon/Canon/Sony/Fujifilm MakerNotes (skipping cloud-only placeholders), toggled via `A` or the viewer's `AI & Scan → Show AF Focus Points` menu.
 
+### Apple Live Photos & Android Motion Photos
+
+- **Fast Motion Photo Tail Detection & Live Photo `.MOV` Pairing:** Added `src/imaging/live_photo.py` (`detect_motion_photo_offset()` using XMP `MicroVideoOffset` + bounded JPEG EOI `\xff\xd9` / `ftyp` tail scan, and `find_paired_live_video()` for iPhone `.HEIC`/`.JPG` + `.MOV` pairs, hiding companion `.MOV` clutter from the grid).
+- **`[LIVE]` Grid Badge & In-Viewer Motion Playback (`L`):** Displays a `[LIVE]` pill on Live/Motion Photo cards and a floating `▶ LIVE` toggle (`L`) in `SingleMediaViewer` that plays the paired `.MOV` or extracted MP4 via `QMediaPlayer` and returns to the still frame on completion.
+
+### Offline External Drive / NAS Browsing & Duplicate Keep Rules
+
+- **Offline Drive / NAS Preservation (`volume_offline`):** Added `is_volume_offline()` in `src/utils/paths.py` so unplugged external drives and unreachable NAS shares are flagged `volume_offline = 1` instead of purging catalog rows, keeping archives browsable via cached thumbnails with an `[OFFLINE]` card badge.
+- **Preferred Folder Priority & Reclaimable-Space Summary:** Added `Keep Preferred Folder Priority` (`preferred_folders`) and `compute_reclaimable_summary()` to `DuplicateFinder` / `DuplicateFinderDialog`, plus live selected-vs-total reclaimable space reporting.
+
+### Thumbnail Grid Image Stacking (`stack_parent_id`) & RAW+JPEG Pairs
+
+- **Collapsible `[⧉ N]` Stack Cards & Auto-Stacking:** Added `stack_parent_id` schema migration and repository helpers (`create_stack`, `unstack_media`, `auto_stack_raw_jpeg_pairs`, `auto_stack_bursts`), `[⧉ N]` badge rendering/clicking in `MediaCardDelegate`, Grid context menu **Stacks** actions, and unified collapsed-stack scope prompts for delete operations.
+
 ---
 
 ## Essentials Photo Gallery v0.15.0

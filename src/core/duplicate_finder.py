@@ -7,6 +7,7 @@ and burst sequence analysis with sharpness scoring and smart auto-recommendation
 from __future__ import annotations
 
 import hashlib
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -931,7 +932,23 @@ def _filename_copy_penalty(filename: str) -> int:
     return 0
 
 
-def auto_recommend_rules(groups: list[DuplicateGroup], rule: str = "highest_resolution") -> None:
+def compute_reclaimable_summary(groups: list[DuplicateGroup]) -> tuple[int, int]:
+    """Returns `(marked_for_removal_count, marked_reclaimable_bytes)` across all groups."""
+    count = 0
+    total_bytes = 0
+    for g in groups:
+        for it in g.items:
+            if it.is_selected_for_removal:
+                count += 1
+                total_bytes += int(it.file_size or 0)
+    return count, total_bytes
+
+
+def auto_recommend_rules(
+    groups: list[DuplicateGroup],
+    rule: str = "highest_resolution",
+    preferred_folders: list[str] | tuple[str, ...] = (),
+) -> None:
     """
     Applies an auto-selection rule across all duplicate and burst groups:
     - 'highest_resolution': Recommends keeping the photo with the most megapixels (and largest file size).
@@ -940,12 +957,37 @@ def auto_recommend_rules(groups: list[DuplicateGroup], rule: str = "highest_reso
     - 'most_metadata': Recommends keeping the photo with the most people, tags, caption, rating.
     - 'best_sharpness': Recommends keeping the sharpest, least-blurry photo in the group.
     - 'original_filename': Prefer clean original filenames without copy/numbered suffixes.
+    - 'preferred_folder': Prefer keeping files inside the user's prioritized folder prefixes.
     """
+    norm_prefs = [
+        os.path.normcase(str(p).strip()).rstrip("\\/")
+        for p in (preferred_folders or ())
+        if str(p).strip()
+    ]
+
+    def _folder_priority_score(folder_path: str) -> int:
+        fp = os.path.normcase(str(folder_path or "")).rstrip("\\/")
+        for idx, pref in enumerate(norm_prefs):
+            if fp == pref or fp.startswith(pref + os.sep) or fp.startswith(pref + "/"):
+                return len(norm_prefs) - idx
+        return 0
+
     for g in groups:
         if not g.items:
             continue
 
-        if rule == "original_filename":
+        if rule == "preferred_folder" and norm_prefs:
+            sorted_items = sorted(
+                g.items,
+                key=lambda it: (
+                    _folder_priority_score(getattr(it, "folder_path", "")),
+                    it.width * it.height,
+                    it.file_size,
+                    it.metadata_score,
+                ),
+                reverse=True,
+            )
+        elif rule == "original_filename":
             sorted_items = sorted(
                 g.items,
                 key=lambda it: (

@@ -939,13 +939,29 @@ class DualDatabaseEngine:
                 cur.execute("ALTER TABLE folders ADD COLUMN ocr_scanned_count INTEGER NOT NULL DEFAULT 0;")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_folders_monitor_mode ON folders(monitor_mode);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_folders_is_private ON folders(is_private);")
+            folder_cols = {r[1] for r in cur.execute("PRAGMA table_info(folders);").fetchall()}
+            if "volume_offline" not in folder_cols:
+                cur.execute("ALTER TABLE folders ADD COLUMN volume_offline INTEGER NOT NULL DEFAULT 0;")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_folders_volume_offline ON folders(volume_offline);")
 
             media_cols = {r[1] for r in cur.execute("PRAGMA table_info(media);").fetchall()}
             if "ocr_scanned" not in media_cols:
                 cur.execute("ALTER TABLE media ADD COLUMN ocr_scanned INTEGER NOT NULL DEFAULT 0;")
             if "ocr_text" not in media_cols:
                 cur.execute("ALTER TABLE media ADD COLUMN ocr_text TEXT DEFAULT '';")
+            if "is_live_photo" not in media_cols:
+                cur.execute("ALTER TABLE media ADD COLUMN is_live_photo INTEGER NOT NULL DEFAULT 0;")
+            if "motion_offset" not in media_cols:
+                cur.execute("ALTER TABLE media ADD COLUMN motion_offset INTEGER NOT NULL DEFAULT 0;")
+            if "live_video_path" not in media_cols:
+                cur.execute("ALTER TABLE media ADD COLUMN live_video_path TEXT DEFAULT '';")
+            if "live_companion_for_id" not in media_cols:
+                cur.execute("ALTER TABLE media ADD COLUMN live_companion_for_id INTEGER REFERENCES media(id) ON DELETE SET NULL;")
+            if "stack_parent_id" not in media_cols:
+                cur.execute("ALTER TABLE media ADD COLUMN stack_parent_id INTEGER REFERENCES media(id) ON DELETE SET NULL;")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_media_ocr_pending ON media(is_video, ocr_scanned);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_media_stack_parent ON media(stack_parent_id);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_media_live_companion ON media(live_companion_for_id);")
 
             try:
                 cur.execute(

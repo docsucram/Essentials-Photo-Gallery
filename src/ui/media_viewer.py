@@ -1845,6 +1845,20 @@ class SingleMediaViewer(QWidget):
         self.zoom_minimap.zoom_requested.connect(self._on_minimap_zoom)
         self.zoom_minimap.hide()
 
+        self._live_motion_spec: tuple[Path, int] | None = None
+        self._is_playing_live_motion: bool = False
+        self.btn_live_play = QPushButton("▶ LIVE", self.graphics_view.viewport())
+        self.btn_live_play.setCursor(Qt.PointingHandCursor)
+        self.btn_live_play.setToolTip("Play Live / Motion Photo (L)")
+        self.btn_live_play.setStyleSheet(
+            "QPushButton { background-color: rgba(15, 23, 42, 210); color: #F8FAFC; "
+            "border: 1px solid #38BDF8; border-radius: 12px; padding: 4px 10px; "
+            "font-size: 8.5pt; font-weight: 700; }"
+            "QPushButton:hover { background-color: rgba(30, 41, 59, 235); }"
+        )
+        self.btn_live_play.clicked.connect(self.toggle_live_photo_playback)
+        self.btn_live_play.hide()
+
         self.media_stack.addWidget(self.graphics_view)
 
         # Page 1: Video Player (Authentic WLPG White Background & Transport Bar)
@@ -2834,6 +2848,61 @@ class SingleMediaViewer(QWidget):
             self._alpha_backdrop_item.setVisible(bool(visible))
         self._update_zoom_minimap()
         self._refresh_af_overlay()
+        self._update_live_badge()
+
+    def _update_live_badge(self) -> None:
+        btn = getattr(self, "btn_live_play", None)
+        if btn is None:
+            return
+        if (
+            getattr(self, "current_is_video", False)
+            or self.is_in_edit_mode()
+            or not self.current_file_path
+            or self.media_stack.currentWidget() != self.graphics_view
+        ):
+            self._live_motion_spec = None
+            btn.hide()
+            return
+        from src.imaging.live_photo import detect_motion_photo_offset, find_paired_live_video
+
+        paired = find_paired_live_video(self.current_file_path)
+        if paired is not None:
+            self._live_motion_spec = (paired, 0)
+        else:
+            off = detect_motion_photo_offset(self.current_file_path)
+            self._live_motion_spec = (self.current_file_path, off) if off is not None else None
+
+        if self._live_motion_spec is not None:
+            btn.move(14, 14)
+            btn.show()
+            btn.raise_()
+        else:
+            btn.hide()
+
+    def toggle_live_photo_playback(self) -> bool:
+        """Plays or stops the paired Live Photo .MOV or embedded Motion Photo MP4."""
+        if getattr(self, "_is_playing_live_motion", False):
+            self._is_playing_live_motion = False
+            self.media_player.stop()
+            self.media_stack.setCurrentIndex(0)
+            return False
+        spec = getattr(self, "_live_motion_spec", None)
+        if spec is None:
+            return False
+        src_path, offset = spec
+        if offset > 0:
+            from src.imaging.live_photo import extract_motion_mp4_to_temp
+
+            play_path = extract_motion_mp4_to_temp(src_path, offset)
+        else:
+            play_path = src_path
+        if play_path is None or not play_path.exists():
+            return False
+        self._is_playing_live_motion = True
+        self.media_stack.setCurrentIndex(1)
+        self.media_player.setSource(QUrl.fromLocalFile(str(play_path)))
+        self.media_player.play()
+        return True
 
     def _update_zoom_minimap(self) -> None:
         """Update ZoomMinimapOverlay visibility, thumbnail, and viewport rectangle."""
@@ -8640,6 +8709,9 @@ class SingleMediaViewer(QWidget):
         else:
             self.btn_play_pause.setIcon(make_wlpg_icon("play", 16))
             self.btn_play_pause.setToolTip("Play (Space)")
+            if state == QMediaPlayer.StoppedState and getattr(self, "_is_playing_live_motion", False):
+                self._is_playing_live_motion = False
+                self.media_stack.setCurrentIndex(0)
 
     def toggle_video_playback(self) -> None:
         if self.media_player.playbackState() == QMediaPlayer.PlayingState:
@@ -9244,12 +9316,16 @@ class SingleMediaViewer(QWidget):
                     event.accept()
                     return True
 
-            # Toggle Camera AF Focus Overlay: A
+            # Toggle Camera AF Focus Overlay: A / Live Motion Playback: L
             if not self.is_crop_mode and not self.is_in_edit_mode() and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier):
                 if event.key() == Qt.Key_A:
                     self.toggle_af_overlay()
                     event.accept()
                     return True
+                if event.key() == Qt.Key_L:
+                    if self.toggle_live_photo_playback():
+                        event.accept()
+                        return True
 
             # Star ratings: 0..5 (or Shift+0..5 to auto-advance)
             if not self.is_crop_mode and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):

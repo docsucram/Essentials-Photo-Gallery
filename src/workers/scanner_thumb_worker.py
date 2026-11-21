@@ -1266,6 +1266,17 @@ class FolderSyncWorker(QRunnable):
         last_emit = time.perf_counter()
 
         try:
+            from src.utils.paths import is_volume_offline
+
+            if is_volume_offline(self.root_path):
+                norm_root = os.path.normcase(str(self.root_path))
+                for f in repo.get_folders():
+                    fpath_norm = os.path.normcase(str(f["path"]))
+                    if fpath_norm == norm_root or fpath_norm.startswith(norm_root + os.sep):
+                        repo.set_folder_volume_offline(int(f["id"]), True)
+                self.signals.finished.emit(0, False)
+                return
+
             if not self.root_path.exists() or not self.root_path.is_dir():
                 self.signals.finished.emit(0, False)
                 return
@@ -1296,6 +1307,7 @@ class FolderSyncWorker(QRunnable):
                     parent_id=parent_fid,
                     mtime=int(dir_stat.st_mtime),
                 )
+                repo.set_folder_volume_offline(folder_id, False)
                 existing_folders[os.path.normcase(norm_dir_str)] = folder_id
 
                 # Load existing (filename_lower -> (id, mtime, width)) for this folder
@@ -1510,6 +1522,42 @@ class FolderSyncWorker(QRunnable):
         tag_people_items: list[tuple[int, str, list[str], list[dict[str, Any]]]],
     ) -> None:
         upserted_ids = repo.bulk_upsert_media(rows)
+
+        # Detect Android Motion Photos (JPEG EOI + MP4 tail) & Apple Live Photos (.HEIC/.JPG + .MOV)
+        try:
+            from src.imaging.live_photo import detect_motion_photo_offset, find_paired_live_video
+
+            folder_paths = {int(f["id"]): Path(str(f["path"])) for f in repo.get_folders()}
+            live_updates: list[tuple[int, int, str, int]] = []
+            mov_pairs: list[tuple[int, int]] = []
+            conn = self.engine.catalog_conn()
+            for r, mid in zip(rows, upserted_ids):
+                if r.get("is_video"):
+                    continue
+                fdir = folder_paths.get(int(r["folder_id"]))
+                if fdir is None:
+                    continue
+                fpath = fdir / str(r["filename"])
+                paired_mov = find_paired_live_video(fpath)
+                if paired_mov is not None:
+                    live_updates.append((1, 0, str(paired_mov), int(mid)))
+                    mov_row = conn.execute(
+                        "SELECT id FROM media WHERE folder_id = ? AND LOWER(filename) = ?;",
+                        (int(r["folder_id"]), paired_mov.name.lower()),
+                    ).fetchone()
+                    if mov_row:
+                        mov_pairs.append((int(mid), int(mov_row[0])))
+                    continue
+                motion_off = detect_motion_photo_offset(fpath)
+                if motion_off is not None:
+                    live_updates.append((1, int(motion_off), "", int(mid)))
+            if live_updates:
+                repo.update_live_photo_metadata(live_updates)
+            if mov_pairs:
+                repo.mark_live_companion_videos(mov_pairs)
+        except Exception:
+            pass
+
         if not tag_people_items:
             return
 

@@ -1434,10 +1434,25 @@ class DuplicateFinderView(QWidget):
             "Keep Most Metadata",
             "Keep Best Sharpness",
             "Keep Original Filename",
+            "Keep Preferred Folder Priority",
         ])
         self.cmb_rule.setFixedHeight(26)
         self.cmb_rule.currentIndexChanged.connect(self._on_rule_changed)
         ws_ctrl_layout.addWidget(self.cmb_rule)
+
+        self.txt_preferred_folder = QLineEdit(self.ws_controls_widget)
+        self.txt_preferred_folder.setPlaceholderText("Preferred folder(s), ; separated...")
+        self.txt_preferred_folder.setFixedWidth(180)
+        self.txt_preferred_folder.setFixedHeight(26)
+        self.txt_preferred_folder.setVisible(False)
+        ws_ctrl_layout.addWidget(self.txt_preferred_folder)
+
+        self.btn_browse_pref_folder = QPushButton("...", self.ws_controls_widget)
+        self.btn_browse_pref_folder.setFixedSize(26, 26)
+        self.btn_browse_pref_folder.setToolTip("Choose preferred keep folder")
+        self.btn_browse_pref_folder.setVisible(False)
+        self.btn_browse_pref_folder.clicked.connect(self._browse_preferred_folder)
+        ws_ctrl_layout.addWidget(self.btn_browse_pref_folder)
 
         btn_apply_all = QPushButton("Apply to All Groups", self.ws_controls_widget)
         btn_apply_all.setFixedHeight(26)
@@ -2771,7 +2786,7 @@ class DuplicateFinderView(QWidget):
 
         self._update_summary_counts()
 
-    def _on_rule_changed(self) -> None:
+    def _current_rule_and_prefs(self) -> tuple[str, list[str]]:
         rule_map = {
             0: "highest_resolution",
             1: "largest_file_size",
@@ -2779,42 +2794,61 @@ class DuplicateFinderView(QWidget):
             3: "most_metadata",
             4: "best_sharpness",
             5: "original_filename",
+            6: "preferred_folder",
         }
         rule = rule_map.get(self.cmb_rule.currentIndex(), "highest_resolution")
+        raw_prefs = self.txt_preferred_folder.text() if hasattr(self, "txt_preferred_folder") else ""
+        prefs = [p.strip() for p in raw_prefs.split(";") if p.strip()]
+        return rule, prefs
+
+    def _browse_preferred_folder(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        chosen = QFileDialog.getExistingDirectory(self, "Choose Preferred Keep Folder")
+        if chosen:
+            cur = self.txt_preferred_folder.text().strip()
+            self.txt_preferred_folder.setText(f"{cur}; {chosen}" if cur else chosen)
+            self._on_rule_changed()
+
+    def _on_rule_changed(self) -> None:
+        rule, prefs = self._current_rule_and_prefs()
+        is_pref = rule == "preferred_folder"
+        if hasattr(self, "txt_preferred_folder"):
+            self.txt_preferred_folder.setVisible(is_pref)
+        if hasattr(self, "btn_browse_pref_folder"):
+            self.btn_browse_pref_folder.setVisible(is_pref)
         if self.active_group:
-            auto_recommend_rules([self.active_group], rule=rule)
+            auto_recommend_rules([self.active_group], rule=rule, preferred_folders=prefs)
             for c in self.cards_container.findChildren(_ImageComparisonCard):
                 if c.group is self.active_group:
                     c.update_selection_state()
             self._update_summary_counts()
 
     def _apply_rule_to_all_groups(self) -> None:
-        rule_map = {
-            0: "highest_resolution",
-            1: "largest_file_size",
-            2: "oldest_date",
-            3: "most_metadata",
-            4: "best_sharpness",
-            5: "original_filename",
-        }
-        rule = rule_map.get(self.cmb_rule.currentIndex(), "highest_resolution")
-        auto_recommend_rules(self.groups, rule=rule)
+        rule, prefs = self._current_rule_and_prefs()
+        auto_recommend_rules(self.groups, rule=rule, preferred_folders=prefs)
         self._populate_groups_list()
         self._update_summary_counts()
 
     def _update_summary_counts(self) -> None:
         tot_removal = sum(1 for g in self.groups for it in g.items if it.is_selected_for_removal)
         tot_bytes = sum(it.file_size for g in self.groups for it in g.items if it.is_selected_for_removal)
-        s = float(tot_bytes)
-        if s >= 1024 ** 3:
-            sz_str = f"{s / (1024 ** 3):.2f} GB"
-        elif s >= 1024 ** 2:
-            sz_str = f"{s / (1024 ** 2):.1f} MB"
-        elif s >= 1024:
-            sz_str = f"{s / 1024:.0f} KB"
-        else:
-            sz_str = f"{int(s)} B"
-        self.lbl_summary.setText(f"{tot_removal} duplicate files marked for removal ({sz_str} recoverable)")
+        tot_possible = sum(int(getattr(g, "reclaimable_bytes", 0) or 0) for g in self.groups)
+
+        def _fmt_bytes(val: float) -> str:
+            if val >= 1024 ** 3:
+                return f"{val / (1024 ** 3):.2f} GB"
+            if val >= 1024 ** 2:
+                return f"{val / (1024 ** 2):.1f} MB"
+            if val >= 1024:
+                return f"{val / 1024:.0f} KB"
+            return f"{int(val)} B"
+
+        sz_str = _fmt_bytes(float(tot_bytes))
+        pos_str = _fmt_bytes(float(tot_possible))
+        self.lbl_summary.setText(
+            f"{tot_removal} duplicate files marked for removal ({sz_str} reclaimable / {pos_str} total)"
+        )
         self.btn_delete.setEnabled(tot_removal > 0)
         self.btn_delete.setText(
             f"🗑 Delete All Duplicates ({tot_removal})" if tot_removal > 0 else "Delete All Duplicates"

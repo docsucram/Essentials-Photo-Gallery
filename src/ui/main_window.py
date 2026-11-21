@@ -1031,7 +1031,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.compare_view.open_in_editor_requested.connect(self._on_compare_open_editor)
         self.compare_view.focused_media_changed.connect(self._on_compare_focused_media_changed)
         self.central_stack.addWidget(self.compare_view)
+        self._expanded_stack_ids: set[int] = set()
         self.grid_view.compare_requested.connect(self.open_compare_view)
+        self.grid_view.stack_toggle_requested.connect(self.toggle_stack_expanded)
         self.grid_view.find_similar_requested.connect(self.open_find_similar_for_media)
 
         self.setCentralWidget(self.central_stack)
@@ -3847,6 +3849,11 @@ class PhotoGalleryMainWindow(QMainWindow):
                 media_ids=tuple(sim_order),
                 search_text=spec.search_text,
             )
+        exp_stack = tuple(sorted(getattr(self, "_expanded_stack_ids", set())))
+        if exp_stack:
+            from dataclasses import replace as _dc_replace
+
+            spec = _dc_replace(spec, expanded_stack_ids=exp_stack)
         records = self.catalog_repo.query_media_records(spec)
         if sim_order:
             rank_map = {int(mid): idx for idx, mid in enumerate(sim_order)}
@@ -4463,6 +4470,87 @@ class PhotoGalleryMainWindow(QMainWindow):
             sel_ids = self.grid_view.selected_media_ids()
             if sel_ids:
                 self.show_quick_preview(int(sel_ids[-1]))
+
+    # -------------------------------------------------------------------------
+    # Image Stacking & RAW+JPEG Pairs
+    # -------------------------------------------------------------------------
+    def toggle_stack_expanded(self, head_id: int) -> None:
+        hid = int(head_id)
+        if hid in self._expanded_stack_ids:
+            self._expanded_stack_ids.discard(hid)
+        else:
+            self._expanded_stack_ids.add(hid)
+        self.rebuild_and_run_query()
+
+    def group_selection_as_stack(self) -> None:
+        target_ids = list(self.get_active_target_ids())
+        if len(target_ids) < 2:
+            self.show_status_message("Select at least 2 items to group into a stack.", 3000)
+            return
+        head = self.catalog_repo.create_stack(target_ids)
+        if head is not None:
+            self._expanded_stack_ids.discard(head)
+            self.rebuild_and_run_query()
+            self.show_status_message(f"✓ Stacked {len(target_ids)} item(s)", 3000)
+
+    def unstack_selection(self) -> None:
+        target_ids = list(self.get_active_target_ids())
+        if not target_ids:
+            return
+        changed = self.catalog_repo.unstack_media(target_ids)
+        for mid in target_ids:
+            self._expanded_stack_ids.discard(int(mid))
+        self.rebuild_and_run_query()
+        self.show_status_message(f"✓ Unstacked {changed} item(s)", 3000)
+
+    def auto_stack_raw_jpeg_pairs(self) -> None:
+        count = self.catalog_repo.auto_stack_raw_jpeg_pairs()
+        self._expanded_stack_ids.clear()
+        self.rebuild_and_run_query()
+        self.show_status_message(f"✓ Paired {count} RAW + JPEG stack(s)", 3500)
+
+    def auto_stack_bursts(self) -> None:
+        count = self.catalog_repo.auto_stack_bursts(max_gap_sec=2.0)
+        self._expanded_stack_ids.clear()
+        self.rebuild_and_run_query()
+        self.show_status_message(f"✓ Grouped {count} burst stack(s)", 3500)
+
+    def expand_stack_targets_if_collapsed(
+        self, target_ids: Sequence[int], *, action_label: str = "modify"
+    ) -> list[int]:
+        """If any selected ID is a collapsed stack head, include all stack members (with prompt)."""
+        out: list[int] = []
+        seen: set[int] = set()
+        extra_count = 0
+        expanded_groups: list[tuple[int, list[int]]] = []
+        for mid in target_ids:
+            imid = int(mid)
+            members = self.catalog_repo.get_stack_member_ids(imid)
+            if len(members) > 1 and imid not in self._expanded_stack_ids and members[0] == imid:
+                extra_count += len(members) - 1
+                expanded_groups.append((imid, members))
+            else:
+                expanded_groups.append((imid, [imid]))
+
+        include_children = False
+        if extra_count > 0:
+            reply = QMessageBox.question(
+                self,
+                "Collapsed Stack Scope",
+                f"Your selection includes collapsed stack(s) with {extra_count} hidden item(s).\n\n"
+                f"Include all items in the stack(s) when you {action_label}?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            include_children = reply == QMessageBox.Yes
+
+        for imid, members in expanded_groups:
+            use_list = members if include_children else [imid]
+            for m in use_list:
+                if m not in seen:
+                    seen.add(m)
+                    out.append(m)
+        return out
 
     def apply_caption_to_selection(self, caption: str) -> None:
         target_ids = self.get_active_target_ids()
@@ -6999,6 +7087,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         )
         if not target_ids:
             return 0
+        if not in_viewer:
+            target_ids = self.expand_stack_targets_if_collapsed(target_ids, action_label="delete")
         try:
             from send2trash import send2trash
         except ImportError:

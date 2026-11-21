@@ -128,3 +128,18 @@ def is_cloud_only_file(path: Path | str) -> bool:
     except OSError:
         return False
     return is_cloud_only_stat(st)
+
+
+def is_volume_offline(path: Path | str) -> bool:
+    """
+    Returns True if the drive/UNC share hosting `path` is currently unplugged or unreachable
+    (distinct from a folder/file that was genuinely deleted on a mounted drive).
+    """
+    p = Path(path)
+    anchor = p.anchor
+    if anchor:
+        try:
+            return not os.path.exists(anchor)
+        except OSError:
+            return True
+    return False
