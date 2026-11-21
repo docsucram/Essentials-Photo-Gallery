@@ -36,6 +36,7 @@ from PySide6.QtGui import (
     QTransform,
 )
 from PySide6.QtWidgets import (
+    QComboBox,
     QGraphicsItem,
     QGraphicsPixmapItem,
     QGraphicsRectItem,
@@ -43,6 +44,22 @@ from PySide6.QtWidgets import (
     QStyleOptionGraphicsItem,
     QWidget,
 )
+
+
+class CropRatioComboBox(QComboBox):
+    """QComboBox that paints a crisp downward chevron arrow regardless of QSS/theme."""
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        cx = self.width() - 10.5
+        cy = self.height() / 2.0 + 1.0
+        pen = QPen(self.palette().text().color(), 1.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        p.setPen(pen)
+        p.drawLine(QPointF(cx - 3.5, cy - 2.0), QPointF(cx, cy + 1.8))
+        p.drawLine(QPointF(cx, cy + 1.8), QPointF(cx + 3.5, cy - 2.0))
+        p.end()
 
 
 def make_corner_rotation_cursor(angle_deg: float) -> QCursor:
@@ -121,6 +138,8 @@ class CropOverlayItem(QGraphicsRectItem):
     Dynamically scales handles and badges according to the view's current zoom level.
     """
 
+    GRID_MODES: tuple[str, ...] = ("thirds", "golden", "diagonals", "crosshair", "none")
+
     def __init__(self, parent: QGraphicsItem | None = None) -> None:
         super().__init__(parent)
         self.setZValue(100)
@@ -132,6 +151,10 @@ class CropOverlayItem(QGraphicsRectItem):
         self._master_scale: float = 1.0  # multiplier to convert display pixels to master image pixels
         self._rotation_deg: float = 0.0
         self._is_rotating: bool = False
+        self._show_fine_grid: bool = False
+        self._is_actively_dragging: bool = False
+        self._grid_mode: str = "thirds"
+        self._straighten_line: tuple[QPointF, QPointF] | None = None
         self._rotation_badge_pos: QPointF = QPointF()
 
     def get_view_inv_scale(self) -> float:
@@ -180,6 +203,33 @@ class CropOverlayItem(QGraphicsRectItem):
         if badge_pos is not None:
             self._rotation_badge_pos = badge_pos
         self.update()
+
+    def set_grid_mode(self, mode: str) -> None:
+        if mode in self.GRID_MODES and mode != self._grid_mode:
+            self._grid_mode = mode
+            self.update()
+
+    def set_fine_grid_active(self, active: bool) -> None:
+        val = bool(active)
+        if val != self._show_fine_grid:
+            self._show_fine_grid = val
+            self.update()
+
+    def set_straighten_line(self, p1: QPointF | None, p2: QPointF | None) -> None:
+        if p1 is None or p2 is None:
+            self._straighten_line = None
+        else:
+            self._straighten_line = (QPointF(p1), QPointF(p2))
+        self.update()
+
+    def grid_mode(self) -> str:
+        return self._grid_mode
+
+    def cycle_grid_mode(self) -> str:
+        idx = self.GRID_MODES.index(self._grid_mode) if self._grid_mode in self.GRID_MODES else 0
+        self._grid_mode = self.GRID_MODES[(idx + 1) % len(self.GRID_MODES)]
+        self.update()
+        return self._grid_mode
 
     def rotation_deg(self) -> float:
         return self._rotation_deg
@@ -308,32 +358,83 @@ class CropOverlayItem(QGraphicsRectItem):
             crop_path = QPainterPath()
             crop_path.addRect(r)
             dimmed_path = full_path.subtracted(crop_path)
-            # WLPG semi-transparent dark grey overlay (~48% opacity)
-            painter.fillPath(dimmed_path, QColor(0, 0, 0, 122))
+            # Dimmed outer scrim: ~65% when idle for clear silhouette, ~40% while dragging for context
+            scrim_alpha = 102 if self._is_actively_dragging else 166
+            painter.fillPath(dimmed_path, QColor(0, 0, 0, scrim_alpha))
+
+            # 1b. AI Expand fill-zone preview (out-of-bounds / rotated corner regions)
+            if self.scene() and getattr(self.scene(), "allow_ai_expand", False):
+                fill_zone = crop_path.subtracted(full_path)
+                if not fill_zone.isEmpty():
+                    painter.fillPath(fill_zone, QColor(59, 130, 246, 55))
+                    painter.fillPath(fill_zone, QBrush(QColor(147, 197, 253, 90), Qt.DiagCrossPattern))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.setPen(QPen(QColor(96, 165, 250, 225), max(1.4, 1.6 * inv_scale), Qt.DashLine))
+                    painter.drawPath(fill_zone)
 
         # 2. Crop Rectangle Outer Border (White with subtle outer shadow)
         border_w = max(1.5, 1.8 * inv_scale)
         shadow_w = max(2.5, 3.2 * inv_scale)
-        painter.setPen(QPen(QColor(20, 20, 20, 120), shadow_w, Qt.SolidLine))
+        painter.setPen(QPen(QColor(20, 20, 20, 140), shadow_w, Qt.SolidLine))
         painter.drawRect(r)
         painter.setPen(QPen(QColor(255, 255, 255, 245), border_w, Qt.SolidLine))
         painter.drawRect(r)
 
-        # 3. Rule of Thirds compositional grid (3x3)
+        # 3. Composition Grid Overlay (or fine 9x9 alignment grid while actively rotating)
         grid_min = 24.0 * inv_scale
-        if w > grid_min and h > grid_min:
+        if w > grid_min and h > grid_min and (self._is_rotating or self._show_fine_grid):
+            fine_pen = QPen(QColor(255, 255, 255, 135), max(0.8, 0.9 * inv_scale), Qt.SolidLine)
+            painter.setPen(fine_pen)
+            for i in range(1, 9):
+                x = r.left() + (w * i) / 9.0
+                y = r.top() + (h * i) / 9.0
+                painter.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
+                painter.drawLine(QPointF(r.left(), y), QPointF(r.right(), y))
+        elif w > grid_min and h > grid_min and self._grid_mode != "none":
             grid_pen = QPen(QColor(255, 255, 255, 175), max(1.0, 1.0 * inv_scale), Qt.SolidLine)
             painter.setPen(grid_pen)
-            # 2 vertical lines
-            x1 = r.left() + w / 3.0
-            x2 = r.left() + 2.0 * w / 3.0
-            painter.drawLine(QPointF(x1, r.top()), QPointF(x1, r.bottom()))
-            painter.drawLine(QPointF(x2, r.top()), QPointF(x2, r.bottom()))
-            # 2 horizontal lines
-            y1 = r.top() + h / 3.0
-            y2 = r.top() + 2.0 * h / 3.0
-            painter.drawLine(QPointF(r.left(), y1), QPointF(r.right(), y1))
-            painter.drawLine(QPointF(r.left(), y2), QPointF(r.right(), y2))
+            if self._grid_mode == "thirds":
+                x1 = r.left() + w / 3.0
+                x2 = r.left() + 2.0 * w / 3.0
+                painter.drawLine(QPointF(x1, r.top()), QPointF(x1, r.bottom()))
+                painter.drawLine(QPointF(x2, r.top()), QPointF(x2, r.bottom()))
+                y1 = r.top() + h / 3.0
+                y2 = r.top() + 2.0 * h / 3.0
+                painter.drawLine(QPointF(r.left(), y1), QPointF(r.right(), y1))
+                painter.drawLine(QPointF(r.left(), y2), QPointF(r.right(), y2))
+            elif self._grid_mode == "golden":
+                # Phi (1:1.618) -> 0.381966 and 0.618034
+                g1, g2 = 0.381966, 0.618034
+                x1, x2 = r.left() + w * g1, r.left() + w * g2
+                y1, y2 = r.top() + h * g1, r.top() + h * g2
+                painter.drawLine(QPointF(x1, r.top()), QPointF(x1, r.bottom()))
+                painter.drawLine(QPointF(x2, r.top()), QPointF(x2, r.bottom()))
+                painter.drawLine(QPointF(r.left(), y1), QPointF(r.right(), y1))
+                painter.drawLine(QPointF(r.left(), y2), QPointF(r.right(), y2))
+            elif self._grid_mode == "diagonals":
+                painter.drawLine(r.topLeft(), r.bottomRight())
+                painter.drawLine(r.topRight(), r.bottomLeft())
+            elif self._grid_mode == "crosshair":
+                cx, cy = r.center().x(), r.center().y()
+                painter.drawLine(QPointF(cx, r.top()), QPointF(cx, r.bottom()))
+                painter.drawLine(QPointF(r.left(), cy), QPointF(r.right(), cy))
+
+        # 3b. Crisp, thicker L-shaped corner brackets
+        arm = min(max(14.0, 18.0 * inv_scale), w * 0.28, h * 0.28)
+        if arm > 3.0:
+            bracket_shadow = QPen(QColor(15, 15, 15, 190), max(4.0, 5.0 * inv_scale), Qt.SolidLine, Qt.SquareCap, Qt.MiterJoin)
+            bracket_white = QPen(QColor(255, 255, 255, 255), max(2.4, 3.0 * inv_scale), Qt.SolidLine, Qt.SquareCap, Qt.MiterJoin)
+            corners = [
+                (QPointF(r.left() + arm, r.top()), r.topLeft(), QPointF(r.left(), r.top() + arm)),
+                (QPointF(r.right() - arm, r.top()), r.topRight(), QPointF(r.right(), r.top() + arm)),
+                (QPointF(r.left() + arm, r.bottom()), r.bottomLeft(), QPointF(r.left(), r.bottom() - arm)),
+                (QPointF(r.right() - arm, r.bottom()), r.bottomRight(), QPointF(r.right(), r.bottom() - arm)),
+            ]
+            for p_pen in (bracket_shadow, bracket_white):
+                painter.setPen(p_pen)
+                for p1, corner_pt, p2 in corners:
+                    painter.drawLine(p1, corner_pt)
+                    painter.drawLine(corner_pt, p2)
 
         # 4. 8 Symmetrical Square Handles (WLPG style - 12 screen pixels across)
         hs = max(10.0, 12.0 * inv_scale)
@@ -412,6 +513,36 @@ class CropOverlayItem(QGraphicsRectItem):
             painter.setPen(QColor(255, 255, 255, 255))
             painter.drawText(rot_rect, Qt.AlignCenter, deg_text)
 
+        # 7. Draw-a-Line Straighten Reference Overlay & Live Angle Pill
+        if self._straighten_line is not None:
+            p1, p2 = self._straighten_line
+            painter.setPen(QPen(QColor(10, 10, 10, 200), max(3.5, 4.0 * inv_scale), Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(p1, p2)
+            painter.setPen(QPen(QColor(255, 255, 255, 250), max(1.8, 2.0 * inv_scale), Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(p1, p2)
+
+            dx = p2.x() - p1.x()
+            dy = p2.y() - p1.y()
+            if math.hypot(dx, dy) >= 4.0:
+                ang = CropScene.compute_straighten_delta(p1, p2)
+                ang_text = f"Angle: {ang:+.1f}°"
+                ang_w = fm.horizontalAdvance(ang_text) + (16.0 * inv_scale)
+                ang_h = text_h + (8.0 * inv_scale)
+                pill_rect = QRectF(
+                    p2.x() + (14.0 * inv_scale),
+                    p2.y() - ang_h - (6.0 * inv_scale),
+                    ang_w,
+                    ang_h,
+                )
+                pill_path = QPainterPath()
+                pill_path.addRoundedRect(pill_rect, max(3.0, 4.0 * inv_scale), max(3.0, 4.0 * inv_scale))
+                painter.fillPath(pill_path, QColor(15, 15, 15, 230))
+                painter.setBrush(Qt.NoBrush)
+                painter.setPen(QPen(QColor(255, 255, 255, 100), max(1.0, 1.0 * inv_scale)))
+                painter.drawPath(pill_path)
+                painter.setPen(QColor(255, 255, 255, 255))
+                painter.drawText(pill_rect, Qt.AlignCenter, ang_text)
+
         painter.restore()
 
 
@@ -424,6 +555,9 @@ class CropScene(QGraphicsScene):
     crop_rect_updated = Signal()
     crop_applied = Signal()
     crop_cancelled = Signal()
+    crop_flip_requested = Signal()
+    crop_grid_cycle_requested = Signal()
+    straighten_line_finished = Signal(float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -436,6 +570,7 @@ class CropScene(QGraphicsScene):
         self.pixmap_item: QGraphicsPixmapItem | None = None
         self.crop_enabled: bool = False
         self.allow_ai_expand: bool = False
+        self.straighten_line_mode: bool = False
 
         # Drag state
         self._is_dragging: bool = False
@@ -456,6 +591,8 @@ class CropScene(QGraphicsScene):
         return self.crop_rect_item.rect() if (self.crop_enabled and self.crop_rect_item.isVisible()) else None
 
     def clear_crop_rect(self) -> None:
+        self.set_straighten_line_mode(False)
+        self.crop_rect_item.set_fine_grid_active(False)
         if self.crop_rect_item.isVisible():
             self.crop_rect_item.hide()
             self.crop_rotation_deg = 0.0
@@ -474,6 +611,41 @@ class CropScene(QGraphicsScene):
                 if v.viewport() is not None:
                     v.viewport().update()
             self.crop_rect_updated.emit()
+
+    @staticmethod
+    def compute_straighten_delta(p1: QPointF, p2: QPointF) -> float:
+        """Computes rotation delta (deg) to level the drawn line to 0 deg (horiz) or 90 deg (vert)."""
+        dx = p2.x() - p1.x()
+        dy = p2.y() - p1.y()
+        if abs(dy) <= abs(dx):
+            if dx < 0:
+                dx, dy = -dx, -dy
+            return -math.degrees(math.atan2(dy, dx))
+        if dy < 0:
+            dx, dy = -dx, -dy
+        return math.degrees(math.atan2(dx, dy))
+
+    def set_straighten_line_mode(self, enabled: bool) -> None:
+        self.straighten_line_mode = bool(enabled)
+        if not self.straighten_line_mode:
+            self.crop_rect_item.set_straighten_line(None, None)
+        if self.views():
+            if self.straighten_line_mode:
+                self.views()[0].viewport().setCursor(Qt.CrossCursor)
+            else:
+                self.views()[0].viewport().unsetCursor()
+
+    def set_straighten_deg(self, deg: float) -> None:
+        rot = max(-45.0, min(float(deg), 45.0))
+        self.crop_rotation_deg = rot
+        self.crop_rect_item.set_rotation_deg(rot)
+        if self.pixmap_item is not None and self.sceneRect().isValid():
+            self.pixmap_item.setTransformOriginPoint(self.sceneRect().center())
+            self.pixmap_item.setRotation(rot)
+        if not self.allow_ai_expand and self.crop_rect_item.isVisible():
+            self.crop_rect_item.setRect(self._clamp_rect_to_scene(self.crop_rect_item.rect()))
+        self.crop_rect_item.update()
+        self.crop_rect_updated.emit()
 
     def _crop_bounds_rect(self) -> QRectF:
         s = self.sceneRect()
@@ -512,9 +684,17 @@ class CropScene(QGraphicsScene):
             return
         if event.button() == Qt.LeftButton:
             pos = event.scenePos()
+            if self.straighten_line_mode:
+                self._is_dragging = True
+                self._drag_mode = "straighten_line"
+                self._drag_start_pos = pos
+                self.crop_rect_item.set_straighten_line(pos, pos)
+                event.accept()
+                return
             action, _ = self.crop_rect_item.hit_test(pos)
 
             self._is_dragging = True
+            self.crop_rect_item._is_actively_dragging = True
             self._drag_start_pos = pos
             self._drag_start_rect = self.crop_rect_item.rect()
 
@@ -555,12 +735,22 @@ class CropScene(QGraphicsScene):
 
         # Update hover cursor when not actively dragging
         if not self._is_dragging:
+            if self.straighten_line_mode:
+                if self.views():
+                    self.views()[0].viewport().setCursor(Qt.CrossCursor)
+                super().mouseMoveEvent(event)
+                return
             action, cur = self.crop_rect_item.hit_test(pos)
             if cur is not None and self.views():
                 self.views()[0].viewport().setCursor(cur)
             elif self.views():
                 self.views()[0].viewport().unsetCursor()
             super().mouseMoveEvent(event)
+            return
+
+        if self._drag_mode == "straighten_line":
+            self.crop_rect_item.set_straighten_line(self._drag_start_pos, pos)
+            event.accept()
             return
 
         dx = pos.x() - self._drag_start_pos.x()
@@ -641,26 +831,36 @@ class CropScene(QGraphicsScene):
             new_w = right - left
             new_h = bottom - top
 
+            # Shift+Drag on corner temporarily locks the current aspect ratio during freeform drag
+            effective_ratio = ratio
+            if (
+                effective_ratio is None
+                and self._drag_mode in ("tl", "tr", "bl", "br")
+                and bool(event.modifiers() & Qt.ShiftModifier)
+                and sr.height() > 0
+            ):
+                effective_ratio = sr.width() / sr.height()
+
             # Enforce aspect ratio preset if active
-            if ratio is not None and ratio > 0:
+            if effective_ratio is not None and effective_ratio > 0:
                 if self._drag_mode in ("tc", "bc"):
-                    new_w = new_h * ratio
+                    new_w = new_h * effective_ratio
                     cx = (left + right) / 2.0
                     left = cx - new_w / 2.0
                     right = cx + new_w / 2.0
                 elif self._drag_mode in ("lc", "rc"):
-                    new_h = new_w / ratio
+                    new_h = new_w / effective_ratio
                     cy = (top + bottom) / 2.0
                     top = cy - new_h / 2.0
                     bottom = cy + new_h / 2.0
                 elif self._drag_mode in ("tl", "br"):
-                    new_h = new_w / ratio
+                    new_h = new_w / effective_ratio
                     if "t" in self._drag_mode:
                         top = bottom - new_h
                     else:
                         bottom = top + new_h
                 elif self._drag_mode in ("tr", "bl"):
-                    new_h = new_w / ratio
+                    new_h = new_w / effective_ratio
                     if "t" in self._drag_mode:
                         top = bottom - new_h
                     else:
@@ -678,10 +878,25 @@ class CropScene(QGraphicsScene):
             return
 
         if event.button() == Qt.LeftButton and self._is_dragging:
+            if self._drag_mode == "straighten_line":
+                end_pos = event.scenePos()
+                dist = math.hypot(end_pos.x() - self._drag_start_pos.x(), end_pos.y() - self._drag_start_pos.y())
+                self._is_dragging = False
+                self._drag_mode = "none"
+                self.crop_rect_item.set_straighten_line(None, None)
+                if dist >= 6.0:
+                    delta = self.compute_straighten_delta(self._drag_start_pos, end_pos)
+                    new_rot = max(-15.0, min(15.0, float(self.crop_rotation_deg) + delta))
+                    self.set_straighten_deg(new_rot)
+                    self.set_straighten_line_mode(False)
+                    self.straighten_line_finished.emit(new_rot)
+                event.accept()
+                return
             was_new_unstarted = (
                 self._drag_mode == "new" and not getattr(self, "_new_crop_started", False)
             )
             self._is_dragging = False
+            self.crop_rect_item._is_actively_dragging = False
             self.crop_rect_item._is_rotating = False
             self._drag_mode = "none"
             self.crop_rect_item.update()
@@ -707,6 +922,14 @@ class CropScene(QGraphicsScene):
             return
         elif event.key() == Qt.Key_Escape:
             self.crop_cancelled.emit()
+            event.accept()
+            return
+        elif event.key() == Qt.Key_X:
+            self.crop_flip_requested.emit()
+            event.accept()
+            return
+        elif event.key() == Qt.Key_G:
+            self.crop_grid_cycle_requested.emit()
             event.accept()
             return
         super().keyPressEvent(event)

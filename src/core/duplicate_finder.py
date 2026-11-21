@@ -221,11 +221,17 @@ def similarity_from_distance(dist: int) -> float:
 
 def fast_file_hash(path: Path | str, chunk_size: int = 8192) -> str | None:
     """Computes a fast partial hash of file header + tail + size for O(1) exact candidate grouping."""
+    from src.utils.paths import is_cloud_only_stat
+
     p = Path(path)
-    if not p.is_file():
+    try:
+        st = p.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    if is_cloud_only_stat(st) or not p.is_file():
         return None
     try:
-        size = p.stat().st_size
+        size = st.st_size
         if size == 0:
             return "empty"
         h = hashlib.md5()
@@ -242,8 +248,10 @@ def fast_file_hash(path: Path | str, chunk_size: int = 8192) -> str | None:
 
 def full_file_hash(path: Path | str) -> str | None:
     """Computes full SHA-256 hash of file for 100% exact verification."""
+    from src.utils.paths import is_cloud_only_file
+
     p = Path(path)
-    if not p.is_file():
+    if is_cloud_only_file(p) or not p.is_file():
         return None
     try:
         h = hashlib.sha256()
@@ -632,12 +640,14 @@ class DuplicateDetectionEngine:
                 if blob:
                     arr_bgr = cv2.imdecode(np.frombuffer(blob, np.uint8), cv2.IMREAD_COLOR)
                 elif it.full_path.exists():
-                    try:
-                        arr_bgr = cv2.imread(str(it.full_path), cv2.IMREAD_REDUCED_COLOR_8)
-                        if arr_bgr is None or arr_bgr.size == 0:
-                            arr_bgr = cv2.imread(str(it.full_path), cv2.IMREAD_COLOR)
-                    except Exception:
-                        arr_bgr = None
+                    from src.utils.paths import is_cloud_only_file
+                    if not is_cloud_only_file(it.full_path):
+                        try:
+                            arr_bgr = cv2.imread(str(it.full_path), cv2.IMREAD_REDUCED_COLOR_8)
+                            if arr_bgr is None or arr_bgr.size == 0:
+                                arr_bgr = cv2.imread(str(it.full_path), cv2.IMREAD_COLOR)
+                        except Exception:
+                            arr_bgr = None
 
                 if arr_bgr is not None and arr_bgr.size > 0:
                     arr_gray = cv2.cvtColor(arr_bgr, cv2.COLOR_BGR2GRAY)
@@ -871,10 +881,12 @@ class DuplicateDetectionEngine:
             if blob:
                 arr_gray = cv2.imdecode(np.frombuffer(blob, np.uint8), cv2.IMREAD_GRAYSCALE)
             elif it.full_path.exists():
-                try:
-                    arr_gray = cv2.imread(str(it.full_path), cv2.IMREAD_GRAYSCALE)
-                except Exception:
-                    arr_gray = None
+                from src.utils.paths import is_cloud_only_file
+                if not is_cloud_only_file(it.full_path):
+                    try:
+                        arr_gray = cv2.imread(str(it.full_path), cv2.IMREAD_GRAYSCALE)
+                    except Exception:
+                        arr_gray = None
             if arr_gray is None or arr_gray.size == 0:
                 continue
             global_sharp = compute_sharpness_score(arr_gray)
@@ -897,12 +909,14 @@ class DuplicateDetectionEngine:
                 if arr is not None and arr.size > 0:
                     return compute_sharpness_score(arr)
         if item.full_path.exists():
-            try:
-                arr = cv2.imread(str(item.full_path), cv2.IMREAD_GRAYSCALE)
-                if arr is not None and arr.size > 0:
-                    return compute_sharpness_score(arr)
-            except Exception:
-                pass
+            from src.utils.paths import is_cloud_only_file
+            if not is_cloud_only_file(item.full_path):
+                try:
+                    arr = cv2.imread(str(item.full_path), cv2.IMREAD_GRAYSCALE)
+                    if arr is not None and arr.size > 0:
+                        return compute_sharpness_score(arr)
+                except Exception:
+                    pass
         return 0.0
 
 

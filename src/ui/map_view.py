@@ -1085,6 +1085,9 @@ class WorldMapView(QWidget):
         self._pending_thumb_ids: set[int] = set()
         self._failed_thumb_ids: set[int] = set()
         self._active_thumb_workers: dict[int, Any] = {}
+        self._active_thumb_flags: dict[int, Any] = {}
+        self._thumb_pool: Any = None
+        self._is_paused_fn: Any = None
         self._thumb_refresh_timer = QTimer(self)
         self._thumb_refresh_timer.setSingleShot(True)
         self._thumb_refresh_timer.setInterval(80)
@@ -1177,6 +1180,26 @@ class WorldMapView(QWidget):
             self._thumb_repo = thumb_repo
         self._emit_map_stats()
 
+    def bind_thumbnail_pool(self, pool: Any, is_paused_fn: Any = None) -> None:
+        """Binds the application's managed thumbnail QThreadPool and global pause predicate."""
+        self._thumb_pool = pool
+        self._is_paused_fn = is_paused_fn
+
+    def cancel_pending_thumbnail_work(self, keep_ids: set[int] | None = None) -> None:
+        """Cancels in-flight cluster thumbnail workers (all if keep_ids is None, or those outside keep_ids)."""
+        for mid, flag in list(self._active_thumb_flags.items()):
+            if keep_ids is not None and mid in keep_ids:
+                continue
+            try:
+                flag.set()
+            except Exception:
+                pass
+            self._active_thumb_flags.pop(mid, None)
+            self._active_thumb_workers.pop(mid, None)
+            self._pending_thumb_ids.discard(mid)
+        if keep_ids is None and self._thumb_refresh_timer.isActive():
+            self._thumb_refresh_timer.stop()
+
     @staticmethod
     def _apply_blob_to_cluster(cluster: dict[str, Any], blob: bytes) -> None:
         b64 = base64.b64encode(blob).decode("ascii")
@@ -1245,13 +1268,22 @@ class WorldMapView(QWidget):
         """Asynchronously decodes 1 sample thumbnail from disk for clusters with no cached thumb."""
         if self._repo is None or self._thumb_repo is None:
             return
+        if callable(self._is_paused_fn):
+            try:
+                if self._is_paused_fn():
+                    return
+            except Exception:
+                pass
         engine = getattr(self._repo, "engine", None)
         get_info = getattr(self._repo, "get_media_decode_info_batch", None)
         if engine is None or get_info is None:
             return
 
+        # Cancel in-flight cluster decodes for IDs no longer in the active viewport sample set
+        self.cancel_pending_thumbnail_work(keep_ids=set(sample_ids))
+
         # Cap per-viewport decode burst so rapid panning stays responsive
-        to_decode = [mid for mid in sample_ids if mid not in self._pending_thumb_ids and mid not in self._failed_thumb_ids][:24]
+        to_decode = [mid for mid in sample_ids if mid not in self._pending_thumb_ids and mid not in self._failed_thumb_ids][:12]
         if not to_decode:
             return
 
@@ -1264,13 +1296,16 @@ class WorldMapView(QWidget):
 
         from pathlib import Path
         from PySide6.QtCore import QThreadPool
+        from legacy_reference.imgBrowserv13 import CancellationFlag
         from src.workers.scanner_thumb_worker import ThumbnailDecodeWorker
 
-        pool = QThreadPool.globalInstance()
+        pool = self._thumb_pool if self._thumb_pool is not None else QThreadPool.globalInstance()
         for row in rows:
             mid = int(row["id"])
             file_path = Path(row["folder_path"]) / str(row["filename"])
+            cflag = CancellationFlag()
             self._pending_thumb_ids.add(mid)
+            self._active_thumb_flags[mid] = cflag
             worker = ThumbnailDecodeWorker(
                 engine=engine,
                 media_id=mid,
@@ -1278,6 +1313,7 @@ class WorldMapView(QWidget):
                 mtime=int(row.get("mtime") or 0),
                 is_video=bool(row.get("is_video")),
                 orientation=int(row.get("orientation") or 1),
+                cancel_flag=cflag,
             )
             worker.signals.thumbnail_ready.connect(self._on_cluster_thumbnail_ready)
             worker.signals.error.connect(self._on_cluster_thumbnail_error)
@@ -1286,12 +1322,14 @@ class WorldMapView(QWidget):
 
     @Slot(int, object)
     def _on_cluster_thumbnail_ready(self, media_id: int, qimg: Any) -> None:
-        self._pending_thumb_ids.discard(int(media_id))
-        self._active_thumb_workers.pop(int(media_id), None)
+        mid_int = int(media_id)
+        self._pending_thumb_ids.discard(mid_int)
+        self._active_thumb_workers.pop(mid_int, None)
+        self._active_thumb_flags.pop(mid_int, None)
         blob = None
         if self._thumb_repo is not None and hasattr(self._thumb_repo, "get_webp_blob"):
             try:
-                blob = self._thumb_repo.get_webp_blob(int(media_id))
+                blob = self._thumb_repo.get_webp_blob(mid_int)
             except Exception:
                 blob = None
 
@@ -1308,7 +1346,6 @@ class WorldMapView(QWidget):
 
         b64_url = f"data:image/webp;base64,{base64.b64encode(blob).decode('ascii')}" if blob else None
         updated = False
-        mid_int = int(media_id)
         for c in self._current_clusters:
             if c.get("thumb_url"):
                 continue
@@ -1328,6 +1365,7 @@ class WorldMapView(QWidget):
         mid_int = int(media_id)
         self._pending_thumb_ids.discard(mid_int)
         self._active_thumb_workers.pop(mid_int, None)
+        self._active_thumb_flags.pop(mid_int, None)
         self._failed_thumb_ids.add(mid_int)
 
     def _push_updated_cluster_thumbnails(self) -> None:
@@ -1443,6 +1481,10 @@ class WorldMapView(QWidget):
         super().showEvent(event)
         if self._web_loaded and self.web_view is not None:
             QTimer.singleShot(60, self.safe_invalidate_map_size)
+
+    def hideEvent(self, event: Any) -> None:
+        self.cancel_pending_thumbnail_work()
+        super().hideEvent(event)
 
     def _on_web_load_finished(self, ok: bool) -> None:
         self._web_loaded = ok

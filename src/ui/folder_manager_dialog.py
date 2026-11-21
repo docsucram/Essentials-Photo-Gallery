@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.db.repository import CatalogRepository
+from src.ui.theme_tokens import set_ui_role
 
 
 def _privacy_settings() -> QSettings:
@@ -474,7 +475,8 @@ class FolderManagerDialog(QDialog):
         left_layout.addLayout(folder_ops_row)
 
         self.legend_label = QLabel("↻ Scan Always  •  ✓ Scan Once  •  ✕ Exclude  |  Click Faces/OCR icons to toggle  •  Ctrl/Shift: multi-select")
-        self.legend_label.setStyleSheet("color: #666; font-size: 11px;")
+        self.legend_label.setStyleSheet("font-size: 11px;")
+        set_ui_role(self.legend_label, "muted")
         left_layout.addWidget(self.legend_label)
 
         # Right Pane: Settings for Selected Folder
@@ -484,12 +486,14 @@ class FolderManagerDialog(QDialog):
         right_layout.setSpacing(10)
 
         self.lbl_selected_title = QLabel("Settings for Selected Folder")
-        self.lbl_selected_title.setStyleSheet("font-weight: 600; font-size: 13px;")
+        self.lbl_selected_title.setStyleSheet("font-size: 13px;")
+        set_ui_role(self.lbl_selected_title, "title")
         right_layout.addWidget(self.lbl_selected_title)
 
         self.lbl_selected_path = QLabel("Select a folder on the left.")
         self.lbl_selected_path.setWordWrap(True)
-        self.lbl_selected_path.setStyleSheet("color: #555; font-size: 11px;")
+        self.lbl_selected_path.setStyleSheet("font-size: 11px;")
+        set_ui_role(self.lbl_selected_path, "muted")
         right_layout.addWidget(self.lbl_selected_path)
 
         # 1. Monitoring Policy Radio Group
@@ -539,7 +543,8 @@ class FolderManagerDialog(QDialog):
 
         ocr_cfg_row = QHBoxLayout()
         self.lbl_ocr_backend = QLabel("OCR Engine: detecting...", grp_ai)
-        self.lbl_ocr_backend.setStyleSheet("color: #555; font-size: 11px;")
+        self.lbl_ocr_backend.setStyleSheet("font-size: 11px;")
+        set_ui_role(self.lbl_ocr_backend, "muted")
         self.btn_configure_ocr = QPushButton("OCR Settings in Options...", grp_ai)
         self.btn_configure_ocr.setToolTip("Open Options → Add-ons to choose the OCR engine or set model paths")
         self.btn_configure_ocr.clicked.connect(self._on_configure_ocr_path)

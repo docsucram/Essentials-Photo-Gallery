@@ -10,7 +10,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import cv2
 import numpy as np
@@ -19,6 +19,7 @@ from PySide6.QtCore import QObject, QRunnable, Signal
 from src.core.ocr_engine import OcrEngine
 from src.db.connection import DualDatabaseEngine
 from src.db.repository import CatalogRepository, ThumbnailRepository
+from src.utils.paths import is_cloud_only_file
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 class OcrWorkerSignals(QObject):
     started = Signal()
     progressed = Signal(int, int)  # (done, total)
+    media_updated = Signal(int)  # media_id
     status_message = Signal(str)
     finished = Signal(int)  # processed_count
     error = Signal(str)
@@ -39,6 +41,7 @@ class OcrScanWorker(QRunnable):
         engine: DualDatabaseEngine,
         *,
         folder_id: int | None = None,
+        media_ids: Sequence[int] | None = None,
         batch_size: int = 24,
         ocr_engine: OcrEngine | None = None,
     ) -> None:
@@ -48,6 +51,7 @@ class OcrScanWorker(QRunnable):
         self.repo = CatalogRepository(engine)
         self.thumb_repo = ThumbnailRepository(engine)
         self.folder_id = folder_id
+        self.media_ids = [int(m) for m in media_ids] if media_ids else None
         self.batch_size = max(1, int(batch_size))
         self.ocr_engine = ocr_engine or OcrEngine()
         self.signals = OcrWorkerSignals()
@@ -61,7 +65,7 @@ class OcrScanWorker(QRunnable):
 
     def _load_rgb_proxy(self, media_id: int, file_path: Path) -> np.ndarray | None:
         """Load up to 1024px RGB proxy from disk, falling back to cached WebP thumbnail."""
-        if file_path.is_file():
+        if not is_cloud_only_file(file_path) and file_path.is_file():
             try:
                 raw = np.fromfile(str(file_path), dtype=np.uint8)
                 bgr = cv2.imdecode(raw, cv2.IMREAD_COLOR)
@@ -97,32 +101,50 @@ class OcrScanWorker(QRunnable):
             self.signals.started.emit()
             conn = self.engine.catalog_conn()
 
-            folder_filter = ""
-            params: list[Any] = []
-            if self.folder_id is not None:
-                folder_filter = """
-                    AND m.folder_id IN (
-                        WITH RECURSIVE sub(id) AS (
-                            SELECT ?
-                            UNION ALL
-                            SELECT f2.id FROM folders f2 JOIN sub s ON f2.parent_id = s.id
-                        )
-                        SELECT id FROM sub
-                    )
+            if self.media_ids:
+                placeholders = ",".join("?" for _ in self.media_ids)
+                conn.execute(
+                    f"UPDATE media SET ocr_scanned = 0 WHERE id IN ({placeholders});",
+                    self.media_ids,
+                )
+                conn.commit()
+                where_clause = f"""
+                    WHERE m.id IN ({placeholders})
+                      AND COALESCE(m.is_missing, 0) = 0
+                      AND COALESCE(m.is_video, 0) = 0
+                      AND COALESCE(m.ocr_scanned, 0) = 0
                 """
-                params.append(int(self.folder_id))
+                params: list[Any] = list(self.media_ids)
+            else:
+                folder_filter = ""
+                params = []
+                if self.folder_id is not None:
+                    folder_filter = """
+                        AND m.folder_id IN (
+                            WITH RECURSIVE sub(id) AS (
+                                SELECT ?
+                                UNION ALL
+                                SELECT f2.id FROM folders f2 JOIN sub s ON f2.parent_id = s.id
+                            )
+                            SELECT id FROM sub
+                        )
+                    """
+                    params.append(int(self.folder_id))
+                where_clause = f"""
+                    WHERE COALESCE(m.is_missing, 0) = 0
+                      AND COALESCE(m.is_video, 0) = 0
+                      AND COALESCE(m.ocr_scanned, 0) = 0
+                      AND COALESCE(f.scan_ocr, 1) = 1
+                      AND COALESCE(f.monitor_mode, 'always') != 'excluded'
+                      {folder_filter}
+                """
 
             count_row = conn.execute(
                 f"""
                 SELECT COUNT(*) AS cnt
                 FROM media m
                 JOIN folders f ON f.id = m.folder_id
-                WHERE COALESCE(m.is_missing, 0) = 0
-                  AND COALESCE(m.is_video, 0) = 0
-                  AND COALESCE(m.ocr_scanned, 0) = 0
-                  AND COALESCE(f.scan_ocr, 1) = 1
-                  AND COALESCE(f.monitor_mode, 'always') != 'excluded'
-                  {folder_filter};
+                {where_clause};
                 """,
                 params,
             ).fetchone()
@@ -134,22 +156,19 @@ class OcrScanWorker(QRunnable):
             self.signals.status_message.emit(f"Indexing text in {total:,} photo(s) (OCR)...")
             self.signals.progressed.emit(0, total)
 
+            last_seen_id = 0
             while not self._is_cancelled():
                 batch_rows = list(conn.execute(
                     f"""
                     SELECT m.id, m.filename, f.path AS folder_path
                     FROM media m
                     JOIN folders f ON f.id = m.folder_id
-                    WHERE COALESCE(m.is_missing, 0) = 0
-                      AND COALESCE(m.is_video, 0) = 0
-                      AND COALESCE(m.ocr_scanned, 0) = 0
-                      AND COALESCE(f.scan_ocr, 1) = 1
-                      AND COALESCE(f.monitor_mode, 'always') != 'excluded'
-                      {folder_filter}
+                    {where_clause}
+                      AND m.id > ?
                     ORDER BY m.id ASC
                     LIMIT ?;
                     """,
-                    params + [self.batch_size],
+                    params + [last_seen_id, self.batch_size],
                 ).fetchall() or ())
                 if not batch_rows:
                     break
@@ -158,10 +177,16 @@ class OcrScanWorker(QRunnable):
                     if self._is_cancelled():
                         break
                     mid = int(row["id"])
+                    last_seen_id = mid
                     fpath = Path(str(row["folder_path"])) / str(row["filename"])
+                    if is_cloud_only_file(fpath):
+                        processed += 1
+                        self.signals.progressed.emit(min(processed, total), total)
+                        continue
                     rgb = self._load_rgb_proxy(mid, fpath)
                     text = self.ocr_engine.extract_text(rgb) if rgb is not None else ""
                     self.repo.update_media_ocr(mid, text)
+                    self.signals.media_updated.emit(mid)
                     processed += 1
                     self.signals.progressed.emit(min(processed, total), total)
                     # Yield briefly so background OCR never starves UI navigation or thumbnail workers

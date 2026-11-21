@@ -2,7 +2,7 @@
 ; Essentials Photo Gallery (PhotoGallery64) Windows x64 Installer
 
 #define MyAppName "Essentials Photo Gallery"
-#define MyAppVersion "0.14.0"
+#define MyAppVersion "0.15.0"
 #define MyAppPublisher "Essentials Software"
 #define MyAppURL "https://github.com/docsucram/Essentials-Photo-Gallery"
 #define MyAppExeName "EssentialsPhotoGallery.exe"

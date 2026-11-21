@@ -223,6 +223,18 @@ QComboBox QAbstractItemView {
     outline: none;
 }
 
+QComboBox QAbstractItemView::item {
+    background-color: #FFFFFF;
+    color: #111827;
+    padding: 4px 8px;
+}
+
+QComboBox QAbstractItemView::item:selected,
+QComboBox QAbstractItemView::item:hover {
+    background-color: #E8F2FC;
+    color: #0F172A;
+}
+
 /* Menus */
 QMenu {
     background-color: #FFFFFF;
@@ -324,4 +336,79 @@ QScrollBar::sub-page:horizontal, QScrollBar::add-page:horizontal {
 QAbstractScrollArea::corner {
     background: transparent;
     border: none;
+}
+
+/* ============================================================================
+   Semantic uiRole Rules (ThemeTokens: modern)
+   ============================================================================ */
+QWidget[uiRole="surface"] {
+    background-color: #F8FAFC;
+    color: #0F172A;
+}
+
+QFrame[uiRole="elevated"], QWidget[uiRole="elevated"] {
+    background-color: #FFFFFF;
+    color: #0F172A;
+    border: 1px solid #CBD5E1;
+    border-radius: 6px;
+}
+
+QFrame[uiRole="card"], QWidget[uiRole="card"] {
+    background-color: #F1F5F9;
+    color: #0F172A;
+    border: 1px solid #CBD5E1;
+    border-radius: 6px;
+}
+
+QLabel[uiRole="title"] {
+    color: #0F172A;
+    font-weight: 600;
+    background: transparent;
+}
+
+QLabel[uiRole="muted"] {
+    color: #475569;
+    background: transparent;
+}
+
+QLabel[uiRole="empty_hint"] {
+    padding: 16px;
+    color: #475569;
+    background-color: #F1F5F9;
+    border: 1px dashed #CBD5E1;
+    border-radius: 6px;
+}
+
+QPushButton[uiRole="primary_btn"] {
+    background-color: #2563EB;
+    color: #FFFFFF;
+    border: 1px solid #1D4ED8;
+    font-weight: 600;
+    padding: 6px 16px;
+    border-radius: 4px;
+}
+QPushButton[uiRole="primary_btn"]:hover {
+    background-color: #1D4ED8;
+}
+QPushButton[uiRole="primary_btn"]:disabled {
+    background-color: #94A3B8;
+    border-color: #94A3B8;
+    color: #F1F5F9;
+}
+
+QPushButton[uiRole="danger_btn"] {
+    background-color: #DC2626;
+    color: #FFFFFF;
+    border: 1px solid #B91C1C;
+    font-weight: 600;
+    padding: 6px 14px;
+    border-radius: 4px;
+}
+QPushButton[uiRole="danger_btn"]:hover {
+    background-color: #B91C1C;
+}
+QPushButton[uiRole="danger_btn"]:disabled {
+    background-color: #94A3B8;
+    border-color: #94A3B8;
+    color: #F1F5F9;
 }

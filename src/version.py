@@ -11,7 +11,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
-APP_VERSION = "0.14.0"
+APP_VERSION = "0.15.0"
 APP_NAME = "Essentials Photo Gallery"
 APP_MUTEX_NAME = "EssentialsPhotoGallery_Mutex"
 GITHUB_RELEASES_API = "https://api.github.com/repos/docsucram/Essentials-Photo-Gallery/releases/latest"

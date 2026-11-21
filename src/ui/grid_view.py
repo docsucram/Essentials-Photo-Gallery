@@ -3084,8 +3084,11 @@ class ThumbnailGridView(QListView):
                 act_prop.triggered.connect(lambda: main_win.toggle_right_pane("info"))
 
         else:
-            # Photo card context menu
-            # 1. View file (Bold default action)
+            # Photo card context menu (WLPG-faithful structure)
+            sel_mids = self.selected_media_ids()
+            target_mids = sel_mids if (sel_mids and media_id in sel_mids) else [media_id]
+
+            # 1. Open: View file (bold), Compare (C), Open with ▸, Open file location
             act_view = menu.addAction("View file")
             bold_font = QFont(act_view.font())
             bold_font.setBold(True)
@@ -3095,15 +3098,11 @@ class ThumbnailGridView(QListView):
             else:
                 act_view.triggered.connect(lambda: self.media_activated.emit(media_id))
 
-            sel_ids_for_cmp = self.selected_media_ids()
-            if len(sel_ids_for_cmp) >= 2:
-                act_cmp = menu.addAction(make_wlpg_icon("layout_grid", 16), "Compare Selected Photos (C)")
-                act_cmp.triggered.connect(lambda _chk=False, ids=list(sel_ids_for_cmp): self.compare_requested.emit(ids))
-            if not is_video:
-                act_sim = menu.addAction("Find Similar Photos...")
-                act_sim.triggered.connect(lambda _chk=False, mid=int(media_id): self.find_similar_requested.emit(mid))
+            if len(sel_mids) >= 2:
+                act_cmp = menu.addAction(make_wlpg_icon("layout_grid", 16), "Compare")
+                act_cmp.setShortcut("C")
+                act_cmp.triggered.connect(lambda _chk=False, ids=list(sel_mids): self.compare_requested.emit(ids))
 
-            # 2. Open with ▸ (Populated with Windows registered apps)
             open_with_menu = menu.addMenu("Open with")
             menu._open_with_menu = open_with_menu
             open_with_menu.setFont(QFont("Segoe UI", 9))
@@ -3144,84 +3143,85 @@ class ThumbnailGridView(QListView):
             if is_mw:
                 act_choose.triggered.connect(lambda: main_win.open_with_app_for_media(media_id, "choose"))
 
-            # 3. Open file location
             act_loc = menu.addAction("Open file location")
             if is_mw:
                 act_loc.triggered.connect(lambda: main_win.open_file_location_for_media(media_id))
 
             menu.addSeparator()
 
-            # 4. Set as desktop background
+            # 2. Quick Actions (Classic WLPG Order)
             act_bg = menu.addAction("Set as desktop background")
-            if is_mw:
+            act_bg.setEnabled(len(target_mids) == 1)
+            if is_mw and len(target_mids) == 1:
                 act_bg.triggered.connect(lambda: main_win.set_desktop_background_for_media(media_id))
 
-            act_print = menu.addAction("Print...")
-            act_print.setShortcut("Ctrl+P")
-            if is_mw:
-                act_print.triggered.connect(main_win.open_print_dialog)
-
-            # Create Studio Submenu
-            create_menu = menu.addMenu("Create")
-            act_pano = create_menu.addAction("Panoramic photo...")
-            act_fuse = create_menu.addAction("Photo Fuse...")
-            act_col = create_menu.addAction("Auto Collage...")
-            if is_mw:
-                act_pano.triggered.connect(main_win.open_panorama_dialog)
-                act_fuse.triggered.connect(main_win.open_photo_fuse_dialog)
-                act_col.triggered.connect(main_win.open_collage_dialog)
-
-            # 5. Rotate right
             act_rr = menu.addAction("Rotate right")
+            act_rr.setShortcut("Ctrl+.")
             if is_mw:
                 act_rr.triggered.connect(lambda: main_win.rotate_selection(clockwise=True))
 
-            # 6. Rotate left
             act_rl = menu.addAction("Rotate left")
+            act_rl.setShortcut("Ctrl+,")
             if is_mw:
                 act_rl.triggered.connect(lambda: main_win.rotate_selection(clockwise=False))
 
             menu.addSeparator()
 
-            # 7. Copy
+            # 3. Organize & AI
+            self._append_album_menu_actions(menu, media_id, main_win)
+
+            create_menu = menu.addMenu("Create")
+            menu._create_menu = create_menu
+            create_menu.setFont(QFont("Segoe UI", 9))
+            act_pano = create_menu.addAction("Panoramic photo...")
+            act_fuse = create_menu.addAction("Photo Fuse...")
+            act_col = create_menu.addAction("Collage...")
+            if is_mw:
+                act_pano.triggered.connect(main_win.open_panorama_dialog)
+                act_fuse.triggered.connect(main_win.open_photo_fuse_dialog)
+                act_col.triggered.connect(main_win.open_collage_dialog)
+
+            ai_menu = menu.addMenu("AI && Scan")
+            menu._ai_scan_menu = ai_menu
+            ai_menu.setFont(QFont("Segoe UI", 9))
+            act_sim = ai_menu.addAction("Find Similar Photos...")
+            act_sim.triggered.connect(lambda _chk=False, mid=int(media_id): self.find_similar_requested.emit(mid))
+            act_rescan = ai_menu.addAction("Rescan for faces")
+            if is_mw:
+                act_rescan.triggered.connect(lambda checked=False, t_ids=list(target_mids): main_win.rescan_faces_for_selection(t_ids))
+            act_ocr = ai_menu.addAction("Scan for text (OCR)")
+            if is_mw and hasattr(main_win, "scan_ocr_for_selection"):
+                act_ocr.triggered.connect(lambda checked=False, t_ids=list(target_mids): main_win.scan_ocr_for_selection(t_ids))
+
+            menu.addSeparator()
+
+            # 4. File Actions (Classic WLPG Order)
             act_copy = menu.addAction("Copy")
             act_copy.setShortcut("Ctrl+C")
             if is_mw:
                 act_copy.triggered.connect(main_win.copy_selection_to_clipboard)
 
-            # 8. Delete
             act_del = menu.addAction("Delete")
             act_del.setShortcut("Del")
             if is_mw:
                 act_del.triggered.connect(main_win.delete_selection_to_recycle_bin)
 
-            # 9. Rename...
             act_ren = menu.addAction("Rename...")
+            act_ren.setShortcut("F2")
             if is_mw:
                 act_ren.triggered.connect(main_win.rename_selection)
 
-            # 10. Resize...
-            act_res = menu.addAction("Resize...")
+            act_res = menu.addAction("Export / Resize...")
             if is_mw:
                 act_res.triggered.connect(main_win.open_resize_dialog)
 
-            # 11. Rescan for faces
-            act_rescan = menu.addAction("Rescan for faces")
-            if is_mw:
-                sel_mids = self.selected_media_ids()
-                target_mids = sel_mids if (sel_mids and media_id in sel_mids) else [media_id]
-                act_rescan.triggered.connect(lambda checked=False, t_ids=target_mids: main_win.rescan_faces_for_selection(t_ids))
-
             menu.addSeparator()
 
-            self._append_album_menu_actions(menu, media_id, main_win)
-            menu.addSeparator()
-
-            # 12. Properties
+            # 5. Properties (Always last)
             act_prop = menu.addAction("Properties")
             act_prop.setShortcut("Alt+Enter")
             if is_mw and hasattr(main_win, "open_file_properties"):
-                target_mid = media_id if (media_id is not None) else (selected_ids[0] if selected_ids else None)
+                target_mid = media_id if (media_id is not None) else (target_mids[0] if target_mids else None)
                 act_prop.triggered.connect(lambda checked=False, mid=target_mid: main_win.open_file_properties(mid))
             elif is_mw and hasattr(main_win, "toggle_right_pane"):
                 act_prop.triggered.connect(lambda: main_win.toggle_right_pane("info"))

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSettings, Qt, QSize, QThread, Signal, Slot
+from src.ui.theme_tokens import menu_stylesheet
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QImage, QImageReader, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -597,20 +598,7 @@ class _ImageComparisonCard(QFrame):
     def contextMenuEvent(self, event: Any) -> None:
         self.card_selected.emit(self.item.media_id)
         menu = QMenu(self)
-        if self.is_dark:
-            menu_qss = (
-                "QMenu { background-color: #1E242C; color: #E2E8F0; border: 1px solid #334155; padding: 4px; }"
-                "QMenu::item { padding: 5px 20px 5px 12px; border-radius: 3px; color: #E2E8F0; background: transparent; }"
-                "QMenu::item:selected { background-color: #2C415A; color: #F8FAFC; }"
-                "QMenu::separator { height: 1px; background: #334155; margin: 4px 8px; }"
-            )
-        else:
-            menu_qss = (
-                "QMenu { background-color: #FFFFFF; color: #0F172A; border: 1px solid #CBD5E1; padding: 4px; }"
-                "QMenu::item { padding: 5px 20px 5px 12px; border-radius: 3px; color: #0F172A; background: transparent; }"
-                "QMenu::item:selected { background-color: #E2E8F0; color: #0F172A; }"
-                "QMenu::separator { height: 1px; background: #E2E8F0; margin: 4px 8px; }"
-            )
+        menu_qss = menu_stylesheet(is_dark=self.is_dark)
         menu.setStyleSheet(menu_qss)
 
         act_keep = menu.addAction("✓ Select to Keep" if not self.item.is_recommended_keep else "✓ Keeping This Copy")

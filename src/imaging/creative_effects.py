@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 import cv2
@@ -548,6 +549,7 @@ def refine_mask_brush(
     radius: int = 24,
     mode: str = "keep_color",
     smart: bool = True,
+    tolerance: float | None = None,
 ) -> np.ndarray:
     """
     Edge-aware bilateral brush for interactive mask touch-up:
@@ -589,12 +591,13 @@ def refine_mask_brush(
         d_lab = roi_lab - seed_lab
         # Weight chroma (a, b) slightly higher than luminance so hue boundaries snap cleanly
         dist_lab = np.sqrt(0.55 * d_lab[:, :, 0] ** 2 + 1.25 * d_lab[:, :, 1] ** 2 + 1.25 * d_lab[:, :, 2] ** 2)
-        tol_mask = (dist_lab <= 28.0).astype(np.uint8) * 255
+        tol_lab = 28.0 if tolerance is None else max(10.0, min(52.0, float(tolerance) * 90.0))
+        tol_mask = (dist_lab <= tol_lab).astype(np.uint8) * 255
         tol_mask[sy_loc, sx_loc] = 255
         ff_mask = np.zeros((tol_mask.shape[0] + 2, tol_mask.shape[1] + 2), dtype=np.uint8)
         cv2.floodFill(tol_mask, ff_mask, (sx_loc, sy_loc), 128)
         connected = (tol_mask == 128).astype(np.float32)
-        soft_edge = np.exp(-dist_lab / 22.0).astype(np.float32)
+        soft_edge = np.exp(-dist_lab / max(10.0, tol_lab * 0.78)).astype(np.float32)
         smart_affinity = np.clip(0.85 * connected + 0.15 * soft_edge, 0.0, 1.0)
         smart_affinity = cv2.GaussianBlur(smart_affinity, (3, 3), 0.7)
         brush_alpha = np.clip(spatial_w * smart_affinity, 0.0, 1.0).astype(np.float32)
@@ -831,6 +834,8 @@ class DepthAndMatteEngine:
         self._depth_model_name: str | None = None
         self._matte_session: Any = None
         self._matte_model_name: str | None = None
+        self._normal_session: Any = None
+        self._normal_model_name: str | None = None
         self._cache: dict[tuple[Any, int, int], tuple[np.ndarray, np.ndarray]] = {}
         self._base_cache: dict[Any, tuple[np.ndarray, np.ndarray]] = {}
 
@@ -893,6 +898,17 @@ class DepthAndMatteEngine:
             ])
             if matte_path:
                 self._init_single_matte_session(matte_path)
+
+            normal_path = self._find_model_file([
+                "dsine.onnx",
+                "normal_bae.onnx",
+            ])
+            if normal_path:
+                sess_opts = ort.SessionOptions()
+                sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                self._normal_session = ort.InferenceSession(str(normal_path), sess_opts, providers=prov_list)
+                self._normal_model_name = normal_path.name
+                logger.info("Normal session loaded: %s with providers %s", normal_path.name, prov_list)
         except Exception as ex:
             logger.debug("ONNX session initialization skipped / fallback active: %s", ex)
 
@@ -1101,6 +1117,117 @@ class DepthAndMatteEngine:
         far_w = (depth_map * (1.0 - alpha_matte)).astype(np.float32)
         self._cache[w_key] = (near_w, far_w)
         return depth_map, alpha_matte, near_w, far_w
+
+    def get_refined_depth_and_normals(
+        self,
+        image_rgb: np.ndarray,
+        media_id: Any = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Returns (refined_depth, alpha_matte, normal_map) where:
+        - refined_depth: float32 (H, W) [0.0=near, 1.0=far] snapped via Joint Guided Filter.
+        - alpha_matte: float32 (H, W) [0.0=bg, 1.0=subject].
+        - normal_map: float32 (H, W, 3) unit 3D surface normals (Nx, Ny, Nz) with Nz > 0.
+        Cached by (cache_id, w, h, 'normals') for real-time virtual light manipulation.
+        """
+        depth_map, alpha_matte = self.get_depth_and_matte(image_rgb, media_id=media_id)
+        h, w = image_rgb.shape[:2]
+        if media_id is not None:
+            cache_id = media_id
+        else:
+            cache_id = (
+                image_rgb.shape,
+                int(image_rgb[0, 0, 0]),
+                int(image_rgb[-1, -1, 0]),
+                int(image_rgb[h // 2, w // 2, 0]),
+            )
+        n_key = (cache_id, w, h, "normals")
+        if n_key in self._cache:
+            refined_d, normals = self._cache[n_key]
+            return refined_d, alpha_matte, normals
+
+        scale = min(1.0, 512.0 / float(max(1, max(h, w))))
+        ww = max(16, int(round(w * scale)))
+        wh = max(16, int(round(h * scale)))
+        if (ww, wh) != (w, h):
+            work_rgb = cv2.resize(image_rgb, (ww, wh), interpolation=cv2.INTER_AREA)
+            work_depth = cv2.resize(depth_map, (ww, wh), interpolation=cv2.INTER_LINEAR)
+            work_matte = cv2.resize(alpha_matte, (ww, wh), interpolation=cv2.INTER_LINEAR)
+        else:
+            work_rgb = image_rgb
+            work_depth = depth_map
+            work_matte = alpha_matte
+
+        work_bgr = cv2.cvtColor(work_rgb, cv2.COLOR_RGB2BGR)
+        refined_work = np.clip(
+            guided_filter_matte(work_bgr, work_depth, radius=12, eps=2e-3, subsample=2),
+            0.0,
+            1.0,
+        ).astype(np.float32)
+
+        normal_work: np.ndarray | None = None
+        if self._normal_session is not None:
+            try:
+                input_name = self._normal_session.get_inputs()[0].name
+                in_shape = self._normal_session.get_inputs()[0].shape
+                th = in_shape[2] if len(in_shape) == 4 and isinstance(in_shape[2], int) and in_shape[2] > 0 else 384
+                tw = in_shape[3] if len(in_shape) == 4 and isinstance(in_shape[3], int) and in_shape[3] > 0 else 384
+                img_f = cv2.resize(work_rgb, (tw, th), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+                blob = ((img_f - 0.5) / 0.5).transpose(2, 0, 1)[None, ...].astype(np.float32)
+                out = self._normal_session.run(None, {input_name: blob})[0]
+                out_chw = out[0] if out.ndim == 4 else out
+                n_hw3 = np.transpose(out_chw[:3], (1, 2, 0)).astype(np.float32)
+                n_hw3 = cv2.resize(n_hw3, (ww, wh), interpolation=cv2.INTER_LINEAR)
+                n_hw3[:, :, 2] = np.maximum(np.abs(n_hw3[:, :, 2]), 0.1)
+                norm = np.linalg.norm(n_hw3, axis=2, keepdims=True)
+                normal_work = (n_hw3 / np.maximum(norm, 1e-6)).astype(np.float32)
+            except Exception:
+                normal_work = None
+
+        if normal_work is None:
+            elev = 1.0 - refined_work
+            z_fine = cv2.GaussianBlur(elev, (0, 0), sigmaX=1.5)
+            z_coarse = cv2.GaussianBlur(elev, (0, 0), sigmaX=5.0)
+            z_blend = (0.55 * z_fine + 0.45 * z_coarse).astype(np.float32)
+            gx = cv2.Scharr(z_blend, cv2.CV_32F, 1, 0) / 32.0
+            gy = cv2.Scharr(z_blend, cv2.CV_32F, 0, 1) / 32.0
+
+            fg_bin = (work_matte > 0.35).astype(np.uint8)
+            if np.any(fg_bin):
+                dt = cv2.distanceTransform(fg_bin, cv2.DIST_L2, 5).astype(np.float32)
+                dt_max = float(np.max(dt))
+                if dt_max > 1.0:
+                    dome = np.sqrt(np.clip(dt / dt_max, 0.0, 1.0)) * work_matte
+                    dome = cv2.GaussianBlur(dome, (0, 0), sigmaX=2.5)
+                    dgx = (cv2.Scharr(dome, cv2.CV_32F, 1, 0) / 32.0) * (dt_max * 0.04)
+                    dgy = (cv2.Scharr(dome, cv2.CV_32F, 0, 1) / 32.0) * (dt_max * 0.04)
+                    gx = gx + 0.45 * dgx
+                    gy = gy + 0.45 * dgy
+
+            # Subtle luminance high-pass micro-relief so specular highlights glint on texture
+            gray_f = cv2.cvtColor(work_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+            hp = gray_f - cv2.GaussianBlur(gray_f, (0, 0), sigmaX=2.0)
+            gx = gx + 0.14 * (cv2.Scharr(hp, cv2.CV_32F, 1, 0) / 32.0)
+            gy = gy + 0.14 * (cv2.Scharr(hp, cv2.CV_32F, 0, 1) / 32.0)
+
+            nx = -gx * 3.2
+            ny = -gy * 3.2
+            nz = np.ones_like(nx, dtype=np.float32)
+            n_stack = np.stack([nx, ny, nz], axis=-1).astype(np.float32)
+            norm = np.linalg.norm(n_stack, axis=2, keepdims=True)
+            normal_work = (n_stack / np.maximum(norm, 1e-6)).astype(np.float32)
+
+        if (ww, wh) != (w, h):
+            refined_out = cv2.resize(refined_work, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+            normal_out = cv2.resize(normal_work, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+            n_norm = np.linalg.norm(normal_out, axis=2, keepdims=True)
+            normal_out = (normal_out / np.maximum(n_norm, 1e-6)).astype(np.float32)
+        else:
+            refined_out = refined_work
+            normal_out = normal_work
+
+        self._cache[n_key] = (refined_out, normal_out)
+        return refined_out, alpha_matte, normal_out
 
     def get_region_mask(
         self,
@@ -1313,6 +1440,464 @@ def get_depth_and_matte_engine() -> DepthAndMatteEngine:
     if _SHARED_DEPTH_ENGINE is None:
         _SHARED_DEPTH_ENGINE = DepthAndMatteEngine()
     return _SHARED_DEPTH_ENGINE
+
+
+# =============================================================================
+# 2b. Depth & Light 2.0: 3D Surface-Normal Relighting & Virtual Light Studio
+# =============================================================================
+
+_SRGB_TO_LIN_LUT = np.power(np.arange(256, dtype=np.float32) / 255.0, 2.2).astype(np.float32)
+_LIN_TO_SRGB_LUT = np.clip(
+    np.round(np.power(np.linspace(0.0, 1.0, 4096, dtype=np.float32), 1.0 / 2.2) * 255.0),
+    0,
+    255,
+).astype(np.uint8)
+_UV_GRID_CACHE: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+
+
+def _get_cached_uv_grids(w: int, h: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    key = (int(w), int(h))
+    cached = _UV_GRID_CACHE.get(key)
+    if cached is not None:
+        return cached
+    aspect = float(w) / float(max(1, h))
+    u = np.linspace(0.0, aspect, w, dtype=np.float32)[None, :]
+    v = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, None]
+    u_norm = np.linspace(0.0, 1.0, w, dtype=np.float32)[None, :]
+    v_norm = v
+    if len(_UV_GRID_CACHE) >= 16:
+        _UV_GRID_CACHE.pop(next(iter(_UV_GRID_CACHE)))
+    val = (u, v, u_norm, v_norm)
+    _UV_GRID_CACHE[key] = val
+    return val
+
+
+def make_default_virtual_light(**overrides: Any) -> dict[str, Any]:
+    """Creates a normalized virtual 3D light descriptor for PhotoAdjustmentRecipe."""
+    light: dict[str, Any] = {
+        "enabled": True,
+        "type": "point",
+        "x": 0.25,
+        "y": 0.25,
+        "z": 0.25,
+        "aim_x": 0.50,
+        "aim_y": 0.50,
+        "cone_angle": 40.0,
+        "kelvin": 4500,
+        "color": "",
+        "intensity": 70.0,
+        "softness": 45.0,
+        "gloss": 30.0,
+        "depth_from": 0.0,
+        "depth_to": 1.0,
+        "gobo": "none",
+    }
+    light.update(overrides)
+    return light
+
+
+def kelvin_to_rgb_srgb(kelvin: float) -> tuple[int, int, int]:
+    """Converts color temperature in Kelvin (1800K..10000K) to (R, G, B) uint8 sRGB."""
+    temp = max(1000.0, min(40000.0, float(kelvin))) / 100.0
+    if temp <= 66.0:
+        r = 255.0
+        g = 99.4708025861 * math.log(max(1.0, temp)) - 161.1195681661
+        if temp <= 19.0:
+            b = 0.0
+        else:
+            b = 138.5177312231 * math.log(max(1.0, temp - 10.0)) - 305.0447927307
+    else:
+        r = 329.698727446 * ((temp - 60.0) ** -0.1332047592)
+        g = 288.1221695283 * ((temp - 60.0) ** -0.0755148492)
+        b = 255.0
+    return (
+        int(max(0, min(255, round(r)))),
+        int(max(0, min(255, round(g)))),
+        int(max(0, min(255, round(b)))),
+    )
+
+
+def parse_hex_color(hex_str: str) -> tuple[int, int, int] | None:
+    s = (hex_str or "").strip().lstrip("#")
+    if len(s) != 6:
+        return None
+    try:
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except ValueError:
+        return None
+
+
+def light_color_srgb(light: dict[str, Any]) -> tuple[int, int, int]:
+    parsed = parse_hex_color(str(light.get("color", "")))
+    if parsed is not None:
+        return parsed
+    return kelvin_to_rgb_srgb(float(light.get("kelvin", 4500)))
+
+
+def light_color_linear(light: dict[str, Any]) -> np.ndarray:
+    r, g, b = light_color_srgb(light)
+    return np.power(np.array([r, g, b], dtype=np.float32) / 255.0, 2.2).astype(np.float32)
+
+
+RELIGHT_LOOK_PRESETS: list[dict[str, Any]] = [
+    {
+        "id": "warm_streetlamp",
+        "name": "Warm Streetlamp",
+        "preview_style": "warm_streetlamp",
+        "preview_colors": ("#ff7e28", "#2d1a10"),
+        "ambient_dim": 45.0,
+        "lights": [
+            make_default_virtual_light(
+                type="spot", x=0.18, y=0.15, z=0.20, aim_x=0.52, aim_y=0.52,
+                cone_angle=48.0, kelvin=2100, color="#ff7e28", intensity=85.0,
+                softness=40.0, gloss=55.0, depth_from=0.0, depth_to=0.85,
+            ),
+        ],
+    },
+    {
+        "id": "golden_rim",
+        "name": "Golden Rim",
+        "preview_style": "golden_rim",
+        "preview_colors": ("#ffb85c", "#3a2b1c"),
+        "ambient_dim": 20.0,
+        "lights": [
+            make_default_virtual_light(
+                type="rim", x=0.84, y=0.18, z=0.75, aim_x=0.48, aim_y=0.45,
+                kelvin=3200, color="#ffb85c", intensity=88.0, softness=45.0,
+                gloss=40.0, depth_from=0.0, depth_to=0.70,
+            ),
+            make_default_virtual_light(
+                type="point", x=0.22, y=0.35, z=0.15, kelvin=5200, color="",
+                intensity=30.0, softness=75.0, gloss=15.0, depth_from=0.0, depth_to=0.55,
+            ),
+        ],
+    },
+    {
+        "id": "studio_rembrandt",
+        "name": "Rembrandt",
+        "preview_style": "studio_rembrandt",
+        "preview_colors": ("#ffe8d5", "#23252a"),
+        "ambient_dim": 35.0,
+        "lights": [
+            make_default_virtual_light(
+                type="spot", x=0.22, y=0.20, z=0.18, aim_x=0.52, aim_y=0.48,
+                cone_angle=38.0, kelvin=4600, color="#ffe8d5", intensity=82.0,
+                softness=55.0, gloss=28.0, depth_from=0.0, depth_to=0.65,
+            ),
+            make_default_virtual_light(
+                type="point", x=0.80, y=0.55, z=0.30, kelvin=6200, color="",
+                intensity=22.0, softness=85.0, gloss=5.0, depth_from=0.0, depth_to=0.70,
+            ),
+        ],
+    },
+    {
+        "id": "dual_neon",
+        "name": "Dual Neon",
+        "preview_style": "dual_neon",
+        "preview_colors": ("#00e5ff", "#ff2a9d"),
+        "ambient_dim": 55.0,
+        "lights": [
+            make_default_virtual_light(
+                type="rim", x=0.12, y=0.38, z=0.40, aim_x=0.50, aim_y=0.48,
+                kelvin=6500, color="#00e5ff", intensity=88.0, softness=35.0,
+                gloss=65.0, depth_from=0.0, depth_to=0.75,
+            ),
+            make_default_virtual_light(
+                type="rim", x=0.88, y=0.36, z=0.45, aim_x=0.50, aim_y=0.48,
+                kelvin=6500, color="#ff2a9d", intensity=88.0, softness=35.0,
+                gloss=65.0, depth_from=0.0, depth_to=0.75,
+            ),
+        ],
+    },
+    {
+        "id": "moonlit_backlight",
+        "name": "Moonlit",
+        "preview_style": "moonlit_backlight",
+        "preview_colors": ("#9cc5ff", "#101a2e"),
+        "ambient_dim": 50.0,
+        "lights": [
+            make_default_virtual_light(
+                type="rim", x=0.55, y=0.10, z=0.85, aim_x=0.50, aim_y=0.52,
+                kelvin=8800, color="#9cc5ff", intensity=90.0, softness=50.0,
+                gloss=40.0, depth_from=0.0, depth_to=1.0,
+            ),
+        ],
+    },
+    {
+        "id": "window_gobo",
+        "name": "Window Gobo",
+        "preview_style": "window_gobo",
+        "preview_colors": ("#ffd296", "#2c2a29"),
+        "ambient_dim": 40.0,
+        "lights": [
+            make_default_virtual_light(
+                type="spot", x=0.14, y=0.16, z=0.22, aim_x=0.55, aim_y=0.55,
+                cone_angle=52.0, kelvin=3800, color="#ffd296", intensity=90.0,
+                softness=30.0, gloss=25.0, depth_from=0.0, depth_to=1.0,
+                gobo="window",
+            ),
+        ],
+    },
+]
+
+
+def _compute_gobo_mask(
+    gobo: str,
+    u_grid: np.ndarray,
+    v_grid: np.ndarray,
+    lx: float,
+    ly: float,
+    aim_x: float,
+    aim_y: float,
+    softness: float,
+) -> np.ndarray | float:
+    g = (gobo or "none").lower()
+    if g == "none" or g == "":
+        return 1.0
+    du = u_grid - aim_x
+    dv = v_grid - aim_y
+    adx = aim_x - lx
+    ady = aim_y - ly
+    ang = math.atan2(ady, adx) if math.hypot(adx, ady) > 1e-4 else 0.0
+    ca, sa = math.cos(ang), math.sin(ang)
+    rx = du * ca + dv * sa
+    ry = -du * sa + dv * ca
+    soft_t = max(0.05, min(1.0, float(softness) / 100.0))
+
+    if g == "blinds":
+        wave = np.sin((ry * 12.0) * math.pi)
+        thresh = -0.15 + 0.1 * (1.0 - soft_t)
+        sharp = 3.0 + 10.0 * (1.0 - soft_t)
+        return np.clip(0.15 + 0.85 * (1.0 / (1.0 + np.exp(-sharp * (wave - thresh)))), 0.12, 1.0).astype(np.float32)
+
+    if g == "window":
+        bar_w = 0.045 + 0.03 * soft_t
+        mullion_x = np.exp(-0.5 * (rx / bar_w) ** 2)
+        mullion_y = np.exp(-0.5 * (ry / bar_w) ** 2)
+        border_mask = np.clip(1.0 - np.maximum(mullion_x, mullion_y) * 0.9, 0.10, 1.0)
+        return border_mask.astype(np.float32)
+
+    if g == "foliage":
+        p1 = np.sin(rx * 22.0 + np.cos(ry * 17.0)) * np.cos(ry * 21.0 - np.sin(rx * 13.0))
+        p2 = np.sin((rx + ry) * 31.0) * np.cos((rx - ry) * 29.0)
+        pat = 0.6 * p1 + 0.4 * p2
+        sharp = 2.0 + 5.0 * (1.0 - soft_t)
+        return np.clip(0.20 + 0.80 * (1.0 / (1.0 + np.exp(-sharp * pat))), 0.15, 1.0).astype(np.float32)
+
+    return 1.0
+
+
+def apply_virtual_3d_relighting(
+    img_rgb: np.ndarray,
+    refined_depth: np.ndarray,
+    alpha_matte: np.ndarray,
+    normal_map: np.ndarray,
+    near_weight: np.ndarray,
+    far_weight: np.ndarray,
+    *,
+    relight_near: float = 0.0,
+    relight_far: float = 0.0,
+    warmth_near: float = 0.0,
+    warmth_far: float = 0.0,
+    ambient_dim: float = 0.0,
+    virtual_lights: Sequence[dict[str, Any]] = (),
+) -> np.ndarray:
+    """
+    Albedo-preserving linear-light 3D shader supporting:
+    - Dim Original Light ('Old Light' suppression) in linear space
+    - Near / Far fill light and warmth shifts
+    - Up to 3 virtual 3D Point / Spot / Rim lights with 3D surface normals,
+      Blinn-Phong specular gloss, depth-band masking, and Gobo projections.
+    """
+    h, w = img_rgb.shape[:2]
+    lin = _SRGB_TO_LIN_LUT[img_rgb]
+    lum = (0.2126 * lin[:, :, 0] + 0.7152 * lin[:, :, 1] + 0.0722 * lin[:, :, 2]).astype(np.float32)
+
+    # 1. Albedo-preserving ambient dimming (0% Original light -> 97% darker for dramatic studio look)
+    dim_t = float(np.clip(float(ambient_dim) / 100.0, 0.0, 1.0))
+    ambient_gain = ((1.0 - 0.97 * dim_t) * (1.0 - 0.12 * dim_t * np.clip(lum, 0.0, 1.0))).astype(np.float32)
+
+    # 2. Near / Far linear fill & warmth
+    ev_shift = (float(relight_near) * 0.014) * near_weight + (float(relight_far) * 0.014) * far_weight
+    near_far_gain = np.power(2.0, np.clip(ev_shift, -2.0, 2.0)).astype(np.float32)
+
+    base_gain = (ambient_gain * near_far_gain)[:, :, None]
+    w_t = np.clip(((float(warmth_near) * near_weight + float(warmth_far) * far_weight) / 100.0) * 0.35, -0.45, 0.45)
+    warmth_rgb = np.stack([1.0 + w_t, 1.0 + 0.15 * w_t, 1.0 - w_t], axis=-1).astype(np.float32)
+
+    # 3. Multi-Light 3D Shader (decoupled <=640px lighting field for 3-5x speedup, applied to sharp albedo)
+    active_lights = [
+        lt for lt in list(virtual_lights)[:3]
+        if isinstance(lt, dict) and bool(lt.get("enabled", True)) and float(lt.get("intensity", 0.0)) >= 0.1
+    ]
+
+    if not active_lights:
+        out_lin = lin * (base_gain * warmth_rgb)
+    else:
+        max_side = max(h, w)
+        if max_side > 640:
+            l_scale = 640.0 / float(max_side)
+            lw = max(24, int(round(w * l_scale)))
+            lh = max(24, int(round(h * l_scale)))
+            work_depth = cv2.resize(refined_depth, (lw, lh), interpolation=cv2.INTER_AREA).astype(np.float32)
+            work_matte = cv2.resize(alpha_matte, (lw, lh), interpolation=cv2.INTER_AREA).astype(np.float32)
+            work_normals = cv2.resize(normal_map, (lw, lh), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+            w_nrm = np.linalg.norm(work_normals, axis=2, keepdims=True)
+            work_normals = (work_normals / np.maximum(w_nrm, 1e-6)).astype(np.float32)
+            work_lum = cv2.resize(lum, (lw, lh), interpolation=cv2.INTER_AREA).astype(np.float32)
+        else:
+            lw, lh = w, h
+            work_depth = refined_depth
+            work_matte = alpha_matte
+            work_normals = normal_map
+            work_lum = lum
+
+        diffuse_field = np.zeros((lh, lw, 3), dtype=np.float32)
+        spec_field = np.zeros((lh, lw, 3), dtype=np.float32)
+
+        aspect = float(lw) / float(max(1, lh))
+        u, v, u_norm, v_norm = _get_cached_uv_grids(lw, lh)
+        pz = (-work_depth).astype(np.float32)
+
+        nx = work_normals[:, :, 0]
+        ny = work_normals[:, :, 1]
+        nz = work_normals[:, :, 2]
+
+        blur_a = cv2.GaussianBlur(work_matte, (0, 0), sigmaX=max(2.0, min(lw, lh) * 0.015))
+        inner_rim = np.clip(work_matte * np.maximum(0.0, 1.0 - blur_a) * 3.8, 0.0, 1.35).astype(np.float32)
+
+        for lt in active_lights:
+            ltype = str(lt.get("type", "point")).lower()
+            lx_n = float(lt.get("x", 0.25))
+            ly_n = float(lt.get("y", 0.25))
+            lx = lx_n * aspect
+            ly = ly_n
+            lz_norm = float(np.clip(float(lt.get("z", 0.25)), 0.0, 1.0))
+            lz = -lz_norm + 0.22
+            aim_x = float(lt.get("aim_x", 0.5)) * aspect
+            aim_y = float(lt.get("aim_y", 0.5))
+            softness = float(np.clip(float(lt.get("softness", 45.0)), 0.0, 100.0))
+            soft_t = softness / 100.0
+            intensity = float(np.clip(float(lt.get("intensity", 70.0)), 0.0, 100.0))
+            gloss = float(np.clip(float(lt.get("gloss", 0.0)), 0.0, 100.0))
+            cone_deg = float(np.clip(float(lt.get("cone_angle", 40.0)), 5.0, 120.0))
+            d_from = float(np.clip(float(lt.get("depth_from", 0.0)), 0.0, 1.0))
+            d_to = float(np.clip(float(lt.get("depth_to", 1.0)), 0.0, 1.0))
+            if d_to < d_from:
+                d_from, d_to = d_to, d_from
+
+            dx = lx - u
+            dy = ly - v
+            dz = lz - pz
+            dist_sq = dx * dx + dy * dy + dz * dz + 1e-6
+            dist = np.sqrt(dist_sq)
+            inv_dist = 1.0 / dist
+            ldx = dx * inv_dist
+            ldy = dy * inv_dist
+            ldz = dz * inv_dist
+
+            radius = 0.45 + 1.20 * soft_t
+            atten = (1.0 / (1.0 + dist_sq / (radius * radius))).astype(np.float32)
+
+            if ltype == "spot":
+                aim_col = max(0, min(lw - 1, int(round(float(lt.get("aim_x", 0.5)) * (lw - 1)))))
+                aim_row = max(0, min(lh - 1, int(round(float(lt.get("aim_y", 0.5)) * (lh - 1)))))
+                aim_pz = -float(work_depth[aim_row, aim_col])
+                adx = aim_x - lx
+                ady = aim_y - ly
+                adz = aim_pz - lz
+                if abs(adx) < 1e-3 and abs(ady) < 1e-3 and abs(adz) < 0.05:
+                    adz = -0.35
+                anorm = math.sqrt(adx * adx + ady * ady + adz * adz + 1e-6)
+                ax, ay, az = adx / anorm, ady / anorm, adz / anorm
+                spot_cos = -(ldx * ax + ldy * ay + ldz * az)
+                inner_cos = math.cos(math.radians(cone_deg * 0.5))
+                outer_cos = math.cos(math.radians(min(89.0, cone_deg * (0.55 + 0.55 * soft_t))))
+                denom = max(1e-4, inner_cos - outer_cos)
+                cone_mask = np.clip((spot_cos - outer_cos) / denom, 0.0, 1.0)
+                cone_mask = cone_mask * cone_mask * (3.0 - 2.0 * cone_mask)
+                type_weight = (atten * cone_mask * 1.35).astype(np.float32)
+            elif ltype == "rim":
+                silhouette = 4.0 * work_matte * (1.0 - work_matte)
+                grazing = np.power(np.clip(1.0 - nz, 0.0, 1.0), 1.25) + 0.75 * silhouette + inner_rim
+                side_align = np.clip(nx * ldx + ny * ldy + 0.45, 0.0, 1.0)
+                type_weight = (atten * np.clip(grazing, 0.0, 1.6) * side_align * 1.45).astype(np.float32)
+            else:
+                type_weight = atten
+
+            # 3-step depth-aware occlusion shadowing for Point / Spot lights
+            if ltype in ("point", "spot"):
+                du_n = lx_n - u_norm
+                dv_n = ly_n - v_norm
+                d2d = np.sqrt(du_n * du_n + dv_n * dv_n + 1e-6)
+                dir_u = du_n / d2d
+                dir_v = dv_n / d2d
+                occluded = np.zeros((lh, lw), dtype=np.float32)
+                for step_d in (0.06, 0.14, 0.24):
+                    t_frac = np.minimum(1.0, step_d / d2d)
+                    su = np.clip(((u_norm + dir_u * np.minimum(step_d, d2d)) * (lw - 1)).astype(np.int32), 0, lw - 1)
+                    sv = np.clip(((v_norm + dir_v * np.minimum(step_d, d2d)) * (lh - 1)).astype(np.int32), 0, lh - 1)
+                    sample_d = work_depth[sv, su]
+                    ray_d = work_depth + t_frac * (lz_norm - work_depth)
+                    occluded = np.maximum(occluded, np.clip((ray_d - sample_d - 0.07) / 0.12, 0.0, 1.0))
+                type_weight = (type_weight * (1.0 - occluded * (0.62 * (1.0 - 0.55 * soft_t)))).astype(np.float32)
+
+            wrap = 0.15 + 0.65 * soft_t
+            ndotl = np.clip((nx * ldx + ny * ldy + nz * ldz + wrap) / (1.0 + wrap), 0.0, 1.0)
+
+            if d_from > 0.001 or d_to < 0.999:
+                f_in = np.clip((work_depth - d_from + 0.06) / 0.06, 0.0, 1.0)
+                f_out = np.clip((d_to + 0.06 - work_depth) / 0.06, 0.0, 1.0)
+                depth_band = np.minimum(f_in, f_out).astype(np.float32)
+            else:
+                depth_band = 1.0
+
+            gobo_mask = _compute_gobo_mask(
+                str(lt.get("gobo", "none")), u, v, lx, ly, aim_x, aim_y, softness
+            )
+
+            gain_scalar = (intensity / 100.0) * 2.2
+            l_col = light_color_linear(lt)[None, None, :]
+            eff = (type_weight * depth_band * gobo_mask * gain_scalar)[:, :, None]
+
+            diffuse_field += eff * ndotl[:, :, None] * l_col
+
+            if gloss >= 0.5:
+                hx = ldx
+                hy = ldy
+                hz = ldz + 1.0
+                h_inv = 1.0 / np.sqrt(hx * hx + hy * hy + hz * hz + 1e-6)
+                ndoth = np.clip((nx * hx + ny * hy + nz * hz) * h_inv, 0.0, 1.0)
+                shininess = 12.0 + 36.0 * (1.0 - soft_t)
+                spec_term = (
+                    (gloss / 100.0)
+                    * 0.85
+                    * np.power(ndoth, shininess)
+                    * np.clip(work_lum * 2.2, 0.05, 1.0)
+                )
+                spec_field += eff * spec_term[:, :, None] * l_col
+
+        if (lw, lh) != (w, h):
+            diffuse_acc = cv2.resize(diffuse_field, (w, h), interpolation=cv2.INTER_LINEAR)
+            spec_acc = cv2.resize(spec_field, (w, h), interpolation=cv2.INTER_LINEAR)
+        else:
+            diffuse_acc = diffuse_field
+            spec_acc = spec_field
+
+        out_lin = lin * (base_gain * warmth_rgb + diffuse_acc) + spec_acc
+
+    # Chroma-preserving luminance shoulder above 0.85
+    y_out = 0.2126 * out_lin[:, :, 0] + 0.7152 * out_lin[:, :, 1] + 0.0722 * out_lin[:, :, 2]
+    y_comp = np.where(
+        y_out > 0.85,
+        0.85 + (y_out - 0.85) / (1.0 + (y_out - 0.85) * 1.45),
+        y_out,
+    )
+    chroma_scale = np.where(y_out > 1e-5, y_comp / np.maximum(y_out, 1e-5), 1.0)[:, :, None]
+    out_lin = out_lin * chroma_scale
+
+    idx = np.clip(np.round(out_lin * 4095.0).astype(np.int32), 0, 4095)
+    return _LIN_TO_SRGB_LUT[idx]
 
 
 # =============================================================================

@@ -2105,6 +2105,126 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawLine(QPointF(s * 0.22, s * 0.38), QPointF(s * 0.78, s * 0.38))
         p.drawLine(QPointF(s * 0.22, s * 0.62), QPointF(s * 0.78, s * 0.62))
 
+    elif kind in ("pane_bottom", "filmstrip"):
+        # Window frame with blue title bar and bottom thumbnail filmstrip
+        p.setPen(QPen(QColor("#3A6A9C"), 1.1))
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawRoundedRect(QRectF(s * 0.10, s * 0.14, s * 0.80, s * 0.72), 2.0, 2.0)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#2468A8"))
+        p.drawRoundedRect(QRectF(s * 0.10, s * 0.14, s * 0.80, s * 0.16), 2.0, 2.0)
+        p.setBrush(QColor("#D8EAF9"))
+        p.drawRect(QRectF(s * 0.11, s * 0.60, s * 0.78, s * 0.25))
+        p.setPen(QPen(QColor("#5C94CE"), 1.0))
+        p.drawLine(QPointF(s * 0.11, s * 0.60), QPointF(s * 0.89, s * 0.60))
+        for rx in (0.16, 0.39, 0.62):
+            p.setBrush(QColor("#3B82F6"))
+            p.setPen(QPen(QColor("#1D4ED8"), 0.8))
+            p.drawRect(QRectF(s * rx, s * 0.65, s * 0.18, s * 0.15))
+
+    elif kind == "add_region":
+        # Dashed selection rectangle with green '+' badge
+        p.setPen(QPen(QColor("#1E63B5"), max(1.4, s * 0.08), Qt.DashLine))
+        p.setBrush(QColor(216, 234, 249, 90))
+        p.drawRect(QRectF(s * 0.16, s * 0.18, s * 0.56, s * 0.54))
+        p.setPen(QPen(QColor("#FFFFFF"), 1.2))
+        p.setBrush(QColor("#15803D"))
+        p.drawEllipse(QPointF(s * 0.72, s * 0.72), s * 0.18, s * 0.18)
+        p.setPen(QPen(QColor("#FFFFFF"), max(1.6, s * 0.09), Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.62, s * 0.72), QPointF(s * 0.82, s * 0.72))
+        p.drawLine(QPointF(s * 0.72, s * 0.62), QPointF(s * 0.72, s * 0.82))
+
+    elif kind == "compare":
+        # Split before/after comparison card
+        p.setPen(QPen(QColor("#2B6CB0"), 1.1))
+        p.setBrush(QColor("#F8FBFF"))
+        p.drawRoundedRect(QRectF(s * 0.12, s * 0.18, s * 0.76, s * 0.64), 2.0, 2.0)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#6BB3EB"))
+        p.drawRect(QRectF(s * 0.14, s * 0.20, s * 0.36, s * 0.60))
+        p.setBrush(QColor("#94A3B8"))
+        p.drawRect(QRectF(s * 0.50, s * 0.20, s * 0.36, s * 0.60))
+        p.setPen(QPen(QColor("#1E3A8A"), max(1.5, s * 0.08)))
+        p.drawLine(QPointF(s * 0.50, s * 0.14), QPointF(s * 0.50, s * 0.86))
+
+    elif kind == "brush":
+        # Diagonal paintbrush
+        p.setPen(QPen(QColor("#78350F"), max(1.4, s * 0.08), Qt.SolidLine, Qt.RoundCap))
+        p.setBrush(QColor("#D97706"))
+        p.drawPolygon(QPolygonF([
+            QPointF(s * 0.26, s * 0.74), QPointF(s * 0.36, s * 0.84),
+            QPointF(s * 0.84, s * 0.26), QPointF(s * 0.74, s * 0.16),
+        ]))
+        p.setPen(QPen(QColor("#1E63B5"), 1.0))
+        p.setBrush(QColor("#3B82F6"))
+        p.drawEllipse(QRectF(s * 0.14, s * 0.64, s * 0.22, s * 0.22))
+
+    elif kind == "eraser":
+        # Angled two-tone eraser block
+        p.setPen(QPen(QColor("#9A3412"), 1.2))
+        p.setBrush(QColor("#FDBA74"))
+        p.drawPolygon(QPolygonF([
+            QPointF(s * 0.18, s * 0.64), QPointF(s * 0.56, s * 0.22),
+            QPointF(s * 0.84, s * 0.44), QPointF(s * 0.46, s * 0.84),
+        ]))
+        p.setBrush(QColor("#F97316"))
+        p.drawPolygon(QPolygonF([
+            QPointF(s * 0.18, s * 0.64), QPointF(s * 0.36, s * 0.44),
+            QPointF(s * 0.64, s * 0.66), QPointF(s * 0.46, s * 0.84),
+        ]))
+
+    elif kind == "invert":
+        # Half-dark / half-light contrast circle
+        p.setPen(QPen(QColor("#1E63B5"), 1.2))
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawEllipse(QRectF(s * 0.16, s * 0.16, s * 0.68, s * 0.68))
+        p.setBrush(QColor("#1E63B5"))
+        p.drawPie(QRectF(s * 0.16, s * 0.16, s * 0.68, s * 0.68), 90 * 16, 180 * 16)
+
+    elif kind == "face":
+        # Friendly smiling face badge
+        p.setPen(QPen(QColor("#1E63B5"), 1.2))
+        p.setBrush(QColor("#E0F2FE"))
+        p.drawEllipse(QRectF(s * 0.16, s * 0.16, s * 0.68, s * 0.68))
+        p.setBrush(QColor("#1E63B5"))
+        p.drawEllipse(QPointF(s * 0.38, s * 0.44), s * 0.05, s * 0.05)
+        p.drawEllipse(QPointF(s * 0.62, s * 0.44), s * 0.05, s * 0.05)
+        p.setBrush(Qt.NoBrush)
+        p.drawArc(QRectF(s * 0.32, s * 0.44, s * 0.36, s * 0.24), 200 * 16, 140 * 16)
+
+    elif kind == "refresh":
+        # Crisp circular Aero refresh arrows
+        p.setBrush(Qt.NoBrush)
+        pen = QPen(QColor("#1E63B5"), max(1.6, s * 0.095))
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        arc_r = QRectF(s * 0.18, s * 0.18, s * 0.64, s * 0.64)
+        p.drawArc(arc_r, 35 * 16, 285 * 16)
+        p.setPen(QPen(QColor("#1E63B5"), 1.2))
+        p.setBrush(QColor("#3B82F6"))
+        p.drawPolygon(QPolygonF([
+            QPointF(s * 0.78, s * 0.16),
+            QPointF(s * 0.85, s * 0.36),
+            QPointF(s * 0.64, s * 0.33),
+        ]))
+
+    elif kind in ("swatch_red", "swatch_blue", "swatch_green", "swatch_warm", "swatch_cool"):
+        # Glossy vivid colour swatch orb for Colour Pop Quick Styles
+        pal = {
+            "swatch_red": ("#FCA5A5", "#DC2626", "#991B1B"),
+            "swatch_blue": ("#93C5FD", "#2563EB", "#1E40AF"),
+            "swatch_green": ("#86EFAC", "#16A34A", "#166534"),
+            "swatch_warm": ("#FDE68A", "#F59E0B", "#B45309"),
+            "swatch_cool": ("#A5F3FC", "#0284C7", "#075985"),
+        }[kind]
+        grad = QLinearGradient(s * 0.2, s * 0.15, s * 0.8, s * 0.85)
+        grad.setColorAt(0.0, QColor(pal[0]))
+        grad.setColorAt(0.55, QColor(pal[1]))
+        grad.setColorAt(1.0, QColor(pal[2]))
+        p.setPen(QPen(QColor(pal[2]), 1.2))
+        p.setBrush(grad)
+        p.drawEllipse(QRectF(s * 0.16, s * 0.16, s * 0.68, s * 0.68))
+
     elif kind == "burst_stack":
         p.setPen(QPen(QColor("#2B6CB0"), 1.0))
         for dx, dy, fc in ((0.28, 0.14, "#D8EAF9"), (0.20, 0.22, "#A8D0F5"), (0.12, 0.30, "#6BB3EB")):
@@ -5784,6 +5904,7 @@ class RibbonToolbar(QWidget):
         self.tab_map = self._build_map_tab()
         self.tab_compare = self._build_compare_tab()
         self.tab_duplicates = self._build_duplicates_tab()
+        self.tab_create_studio = self._build_create_studio_tab()
 
         self.tab_widget.addTab(self.tab_home, "Home")
         self.tab_widget.addTab(self.tab_edit, "Edit")
@@ -5794,10 +5915,12 @@ class RibbonToolbar(QWidget):
         self.tab_widget.addTab(self.tab_map, "Map")
         self.tab_widget.addTab(self.tab_compare, "Compare")
         self.tab_widget.addTab(self.tab_duplicates, "Duplicates")
+        self.tab_widget.addTab(self.tab_create_studio, "Create Studio")
         self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_batch_people), False)
         self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_map), False)
         self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_compare), False)
         self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_duplicates), False)
+        self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_create_studio), False)
 
         self.tab_widget.tabBarDoubleClicked.connect(self._on_tab_bar_double_clicked)
         self.tab_widget.tabBarClicked.connect(self._on_tab_bar_clicked)
@@ -6150,8 +6273,9 @@ class RibbonToolbar(QWidget):
         Creates an authentic WLPG 2-button vertical split Save As Copy control:
         - Top button: 32px make_copy icon -> clicking triggers 'save_as_copy' (default behavior / Ctrl+Shift+S).
         - Bottom button: 'Save as\\ncopy ▾' text -> opens menu:
-            - Save in original location
+            - Quick Save in Original Location
             - Choose Location...
+            - Export / Resize...
             - Options...
         """
         container = QWidget(parent)
@@ -6183,11 +6307,14 @@ class RibbonToolbar(QWidget):
         btn_bot.setPopupMode(QToolButton.InstantPopup)
 
         menu = QMenu(btn_bot)
-        act_orig = menu.addAction(make_wlpg_icon("make_copy", 16), "Save in original location")
+        act_orig = menu.addAction(make_wlpg_icon("make_copy", 16), "Quick Save in Original Location")
         act_orig.triggered.connect(lambda: self.action_triggered.emit("save_as_copy_original"))
 
         act_choose = menu.addAction(make_wlpg_icon("folder_open", 16), "Choose Location...")
         act_choose.triggered.connect(lambda: self.action_triggered.emit("save_as_copy_choose_location"))
+
+        act_resized = menu.addAction(make_wlpg_icon("resize", 16), "Export / Resize...")
+        act_resized.triggered.connect(lambda: self.action_triggered.emit("save_as_resized_copy"))
 
         menu.addSeparator()
         act_opt = menu.addAction(make_wlpg_icon("options", 16), "Options...")
@@ -7600,8 +7727,8 @@ class RibbonToolbar(QWidget):
         self.btn_edit_rename.setToolTip("Rename file (F2)")
         self.btn_edit_rename.clicked.connect(lambda: self.action_triggered.emit("rename_file"))
 
-        self.btn_edit_resize = self._make_btn("Resize", "resize", self.grp_edit_properties)
-        self.btn_edit_resize.setToolTip("Resize photo...")
+        self.btn_edit_resize = self._make_btn("Export / Resize...", "resize", self.grp_edit_properties)
+        self.btn_edit_resize.setToolTip("Export / Resize...")
         self.btn_edit_resize.clicked.connect(lambda: self.action_triggered.emit("resize_photo"))
 
         self.btn_edit_time = self._make_btn("Adjust time", "calendar", self.grp_edit_properties)
@@ -7650,7 +7777,7 @@ class RibbonToolbar(QWidget):
         self.btn_edit_prop_drop.setPopupMode(QToolButton.InstantPopup)
         prop_menu = QMenu(self.btn_edit_prop_drop)
         prop_menu.addAction("Adjust date and time...", lambda: self.action_triggered.emit("change_time_taken"))
-        prop_menu.addAction("Resize photo...", lambda: self.action_triggered.emit("resize_photo"))
+        prop_menu.addAction("Export / Resize...", lambda: self.action_triggered.emit("resize_photo"))
         prop_menu.addAction("Rename photo...", lambda: self.action_triggered.emit("rename_file"))
         self.btn_edit_prop_drop.setMenu(prop_menu)
 
@@ -8255,7 +8382,7 @@ class RibbonToolbar(QWidget):
         self.btn_photo_fuse = btn_fuse
         grp_tools.content_layout.addWidget(btn_fuse)
 
-        btn_collage = self._make_btn("Auto\nCollage", "collage", grp_tools, large=True)
+        btn_collage = self._make_btn("Collage", "collage", grp_tools, large=True)
         btn_collage.setToolTip("Generate an interactive grid, vintage Polaroid scatter, or 'Then & Now' comparison card from selected photos.")
         btn_collage.clicked.connect(lambda: self.action_triggered.emit("collage"))
         self.btn_collage = btn_collage
@@ -8617,6 +8744,16 @@ class RibbonToolbar(QWidget):
             lambda: self.action_triggered.emit("toggle_tag_pane")
         )
         grp_panes.content_layout.addWidget(self.btn_toggle_tag_pane)
+
+        self.btn_toggle_filmstrip = self._make_btn(
+            "Filmstrip\npane", "filmstrip", grp_panes, large=True, checkable=True
+        )
+        self.btn_toggle_filmstrip.setToolTip("Show / hide bottom Filmstrip in Single Image View")
+        self.btn_toggle_filmstrip.setVisible(False)
+        self.btn_toggle_filmstrip.clicked.connect(
+            lambda: self.action_triggered.emit("toggle_filmstrip_pane")
+        )
+        grp_panes.content_layout.addWidget(self.btn_toggle_filmstrip)
         grp_panes.adjust_to_content()
 
         hbox.addWidget(grp_panes)
@@ -10022,71 +10159,188 @@ class RibbonToolbar(QWidget):
         if idx >= 0:
             self.tab_widget.tabBar().setTabVisible(idx, visible)
 
-    def set_active_mode(self, mode: Literal["grid", "viewer", "map", "batch_people", "people", "albums", "compare", "duplicates"]) -> None:
-        """Switches Ribbon context when entering/exiting Single Media Viewer, World Map, People, Compare, Duplicates, or Batch People Tagging."""
+    def _build_create_studio_tab(self) -> QWidget:
+        """Contextual Ribbon tab dynamically populated for active Create Studio workspaces."""
+        page = _RibbonPage()
+        self._create_studio_hbox = QHBoxLayout(page)
+        self._create_studio_hbox.setContentsMargins(4, 2, 4, 2)
+        self._create_studio_hbox.setSpacing(4)
+        self._create_studio_buttons: list[QToolButton] = []
+        self._create_studio_action_btns: dict[str, QToolButton] = {}
+        self._create_studio_groups: list[QWidget] = []
+        return page
+
+    def configure_create_studio_tab(self, title: str, actions: Sequence[Any]) -> None:
+        """Populate contextual Create Studio tab with Close (Save/Cancel) and tool action groups."""
+        idx = self.tab_widget.indexOf(self.tab_create_studio)
+        if idx >= 0:
+            self.tab_widget.setTabText(idx, title or "Create Studio")
+
+        old_set = set(self._create_studio_buttons)
+        if old_set and hasattr(self, "_all_themed_buttons"):
+            self._all_themed_buttons = [b for b in self._all_themed_buttons if b not in old_set]
+        self._create_studio_buttons.clear()
+        self._create_studio_action_btns.clear()
+
+        for g in self._create_studio_groups:
+            self._create_studio_hbox.removeWidget(g)
+            g.deleteLater()
+        self._create_studio_groups.clear()
+
+        while self._create_studio_hbox.count():
+            item = self._create_studio_hbox.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+
+        # 1. Workspace-declared tool groups
+        grouped: dict[str, list[Any]] = {}
+        for spec in actions:
+            grp_name = getattr(spec, "group", "Tools") or "Tools"
+            grouped.setdefault(grp_name, []).append(spec)
+
+        for grp_name, specs in grouped.items():
+            grp_box = _RibbonGroupBox(grp_name, self.tab_create_studio)
+            for spec in specs:
+                btn = self._make_btn(
+                    spec.label,
+                    spec.icon_kind,
+                    grp_box,
+                    large=bool(getattr(spec, "large", True)),
+                    checkable=bool(getattr(spec, "checkable", False)),
+                )
+                if spec.tooltip:
+                    btn.setToolTip(spec.tooltip)
+                if getattr(spec, "checkable", False):
+                    btn.setChecked(bool(getattr(spec, "checked", False)))
+                btn.setEnabled(bool(getattr(spec, "enabled", True)))
+                aid = str(spec.action_id)
+                btn.clicked.connect(lambda _chk=False, action_key=aid: self.action_triggered.emit(f"create_ws:{action_key}"))
+                grp_box.content_layout.addWidget(btn)
+                self._create_studio_buttons.append(btn)
+                self._create_studio_action_btns[aid] = btn
+            grp_box.adjust_to_content()
+            self._create_studio_hbox.addWidget(grp_box)
+            self._create_studio_groups.append(grp_box)
+
+        # 2. Save / Close group — always last on the right to match all other contextual tabs
+        grp_close = _RibbonGroupBox("Close", self.tab_create_studio)
+        btn_save = self._make_btn("Save New...", "save", grp_close, large=True)
+        btn_save.setToolTip("Save the generated creation as a new file (Ctrl+S)")
+        btn_save.clicked.connect(lambda: self.action_triggered.emit("create_ws_save"))
+        btn_cancel = self._make_btn("Cancel", "cancel", grp_close, large=True)
+        btn_cancel.setToolTip("Exit workspace and return to gallery/viewer (Esc)")
+        btn_cancel.clicked.connect(lambda: self.action_triggered.emit("create_ws_cancel"))
+        grp_close.content_layout.addWidget(btn_save)
+        grp_close.content_layout.addWidget(btn_cancel)
+        grp_close.adjust_to_content()
+        self._create_studio_hbox.addWidget(grp_close)
+        self._create_studio_groups.append(grp_close)
+        self._create_studio_buttons.extend([btn_save, btn_cancel])
+        self._create_studio_action_btns["create_ws_save"] = btn_save
+        self._create_studio_action_btns["create_ws_cancel"] = btn_cancel
+
+        self._create_studio_hbox.addStretch(1)
+        self.refresh_icons()
+
+    def sync_create_studio_action_states(self, states: dict[str, dict[str, Any]]) -> None:
+        """Synchronize enabled/checked/text state of contextual Create Studio ribbon buttons."""
+        for aid, st in (states or {}).items():
+            btn = self._create_studio_action_btns.get(aid)
+            if btn is None:
+                continue
+            if "enabled" in st:
+                btn.setEnabled(bool(st["enabled"]))
+            if "checked" in st and btn.isCheckable():
+                btn.blockSignals(True)
+                btn.setChecked(bool(st["checked"]))
+                btn.blockSignals(False)
+            if "text" in st:
+                btn.setText(str(st["text"]))
+            if "icon_kind" in st:
+                kind = str(st["icon_kind"])
+                btn._icon_kind = kind
+                size = 32 if getattr(btn, "_is_large", False) else 16
+                btn.setIcon(make_wlpg_icon(kind, size))
+
+    def set_active_mode(self, mode: Literal["grid", "viewer", "map", "batch_people", "people", "albums", "compare", "duplicates", "create_studio"]) -> None:
+        """Switches Ribbon context when entering/exiting Single Media Viewer, World Map, People, Compare, Duplicates, Batch People Tagging, or Create Studio."""
         tab_map = getattr(self, "tab_map", None)
         tab_batch = getattr(self, "tab_batch_people", None)
         tab_compare = getattr(self, "tab_compare", None)
         tab_duplicates = getattr(self, "tab_duplicates", None)
+        tab_studio = getattr(self, "tab_create_studio", None)
+
+        if mode == "create_studio":
+            self._set_tab_visible(tab_studio, True)
+            if tab_studio is not None:
+                self.tab_widget.setCurrentWidget(tab_studio)
+            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map, tab_batch, tab_compare, tab_duplicates):
+                self._set_tab_visible(tab, False)
+            if hasattr(self, "scope_bar") and self.scope_bar is not None:
+                self.scope_bar.setVisible(False)
+            self.tab_widget.tabBar().updateGeometry()
+            self.tab_widget.updateGeometry()
+            self.tab_widget.tabBar().update()
+            return
 
         if mode == "duplicates":
-            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map, tab_batch, tab_compare):
-                self._set_tab_visible(tab, False)
             self._set_tab_visible(tab_duplicates, True)
             if tab_duplicates is not None:
                 self.tab_widget.setCurrentWidget(tab_duplicates)
+            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map, tab_batch, tab_compare, tab_studio):
+                self._set_tab_visible(tab, False)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
                 self.scope_bar.setVisible(False)
+            self.tab_widget.tabBar().updateGeometry()
+            self.tab_widget.updateGeometry()
             return
 
-        self._set_tab_visible(tab_duplicates, False)
-
         if mode == "compare":
-            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map, tab_batch):
-                self._set_tab_visible(tab, False)
             self._set_tab_visible(tab_compare, True)
             if tab_compare is not None:
                 self.tab_widget.setCurrentWidget(tab_compare)
+            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map, tab_batch, tab_duplicates, tab_studio):
+                self._set_tab_visible(tab, False)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
                 self.scope_bar.setVisible(False)
+            self.tab_widget.tabBar().updateGeometry()
+            self.tab_widget.updateGeometry()
             return
 
-        self._set_tab_visible(tab_compare, False)
-
         if mode == "batch_people":
-            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map):
-                self._set_tab_visible(tab, False)
             self._set_tab_visible(tab_batch, True)
             if tab_batch is not None:
                 self.tab_widget.setCurrentWidget(tab_batch)
+            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map, tab_compare, tab_duplicates, tab_studio):
+                self._set_tab_visible(tab, False)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
                 self.scope_bar.setVisible(False)
+            self.tab_widget.tabBar().updateGeometry()
+            self.tab_widget.updateGeometry()
             return
 
-        self._set_tab_visible(tab_batch, False)
-
         if mode == "map":
-            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view):
-                self._set_tab_visible(tab, False)
             self._set_tab_visible(tab_map, True)
             if tab_map is not None:
                 self.tab_widget.setCurrentWidget(tab_map)
+            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_batch, tab_compare, tab_duplicates, tab_studio):
+                self._set_tab_visible(tab, False)
             self.set_active_view_button("map")
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
                 self.scope_bar.setVisible(False)
+            self.tab_widget.tabBar().updateGeometry()
+            self.tab_widget.updateGeometry()
             return
 
-        self._set_tab_visible(tab_map, False)
-
         if mode == "viewer":
-            # In Single Image View, hide Home and Find, showing File, Edit, Create, View
-            self._set_tab_visible(self.tab_home, False)
+            # In Single Image View, show Edit, Create, View first, then switch current tab before hiding others
             self._set_tab_visible(self.tab_edit, True)
-            self._set_tab_visible(self.tab_find, False)
             self._set_tab_visible(self.tab_create, True)
             self._set_tab_visible(self.tab_view, True)
             self._set_edit_tab_mode("viewer")
             self.tab_widget.setCurrentWidget(self.tab_edit)
+            for tab in (self.tab_home, self.tab_find, tab_map, tab_batch, tab_compare, tab_duplicates, tab_studio):
+                self._set_tab_visible(tab, False)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
                 self.scope_bar.setVisible(False)
             if hasattr(self, "grp_arrange"):
@@ -10097,6 +10351,8 @@ class RibbonToolbar(QWidget):
                 self.grp_layout.setVisible(False)
             if hasattr(self, "btn_toggle_nav_pane"):
                 self.btn_toggle_nav_pane.setVisible(False)
+            if hasattr(self, "btn_toggle_filmstrip"):
+                self.btn_toggle_filmstrip.setVisible(True)
             if hasattr(self, "grp_panes"):
                 self.grp_panes.adjust_to_content()
             if hasattr(self, "slider_zoom"):
@@ -10107,16 +10363,24 @@ class RibbonToolbar(QWidget):
                 self.btn_zoom_fit.setVisible(True)
             if hasattr(self, "grp_zoom"):
                 self.grp_zoom.adjust_to_content()
+            self.tab_widget.tabBar().updateGeometry()
+            self.tab_widget.updateGeometry()
+            self.tab_widget.tabBar().update()
         else:
-            # Grid / People Directory mode: restore main tabs
+            # Grid / People Directory / Albums mode: show main tabs first, switch off contextual tabs, then hide contextual tabs
             for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view):
                 self._set_tab_visible(tab, True)
             self.set_active_view_button(
                 "albums" if mode == "albums" else ("people" if mode == "people" else "gallery")
             )
             self._set_edit_tab_mode("grid")
-            if self.tab_widget.currentWidget() in (self.tab_edit, tab_batch, tab_map):
+            if (
+                self.tab_widget.currentIndex() < 0
+                or self.tab_widget.currentWidget() in (self.tab_edit, tab_batch, tab_map, tab_compare, tab_duplicates, tab_studio)
+            ):
                 self.tab_widget.setCurrentWidget(self.tab_home)
+            for tab in (tab_map, tab_batch, tab_compare, tab_duplicates, tab_studio):
+                self._set_tab_visible(tab, False)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
                 self.scope_bar.setVisible(True)
             if hasattr(self, "grp_arrange"):
@@ -10127,6 +10391,8 @@ class RibbonToolbar(QWidget):
                 self.grp_layout.setVisible(True)
             if hasattr(self, "btn_toggle_nav_pane"):
                 self.btn_toggle_nav_pane.setVisible(True)
+            if hasattr(self, "btn_toggle_filmstrip"):
+                self.btn_toggle_filmstrip.setVisible(False)
             if hasattr(self, "grp_panes"):
                 self.grp_panes.adjust_to_content()
             if hasattr(self, "slider_zoom"):
@@ -10137,6 +10403,9 @@ class RibbonToolbar(QWidget):
                 self.btn_zoom_fit.setVisible(False)
             if hasattr(self, "grp_zoom"):
                 self.grp_zoom.adjust_to_content()
+            self.tab_widget.tabBar().updateGeometry()
+            self.tab_widget.updateGeometry()
+            self.tab_widget.tabBar().update()
 
 
     def _apply_file_menu_stylesheet(self, is_dark: bool) -> None:

@@ -1,18 +1,28 @@
 # Essentials Photo Gallery
 
 [![Release](https://img.shields.io/github/v/release/docsucram/Essentials-Photo-Gallery?label=Release&color=blue)](https://github.com/docsucram/Essentials-Photo-Gallery/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/docsucram/Essentials-Photo-Gallery/total?color=green)](https://github.com/docsucram/Essentials-Photo-Gallery/releases)
+[![Stars](https://img.shields.io/github/stars/docsucram/Essentials-Photo-Gallery)](https://github.com/docsucram/Essentials-Photo-Gallery/stargazers)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011%20(x64)-0078D6.svg)](https://github.com/docsucram/Essentials-Photo-Gallery/releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)](LICENSE)
 
-**Essentials Photo Gallery** is a modern, 64-bit update to Microsoft's long-abandoned **Windows Live Photo Gallery (WLPG)**.
+**Essentials Photo Gallery** is a modern, 64-bit, **100% local & privacy-first** successor to Microsoft's **Windows Live Photo Gallery (WLPG)**.
 
-Microsoft discontinued Windows Essentials back in 2017, and for anyone with a big local folder collection of family photos, nothing since has quite matched how fast, intuitive, and practical WLPG was for browsing, organising, tagging, and doing quick edits. This project brings that exact feel and workflow back on Windows 10 and 11—fixing WLPG's old limitations while adding modern tools for large local libraries.
+Microsoft discontinued Windows Essentials in 2017, and for anyone with a large local folder collection of family photos, nothing since has matched how fast, intuitive, and practical WLPG was for browsing, organising, tagging, and quick edits. This project brings that exact workflow back on Windows 10 and 11—engineered for **500,000+ photo libraries** (`<10 ms` queries, `60 FPS` scrolling), modern camera RAW & next-gen codecs, local AI face recognition & OCR, and non-destructive 32-bit editing.
 
 > [!IMPORTANT]
 > **Project Status — In Active Development**
-> This project is still actively being developed and tested. File write-back is **turned off by default**, and if you are trying it out on an existing photo collection, **it is strongly recommended to leave file write-back turned off** so tag and metadata changes stay in the local database rather than modifying your original image files. As always, please keep backups of important photos.
+> File write-back is **turned off by default** (catalog-only Safe Mode) so tag, rating, and face changes stay strictly in the local database until you explicitly enable write-back. Original files are never altered without an automatic backup in `.OriginalFiles/`. As always, please keep backups of important photos.
 
 ![Single Image View with Face Tagging and Tag and Caption Pane](docs/images/single_view_face_tag.jpg)
+
+| World Map Clustering & Geotagging | Multi-Photo Compare Light Table |
+| :---: | :---: |
+| ![Interactive World Map with photo clusters](docs/images/release-0.10.0/world-map-clusters.jpg) | ![Multi-Photo Compare Mode](docs/images/release-0.12.0/compare-mode.jpg) |
+
+| Fine Tune Advanced & Regional Sky Masks | Revamped Duplicates & Find Similar |
+| :---: | :---: |
+| ![Fine Tune Advanced with Automatic Sky Regional Mask](docs/images/release-0.14.0/fine-tune-regional-sky-mask.jpg) | ![Revamped Duplicates Finder workspace](docs/images/release-0.14.0/duplicates-finder-revamped.jpg) |
 
 ---
 
@@ -58,8 +68,42 @@ Standalone 64-bit Windows installers (`EssentialsPhotoGallery_Setup_x64.exe`) ar
   - **Portrait Depth Blur, Relighting & Colour Pop** alongside Crop/Uncrop, Straighten, Spot Fix (Retouch & Red Eye), Exposure, Colour, Effects, and Vector Markup & Privacy Redaction
   - **Contact Sheet & Photo Printing**
 
-- **Duplicate & Burst Photo Finder**
-  Finds exact file duplicates, resized/re-saved copies (via perceptual hashing), and rapid burst sequences, with side-by-side sharpness comparison to help clean up clutter safely via the Recycle Bin.
+- **Duplicate & Burst Photo Finder + Find Similar**
+  Finds exact file duplicates, resized/re-saved copies (via perceptual hashing), rapid burst sequences (with face/eye Laplacian sharpness scoring), and visually similar photos via LAB Haar + palette matching, with side-by-side comparison and safe Recycle Bin cleanup.
+
+---
+
+## Supported Formats
+
+| Category | Formats |
+| :--- | :--- |
+| **Standard & Animated Images** | `JPG`/`JPEG`, `PNG`, `BMP`, `TIFF`/`TIF`, `WebP` (static & animated), `GIF` (animated), `ICO` |
+| **Next-Gen & Wide-Gamut** | `HEIC`, `HEIF`, `HIF`, `AVIF`, `JPEG XL (.jxl)` — with LittleCMS2 Display P3 / Adobe RGB → sRGB colour management |
+| **Camera RAW (Non-Destructive)** | `CR2`, `CR3`, `NEF`, `ARW`, `RAF`, `DNG`, `ORF`, `RW2`, `PEF`, `SRW` (+ Windows Imaging Component fallback) |
+| **Videos** | `MP4`, `MOV`, `M4V`, `MKV`, `AVI`, `WMV`, `FLV`, `WebM`, `3GP`, `TS`, `MTS`, `M2TS` |
+
+---
+
+## Metadata, Non-Destructive Safety & Data Ownership
+
+Essentials Photo Gallery is **100% folder-first and local**: your photos stay in your existing folders with no cloud account, no subscription, and no telemetry.
+
+- **Catalog-Only Safe Mode (Default):** Ratings, flags, descriptive tags, captions, people tags, albums, smart albums, OCR text, and face embeddings live strictly in `%LOCALAPPDATA%\PhotoGallery\db\catalog.db` (and WebP thumbnails in `thumbnails.db`) until you explicitly enable **Write to files** in **File → Options**.
+- **Surgical XMP Write-Back:** When write-back is enabled, metadata writes preserve unrelated third-party XMP namespaces (such as Adobe Lightroom / Camera Raw `crs:*` develop settings, darktable edit history, and copyright fields), preserve file modification timestamps (`mtime`), and always write `.xmp` sidecars for camera RAW files rather than touching RAW containers.
+- **OneDrive Files On-Demand Safe:** Online-only cloud placeholders (`OFFLINE` / `RECALL_ON_OPEN` / `RECALL_ON_DATA_ACCESS`) are never opened by background scanners, thumbnail workers, face detection, OCR, or duplicate hashing—so browsing never triggers unintended gigabyte cloud downloads.
+- **Automatic `.OriginalFiles/` Backups:** Before saving destructive image edits, Essentials Photo Gallery stashes an untouched original in `<folder>/.OriginalFiles/` so you can revert to original at any time.
+
+---
+
+## Uninstall & Clean Up
+
+Uninstalling Essentials Photo Gallery (or removing its database) **never deletes your photos or videos**.
+
+1. Open **Windows Settings → Apps → Installed apps**, find **Essentials Photo Gallery**, and choose **Uninstall**.
+2. *(Optional)* To also remove the local catalog database, thumbnail cache, logs, and optional downloaded AI models:
+   ```powershell
+   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:LOCALAPPDATA\PhotoGallery"
+   ```
 
 ---
 

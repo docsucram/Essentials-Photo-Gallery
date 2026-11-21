@@ -2,7 +2,7 @@
 
 This document tracks **genuinely unbuilt future enhancements** for **Essentials Photo Gallery**, maintaining the classic Windows Live Photo Gallery (WLPG) ease-of-use and speed while expanding optional local AI, heritage migration, and enthusiast editing capabilities.
 
-> **Graduated Features:** Completed initiatives—including **Visual Similarity Search (`Find Similar` with 24-byte LAB Haar + pHash/dHash, `81%` default & `70%–98%` Scope Bar slider)**, **Database Fresh Start Reset & Empty-Library Prompt**, **Session-Cached `FaceEngine` & Folder Manager Performance Optimizations**, **Companion Phone GPS Matching & GPX Interpolation**, **Fine Tune Two-Tier `Basic | Advanced` Mode** (`Smart Enhance`, `Whites`/`Blacks`, content-aware `Structure`, `Tone Curve`, `WB Eyedropper`, `8-Band Color Mixer (HSL)`, `Sharpen Radius/Masking`, `Split Denoise`, `Orton Glow`/`Golden Hour`, `Film Grain`), **Phase 1 Regional Masking (`Whole | Subject | Bg | Sky`) with Interactive Paint/Erase Mask Brush & Live Masked Histogram**, **Home Ribbon `People` & `Geotag` Split Buttons**, SQLite FTS5 RapidOCR search, Per-Folder Scan & Privacy Controls with PBKDF2 PIN lock, Unified `LaMa` ONNX Generative Inpainting, Embedded JPEG Fast-Path for Camera RAW, AgX Highlight Chroma Roll-Off, Focus-Aware Sliders, and Interactive Map Pin Adjustment—have been graduated into [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) and [`docs/editing_engine.md`](editing_engine.md).
+> **Graduated Features:** Completed initiatives—including **Depth & Light 2.0 (3D Surface-Normal Relighting & Virtual Light Studio with Joint-Guided Depth Refinement, Hemispherical Volume Normals, Albedo-Preserving Ambient Dimming, 3 Interactive On-Canvas Point/Spot/Rim Lights, Blinn-Phong Gloss, Gobo Projections & 6 Relight Look Presets)**, **UI Theme Architecture Consolidation (`ThemeTokens`, semantic `uiRole` QSS properties, and automated headless contrast auditing)**, **Visual Similarity Search (`Find Similar` with 24-byte LAB Haar + pHash/dHash, `81%` default & `70%–98%` Scope Bar slider)**, **Database Fresh Start Reset & Empty-Library Prompt**, **Session-Cached `FaceEngine` & Folder Manager Performance Optimizations**, **Companion Phone GPS Matching & GPX Interpolation**, **Fine Tune Two-Tier `Basic | Advanced` Mode** (`Smart Enhance`, `Whites`/`Blacks`, content-aware `Structure`, `Tone Curve`, `WB Eyedropper`, `8-Band Color Mixer (HSL)`, `Sharpen Radius/Masking`, `Split Denoise`, `Orton Glow`/`Golden Hour`, `Film Grain`), **Phase 1 Regional Masking (`Whole | Subject | Bg | Sky`) with Interactive Paint/Erase Mask Brush & Live Masked Histogram**, **Home Ribbon `People` & `Geotag` Split Buttons**, SQLite FTS5 RapidOCR search, Per-Folder Scan & Privacy Controls with PBKDF2 PIN lock, Unified `LaMa` ONNX Generative Inpainting, Embedded JPEG Fast-Path for Camera RAW, AgX Highlight Chroma Roll-Off, Focus-Aware Sliders, and Interactive Map Pin Adjustment—have been graduated into [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) and [`docs/editing_engine.md`](editing_engine.md).
 
 ---
 
@@ -53,6 +53,7 @@ This document tracks **genuinely unbuilt future enhancements** for **Essentials 
     * Clicking the **`[⧉ N]`** badge on a thumbnail (or pressing **`S`**) expands/collapses that stack inline in the grid (or opens all stack members directly in **Compare Mode (`C`)**).
     * Right-click context menu: **`Stack ▸`** (`Group Selected into Stack`, `Unstack`, `Set Selected as Top of Stack`, `Open Stack in Compare View`).
     * Auto-stacking helpers: **`Auto-Stack RAW + JPEG Pairs`** and **`Auto-Stack Rapid Bursts (< 2s)`** (picking the highest Laplacian sharpness shot as the stack parent).
+    * **Unified RAW + JPEG/HEIC Lifecycle & Preview Controls:** Keep paired RAW + JPEG/HEIC files together during move, rename, copy, and Duplicate Finder scans; prompt with a deletion-scope choice (*Delete Both / RAW Only / JPEG Only*); and add a configurable RAW display preference (*Embedded Preview* vs. *Full Demosaic* vs. *Paired JPEG*).
 
 ---
 
@@ -62,6 +63,7 @@ This document tracks **genuinely unbuilt future enhancements** for **Essentials 
 * **Building on v0.14.0's 24-Byte LAB Haar `Find Similar`:** Keep the built-in, zero-download `24-byte` CIE LAB Haar + `64-bit` pHash/dHash engine as the instant Tier 1 visual similarity matcher, and persist computed `(fast_hash, phash64, dhash64, laplacian_sharpness, lab_haar)` signatures in a `thumbnails.db` `media_signatures` table keyed by `(media_id, mtime)` so scans across 10,000+ photos execute in `< 50 ms` without re-reading image files.
 * **Tier 2 — Optional `MobileCLIP-S1` INT8 ONNX Add-on (~80 MB in `File → Options → Add-ons`):**
   * Background low-priority `SemanticIndexWorker` stores L2-normalized `512-d float16` (`1 KB`/photo) vectors in a separate `semantic_vectors.db`, controlled per folder in **Folder Manager**.
+  * **Resumable & Verified Add-On Downloads:** Support HTTP `Range` resume and `sha256sums.txt` integrity checks across all optional ONNX add-on downloads in `File → Options → Add-ons`, plus an optional multilingual CLIP text encoder pack.
   * **1. Natural-Language Search:** Type conceptual queries (`"dog on beach"`, `"birthday cake"`, `"snowy garden"`) in the Search Box (`< 15 ms` across 100k photos, fused with FTS5 keyword/tag/OCR matches via Reciprocal Rank Fusion).
   * **2. Pre-Computed Zero-Shot Auto-Tagging (`concept_presets.bin`):** Ship a tiny `~64 KB` file of pre-computed text embeddings for ~120 common photographic categories (*Beach, Sunset, Mountain, Dog, Cat, Car, Food, Wedding, Document, Receipt, Screenshot, Concert, Wildlife*). Comparing photo embeddings against `concept_presets.bin` enables optional **Suggested Smart Tags** (analogous to face suggestions) with zero extra model overhead.
   * **3. AI Conceptual Similarity & Contextual `Duplicates` Ribbon Workspace:** Adds a 4th mode inside a contextual **`Duplicates & Similar`** Ribbon tab alongside *Exact Copies*, *Visual & Bursts*, and *Color / Haar Similar* (with linked 2-up loupe, auto-pick presets, and non-destructive **"Merge Tags, People, Caption & Rating into Kept Photo"** on recycle).
@@ -84,75 +86,60 @@ This document tracks **genuinely unbuilt future enhancements** for **Essentials 
 
 ---
 
-## 6. UI Theme Architecture Consolidation & Automated Contrast Auditing
+## 6. Additional Editing, Generative Restoration & Semantic Masking
 
-### 6.1 Eliminating Inline `setStyleSheet()` Sprawl (`ThemeTokens` + Semantic QSS Roles)
-* **Problem:** Hardcoded inline `widget.setStyleSheet(...)` calls inside individual dialogs and docks override global `.qss` files (`wlpg_aero.qss`, `dark.qss`, `modern.qss`), causing recurring text-contrast, border, and disabled-state bugs when switching between Classic Aero, Fluent, and Dark Studio themes.
-* **Safe, Incremental Remediation Plan (Zero Layout Risk):**
-  1. **Central `ThemeTokens` Palette (`src/ui/theme_tokens.py`):** Define a single source of truth for custom-painted `QPainter` delegates and dynamic widgets (`bg_surface`, `bg_elevated`, `text_primary`, `text_secondary`, `border_subtle`, `accent`, `danger`).
-  2. **Semantic QSS Property Roles:** Replace inline widget color stylesheets with semantic Qt properties (e.g., `widget.setProperty("uiRole", "card")`, `lbl.setProperty("uiRole", "muted")`) styled centrally in the 3 `.qss` stylesheets followed by `style().unpolish(w); style().polish(w)`.
-  3. **Automated Headless Theme Contrast Test (`tests/test_theme_contrast_audit.py`):** Add a unit test that instantiates every dialog and dock across all 3 themes and asserts that no visible label, button, or input has unreadable foreground-to-background luminance contrast (`< 3.0:1`) or stale inline hex overrides.
-
----
-
-## 7. Additional Editing, Generative Restoration & Semantic Masking
-
-### 7.1 `LaMa` Context-Aware Fill Remaining Extensions (`Photo Fuse` & `Perspective/Keystone`)
+### 6.1 `LaMa` Context-Aware Fill Remaining Extensions (`Photo Fuse` & `Perspective/Keystone`)
 * Extend the implemented `LaMaInpaintEngine` (`lama_fp32.onnx`) to the remaining geometric tools:
   * **Photo Fuse Boundary Fill:** Fill thin outer edge slivers when handheld burst shots have slight framing drift after homography alignment, instead of cropping in.
   * **Perspective / Keystone Correction & Corner Fill:** Add `Vertical Perspective (-100..+100)` and `Horizontal Perspective (-100..+100)` sliders inside the Crop & Straighten tool, solved via 4-point projective homography (`cv2.getPerspectiveTransform` + `cv2.warpPerspective(..., flags=cv2.INTER_LANCZOS4)`), paired with analytical auto-crop or optional `LaMa` corner-wedge fill.
 
-### 7.2 Archival Restoration Presets in Spot Fix
+### 6.2 Archival Restoration Presets in Spot Fix
 * **Auto "Remove Orange Date Stamp" Preset:** Automatically detect saturated orange/red LED quartz date-stamp digits in the bottom corners of 1980s–2000s film/compact scans and feed the dilated digit mask into `LaMaInpaintEngine`.
 * **Dust & Film Scratch Line Mode:** Hold `Shift` in Spot Fix to click-drag straight scratch lines across scanned slides/negatives and heal them in one stroke.
 
-### 7.3 Creative `.cube` 3D LUT Importer & Look Profiles
+### 6.3 Creative `.cube` 3D LUT Importer & Look Profiles
 * **Look Profiles Dropdown (`As Shot`, `Natural`, `Warm Print`, `Vivid`, `Portrait`, `Monochrome`)** with an importable **`.cube` 3D LUT** parser evaluated via fast trilinear `numpy` lookup and continuous `Amount (0–200%)` intensity blending.
 
-### 7.4 Semantic Masking Phase 2 (`MobileSAM` / `EdgeSAM` + Pre-Computed `sam3_presets.bin`)
+### 6.4 Semantic Masking Phase 2 (`MobileSAM` / `EdgeSAM` + Pre-Computed `sam3_presets.bin`)
 * **Optional Add-on in `File → Options → Add-ons`:** Adds `mobile_sam_encoder_int8.onnx` (~18 MB) + `sam_mask_decoder.onnx` (~16 MB) extending **Fine Tune Regional Masking** (`Whole | Subject | Bg | Sky` + Mask Brush) with interactive **Click / Box-to-Select Any Object**, cached per `media_id`.
 * **Pre-Computed Text Embeddings (`sam3_presets.bin` / `semantic_mask_presets.bin`, ~524 KB):** Ship pre-computed text embeddings for ~150 common masking categories (*Foliage, Water, Architecture, Road, Skin, Pet, Vehicle*) so instant 1-click semantic masks run without bundling a heavy text encoder.
 * **Live Histogram "Subject-Only" Scope Toggle:** Compute the live histogram strictly inside the detected foreground/subject mask so bright skies don't skew skin-tone exposure decisions.
 
 ---
 
-## 8. Geolocation, Memories, Video & Library Portability Extensions
+## 7. Geolocation, Memories, Video & Library Portability Extensions
 
-### 8.1 Map Polygon Geofencing, KML Track Import & Memories Strip
+### 7.1 Map Polygon Geofencing, KML Track Import & Memories Strip
 * **KML Track Import:** Extend **Companion Phone GPS Matching** (`GpsMatchDialog`) alongside `.gpx` to also parse Google Timeline `.kml` exports.
 * **Map Polygon Geofencing & Geographic Smart Albums:** Draw a lasso or polygon on **World Map View** to filter photos inside custom geographic regions or save the boundary as a Smart Album rule.
 * **"On This Day" Collapsible Memories Strip:** Optional collapsible horizontal strip above the Thumbnail Grid highlighting photos from 1, 2, 5, and 10 years ago today.
 
-### 8.2 Video Frame Capture ("Save Still Photo") & Beat-Synced MP4 Slideshows
+### 7.2 Video Frame Capture ("Save Still Photo") & Beat-Synced MP4 Slideshows
 * **Video Frame Capture:** Add a **"Save Frame as Photo"** button in the Single Media Viewer video transport bar that exports the current full-resolution decoded frame as `.jpg`/`.png` into the same folder, copies `date_taken` (offset by playback position) + GPS coordinates, and immediately indexes it into the catalog.
 * **Beat-Synced Slideshow Music & MP4 Export:** Detect onset peaks in `.mp3`/`.wav` audio tracks via short-time Fourier flux (NumPy FFT, zero heavy audio dependencies) and snap Ken Burns pan/zoom slide transitions to musical bars in 1080p MP4 exports.
 
-### 8.3 Dominant Color Swatch Filtering (`Find` Tab) & Portable Catalog Bundles (`.epgbackup`)
+### 7.3 Dominant Color Swatch Filtering (`Find` Tab) & Portable Catalog Bundles (`.epgbackup`)
 * **Dominant Color Swatch Filtering:** Add a 10-swatch clickable color filter bar to the `Find` ribbon tab matching precomputed Tier 1 `media_signatures` CIE LAB color data.
 * **Multi-PC Library Portability (`.epgbackup`):** Extend **File → Options → Database** with **"Export / Import Portable Catalog Bundle..."** packaging `catalog.db`, `thumbnails.db`, and relative root-folder path mappings so drive-letter differences (`D:\Pictures` vs. `C:\Users\...\Pictures`) remap automatically on the target PC.
 
+---
 
-## 9. Depth & Light 2.0 — 3D Surface-Normal Relighting & Virtual Light Studio
+## 8. Photographer Culling Toolkit, Motion Photos, Offline Drives & Customization
 
-### 9.1 Why Upgrade Beyond Flat Z-Slice Relighting
-* **Current Limitation:** Our v0.14.0 `Depth & Light` relighting (`relight_near`, `relight_far`) modulates exposure strictly by 2D depth slice $D(x, y)$ and subject matte $M(x, y)$. While fast, it brightens subjects uniformly like a flat 2D cutout rather than wrapping light directionally around 3D contours (faces, coats, umbrellas, wet pavement) or casting specular reflections.
-* **Target Experience (Inspired by Clipdrop/SwitchLight Relight & Luminar Neo Relight AI):** Combine fast Luminar-style Near/Far sliders with an interactive **3D Virtual Light Studio** supporting draggable on-canvas Point/Spot lights, 3D surface normals, wet/skin specular gloss, old-light suppression, and 1-click lighting sphere presets.
+### 8.1 Offline External Drive / NAS Browsing & Relocatable Cache
+* **Offline Volume Browsing (`volume_offline` vs. Deleted):** Distinguish unplugged USB drives and offline NAS mounts from deleted files so catalogued folders remain browsable via cached `thumbnails.db` thumbnails with an **`Offline`** badge, disabling only actions requiring original disk bytes and recovering automatically when the drive reconnects.
+* **Relocatable Database & Thumbnail Cache:** Allow moving `thumbnails.db` (which grows to several GB on 500k libraries) and `catalog.db` to a secondary drive from **File → Options → Database** with a cancellable migration progress dialog.
 
-### 9.2 Technical Architecture (`src/imaging/creative_effects.py`, `src/ui/right_tag_dock.py`)
-1. **Joint-Guided Depth Edge Refinement & 3D Surface Normal Reconstruction (`< 4 ms`):**
-   * Refine the raw `Depth-Anything-V2` depth map $D(x, y)$ against the RGB proxy via a fast He et al. **Joint Guided Filter** so depth edges snap cleanly to hair, coat lapels, and umbrellas without halo bleeding.
-   * Compute a dense **3D Surface Normal Map** $\vec{N}(x, y) = (N_x, N_y, N_z)$ from multi-scale Scharr/Sobel spatial gradients of the refined depth map blended with a smooth 3D hemispherical volume prior on detected faces/subjects (with optional upgrade hook for an explicit normal-map ONNX estimator such as `DSINE` / ` Bae-Normal` in *Options → Add-ons*).
-2. **Albedo-Preserving De-Lighting ("Old Light" Dimming) & Linear Shading:**
-   * Separate intrinsic surface reflectance (albedo) from ambient illumination in linear sRGB so darkening the existing scene (*"Dim Original Light"*) or boosting `Relight Near` preserves deep blacks (e.g., dark coats stay rich black rather than turning milky grey).
-3. **Interactive Multi-Light 3D Shader (Point, Spot & Directional Rim Lights):**
-   * Support up to **3 independent virtual 3D lights** in `PhotoAdjustmentRecipe.virtual_lights: list[dict]`:
-     * **On-Canvas Gizmo:** Draggable **Light Source (`●`)** and **Aim Point (`◎`)** directly on `SingleMediaViewer`.
-     * **Light Types:** `Point` (3D omnidirectional with inverse-square falloff), `Spot` (cone angle aimed at `◎`), and `Directional / Rim` (edge-hugging backlight where $\vec{N} \cdot \vec{V}_{\text{cam}} \to 0$).
-     * **Per-Light Controls:**
-       * `Temperature (1800K–10000K)` & `Color Swatch / Hex Picker` (e.g., `#ff7e28` sodium streetlamp, `#ffe8d5` warm key, neon cyan/magenta).
-       * `Intensity (0–100)`, `Softness / Diffusion` (Lambertian wrap factor), and `Close to Far` (light Z-coordinate $z_L \in [0, 1]$).
-       * `Gloss (0–100)`: Blinn-Phong specular highlight reflection ($\max(0, \vec{N} \cdot \vec{H})^p$) modulated by local luminance so wet pavement, eyes, skin catchlights, and umbrella fabric glint realistically toward the light source.
-       * `Depth Range (From / To)`: Restricts light contribution to specific depth intervals.
-       * `Pattern (Gobo)`: Optional projected light mask (*None*, *Venetian Blinds*, *Window Pane*, *Dappled Foliage*).
-4. **1-Click "Relight Looks" Sphere Presets:**
-   * Visual sphere grid at the top of the Relight panel (*Warm Streetlamp*, *Golden Rim Light*, *Studio Rembrandt*, *Dual Neon Cyberpunk*, *Moonlit Backlight*, *Window Gobo*) that populates light positions, Kelvin colors, and gloss in one click.
+### 8.2 Apple Live Photos & Android Motion Photos
+* **Unified Motion Photo Support:** Detect Android/Samsung/Pixel Motion Photos via a fast 2-byte JPEG EOI tail check (`FF D9`) + XMP/MP4 `ftyp` offset scan, and pair iPhone `.HEIC`/`.JPG` + `.MOV` Live Photos into a single `[LIVE]` card with smooth in-viewer playback and unified Move/Rename/Delete lifecycle.
+
+### 8.3 Pro Culling Ergonomics (AF Overlay, Zoom Minimap, Batch Rename & Space QuickLook)
+* **Camera Autofocus (AF) Area Overlay:** On-demand MakerNote AF point parser (cached per `(path, mtime, size)`, never run during folder scans) displaying locked/selected autofocus boxes in Single Image View and Compare Mode.
+* **Zoom Minimap Navigator & Sharpness Heatmap Grid:** When zoomed >100% in Single Image View or Compare Mode, display a corner minimap with a draggable viewport box and an optional thumbnail-resolution sharpness grid overlay.
+* **Batch Rename with Live Preview & Sidecar Sync (`F2` on Multi-Selection):** Token/sequence renaming with collision detection, Windows reserved-name validation (`CON`/`PRN`/`AUX`/`NUL`/`COM1-9`/`LPT1-9`), atomic rollback, and automatic renaming of `.xmp` sidecars, `.OriginalFiles` backups, and RAW+JPEG companions.
+* **Spacebar Quick Preview & Global Auto-Advance:** Instant `Space` QuickLook preview in Thumbnail Grid View, plus `Shift + 1..5` / `Shift + P` auto-advance culling outside Compare Mode.
+
+### 8.4 Duplicate Finder Keep Rules, Calendar Heatmap & Custom Fields
+* **Preferred Folders & Keep Rules:** Extend **Duplicate Finder** Auto-Pick with an ordered **Preferred Folder Priority** list, RAW+JPEG/Live Photo pair protection, and a total reclaimable-disk-space summary banner.
+* **Visual Calendar Density Heatmap:** Optional GitHub-style Year/Month/Day activity heatmap inside the **Date Taken** navigation panel to spot busy trips and events at a glance.
+* **Customizable Status Bar & Info Pane Fields:** Right-click dialogs to show, hide, and reorder displayed metadata fields (dimensions, file size, lens, exposure, color space, path, GPS) with optional automatic hiding of empty fields.

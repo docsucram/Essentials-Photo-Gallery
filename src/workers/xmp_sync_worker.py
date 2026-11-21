@@ -9,6 +9,7 @@ losslessly without re-encoding image pixel data.
 from __future__ import annotations
 
 import datetime
+import io
 import os
 import stat
 import struct
@@ -23,6 +24,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
 from src.db.connection import DualDatabaseEngine
 from src.db.repository import CatalogRepository, _epoch_to_datetime_utc
+from src.utils.paths import is_cloud_only_file, is_cloud_only_stat
 
 XMP_HEADER = b"http://ns.adobe.com/xap/1.0/\x00"
 EXIF_HEADER = b"Exif\x00\x00"
@@ -322,6 +324,183 @@ def build_wlpg_xmp_packet(media_detail: dict[str, Any]) -> bytes:
 </x:xmpmeta>
 <?xpacket end="w"?>"""
     return xmp_str.encode("utf-8")
+
+
+# Exact Clark-notation tags managed by Essentials Photo Gallery during XMP write-back.
+# Any attribute or element outside this set (e.g. Adobe crs:*, darktable:*, dc:rights,
+# photoshop:Headline, xmpMM:*, drone telemetry) is preserved intact during merge.
+_MANAGED_XMP_TAGS: frozenset[str] = frozenset(
+    {
+        f"{{{NS['xmp']}}}Rating",
+        f"{{{NS['MicrosoftPhoto']}}}Rating",
+        f"{{{NS['tiff']}}}Orientation",
+        f"{{{NS['exif']}}}DateTimeOriginal",
+        f"{{{NS['exif']}}}GPSLatitude",
+        f"{{{NS['exif']}}}GPSLongitude",
+        f"{{{NS['dc']}}}description",
+        f"{{{NS['dc']}}}title",
+        f"{{{NS['dc']}}}subject",
+        f"{{{NS['dc']}}}creator",
+        f"{{{NS['lr']}}}hierarchicalSubject",
+        f"{{{NS['MicrosoftPhoto']}}}LastKeywordXMP",
+        f"{{{NS['digiKam']}}}TagsList",
+        f"{{{NS['Iptc4xmpCore']}}}Location",
+        f"{{{NS['MP']}}}RegionInfo",
+        f"{{{NS['mwg-rs']}}}Regions",
+    }
+)
+
+
+def _extract_xmp_xml_slice(raw_bytes: bytes) -> bytes | None:
+    """Extracts the <x:xmpmeta>...</x:xmpmeta> or <rdf:RDF>...</rdf:RDF> XML fragment from an XMP packet."""
+    for start_tag, end_tag in (
+        (b"<x:xmpmeta", b"</x:xmpmeta>"),
+        (b"<rdf:RDF", b"</rdf:RDF>"),
+    ):
+        s_idx = raw_bytes.find(start_tag)
+        if s_idx != -1:
+            e_idx = raw_bytes.find(end_tag, s_idx)
+            if e_idx != -1:
+                return raw_bytes[s_idx : e_idx + len(end_tag)]
+    return None
+
+
+def merge_wlpg_xmp_packet(
+    existing_xmp_bytes: bytes | None, media_detail: dict[str, Any]
+) -> bytes:
+    """
+    Surgically updates Gallery-managed metadata inside `existing_xmp_bytes` while
+    preserving all unrelated third-party XMP namespaces and properties (e.g. Adobe
+    Camera Raw `crs:*`, darktable history `darktable:*`, `photoshop:Headline`,
+    `dc:rights`, `xmpMM:*`, drone telemetry). Falls back to `build_wlpg_xmp_packet()`
+    when no valid existing XMP packet is present.
+    """
+    fresh_bytes = build_wlpg_xmp_packet(media_detail)
+    if not existing_xmp_bytes:
+        return fresh_bytes
+
+    existing_slice = _extract_xmp_xml_slice(existing_xmp_bytes)
+    fresh_slice = _extract_xmp_xml_slice(fresh_bytes)
+    if not existing_slice or not fresh_slice:
+        return fresh_bytes
+
+    try:
+        # Preserve original prefixes declared in the existing XMP document (crs, darktable, photoshop, etc.)
+        discovered_ns: dict[str, str] = {}
+        for _ev, (prefix, uri) in ET.iterparse(io.BytesIO(existing_slice), events=("start-ns",)):
+            if prefix and uri and uri not in discovered_ns.values():
+                discovered_ns[prefix] = uri
+        for prefix, uri in discovered_ns.items():
+            if uri not in NS.values():
+                try:
+                    ET.register_namespace(prefix, uri)
+                except ValueError:
+                    pass
+        for prefix, uri in NS.items():
+            ET.register_namespace(prefix, uri)
+
+        existing_root = ET.fromstring(existing_slice)
+        fresh_root = ET.fromstring(fresh_slice)
+    except Exception:
+        return fresh_bytes
+
+    rdf_tag = f"{{{NS['rdf']}}}RDF"
+    desc_tag = f"{{{NS['rdf']}}}Description"
+
+    existing_rdf = existing_root if existing_root.tag == rdf_tag else existing_root.find(f".//{rdf_tag}")
+    fresh_desc = fresh_root.find(f".//{desc_tag}")
+    if existing_rdf is None or fresh_desc is None:
+        return fresh_bytes
+
+    existing_descs = existing_rdf.findall(desc_tag)
+    if not existing_descs:
+        primary_desc = ET.SubElement(existing_rdf, desc_tag, {f"{{{NS['rdf']}}}about": ""})
+        existing_descs = [primary_desc]
+    else:
+        primary_desc = existing_descs[0]
+
+    # Remove ONLY Gallery-managed attributes & child elements from all existing Description blocks
+    for desc in existing_descs:
+        for attr_key in list(desc.attrib.keys()):
+            if attr_key in _MANAGED_XMP_TAGS:
+                del desc.attrib[attr_key]
+        for child in list(desc):
+            if child.tag in _MANAGED_XMP_TAGS:
+                desc.remove(child)
+
+    # Splice freshly computed Gallery-managed attributes & child elements onto the primary Description
+    for attr_key, attr_val in fresh_desc.attrib.items():
+        if attr_key in _MANAGED_XMP_TAGS:
+            primary_desc.set(attr_key, attr_val)
+    for child in list(fresh_desc):
+        if child.tag in _MANAGED_XMP_TAGS:
+            primary_desc.append(child)
+
+    # Ensure root is wrapped in <x:xmpmeta>
+    xmpmeta_tag = f"{{{NS['x']}}}xmpmeta"
+    if existing_root.tag != xmpmeta_tag:
+        wrapper = ET.Element(xmpmeta_tag)
+        wrapper.append(existing_root)
+        output_root = wrapper
+    else:
+        output_root = existing_root
+
+    try:
+        ET.indent(output_root, space="  ")
+    except Exception:
+        pass
+    xml_body = ET.tostring(output_root, encoding="unicode")
+    packet = (
+        '<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>\n'
+        f"{xml_body}\n"
+        '<?xpacket end="w"?>'
+    )
+    return packet.encode("utf-8")
+
+
+def _extract_jpeg_xmp_packet(file_path: Path) -> bytes | None:
+    """Reads the existing APP1 XMP packet bytes from a JPEG without touching image scan data."""
+    try:
+        raw = file_path.read_bytes()
+    except OSError:
+        return None
+    n = len(raw)
+    if n < 4 or raw[:2] != b"\xff\xd8":
+        return None
+    pos = 2
+    while pos + 1 < n:
+        if raw[pos] != 0xFF:
+            break
+        marker = raw[pos + 1]
+        if marker in (0xD8, 0x01) or (0xD0 <= marker <= 0xD7):
+            pos += 2
+            continue
+        if marker in (0xDA, 0xD9) or pos + 4 > n:
+            break
+        seg_len = struct.unpack(">H", raw[pos + 2 : pos + 4])[0]
+        seg_end = pos + 2 + seg_len
+        if seg_end > n:
+            break
+        payload = raw[pos + 4 : seg_end]
+        if marker == 0xE1 and payload.startswith(XMP_HEADER):
+            return payload[len(XMP_HEADER) :]
+        pos = seg_end
+    return None
+
+
+def _resolve_sidecar_write_path(file_path: Path) -> Path:
+    """
+    Returns the target `.xmp` sidecar path for RAW / non-JPEG files.
+    Preserves existing Lightroom/ACR `<stem>.xmp` sidecars when present and
+    `<stem><ext>.xmp` does not already exist; otherwise uses `<stem><ext>.xmp`.
+    """
+    ext_sidecar = file_path.with_suffix(file_path.suffix + ".xmp")
+    if ext_sidecar.is_file():
+        return ext_sidecar
+    stem_sidecar = file_path.with_suffix(".xmp")
+    if stem_sidecar.is_file():
+        return stem_sidecar
+    return ext_sidecar
 
 
 def transform_box_raw_to_display(
@@ -978,26 +1157,45 @@ def _sync_single_media_item(
         return None
 
     try:
-        stat_res = file_path.stat()
+        stat_res = file_path.stat(follow_symlinks=False)
+        if is_cloud_only_stat(stat_res):
+            return None
         orig_atime = stat_res.st_atime
         orig_mtime = stat_res.st_mtime
     except OSError:
         return None
 
-    xmp_packet = build_wlpg_xmp_packet(media_detail)
     orientation = int(media_detail.get("orientation") or 1)
     suffix = file_path.suffix.lower()
 
     ok = False
     if suffix in RAW_EXT_SET or suffix not in (".jpg", ".jpeg"):
         # Camera RAW or non-JPEG container: ALWAYS write to .xmp sidecar, NEVER modify RAW container directly
-        sidecar = file_path.with_suffix(file_path.suffix + ".xmp")
+        sidecar = _resolve_sidecar_write_path(file_path)
+        existing_xmp: bytes | None = None
+        if sidecar.is_file() and not is_cloud_only_file(sidecar):
+            try:
+                existing_xmp = sidecar.read_bytes()
+            except OSError:
+                existing_xmp = None
+        xmp_packet = merge_wlpg_xmp_packet(existing_xmp, media_detail)
         sidecar_tmp = sidecar.with_suffix(sidecar.suffix + ".tmp_xmp")
         sidecar_tmp.write_bytes(xmp_packet)
         ok = _safe_atomic_replace(sidecar_tmp, sidecar)
         record_recently_written(sidecar, len(xmp_packet), int(time.time()))
     else:
-        ok = _inject_xmp_and_exif_into_jpeg_lossless(file_path, xmp_packet, orientation)
+        existing_xmp = _extract_jpeg_xmp_packet(file_path)
+        xmp_packet = merge_wlpg_xmp_packet(existing_xmp, media_detail)
+        if len(XMP_HEADER + xmp_packet) + 2 > 65535:
+            # If preserved third-party XMP pushes APP1 over JPEG's 64 KiB segment limit,
+            # write the merged XMP safely to a sidecar rather than truncating third-party data.
+            sidecar = _resolve_sidecar_write_path(file_path)
+            sidecar_tmp = sidecar.with_suffix(sidecar.suffix + ".tmp_xmp")
+            sidecar_tmp.write_bytes(xmp_packet)
+            ok = _safe_atomic_replace(sidecar_tmp, sidecar)
+            record_recently_written(sidecar, len(xmp_packet), int(time.time()))
+        else:
+            ok = _inject_xmp_and_exif_into_jpeg_lossless(file_path, xmp_packet, orientation)
 
     if ok:
         try:

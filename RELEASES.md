@@ -4,6 +4,42 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 
 ---
 
+## Essentials Photo Gallery v0.15.0
+
+**Essentials Photo Gallery 0.15.0** brings **Depth & Light 2.0** (3D surface-normal relighting & virtual light studio), a **unified Crop & Straighten bar**, an upgraded **Resize & Export** dialog, consolidated **ThemeTokens** contrast auditing, and key **reliability & data-safety hardening** for OneDrive libraries and third-party XMP sidecars.
+
+### Depth & Light 2.0: 3D Surface-Normal Relighting & Virtual Light Studio
+
+- **3D Surface-Normal Reconstruction & Albedo-Preserving De-Lighting:** Replaced flat Z-slice relighting with joint-guided depth edge refinement, multi-scale Scharr + hemispherical subject volume normals (`DepthAndMatteEngine.get_refined_depth_and_normals()`), optional ONNX normal-map model support (`dsine.onnx` / `normal_bae.onnx`), and linear-light ambient **Dim original light (Old Light)** suppression that keeps deep blacks rich without washing out into grey.
+- **Up to 3 Interactive Virtual 3D Lights & On-Canvas Gizmos:** Add up to 3 independent **Point**, **Spot**, or **Rim** lights with draggable on-canvas source orbs (`●`) and aim reticles (`◎`), per-light **Temperature (1800K–10000K)** + color swatch picker, **Intensity**, **Softness / Diffusion**, **Close ↔ Far (Z)**, Blinn-Phong **Gloss / Specular**, **Depth Range (`From..To`)**, and procedural **Gobo** projections (**Venetian Blinds**, **Window Pane**, **Dappled Foliage**).
+- **1-Click "Relight Looks" Sphere Presets:** Six shaded visual lighting sphere presets (**Warm Streetlamp**, **Golden Rim**, **Rembrandt**, **Dual Neon**, **Moonlit**, **Window Gobo**) configure lights and ambient dimming in one click.
+
+### Unified Crop & Straighten Tool
+
+- **Draw-a-Line Straighten & Smooth Angle Slider:** Replaced the disconnected straighten flow with a unified **Crop & Straighten** bar featuring a checkable **Straighten** line-draw tool (auto-levels horizontal horizons to `0°` and vertical edges to `90°` with a live `Angle: ±X.X°` pill), a `-15.0° .. +15.0°` slider with double-click reset, **Auto** horizon detection, and a temporary `9×9` fine alignment grid while rotating. Clicking **Straighten** on the Edit Ribbon now opens this unified bar directly.
+- **Streamlined Aspect Ratios & Progressive Disclosure:** Removed reoriented duplicate presets (`3:4`, `2:3`, `4:5`, `9:16`) in favor of **↻ Flip** (`X`), hid `[W] : [H] [+ Save]` unless **Custom** is active, persisted saved custom ratios in `QSettings`, and restored a crisp `▾` chevron on the ratio selector across all themes.
+- **Composition Grids, Scrim & AI Expand Preview:** Added **Grid ▾** (`G`) cycling through Rule of Thirds (`3×3`), Golden Ratio (`Phi`), Diagonals, Center Crosshair, and None; refined outer scrim opacity (~65% idle / ~40% dragging) with L-shaped corner brackets and `Shift + Drag` corner ratio lock; and added an `AI Expand` fill-zone preview with dynamic **Apply & Fill** labeling.
+
+### Unified Resize & Export
+
+- **Upgraded `Resize & Export` Dialog:** Available from both Gallery View (**Resize & Export...**) and Single Image View (**Save as copy ▾ → Resize & Export...**, baking active non-destructive edits and crops).
+- **Flexible Modes, Presets & Privacy:** Supports **Fit within (Long Edge)**, **Exact W × H** (with **Lock aspect ratio** and **Center-crop to fill**), and **Percentage (`%`)**, alongside **Do not enlarge smaller photos**, `QSettings`-saved custom size presets, live output resolution & file-size estimates, `JPEG`/`WebP`/`PNG` format & quality controls, **Strip GPS & EXIF metadata**, and non-destructive collision naming.
+
+### Theme Architecture & Contrast Auditing
+
+- **Central `ThemeTokens` & Semantic QSS Roles:** Consolidated theme colors into `ThemeTokens` and semantic `uiRole` properties across Classic Aero, Fluent, and Dark Studio stylesheets, backed by an automated headless contrast audit test suite (`tests/test_theme_contrast_audit.py`).
+- **Modular Create Studio & Bottom Filmstrip Dock:** Refactored Create Studio workspaces into `src/ui/create_studio/` and added a dedicated collapsible `BottomFilmstripDock` (`src/ui/bottom_filmstrip_dock.py`) for quick photo navigation.
+
+### Safety, Reliability & Bug Fixes
+
+- **Windows OneDrive Files On-Demand Protection:** Background workers (`FolderSyncWorker`, `ThumbnailDecodeWorker`, `FaceDetectionWorker`, `OcrScanWorker`, `DuplicateDetectionEngine`, `FolderWatcher`, and `MetadataSyncDaemon`) now inspect Windows `st_file_attributes` (`OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS`) before reading file bytes, keeping cloud-only placeholders indexed without accidentally triggering gigabytes of OneDrive downloads.
+- **Non-Destructive Third-Party XMP Preservation:** When optional file write-back is enabled, `merge_wlpg_xmp_packet()` now surgically updates only Essentials Photo Gallery's managed tags, ratings, captions, GPS, and face regions—preserving unrelated third-party namespaces such as Adobe Lightroom / Camera Raw develop edits (`crs:*`), darktable history (`darktable:*`), `dc:rights`, and `photoshop:Headline`, and updating existing Lightroom-style `<stem>.xmp` sidecars in place.
+- **Clean Fresh Start Reset Worker Shutdown:** Fixed a typo (`thumb_pool` → `thumbnail_pool`) in `perform_fresh_start_reset()` and ensured all active thumbnail, scanner, face, OCR, map, and XMP workers are cleanly cancelled and awaited before resetting `catalog.db` and `thumbnails.db`.
+- **World Map Worker Pool & Pause Integration:** Routed `WorldMapView` cluster thumbnail decoding through the application's managed `thumbnail_pool` with per-worker cancellation flags, viewport-change cancellation, and global Pause Background Tasks support.
+- **Create Studio Theme Re-Entrancy Fix:** Added `_applying_theme` re-entrancy guards in `create_studio_dialogs.py` preventing an infinite `changeEvent(StyleChange)` → `_apply_theme()` recursion crash during live theme transitions.
+
+---
+
 ## Essentials Photo Gallery v0.14.0
 
 **Essentials Photo Gallery 0.14.0** takes a big step forward in both editing power and library cleanup—introducing **Advanced Fine Tune** with **Automatic Regional Masks**, a **revamped Duplicates Finder** paired with **Find Similar Photos**, and **Companion Phone GPS Matching** for automatic geotagging.

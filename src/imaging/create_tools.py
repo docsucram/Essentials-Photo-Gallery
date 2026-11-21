@@ -101,52 +101,118 @@ def find_largest_interior_rectangle(mask: np.ndarray) -> tuple[int, int, int, in
     return rx, ry, rw, rh
 
 
-def inpaint_minor_border_gaps(stitched_bgr: np.ndarray, mask: np.ndarray) -> np.ndarray:
+def inpaint_minor_border_gaps(
+    stitched_bgr: np.ndarray,
+    mask: np.ndarray,
+    allow_full_border_ai: bool = False,
+) -> np.ndarray:
     """
-    Fills minor missing corner / sky / grass border gaps using cv2.inpaint (Telea algorithm).
+    Fills missing border / sky / scenery gaps along stitched panorama edges.
+    - When allow_full_border_ai=True, targets all wavy outer border wedges (up to 25% of canvas)
+      using the same LaMa neural inpainting + feathered seam-blend pipeline as Crop AI Expand
+      (falling back gracefully to Telea when LaMa is not installed).
+    - When allow_full_border_ai=False, fills minor interior convex-hull gaps (< 2.5% area).
     """
     if stitched_bgr is None or mask is None:
         return stitched_bgr
 
-    # Identify small black holes / gaps inside convex hull or bounding rect
     h, w = stitched_bgr.shape[:2]
-    contours, _ = cv2.findContours((mask > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return stitched_bgr
+    if allow_full_border_ai:
+        gap_mask = (mask == 0).astype(np.uint8) * 255
+        gap_ratio = float(np.count_nonzero(gap_mask)) / float(max(1, h * w))
+        if gap_ratio <= 0.0:
+            return stitched_bgr
+        # Cap full-border AI fill at 25% of canvas to avoid hallucinating massive empty regions
+        if gap_ratio <= 0.25:
+            clean_inpaint_mask = gap_mask
+        else:
+            contours, _ = cv2.findContours((mask > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:
+                return stitched_bgr
+            hull = cv2.convexHull(np.vstack(contours))
+            hull_mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.drawContours(hull_mask, [hull], -1, 255, -1)
+            clean_inpaint_mask = cv2.bitwise_and(hull_mask, gap_mask)
+    else:
+        contours, _ = cv2.findContours((mask > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return stitched_bgr
 
-    # Get outer convex hull
-    all_pts = np.vstack(contours)
-    hull = cv2.convexHull(all_pts)
-    hull_mask = np.zeros((h, w), dtype=np.uint8)
-    cv2.drawContours(hull_mask, [hull], -1, 255, -1)
+        all_pts = np.vstack(contours)
+        hull = cv2.convexHull(all_pts)
+        hull_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.drawContours(hull_mask, [hull], -1, 255, -1)
 
-    # Missing gaps between hull and actual stitched mask
-    gap_mask = cv2.bitwise_and(hull_mask, cv2.bitwise_not(mask))
-
-    # Only inpaint small gap areas to avoid halluncinating massive regions
-    # Filter components by area < 2.5% of total image
-    max_gap_area = (h * w) * 0.025
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(gap_mask)
-    clean_inpaint_mask = np.zeros((h, w), dtype=np.uint8)
-    for lbl in range(1, num_labels):
-        if stats[lbl, cv2.CC_STAT_AREA] <= max_gap_area:
-            clean_inpaint_mask[labels == lbl] = 255
+        gap_mask = cv2.bitwise_and(hull_mask, cv2.bitwise_not(mask))
+        max_gap_area = (h * w) * 0.025
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(gap_mask)
+        clean_inpaint_mask = np.zeros((h, w), dtype=np.uint8)
+        for lbl in range(1, num_labels):
+            if stats[lbl, cv2.CC_STAT_AREA] <= max_gap_area:
+                clean_inpaint_mask[labels == lbl] = 255
 
     if np.any(clean_inpaint_mask > 0):
-        # Use neural LaMa when downloaded for crisp scenery/sky/grass corner fill;
-        # fall back to fast Telea inpainting otherwise.
+        # Use neural LaMa (same engine as Crop AI Expand) with dilated seam + feathered blend
         try:
             from src.imaging.creative_effects import get_lama_inpaint_engine, inpaint_object_lama
 
             if get_lama_inpaint_engine().has_neural_model():
-                stitched_rgb = cv2.cvtColor(stitched_bgr, cv2.COLOR_BGR2RGB)
-                filled_rgb = inpaint_object_lama(stitched_rgb, clean_inpaint_mask)
-                return cv2.cvtColor(filled_rgb, cv2.COLOR_RGB2BGR)
+                # Pre-fill black gaps with fast Telea context so LaMa never sees a hard black cliff
+                prefill_bgr = cv2.inpaint(stitched_bgr, clean_inpaint_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
+                seam_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+                dilated_mask = cv2.dilate(clean_inpaint_mask, seam_k, iterations=1)
+                prefill_rgb = cv2.cvtColor(prefill_bgr, cv2.COLOR_BGR2RGB)
+                filled_rgb = inpaint_object_lama(prefill_rgb, dilated_mask)
+                filled_bgr = cv2.cvtColor(filled_rgb, cv2.COLOR_RGB2BGR)
+
+                # Feather-blend filled border with crisp original interior
+                erode_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                keep_bin = cv2.erode((clean_inpaint_mask == 0).astype(np.uint8) * 255, erode_k, iterations=1)
+                alpha_keep = cv2.GaussianBlur(keep_bin.astype(np.float32) / 255.0, (9, 9), 2.0)
+                alpha_keep = np.where(clean_inpaint_mask > 0, 0.0, alpha_keep)[:, :, None]
+                blended = (
+                    stitched_bgr.astype(np.float32) * alpha_keep
+                    + filled_bgr.astype(np.float32) * (1.0 - alpha_keep)
+                )
+                return np.clip(blended, 0, 255).astype(np.uint8)
         except Exception:
             pass
-        return cv2.inpaint(stitched_bgr, clean_inpaint_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
+        return cv2.inpaint(stitched_bgr, clean_inpaint_mask, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
 
     return stitched_bgr
+
+
+def fill_warped_border_slivers(warped_bgr: np.ndarray, max_area_ratio: float = 0.08) -> np.ndarray:
+    """
+    Fill thin black outer border slivers left by homography alignment (e.g. Photo Fuse burst shots)
+    using LaMa neural inpainting when available, or fast Telea fallback.
+    """
+    if warped_bgr is None or warped_bgr.size == 0:
+        return warped_bgr
+    h, w = warped_bgr.shape[:2]
+    gray = cv2.cvtColor(warped_bgr, cv2.COLOR_BGR2GRAY)
+    sliver_mask = (gray <= 1).astype(np.uint8) * 255
+    nonzero = int(np.count_nonzero(sliver_mask))
+    if nonzero == 0 or (nonzero / float(max(1, h * w))) > max_area_ratio:
+        return warped_bgr
+    return inpaint_minor_border_gaps(warped_bgr, (gray > 1).astype(np.uint8) * 255, allow_full_border_ai=True)
+
+
+def slice_panorama_carousel(
+    stitched_bgr: np.ndarray,
+    slide_count: int = 3,
+    slide_size: tuple[int, int] = (1080, 1350),
+) -> list[np.ndarray]:
+    """
+    Slice a wide panorama into `slide_count` (2..5) seamless swipeable 4:5 Instagram carousel slides.
+    """
+    if stitched_bgr is None or stitched_bgr.size == 0:
+        return []
+    n = max(2, min(5, int(slide_count)))
+    sw, sh = max(64, int(slide_size[0])), max(64, int(slide_size[1]))
+    total_w = sw * n
+    resized, _ = _crop_to_aspect_with_rect(stitched_bgr, total_w, sh, focus_center=(0.5, 0.5), zoom=1.0)
+    return [resized[:, i * sw : (i + 1) * sw].copy() for i in range(n)]
 
 
 def _find_learned_matcher_models() -> tuple[str, Path, Path] | None:
@@ -419,10 +485,11 @@ def postprocess_panorama(
     raw_stitched_bgr: np.ndarray,
     auto_crop: bool = True,
     fill_minor_gaps: bool = False,
+    allow_full_border_ai: bool = False,
 ) -> np.ndarray:
     """
-    Rapidly applies border inpainting and Microsoft ICE-style auto-crop on raw stitched panorama.
-    Runs in <50ms without re-running the stitcher.
+    Rapidly applies border inpainting (LaMa AI or Telea) and Microsoft ICE-style auto-crop
+    on a raw stitched panorama without re-running the stitcher.
     """
     if raw_stitched_bgr is None or raw_stitched_bgr.size == 0:
         return raw_stitched_bgr
@@ -432,7 +499,7 @@ def postprocess_panorama(
     mask = (gray > 0).astype(np.uint8) * 255
 
     if fill_minor_gaps:
-        result = inpaint_minor_border_gaps(result, mask)
+        result = inpaint_minor_border_gaps(result, mask, allow_full_border_ai=allow_full_border_ai)
         gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
         mask = (gray > 0).astype(np.uint8) * 255
 
@@ -472,35 +539,42 @@ def _crop_to_aspect_with_rect(
     target_w: int,
     target_h: int,
     focus_center: tuple[float, float] | None = None,
+    zoom: float = 1.0,
 ) -> tuple[np.ndarray, tuple[int, int, int, int]]:
     """
-    Aspect-fill crop with face/focus awareness:
+    Aspect-fill crop with face/focus awareness and optional per-photo zoom (>= 1.0):
     - If focus_center is provided as normalized (cx, cy) in [0..1], centers the crop box around it.
     - Defaults to (0.5, 0.40) to keep heads and eyes in frame rather than cutting off foreheads.
+    - zoom > 1.0 zooms into focus_center while maintaining exact target aspect ratio.
     Returns (cropped_resized_bgr, (start_x, start_y, crop_w, crop_h)).
     """
     h, w = img_bgr.shape[:2]
-    target_aspect = target_w / target_h
-    current_aspect = w / h
+    target_aspect = target_w / max(1, target_h)
+    current_aspect = w / max(1, h)
 
     fc_x, fc_y = focus_center if focus_center is not None else (0.5, 0.40)
+    z = max(1.0, min(4.0, float(zoom or 1.0)))
 
     if current_aspect > target_aspect:
-        # Crop width
-        new_w = int(h * target_aspect)
-        desired_x = int(w * fc_x - new_w / 2)
-        start_x = max(0, min(w - new_w, desired_x))
-        cropped = img_bgr[:, start_x : start_x + new_w]
-        rect = (start_x, 0, new_w, h)
+        base_w = h * target_aspect
+        base_h = float(h)
     else:
-        # Crop height
-        new_h = int(w / target_aspect)
-        desired_y = int(h * fc_y - new_h / 2)
-        start_y = max(0, min(h - new_h, desired_y))
-        cropped = img_bgr[start_y : start_y + new_h, :]
-        rect = (0, start_y, w, new_h)
+        base_w = float(w)
+        base_h = w / target_aspect
 
-    resized = cv2.resize(cropped, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    new_w = max(8, min(w, int(round(base_w / z))))
+    new_h = max(8, min(h, int(round(base_h / z))))
+
+    desired_x = int(round(w * fc_x - new_w / 2.0))
+    desired_y = int(round(h * fc_y - new_h / 2.0))
+    start_x = max(0, min(w - new_w, desired_x))
+    start_y = max(0, min(h - new_h, desired_y))
+
+    cropped = img_bgr[start_y : start_y + new_h, start_x : start_x + new_w]
+    rect = (start_x, start_y, new_w, new_h)
+
+    interp = cv2.INTER_CUBIC if (new_w < target_w or new_h < target_h) else cv2.INTER_AREA
+    resized = cv2.resize(cropped, (target_w, target_h), interpolation=interp)
     return resized, rect
 
 
@@ -509,13 +583,14 @@ def _crop_to_aspect(
     target_w: int,
     target_h: int,
     focus_center: tuple[float, float] | None = None,
+    zoom: float = 1.0,
 ) -> np.ndarray:
     """
-    Aspect-fill crop with face/focus awareness:
+    Aspect-fill crop with face/focus awareness and optional per-photo zoom:
     - If focus_center is provided as normalized (cx, cy) in [0..1], centers the crop box around it.
     - Defaults to (0.5, 0.40) to keep heads and eyes in frame rather than cutting off foreheads.
     """
-    resized, _ = _crop_to_aspect_with_rect(img_bgr, target_w, target_h, focus_center)
+    resized, _ = _crop_to_aspect_with_rect(img_bgr, target_w, target_h, focus_center, zoom=zoom)
     return resized
 
 
@@ -611,6 +686,7 @@ def create_grid_collage(
     bg_color: tuple[int, int, int] = (245, 245, 247),  # Light clean canvas
     target_size: tuple[int, int] = (2560, 1440),
     focus_centers: list[tuple[float, float] | None] | None = None,
+    zooms: list[float] | None = None,
 ) -> np.ndarray:
     """
     Renders a high-resolution grid/masonry collage:
@@ -635,7 +711,8 @@ def create_grid_collage(
             continue
 
         fc = focus_centers[i] if focus_centers and i < len(focus_centers) else None
-        cropped = _crop_to_aspect(images_bgr[i], sw, sh, focus_center=fc)
+        z = zooms[i] if zooms and i < len(zooms) else 1.0
+        cropped = _crop_to_aspect(images_bgr[i], sw, sh, focus_center=fc, zoom=z)
         if corner_radius > 0:
             rounded_bgra = _apply_rounded_corners(cropped, corner_radius)
             alpha = rounded_bgra[:, :, 3].astype(np.float32) / 255.0
@@ -747,6 +824,7 @@ def create_blended_seamless_collage(
     faces_per_image: list[list[tuple[int, int, int, int]]] | None = None,
     prioritize_faces: bool = True,
     focus_centers: list[tuple[float, float] | None] | None = None,
+    zooms: list[float] | None = None,
 ) -> np.ndarray:
     """
     Renders an authentic Windows Live Photo Gallery seamless merged collage:
@@ -790,12 +868,14 @@ def create_blended_seamless_collage(
         if focus_centers and i < len(focus_centers) and focus_centers[i] is not None:
             fc_x, fc_y = focus_centers[i]  # type: ignore[misc]
 
+        z = zooms[i] if zooms and i < len(zooms) else 1.0
         photo_info.append({
             "index": i,
             "img": img,
             "faces": faces,
             "prominence": prominence,
             "focus_center": (fc_x, fc_y),
+            "zoom": z,
         })
 
     # 2. Assign photos to slots: if prioritize_faces, place highest face prominence at Hero slot 0
@@ -820,7 +900,9 @@ def create_blended_seamless_collage(
         ph = max(64, int(th * sh_norm))
 
         # Face-aware aspect crop
-        cropped, crop_rect = _crop_to_aspect_with_rect(img, pw, ph, focus_center=(fc_x, fc_y))
+        cropped, crop_rect = _crop_to_aspect_with_rect(
+            img, pw, ph, focus_center=(fc_x, fc_y), zoom=pinfo.get("zoom", 1.0)
+        )
         patch = cv2.resize(cropped, (pw, ph), interpolation=cv2.INTER_AREA).astype(np.float32)
 
         # Generate smooth cosine Hermite feathering mask
@@ -1027,7 +1109,13 @@ def create_polaroid_scatter_collage(
         draw_card = ImageDraw.Draw(card)
 
         # 2. Add aspect-filled photo
-        cropped_bgr = _crop_to_aspect(img_bgr, photo_w, photo_h, focus_center=item.get("focus_center"))
+        cropped_bgr = _crop_to_aspect(
+            img_bgr,
+            photo_w,
+            photo_h,
+            focus_center=item.get("focus_center"),
+            zoom=item.get("crop_zoom", 1.0),
+        )
         photo_pil = Image.fromarray(cv2.cvtColor(cropped_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
         card.paste(photo_pil, (16, 16))
 
@@ -1207,7 +1295,13 @@ def create_then_and_now_card(
         cy = margin_y
 
         # Aspect fill crop
-        cropped_bgr = _crop_to_aspect(img_bgr, cell_w, cell_h)
+        cropped_bgr = _crop_to_aspect(
+            img_bgr,
+            cell_w,
+            cell_h,
+            focus_center=item.get("focus_center"),
+            zoom=item.get("crop_zoom", 1.0),
+        )
         photo_pil = Image.fromarray(cv2.cvtColor(cropped_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
         canvas_pil.paste(photo_pil, (cx, cy))
 

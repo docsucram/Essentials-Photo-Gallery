@@ -28,6 +28,7 @@ from PySide6.QtCore import (
 from legacy_reference.imgBrowserv13 import CancellationFlag
 from src.db.connection import DualDatabaseEngine
 from src.db.repository import CatalogRepository, ThumbnailRepository
+from src.utils.paths import is_cloud_only_stat
 from src.workers.scanner_thumb_worker import (
     ALL_MEDIA_EXT_SET,
     IGNORED_DIR_NAMES,
@@ -74,6 +75,8 @@ def _enrich_and_upsert_media(
             st = fpath.stat(follow_symlinks=False)
             size_int = int(st.st_size)
         except OSError:
+            continue
+        if is_cloud_only_stat(st):
             continue
         try:
             meta = extract_media_metadata(fpath, is_v)

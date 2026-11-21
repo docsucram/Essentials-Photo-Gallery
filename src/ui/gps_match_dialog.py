@@ -34,6 +34,7 @@ from src.core.gps_matcher import (
     parse_gpx_file,
     resolve_missing_place_names,
 )
+from src.ui.theme_tokens import get_theme_tokens, set_ui_role
 
 
 def _fmt_ts(ts: int) -> str:
@@ -99,22 +100,24 @@ class _HoverPhotoPreviewPopup(QFrame):
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setFrameShape(QFrame.StyledPanel)
+        is_dark = bool(parent is not None and parent.palette().color(parent.backgroundRole()).lightness() < 128)
+        tok = get_theme_tokens(is_dark=is_dark)
         self.setStyleSheet(
-            "QFrame { background-color: #FFFFFF; border: 1px solid #94A3B8; border-radius: 6px; }"
-            "QLabel { color: #0F172A; background: transparent; border: none; }"
+            f"QFrame {{ background-color: {tok.bg_elevated}; border: 1px solid {tok.border_subtle}; border-radius: 6px; }}"
+            f"QLabel {{ color: {tok.text_primary}; background: transparent; border: none; }}"
         )
         vbox = QVBoxLayout(self)
         vbox.setContentsMargins(10, 10, 10, 10)
         vbox.setSpacing(6)
 
         self.lbl_role = QLabel("", self)
-        self.lbl_role.setStyleSheet("font-size: 9pt; font-weight: 600; color: #2563EB;")
+        self.lbl_role.setStyleSheet(f"font-size: 9pt; font-weight: 600; color: {tok.accent};")
         vbox.addWidget(self.lbl_role)
 
         self.lbl_img = QLabel(self)
         self.lbl_img.setAlignment(Qt.AlignCenter)
         self.lbl_img.setFixedSize(260, 195)
-        self.lbl_img.setStyleSheet("background-color: #F1F5F9; border-radius: 4px;")
+        self.lbl_img.setStyleSheet(f"background-color: {tok.bg_card}; border-radius: 4px;")
         vbox.addWidget(self.lbl_img)
 
         self.lbl_meta = QLabel("", self)
@@ -306,7 +309,7 @@ class GpsMatchDialog(QDialog):
             self,
         )
         lbl_sub.setWordWrap(True)
-        lbl_sub.setStyleSheet("color: #475569;")
+        set_ui_role(lbl_sub, "muted")
         root.addWidget(lbl_sub)
 
         # 2. Scope & Source Bar (modeled after Find Duplicates)
@@ -340,7 +343,7 @@ class GpsMatchDialog(QDialog):
         top_row.addWidget(self.btn_import_gpx)
 
         self.lbl_scope_counts = QLabel("", scope_frame)
-        self.lbl_scope_counts.setStyleSheet("color: #475569; margin-left: 6px;")
+        set_ui_role(self.lbl_scope_counts, "muted")
         top_row.addWidget(self.lbl_scope_counts, 1)
 
         self.btn_toggle_timing = QPushButton("Clock & Time Window...", scope_frame)
@@ -420,7 +423,7 @@ class GpsMatchDialog(QDialog):
         row2.addWidget(self.chk_fix_timestamps)
         row2.addStretch(1)
         self.lbl_gpx_info = QLabel("", self.timing_panel)
-        self.lbl_gpx_info.setStyleSheet("color: #64748B;")
+        set_ui_role(self.lbl_gpx_info, "muted")
         row2.addWidget(self.lbl_gpx_info)
         timing_vbox.addLayout(row2)
 
@@ -463,9 +466,7 @@ class GpsMatchDialog(QDialog):
         self.lbl_empty_hint = QLabel("", self)
         self.lbl_empty_hint.setWordWrap(True)
         self.lbl_empty_hint.setAlignment(Qt.AlignCenter)
-        self.lbl_empty_hint.setStyleSheet(
-            "padding: 16px; color: #475569; background: #F8FAFC; border: 1px dashed #CBD5E1; border-radius: 6px;"
-        )
+        set_ui_role(self.lbl_empty_hint, "empty_hint")
         self.lbl_empty_hint.setVisible(False)
         root.addWidget(self.lbl_empty_hint)
 
@@ -490,10 +491,7 @@ class GpsMatchDialog(QDialog):
 
         self.btn_apply = QPushButton("Apply Locations to 0 Photos", self)
         self.btn_apply.setDefault(True)
-        self.btn_apply.setStyleSheet(
-            "QPushButton { background: #2563EB; color: #FFFFFF; font-weight: 600; padding: 6px 16px; border-radius: 4px; }"
-            "QPushButton:disabled { background: #94A3B8; color: #E2E8F0; }"
-        )
+        set_ui_role(self.btn_apply, "primary_btn")
         self.btn_apply.clicked.connect(self.accept)
         footer.addWidget(self.btn_apply)
         root.addLayout(footer)

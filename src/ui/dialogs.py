@@ -9,6 +9,8 @@ Modal Dialogs for PhotoGallery64:
 from __future__ import annotations
 
 import datetime
+import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -25,6 +27,7 @@ from PySide6.QtGui import (
     QPixmap,
 )
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDateEdit,
@@ -36,6 +39,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -1740,6 +1744,192 @@ class AppSettingsDialog(QDialog):
         return str(self.cmb_unsaved_action.currentData()) if hasattr(self, "cmb_unsaved_action") else "prompt"
 
 
+def compute_resize_target(
+    src_w: int,
+    src_h: int,
+    mode: str = "long_edge",
+    max_dim: int = 1024,
+    target_w: int = 1024,
+    target_h: int = 768,
+    percent: int = 50,
+    lock_aspect: bool = True,
+    center_crop: bool = False,
+    no_upscale: bool = True,
+) -> tuple[int, int, bool]:
+    """
+    Computes (out_w, out_h, use_center_crop) for the given source dimensions and resize settings.
+    """
+    src_w = max(1, int(src_w))
+    src_h = max(1, int(src_h))
+
+    if mode == "percent":
+        pct = max(1, min(100, int(percent))) if no_upscale else max(1, int(percent))
+        scale = pct / 100.0
+        return max(1, int(round(src_w * scale))), max(1, int(round(src_h * scale))), False
+
+    if mode == "exact":
+        tw = max(1, int(target_w))
+        th = max(1, int(target_h))
+        if no_upscale and src_w <= tw and src_h <= th:
+            return src_w, src_h, False
+        if not lock_aspect and center_crop:
+            return tw, th, True
+        if lock_aspect:
+            scale = min(tw / float(src_w), th / float(src_h))
+            if no_upscale and scale >= 1.0:
+                return src_w, src_h, False
+            return max(1, int(round(src_w * scale))), max(1, int(round(src_h * scale))), False
+        if no_upscale:
+            return min(src_w, tw), min(src_h, th), False
+        return tw, th, False
+
+    # Default: "long_edge"
+    md = max(1, int(max_dim))
+    cur_max = max(src_w, src_h)
+    if no_upscale and cur_max <= md:
+        return src_w, src_h, False
+    scale = md / float(cur_max)
+    return max(1, int(round(src_w * scale))), max(1, int(round(src_h * scale))), False
+
+
+def _estimate_resized_file_bytes(out_w: int, out_h: int, fmt_ext: str, quality: int) -> int:
+    """Estimates output file size in bytes for live UI preview."""
+    px = max(1, int(out_w) * int(out_h))
+    ext = fmt_ext.lower()
+    if ext == ".png":
+        return int(px * 1.8)
+    q_norm = max(0.1, min(1.0, float(quality) / 100.0))
+    jpeg_bpp = 0.12 + 1.85 * (q_norm ** 2.2)
+    if ext == ".webp":
+        return int(px * jpeg_bpp * 0.72 / 1.0)
+    return int(px * jpeg_bpp)
+
+
+def _format_bytes_human(num_bytes: int) -> str:
+    if num_bytes < 1024:
+        return f"~{num_bytes} B"
+    kb = num_bytes / 1024.0
+    if kb < 1024.0:
+        return f"~{int(round(kb))} KB"
+    return f"~{kb / 1024.0:.1f} MB"
+
+
+def _resolve_output_format_and_ext(src_ext: str, out_format: str) -> tuple[str, str]:
+    fmt_key = (out_format or "same").lower()
+    if fmt_key == "jpeg":
+        return "JPEG", ".jpg"
+    if fmt_key == "webp":
+        return "WEBP", ".webp"
+    if fmt_key == "png":
+        return "PNG", ".png"
+
+    ext = (src_ext or ".jpg").lower()
+    if ext in (".jpg", ".jpeg"):
+        return "JPEG", src_ext or ".jpg"
+    if ext == ".webp":
+        return "WEBP", ".webp"
+    if ext == ".png":
+        return "PNG", ".png"
+    return "JPEG", ".jpg"
+
+
+def _process_single_resize(
+    src: Path,
+    out_dir: Path,
+    *,
+    resize_enabled: bool = True,
+    mode: str = "long_edge",
+    max_dim: int = 1024,
+    target_w: int = 1024,
+    target_h: int = 768,
+    percent: int = 50,
+    lock_aspect: bool = True,
+    center_crop: bool = False,
+    no_upscale: bool = True,
+    out_format: str = "same",
+    quality: int = 88,
+    strip_metadata: bool = False,
+    in_memory_image: Image.Image | None = None,
+) -> Path | None:
+    """Resizes/exports one image (or in-memory rendered image) and writes a non-destructive copy."""
+    exif_bytes: bytes | None = None
+    if in_memory_image is not None:
+        img = in_memory_image.copy()
+        if not strip_metadata and src.exists():
+            try:
+                with Image.open(src) as disk_img:
+                    exif_bytes = disk_img.info.get("exif")
+            except Exception:
+                exif_bytes = None
+    else:
+        if not src.exists():
+            return None
+        with Image.open(src) as opened:
+            exif_bytes = None if strip_metadata else opened.info.get("exif")
+            img = ImageOps.exif_transpose(opened).copy()
+
+    src_w, src_h = img.size
+    if resize_enabled:
+        out_w, out_h, use_crop = compute_resize_target(
+            src_w,
+            src_h,
+            mode=mode,
+            max_dim=max_dim,
+            target_w=target_w,
+            target_h=target_h,
+            percent=percent,
+            lock_aspect=lock_aspect,
+            center_crop=center_crop,
+            no_upscale=no_upscale,
+        )
+        if use_crop:
+            res_img = ImageOps.fit(img, (out_w, out_h), method=Image.Resampling.LANCZOS)
+        elif (out_w, out_h) != (src_w, src_h):
+            res_img = img.resize((out_w, out_h), Image.Resampling.LANCZOS)
+        else:
+            res_img = img
+    else:
+        out_w, out_h = src_w, src_h
+        res_img = img
+
+    pil_fmt, ext = _resolve_output_format_and_ext(src.suffix or ".jpg", out_format)
+    if pil_fmt == "JPEG" and res_img.mode not in ("RGB", "L"):
+        res_img = res_img.convert("RGB")
+
+    stem = src.stem
+    if resize_enabled:
+        if mode == "long_edge":
+            suffix_tag = f"_{max(out_w, out_h)}px"
+        else:
+            suffix_tag = f"_{out_w}x{out_h}"
+        base_target_stem = f"{stem}{suffix_tag}"
+    else:
+        src_ext = (src.suffix or "").lower()
+        if src_ext != ext.lower():
+            base_target_stem = stem
+        else:
+            base_target_stem = f"{stem}_export"
+
+    target = out_dir / f"{base_target_stem}{ext}"
+    if target.exists() or (src.exists() and target.resolve() == src.resolve()):
+        c = 2
+        while (out_dir / f"{base_target_stem}_{c}{ext}").exists():
+            c += 1
+        target = out_dir / f"{base_target_stem}_{c}{ext}"
+
+    save_kwargs: dict[str, Any] = {"format": pil_fmt}
+    if pil_fmt in ("JPEG", "WEBP"):
+        save_kwargs["quality"] = max(1, min(100, int(quality)))
+    if strip_metadata:
+        for meta_key in ("exif", "XML:com.adobe.xmp", "xmp", "photoshop", "iptc"):
+            res_img.info.pop(meta_key, None)
+    elif exif_bytes and pil_fmt in ("JPEG", "WEBP"):
+        save_kwargs["exif"] = exif_bytes
+
+    res_img.save(target, **save_kwargs)
+    return target
+
+
 class _ResizeWorker(QThread):
     progress = Signal(int, int)  # current, total
     finished_batch = Signal(list)  # list[Path]
@@ -1747,14 +1937,39 @@ class _ResizeWorker(QThread):
     def __init__(
         self,
         file_paths: list[Path],
-        max_dim: int,
-        out_dir: Path,
+        max_dim: int = 1024,
+        out_dir: Path = Path("."),
         parent: QObject | None = None,
+        *,
+        resize_enabled: bool = True,
+        mode: str = "long_edge",
+        target_w: int = 1024,
+        target_h: int = 768,
+        percent: int = 50,
+        lock_aspect: bool = True,
+        center_crop: bool = False,
+        no_upscale: bool = True,
+        out_format: str = "same",
+        quality: int = 88,
+        strip_metadata: bool = False,
+        in_memory_image: Image.Image | None = None,
     ) -> None:
         super().__init__(parent)
         self.file_paths = file_paths
         self.max_dim = max_dim
         self.out_dir = out_dir
+        self.resize_enabled = bool(resize_enabled)
+        self.mode = mode
+        self.target_w = target_w
+        self.target_h = target_h
+        self.percent = percent
+        self.lock_aspect = lock_aspect
+        self.center_crop = center_crop
+        self.no_upscale = no_upscale
+        self.out_format = out_format
+        self.quality = quality
+        self.strip_metadata = strip_metadata
+        self.in_memory_image = in_memory_image
 
     def run(self) -> None:
         try:
@@ -1764,39 +1979,27 @@ class _ResizeWorker(QThread):
         generated: list[Path] = []
         total = len(self.file_paths)
         for i, src in enumerate(self.file_paths):
-            if not src.exists():
-                self.progress.emit(i + 1, total)
-                continue
             try:
-                with Image.open(src) as img:
-                    img = ImageOps.exif_transpose(img)
-                    w, h = img.size
-                    if max(w, h) > self.max_dim:
-                        scale = self.max_dim / float(max(w, h))
-                        nw = max(1, int(round(w * scale)))
-                        nh = max(1, int(round(h * scale)))
-                        res_img = img.resize((nw, nh), Image.Resampling.LANCZOS)
-                    else:
-                        res_img = img.copy()
-
-                    stem = src.stem
-                    ext = src.suffix or ".jpg"
-                    dim_suffix = f" ({res_img.width}x{res_img.height})"
-                    base_target_stem = f"{stem}{dim_suffix}"
-                    target = self.out_dir / f"{base_target_stem}{ext}"
-                    if target.exists():
-                        c = 2
-                        while (self.out_dir / f"{base_target_stem} ({c}){ext}").exists():
-                            c += 1
-                        target = self.out_dir / f"{base_target_stem} ({c}){ext}"
-
-                    if ext.lower() in (".jpg", ".jpeg"):
-                        res_img.save(target, format="JPEG", quality=92)
-                    elif ext.lower() == ".png":
-                        res_img.save(target, format="PNG")
-                    else:
-                        res_img.save(target)
-                    generated.append(target)
+                mem_img = self.in_memory_image if (i == 0 and total == 1) else None
+                out_path = _process_single_resize(
+                    src,
+                    self.out_dir,
+                    resize_enabled=self.resize_enabled,
+                    mode=self.mode,
+                    max_dim=self.max_dim,
+                    target_w=self.target_w,
+                    target_h=self.target_h,
+                    percent=self.percent,
+                    lock_aspect=self.lock_aspect,
+                    center_crop=self.center_crop,
+                    no_upscale=self.no_upscale,
+                    out_format=self.out_format,
+                    quality=self.quality,
+                    strip_metadata=self.strip_metadata,
+                    in_memory_image=mem_img,
+                )
+                if out_path is not None:
+                    generated.append(out_path)
             except Exception:
                 pass
             self.progress.emit(i + 1, total)
@@ -1806,97 +2009,224 @@ class _ResizeWorker(QThread):
 
 class ResizePhotoDialog(QDialog):
     """
-    Authentic Windows Live Photo Gallery 'Resize' dialog (`media_1792184754917_353219bb.png`).
-    Allows selecting standard presets (Smaller: 640, Medium: 1024, Large: 1280, Custom),
-    specifying maximum dimensions, picking target destination directory, and resizing images
-    using high-quality Lanczos resampling with collision avoidance (e.g. 'filename (2).jpg').
+    Unified Resize dialog for both Gallery batch resizing and Single Image View
+    ('Save Resized Copy...'). Supports Fit within (Long Edge), Exact WxH (with
+    aspect lock and optional center-crop to fill), Percentage (%), saved custom
+    presets in QSettings, live resolution/size readout, format/quality, and
+    metadata stripping.
     """
+
+    _SETTINGS_KEY = "resize/custom_presets"
 
     def __init__(
         self,
         file_paths: Sequence[Path | str],
         parent: QWidget | None = None,
+        *,
+        in_memory_image: Image.Image | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Photo Gallery")
+        self.setWindowTitle("Export / Resize")
         self.setWindowIcon(make_wlpg_icon("gallery", 16))
-        self.setFixedWidth(440)
+        self.setMinimumWidth(480)
 
         self.file_paths = [Path(p) for p in file_paths]
+        self._in_memory_image = in_memory_image
         self.generated_files: list[Path] = []
+        self._updating_exact_inputs = False
 
-        # Determine initial save folder
+        # Probe single-image source dimensions for live preview
+        self._single_src_size: tuple[int, int] | None = None
+        if len(self.file_paths) == 1:
+            if self._in_memory_image is not None:
+                self._single_src_size = self._in_memory_image.size
+            elif self.file_paths[0].exists():
+                try:
+                    with Image.open(self.file_paths[0]) as im:
+                        im_t = ImageOps.exif_transpose(im)
+                        self._single_src_size = im_t.size
+                except Exception:
+                    self._single_src_size = None
+
         initial_dir = Path.home()
         for p in self.file_paths:
             if p.parent.exists():
                 initial_dir = p.parent
                 break
 
+        self._custom_presets: list[dict[str, Any]] = self._load_custom_presets()
+
         vbox = QVBoxLayout(self)
         vbox.setContentsMargins(18, 16, 18, 16)
-        vbox.setSpacing(12)
+        vbox.setSpacing(10)
 
-        # 1. Blue WLPG Header ("Resize")
-        lbl_title = QLabel("Resize", self)
-        lbl_title.setFont(QFont("Segoe UI", 14))
-        lbl_title.setStyleSheet("color: #0066CC; font-weight: normal;")
+        # 1. Header
+        lbl_title = QLabel("Export / Resize", self)
+        lbl_title.setFont(QFont("Segoe UI", 14, QFont.DemiBold))
+        lbl_title.setProperty("uiRole", "heading")
         vbox.addWidget(lbl_title)
 
-        vbox.addSpacing(2)
-
-        # 2. Form Grid (Select a size | Maximum dimensions)
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(16)
-        grid.setVerticalSpacing(4)
-
-        lbl_size = QLabel("Select a size:", self)
-        lbl_size.setFont(QFont("Segoe UI", 9))
-        grid.addWidget(lbl_size, 0, 0)
-
-        lbl_dim = QLabel("Maximum dimensions:", self)
-        lbl_dim.setFont(QFont("Segoe UI", 9))
-        grid.addWidget(lbl_dim, 0, 1)
+        # 2. Presets Row + Save / Delete Preset
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(6)
+        lbl_preset = QLabel("Preset:", self)
+        lbl_preset.setFont(QFont("Segoe UI", 9))
+        preset_row.addWidget(lbl_preset)
 
         self.cmb_size = QComboBox(self)
         self.cmb_size.setFont(QFont("Segoe UI", 9))
-        self.cmb_size.addItem("Smaller: 640", 640)
-        self.cmb_size.addItem("Medium: 1024", 1024)
-        self.cmb_size.addItem("Large: 1280", 1280)
-        self.cmb_size.addItem("Custom", None)
-        self.cmb_size.setCurrentIndex(1)  # Default: Medium: 1024
-        grid.addWidget(self.cmb_size, 1, 0)
+        self._rebuild_presets_combo(select_index=2)  # Default: Medium — 1024 px
+        preset_row.addWidget(self.cmb_size, 1)
 
-        self.txt_dim = QLineEdit(self)
-        self.txt_dim.setFont(QFont("Segoe UI", 9))
+        self.btn_save_preset = QPushButton("+ Save Preset", self)
+        self.btn_save_preset.setFont(QFont("Segoe UI", 9))
+        self.btn_save_preset.setToolTip("Save current export & resize settings as a reusable preset")
+        self.btn_save_preset.clicked.connect(self._on_save_preset_clicked)
+        preset_row.addWidget(self.btn_save_preset)
+
+        self.btn_delete_preset = QPushButton("✕", self)
+        self.btn_delete_preset.setFont(QFont("Segoe UI", 9, QFont.Bold))
+        self.btn_delete_preset.setMinimumWidth(30)
+        self.btn_delete_preset.setFixedWidth(30)
+        self.btn_delete_preset.setToolTip("Delete selected custom preset")
+        self.btn_delete_preset.clicked.connect(self._on_delete_preset_clicked)
+        self.btn_delete_preset.setVisible(False)
+        preset_row.addWidget(self.btn_delete_preset)
+        vbox.addLayout(preset_row)
+
+        # 3. Optional Resize Group Box + Three Resize Modes
+        self.mode_group = QGroupBox("Resize", self)
+        self.mode_group.setCheckable(True)
+        self.mode_group.setChecked(True)
+        mode_group = self.mode_group
+        mode_layout = QVBoxLayout(mode_group)
+        mode_layout.setSpacing(8)
+
+        self.mode_btn_group = QButtonGroup(self)
+
+        # Mode A: Fit within (Long Edge)
+        row_long = QHBoxLayout()
+        self.rb_mode_long_edge = QRadioButton("Fit within (Long Edge):", mode_group)
+        self.rb_mode_long_edge.setChecked(True)
+        self.mode_btn_group.addButton(self.rb_mode_long_edge)
+        row_long.addWidget(self.rb_mode_long_edge)
+
+        self.txt_dim = QLineEdit(mode_group)
         self.txt_dim.setValidator(QIntValidator(1, 99999, self))
         self.txt_dim.setText("1024")
-        grid.addWidget(self.txt_dim, 1, 1)
+        self.txt_dim.setFixedWidth(84)
+        row_long.addWidget(self.txt_dim)
+        row_long.addWidget(QLabel("px", mode_group))
+        row_long.addStretch(1)
+        mode_layout.addLayout(row_long)
 
-        vbox.addLayout(grid)
+        # Mode B: Exact W x H
+        row_exact = QHBoxLayout()
+        self.rb_mode_exact = QRadioButton("Exact W × H:", mode_group)
+        self.mode_btn_group.addButton(self.rb_mode_exact)
+        row_exact.addWidget(self.rb_mode_exact)
 
-        vbox.addSpacing(6)
+        init_w = str(self._single_src_size[0]) if self._single_src_size else "1024"
+        init_h = str(self._single_src_size[1]) if self._single_src_size else "768"
+        self.txt_exact_w = QLineEdit(init_w, mode_group)
+        self.txt_exact_w.setValidator(QIntValidator(1, 99999, self))
+        self.txt_exact_w.setFixedWidth(72)
+        self.txt_exact_h = QLineEdit(init_h, mode_group)
+        self.txt_exact_h.setValidator(QIntValidator(1, 99999, self))
+        self.txt_exact_h.setFixedWidth(72)
+        row_exact.addWidget(self.txt_exact_w)
+        row_exact.addWidget(QLabel("×", mode_group))
+        row_exact.addWidget(self.txt_exact_h)
+        row_exact.addWidget(QLabel("px", mode_group))
+        row_exact.addStretch(1)
+        mode_layout.addLayout(row_exact)
 
-        # 3. Save to: Path + Browse...
+        row_exact_opts = QHBoxLayout()
+        row_exact_opts.setContentsMargins(22, 0, 0, 0)
+        self.chk_lock_aspect = QCheckBox("Lock aspect ratio", mode_group)
+        self.chk_lock_aspect.setChecked(True)
+        self.chk_center_crop = QCheckBox("Center-crop to fill", mode_group)
+        self.chk_center_crop.setChecked(False)
+        self.chk_center_crop.setEnabled(False)
+        row_exact_opts.addWidget(self.chk_lock_aspect)
+        row_exact_opts.addWidget(self.chk_center_crop)
+        row_exact_opts.addStretch(1)
+        mode_layout.addLayout(row_exact_opts)
+
+        # Mode C: Percentage (%)
+        row_pct = QHBoxLayout()
+        self.rb_mode_percent = QRadioButton("Percentage:", mode_group)
+        self.mode_btn_group.addButton(self.rb_mode_percent)
+        row_pct.addWidget(self.rb_mode_percent)
+
+        self.spin_percent = QSpinBox(mode_group)
+        self.spin_percent.setRange(10, 100)
+        self.spin_percent.setValue(50)
+        self.spin_percent.setSuffix("%")
+        self.spin_percent.setFixedWidth(84)
+        row_pct.addWidget(self.spin_percent)
+        row_pct.addStretch(1)
+        mode_layout.addLayout(row_pct)
+
+        self.chk_no_upscale = QCheckBox("Do not enlarge smaller photos", mode_group)
+        self.chk_no_upscale.setChecked(True)
+        mode_layout.addWidget(self.chk_no_upscale)
+
+        vbox.addWidget(mode_group)
+
+        # 4. Output Format, Quality & Privacy
+        out_group = QGroupBox("Format && Privacy", self)
+        out_grid = QGridLayout(out_group)
+        out_grid.setHorizontalSpacing(10)
+        out_grid.setVerticalSpacing(6)
+
+        out_grid.addWidget(QLabel("Format:", out_group), 0, 0)
+        self.cmb_format = QComboBox(out_group)
+        self.cmb_format.addItem("Same as original", "same")
+        self.cmb_format.addItem("JPEG", "jpeg")
+        self.cmb_format.addItem("WebP", "webp")
+        self.cmb_format.addItem("PNG", "png")
+        out_grid.addWidget(self.cmb_format, 0, 1)
+
+        out_grid.addWidget(QLabel("Quality:", out_group), 0, 2)
+        q_row = QHBoxLayout()
+        self.slider_quality = QSlider(Qt.Horizontal, out_group)
+        self.slider_quality.setRange(50, 100)
+        self.slider_quality.setValue(88)
+        self.lbl_quality_val = QLabel("88%", out_group)
+        self.lbl_quality_val.setFixedWidth(36)
+        q_row.addWidget(self.slider_quality, 1)
+        q_row.addWidget(self.lbl_quality_val)
+        out_grid.addLayout(q_row, 0, 3)
+
+        self.chk_strip_metadata = QCheckBox("Strip GPS && EXIF metadata", out_group)
+        self.chk_strip_metadata.setChecked(False)
+        out_grid.addWidget(self.chk_strip_metadata, 1, 0, 1, 4)
+
+        vbox.addWidget(out_group)
+
+        # 5. Live Output Summary
+        self.lbl_preview_summary = QLabel("", self)
+        self.lbl_preview_summary.setProperty("uiRole", "muted")
+        self.lbl_preview_summary.setWordWrap(True)
+        vbox.addWidget(self.lbl_preview_summary)
+
+        # 6. Save to: Path + Browse...
         lbl_save = QLabel("Save to:", self)
         lbl_save.setFont(QFont("Segoe UI", 9))
         vbox.addWidget(lbl_save)
 
         save_row = QHBoxLayout()
         save_row.setSpacing(8)
-
         self.txt_save_path = QLineEdit(str(initial_dir), self)
         self.txt_save_path.setFont(QFont("Segoe UI", 9))
-        self.txt_save_path.setReadOnly(False)
         save_row.addWidget(self.txt_save_path, 1)
 
         self.btn_browse = QPushButton("Browse...", self)
         self.btn_browse.setFont(QFont("Segoe UI", 9))
         self.btn_browse.clicked.connect(self._on_browse_clicked)
         save_row.addWidget(self.btn_browse)
-
         vbox.addLayout(save_row)
-
-        vbox.addSpacing(12)
 
         # Progress bar (visible during batch resizing)
         self.progress_bar = QProgressBar(self)
@@ -1907,15 +2237,16 @@ class ResizePhotoDialog(QDialog):
         self.progress_bar.setVisible(False)
         vbox.addWidget(self.progress_bar)
 
-        # 4. Action Buttons (Resize and Save | Cancel)
+        # 7. Action Buttons
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
         btn_row.addStretch(1)
 
-        self.btn_resize = QPushButton("Resize and Save", self)
+        export_label = "Export" if len(self.file_paths) == 1 else f"Export {len(self.file_paths)} Photos"
+        self.btn_resize = QPushButton(export_label, self)
         self.btn_resize.setFont(QFont("Segoe UI", 9))
         self.btn_resize.setDefault(True)
-        self.btn_resize.setMinimumWidth(110)
+        self.btn_resize.setMinimumWidth(120)
         self.btn_resize.clicked.connect(self._on_resize_clicked)
         btn_row.addWidget(self.btn_resize)
 
@@ -1930,29 +2261,313 @@ class ResizePhotoDialog(QDialog):
 
         self._worker: _ResizeWorker | None = None
 
-        # Connect synchronization between preset combo and dimension text box
+        # Wire signals
+        self.mode_group.toggled.connect(self._on_resize_toggled)
         self.cmb_size.currentIndexChanged.connect(self._on_size_combo_changed)
         self.txt_dim.textChanged.connect(self._on_dim_text_changed)
+        self.rb_mode_long_edge.toggled.connect(self._on_mode_changed)
+        self.rb_mode_exact.toggled.connect(self._on_mode_changed)
+        self.rb_mode_percent.toggled.connect(self._on_mode_changed)
+        self.txt_exact_w.textEdited.connect(self._on_exact_w_edited)
+        self.txt_exact_h.textEdited.connect(self._on_exact_h_edited)
+        self.chk_lock_aspect.toggled.connect(self._on_lock_aspect_toggled)
+        self.chk_center_crop.toggled.connect(self._update_preview_summary)
+        self.spin_percent.valueChanged.connect(self._update_preview_summary)
+        self.chk_no_upscale.toggled.connect(self._update_preview_summary)
+        self.cmb_format.currentIndexChanged.connect(self._on_format_or_quality_changed)
+        self.slider_quality.valueChanged.connect(self._on_format_or_quality_changed)
 
-    def _on_size_combo_changed(self, index: int) -> None:
-        dim = self.cmb_size.currentData()
-        if dim is not None:
+        self._sync_mode_enabled_states()
+        self._on_format_or_quality_changed()
+        self._update_preview_summary()
+
+    # ------------------------------------------------------------------
+    # Preset Persistence
+    # ------------------------------------------------------------------
+    def _load_custom_presets(self) -> list[dict[str, Any]]:
+        settings = QSettings("PhotoGallery64", "PhotoGallery64")
+        raw = settings.value(self._SETTINGS_KEY, "[]")
+        try:
+            items = json.loads(raw) if isinstance(raw, str) else list(raw or [])
+        except Exception:
+            items = []
+        return [it for it in items if isinstance(it, dict) and "name" in it]
+
+    def _save_custom_presets(self) -> None:
+        settings = QSettings("PhotoGallery64", "PhotoGallery64")
+        settings.setValue(self._SETTINGS_KEY, json.dumps(self._custom_presets))
+
+    def _rebuild_presets_combo(self, select_index: int | None = None, select_name: str | None = None) -> None:
+        self.cmb_size.blockSignals(True)
+        try:
+            self.cmb_size.clear()
+            self.cmb_size.addItem("Original size (No resize)", {"resize_enabled": False})
+            self.cmb_size.addItem("Small — 640 px", {"resize_enabled": True, "mode": "long_edge", "dim": 640})
+            self.cmb_size.addItem("Medium — 1024 px", {"resize_enabled": True, "mode": "long_edge", "dim": 1024})
+            self.cmb_size.addItem("Full HD — 1920 px", {"resize_enabled": True, "mode": "long_edge", "dim": 1920})
+            self.cmb_size.addItem("4K — 3840 px", {"resize_enabled": True, "mode": "long_edge", "dim": 3840})
+            self.cmb_size.addItem("Custom", None)
+            for p in self._custom_presets:
+                self.cmb_size.addItem(str(p["name"]), {"custom": True, **p})
+
+            if select_name is not None:
+                idx = self.cmb_size.findText(select_name)
+                self.cmb_size.setCurrentIndex(idx if idx >= 0 else 5)
+            elif select_index is not None:
+                self.cmb_size.setCurrentIndex(select_index)
+        finally:
+            self.cmb_size.blockSignals(False)
+
+    def save_custom_preset(self, name: str) -> None:
+        cfg = self._current_resize_config()
+        entry: dict[str, Any] = {
+            "name": name.strip(),
+            "resize_enabled": bool(cfg["resize_enabled"]),
+            "mode": cfg["mode"],
+            "no_upscale": bool(cfg["no_upscale"]),
+            "out_format": str(cfg["out_format"]),
+            "quality": int(cfg["quality"]),
+            "strip_metadata": bool(cfg["strip_metadata"]),
+        }
+        if cfg["mode"] == "long_edge":
+            entry["dim"] = cfg["max_dim"]
+        elif cfg["mode"] == "exact":
+            entry["w"] = cfg["target_w"]
+            entry["h"] = cfg["target_h"]
+            entry["lock_aspect"] = cfg["lock_aspect"]
+            entry["center_crop"] = cfg["center_crop"]
+        else:
+            entry["percent"] = cfg["percent"]
+        self._custom_presets = [p for p in self._custom_presets if p.get("name") != entry["name"]]
+        self._custom_presets.append(entry)
+        self._save_custom_presets()
+        self._rebuild_presets_combo(select_name=entry["name"])
+        self.btn_delete_preset.setVisible(True)
+
+    def _on_save_preset_clicked(self) -> None:
+        cfg = self._current_resize_config()
+        if not cfg["resize_enabled"]:
+            fmt = str(cfg["out_format"]).upper() if cfg["out_format"] != "same" else "Original"
+            default_name = f"Original ({fmt})"
+        elif cfg["mode"] == "long_edge":
+            default_name = f"Custom {cfg['max_dim']} px"
+        elif cfg["mode"] == "exact":
+            default_name = f"Custom {cfg['target_w']}×{cfg['target_h']}"
+        else:
+            default_name = f"Scale {cfg['percent']}%"
+        name, ok = QInputDialog.getText(self, "Save Export Preset", "Preset name:", text=default_name)
+        if ok and name.strip():
+            self.save_custom_preset(name.strip())
+
+    def _on_delete_preset_clicked(self) -> None:
+        data = self.cmb_size.currentData()
+        if not isinstance(data, dict) or not data.get("custom"):
+            return
+        name = self.cmb_size.currentText()
+        self._custom_presets = [p for p in self._custom_presets if p.get("name") != name]
+        self._save_custom_presets()
+        self._rebuild_presets_combo(select_index=2)
+        self._on_size_combo_changed(2)
+
+    # ------------------------------------------------------------------
+    # Mode & Input Synchronization
+    # ------------------------------------------------------------------
+    def active_mode(self) -> str:
+        if self.rb_mode_exact.isChecked():
+            return "exact"
+        if self.rb_mode_percent.isChecked():
+            return "percent"
+        return "long_edge"
+
+    def _on_resize_toggled(self, checked: bool) -> None:
+        if not checked:
+            self.cmb_size.blockSignals(True)
+            self.cmb_size.setCurrentIndex(0)  # Original size (No resize)
+            self.cmb_size.blockSignals(False)
+            self.btn_delete_preset.setVisible(False)
+        else:
+            if self.cmb_size.currentIndex() == 0:
+                self.cmb_size.blockSignals(True)
+                self.cmb_size.setCurrentIndex(5)  # Custom
+                self.cmb_size.blockSignals(False)
+        self._sync_mode_enabled_states()
+        self._update_preview_summary()
+
+    def _sync_mode_enabled_states(self) -> None:
+        if not self.mode_group.isChecked():
+            return
+        mode = self.active_mode()
+        self.txt_dim.setEnabled(mode == "long_edge")
+        self.txt_exact_w.setEnabled(mode == "exact")
+        self.txt_exact_h.setEnabled(mode == "exact")
+        self.chk_lock_aspect.setEnabled(mode == "exact")
+        self.chk_center_crop.setEnabled(mode == "exact" and not self.chk_lock_aspect.isChecked())
+        self.spin_percent.setEnabled(mode == "percent")
+
+    def _on_mode_changed(self) -> None:
+        self._sync_mode_enabled_states()
+        self._update_preview_summary()
+
+    def _on_size_combo_changed(self, _index: int) -> None:
+        data = self.cmb_size.currentData()
+        is_custom_saved = isinstance(data, dict) and bool(data.get("custom"))
+        self.btn_delete_preset.setVisible(is_custom_saved)
+        if not isinstance(data, dict):
+            return
+
+        resize_enabled = bool(data.get("resize_enabled", True))
+        self.mode_group.blockSignals(True)
+        self.mode_group.setChecked(resize_enabled)
+        self.mode_group.blockSignals(False)
+
+        if "no_upscale" in data:
+            self.chk_no_upscale.setChecked(bool(data["no_upscale"]))
+        if "out_format" in data:
+            fmt_idx = self.cmb_format.findData(str(data["out_format"]))
+            if fmt_idx >= 0:
+                self.cmb_format.blockSignals(True)
+                self.cmb_format.setCurrentIndex(fmt_idx)
+                self.cmb_format.blockSignals(False)
+        if "quality" in data:
+            self.slider_quality.blockSignals(True)
+            self.slider_quality.setValue(int(data["quality"]))
+            self.slider_quality.blockSignals(False)
+        if "strip_metadata" in data:
+            self.chk_strip_metadata.setChecked(bool(data["strip_metadata"]))
+
+        mode = data.get("mode", "long_edge")
+        if mode == "long_edge" and "dim" in data:
+            self.rb_mode_long_edge.setChecked(True)
             self.txt_dim.blockSignals(True)
-            self.txt_dim.setText(str(dim))
+            self.txt_dim.setText(str(int(data.get("dim", 1024))))
             self.txt_dim.blockSignals(False)
+        elif mode == "exact":
+            self.rb_mode_exact.setChecked(True)
+            self._updating_exact_inputs = True
+            try:
+                self.txt_exact_w.setText(str(int(data.get("w", 1024))))
+                self.txt_exact_h.setText(str(int(data.get("h", 768))))
+                self.chk_lock_aspect.setChecked(bool(data.get("lock_aspect", True)))
+                self.chk_center_crop.setChecked(bool(data.get("center_crop", False)))
+            finally:
+                self._updating_exact_inputs = False
+        elif mode == "percent":
+            self.rb_mode_percent.setChecked(True)
+            self.spin_percent.setValue(int(data.get("percent", 50)))
+
+        self._sync_mode_enabled_states()
+        self._on_format_or_quality_changed()
+        self._update_preview_summary()
 
     def _on_dim_text_changed(self, text: str) -> None:
         val = int(text) if text.strip().isdigit() else None
         self.cmb_size.blockSignals(True)
-        if val == 640:
-            self.cmb_size.setCurrentIndex(0)
-        elif val == 1024:
-            self.cmb_size.setCurrentIndex(1)
-        elif val == 1280:
-            self.cmb_size.setCurrentIndex(2)
-        else:
-            self.cmb_size.setCurrentIndex(3)  # Custom
+        preset_map = {640: 1, 1024: 2, 1920: 3, 3840: 4}
+        self.cmb_size.setCurrentIndex(preset_map.get(val, 5))
         self.cmb_size.blockSignals(False)
+        self.btn_delete_preset.setVisible(False)
+        self._update_preview_summary()
+
+    def _on_exact_w_edited(self, text: str) -> None:
+        if self._updating_exact_inputs:
+            return
+        if self.chk_lock_aspect.isChecked() and self._single_src_size and text.strip().isdigit():
+            w_val = int(text.strip())
+            sw, sh = self._single_src_size
+            if w_val > 0 and sw > 0 and sh > 0:
+                self._updating_exact_inputs = True
+                try:
+                    self.txt_exact_h.setText(str(max(1, int(round(w_val * (sh / float(sw)))))))
+                finally:
+                    self._updating_exact_inputs = False
+        self._update_preview_summary()
+
+    def _on_exact_h_edited(self, text: str) -> None:
+        if self._updating_exact_inputs:
+            return
+        if self.chk_lock_aspect.isChecked() and self._single_src_size and text.strip().isdigit():
+            h_val = int(text.strip())
+            sw, sh = self._single_src_size
+            if h_val > 0 and sw > 0 and sh > 0:
+                self._updating_exact_inputs = True
+                try:
+                    self.txt_exact_w.setText(str(max(1, int(round(h_val * (sw / float(sh)))))))
+                finally:
+                    self._updating_exact_inputs = False
+        self._update_preview_summary()
+
+    def _on_lock_aspect_toggled(self, checked: bool) -> None:
+        self.chk_center_crop.setEnabled(self.active_mode() == "exact" and not checked)
+        if checked:
+            self.chk_center_crop.setChecked(False)
+        self._update_preview_summary()
+
+    def _on_format_or_quality_changed(self) -> None:
+        q = self.slider_quality.value()
+        self.lbl_quality_val.setText(f"{q}%")
+        fmt_choice = str(self.cmb_format.currentData() or "same")
+        src_ext = self.file_paths[0].suffix if self.file_paths else ".jpg"
+        pil_fmt, _ = _resolve_output_format_and_ext(src_ext, fmt_choice)
+        self.slider_quality.setEnabled(pil_fmt != "PNG")
+        self._update_preview_summary()
+
+    def _current_resize_config(self) -> dict[str, Any]:
+        dim_str = self.txt_dim.text().strip()
+        w_str = self.txt_exact_w.text().strip()
+        h_str = self.txt_exact_h.text().strip()
+        return {
+            "resize_enabled": self.mode_group.isChecked(),
+            "mode": self.active_mode(),
+            "max_dim": int(dim_str) if dim_str.isdigit() and int(dim_str) > 0 else 1024,
+            "target_w": int(w_str) if w_str.isdigit() and int(w_str) > 0 else 1024,
+            "target_h": int(h_str) if h_str.isdigit() and int(h_str) > 0 else 768,
+            "percent": int(self.spin_percent.value()),
+            "lock_aspect": self.chk_lock_aspect.isChecked(),
+            "center_crop": self.chk_center_crop.isChecked(),
+            "no_upscale": self.chk_no_upscale.isChecked(),
+            "out_format": str(self.cmb_format.currentData() or "same"),
+            "quality": int(self.slider_quality.value()),
+            "strip_metadata": self.chk_strip_metadata.isChecked(),
+        }
+
+    def _update_preview_summary(self) -> None:
+        cfg = self._current_resize_config()
+        if len(self.file_paths) == 1 and self._single_src_size is not None:
+            sw, sh = self._single_src_size
+            if cfg["resize_enabled"]:
+                ow, oh, _ = compute_resize_target(
+                    sw,
+                    sh,
+                    mode=cfg["mode"],
+                    max_dim=cfg["max_dim"],
+                    target_w=cfg["target_w"],
+                    target_h=cfg["target_h"],
+                    percent=cfg["percent"],
+                    lock_aspect=cfg["lock_aspect"],
+                    center_crop=cfg["center_crop"],
+                    no_upscale=cfg["no_upscale"],
+                )
+            else:
+                ow, oh = sw, sh
+            _, ext = _resolve_output_format_and_ext(self.file_paths[0].suffix or ".jpg", cfg["out_format"])
+            est = _format_bytes_human(_estimate_resized_file_bytes(ow, oh, ext, cfg["quality"]))
+            self.lbl_preview_summary.setText(
+                f"Original: {sw} × {sh} px  →  Output: {ow} × {oh} px ({est})"
+            )
+        else:
+            count = len(self.file_paths)
+            if not cfg["resize_enabled"]:
+                detail = "Original resolution"
+            elif cfg["mode"] == "long_edge":
+                detail = f"Longest edge capped at {cfg['max_dim']} px"
+            elif cfg["mode"] == "exact":
+                sub = "center-crop" if (not cfg["lock_aspect"] and cfg["center_crop"]) else (
+                    "fit" if cfg["lock_aspect"] else "exact"
+                )
+                detail = f"Target size: {cfg['target_w']} × {cfg['target_h']} px ({sub})"
+            else:
+                detail = f"Scaled to {cfg['percent']}%"
+            self.lbl_preview_summary.setText(f"{count} photos selected • {detail}")
 
     def _on_browse_clicked(self) -> None:
         curr = self.txt_save_path.text()
@@ -1961,8 +2576,7 @@ class ResizePhotoDialog(QDialog):
             self.txt_save_path.setText(chosen)
 
     def _on_resize_clicked(self) -> None:
-        dim_str = self.txt_dim.text().strip()
-        max_dim = int(dim_str) if dim_str.isdigit() and int(dim_str) > 0 else 1024
+        cfg = self._current_resize_config()
         out_dir = Path(self.txt_save_path.text().strip() or ".")
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -1973,24 +2587,39 @@ class ResizePhotoDialog(QDialog):
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
 
-        self._worker = _ResizeWorker(self.file_paths, max_dim, out_dir, self)
+        self._worker = _ResizeWorker(
+            self.file_paths,
+            cfg["max_dim"],
+            out_dir,
+            self,
+            resize_enabled=cfg["resize_enabled"],
+            mode=cfg["mode"],
+            target_w=cfg["target_w"],
+            target_h=cfg["target_h"],
+            percent=cfg["percent"],
+            lock_aspect=cfg["lock_aspect"],
+            center_crop=cfg["center_crop"],
+            no_upscale=cfg["no_upscale"],
+            out_format=cfg["out_format"],
+            quality=cfg["quality"],
+            strip_metadata=cfg["strip_metadata"],
+            in_memory_image=self._in_memory_image,
+        )
         self._worker.progress.connect(self._on_resize_progress)
         self._worker.finished_batch.connect(self._on_resize_finished)
         self._worker.start()
 
     def _on_resize_progress(self, current: int, total: int) -> None:
         if total > 0:
-            pct = int(100 * current / total)
-            self.progress_bar.setValue(pct)
+            self.progress_bar.setValue(int(100 * current / total))
 
     def _on_resize_finished(self, generated: list[Path]) -> None:
         self.generated_files = generated
         self.accept()
 
     def execute_resize(self) -> list[Path]:
-        """Resizes all input photos to the requested max dimension using Lanczos interpolation."""
-        dim_str = self.txt_dim.text().strip()
-        max_dim = int(dim_str) if dim_str.isdigit() and int(dim_str) > 0 else 1024
+        """Synchronously resizes all input photos using the current dialog configuration."""
+        cfg = self._current_resize_config()
         out_dir = Path(self.txt_save_path.text().strip() or ".")
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -1998,41 +2627,29 @@ class ResizePhotoDialog(QDialog):
             pass
 
         generated: list[Path] = []
-        for src in self.file_paths:
-            if not src.exists():
-                continue
+        total = len(self.file_paths)
+        for i, src in enumerate(self.file_paths):
             try:
-                with Image.open(src) as img:
-                    img = ImageOps.exif_transpose(img)
-                    w, h = img.size
-                    if max(w, h) > max_dim:
-                        scale = max_dim / float(max(w, h))
-                        nw = max(1, int(round(w * scale)))
-                        nh = max(1, int(round(h * scale)))
-                        res_img = img.resize((nw, nh), Image.Resampling.LANCZOS)
-                    else:
-                        res_img = img.copy()
-
-                    stem = src.stem
-                    ext = src.suffix or ".jpg"
-                    dim_suffix = f" ({res_img.width}x{res_img.height})"
-                    base_target_stem = f"{stem}{dim_suffix}"
-                    target = out_dir / f"{base_target_stem}{ext}"
-                    # Collision avoidance: filename (576x1024) (2).ext...
-                    if target.exists():
-                        c = 2
-                        while (out_dir / f"{base_target_stem} ({c}){ext}").exists():
-                            c += 1
-                        target = out_dir / f"{base_target_stem} ({c}){ext}"
-
-                    # Save preserving format / quality
-                    if ext.lower() in (".jpg", ".jpeg"):
-                        res_img.save(target, format="JPEG", quality=92)
-                    elif ext.lower() == ".png":
-                        res_img.save(target, format="PNG")
-                    else:
-                        res_img.save(target)
-                    generated.append(target)
+                mem_img = self._in_memory_image if (i == 0 and total == 1) else None
+                out_path = _process_single_resize(
+                    src,
+                    out_dir,
+                    resize_enabled=cfg["resize_enabled"],
+                    mode=cfg["mode"],
+                    max_dim=cfg["max_dim"],
+                    target_w=cfg["target_w"],
+                    target_h=cfg["target_h"],
+                    percent=cfg["percent"],
+                    lock_aspect=cfg["lock_aspect"],
+                    center_crop=cfg["center_crop"],
+                    no_upscale=cfg["no_upscale"],
+                    out_format=cfg["out_format"],
+                    quality=cfg["quality"],
+                    strip_metadata=cfg["strip_metadata"],
+                    in_memory_image=mem_img,
+                )
+                if out_path is not None:
+                    generated.append(out_path)
             except Exception:
                 pass
 

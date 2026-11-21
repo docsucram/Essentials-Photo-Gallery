@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
 )
+from src.ui.theme_tokens import get_theme_tokens, relative_luminance
 
 from src.imaging.create_tools import (
     stitch_panorama,
@@ -156,25 +157,225 @@ def prompt_save_new_file(
 # Reusable WLPG Studio UI Components (Fine-Tune Style)
 # =============================================================================
 
+def _resolve_theme_name(widget: QWidget | None = None) -> str:
+    """Resolve active UI theme name ('wlpg_aero', 'modern', 'dark') for a dialog/widget."""
+    cur: QWidget | None = widget
+    visited: set[int] = set()
+    while cur is not None and id(cur) not in visited:
+        visited.add(id(cur))
+        val = getattr(cur, "current_theme", None)
+        if isinstance(val, str) and val in ("wlpg_aero", "modern", "dark"):
+            return val
+        cur = cur.parentWidget()
+    if widget is not None:
+        win = widget.window()
+        val = getattr(win, "current_theme", None)
+        if isinstance(val, str) and val in ("wlpg_aero", "modern", "dark"):
+            return val
+
+    app = QApplication.instance()
+    if app is not None:
+        prop = app.property("ui_theme") or app.property("current_theme")
+        if isinstance(prop, str) and prop in ("wlpg_aero", "modern", "dark"):
+            return prop
+        try:
+            qss = app.styleSheet() or ""
+            if "Dark Studio Theme" in qss or "#16181D" in qss or "#1B1E24" in qss:
+                return "dark"
+            if "Modern Fluent Theme" in qss or "#F9FAFB" in qss:
+                return "modern"
+            if "Aero" in qss or "#F3F6FB" in qss or "#E3EEFB" in qss:
+                return "wlpg_aero"
+        except Exception:
+            pass
+        try:
+            win_col = (widget.palette() if widget is not None else app.palette()).window().color()
+            if win_col.isValid() and relative_luminance(win_col.name()) < 0.35:
+                return "dark"
+        except Exception:
+            pass
+    return "wlpg_aero"
+
+
+def _apply_legacy_studio_theme(dialog: QDialog, theme_name: str | None = None) -> str:
+    """Apply consistent theme-token QSS to legacy Create Studio dialogs."""
+    resolved = theme_name or _resolve_theme_name(dialog)
+    dialog.setObjectName("LegacyStudioDialog")
+    if getattr(dialog, "_applied_theme_name", None) == resolved:
+        return resolved
+    dialog._applied_theme_name = resolved
+    tok = get_theme_tokens(resolved)
+    btn_bg = tok.bg_card if not tok.is_dark else "#272C36"
+    header_color = "#29588C" if not tok.is_dark else "#93C5FD"
+    dialog.setStyleSheet(f"""
+        QDialog#LegacyStudioDialog {{
+            background-color: {tok.bg_surface};
+            color: {tok.text_primary};
+        }}
+        QDialog#LegacyStudioDialog QLabel {{
+            color: {tok.text_primary};
+            background: transparent;
+        }}
+        QDialog#LegacyStudioDialog QLabel[uiRole="muted"] {{
+            color: {tok.text_secondary};
+        }}
+        QDialog#LegacyStudioDialog QLabel[uiRole="accent_val"] {{
+            color: {header_color};
+            font-weight: bold;
+        }}
+        QDialog#LegacyStudioDialog QCheckBox {{
+            color: {tok.text_primary};
+            background: transparent;
+            spacing: 6px;
+        }}
+        QDialog#LegacyStudioDialog QFrame#LegacyStripFrame {{
+            background-color: {tok.bg_elevated};
+            border: 1px solid {tok.border_subtle};
+            border-radius: 4px;
+        }}
+        QDialog#LegacyStudioDialog QScrollArea#LegacySidebarScroll {{
+            background-color: {tok.bg_surface};
+            border: 1px solid {tok.border_subtle};
+            border-radius: 4px;
+        }}
+        QDialog#LegacyStudioDialog QListWidget {{
+            background-color: {tok.bg_input};
+            color: {tok.text_primary};
+            border: 1px solid {tok.border_subtle};
+            border-radius: 3px;
+            font-size: 11px;
+        }}
+        QDialog#LegacyStudioDialog QListWidget::item {{
+            padding: 3px 6px;
+        }}
+        QDialog#LegacyStudioDialog QListWidget::item:selected {{
+            background-color: {tok.selection_bg};
+            color: {tok.selection_text};
+        }}
+        QDialog#LegacyStudioDialog QComboBox {{
+            background-color: {tok.bg_input};
+            color: {tok.text_primary};
+            border: 1px solid {tok.border_subtle};
+            border-radius: 3px;
+            padding: 3px 8px;
+        }}
+        QDialog#LegacyStudioDialog QComboBox:hover {{
+            border-color: {tok.accent};
+        }}
+        QDialog#LegacyStudioDialog QComboBox QAbstractItemView {{
+            background-color: {tok.bg_elevated};
+            color: {tok.text_primary};
+            border: 1px solid {tok.border_subtle};
+            selection-background-color: {tok.selection_bg};
+            selection-color: {tok.selection_text};
+            outline: none;
+        }}
+        QDialog#LegacyStudioDialog QComboBox QAbstractItemView::item {{
+            color: {tok.text_primary};
+            background-color: transparent;
+            padding: 4px 8px;
+            min-height: 20px;
+        }}
+        QDialog#LegacyStudioDialog QComboBox QAbstractItemView::item:selected,
+        QDialog#LegacyStudioDialog QComboBox QAbstractItemView::item:hover {{
+            background-color: {tok.selection_bg};
+            color: {tok.selection_text};
+        }}
+        QDialog#LegacyStudioDialog QPushButton {{
+            background-color: {btn_bg};
+            color: {tok.text_primary};
+            border: 1px solid {tok.border_subtle};
+            border-radius: 4px;
+            padding: 4px 10px;
+        }}
+        QDialog#LegacyStudioDialog QPushButton:hover {{
+            background-color: {tok.bg_hover};
+            border-color: {tok.accent};
+        }}
+        QDialog#LegacyStudioDialog QPushButton:checked {{
+            background-color: {tok.selection_bg};
+            color: {tok.selection_text};
+            border: 1.5px solid {tok.accent};
+            font-weight: bold;
+        }}
+        QDialog#LegacyStudioDialog QPushButton[uiRole="primary_btn"] {{
+            background-color: {tok.accent};
+            color: {tok.text_on_accent};
+            border: 1px solid {tok.accent};
+            font-weight: bold;
+            padding: 6px 14px;
+            min-width: 90px;
+        }}
+        QDialog#LegacyStudioDialog QPushButton[uiRole="primary_btn"]:hover {{
+            background-color: {tok.accent_hover};
+            border-color: {tok.accent_hover};
+        }}
+        QDialog#LegacyStudioDialog QPushButton[uiRole="primary_btn"]:disabled {{
+            background-color: {tok.bg_hover};
+            color: {tok.text_secondary};
+            border-color: {tok.border_subtle};
+        }}
+        QDialog#LegacyStudioDialog QProgressBar {{
+            border: 1px solid {tok.border_subtle};
+            border-radius: 3px;
+            background-color: {tok.bg_input};
+            color: {tok.text_primary};
+        }}
+        QDialog#LegacyStudioDialog QProgressBar::chunk {{
+            background-color: {tok.accent};
+            border-radius: 2px;
+        }}
+    """)
+    return resolved
+
+
 class _FineTuneGroup(QFrame):
-    """Clean WLPG white rounded card matching right_tag_dock."""
+    """Clean WLPG white rounded card matching right_tag_dock across themes."""
     def __init__(self, title: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("FineTuneGroup")
-        self.setStyleSheet("""
-            QFrame#FineTuneGroup {
-                background: #FFFFFF;
-                border: 1px solid #D2DFEE;
-                border-radius: 4px;
-            }
-        """)
+        self._applied_theme: str | None = None
         self.vbox = QVBoxLayout(self)
         self.vbox.setContentsMargins(10, 8, 10, 10)
         self.vbox.setSpacing(6)
+        self._title_lbl: QLabel | None = None
         if title:
             lbl = QLabel(title, self)
-            lbl.setStyleSheet("color: #29588C; font-family: 'Segoe UI'; font-size: 9.5pt; font-weight: 600; border: none;")
+            lbl.setObjectName("FineTuneGroupHeader")
+            self._title_lbl = lbl
             self.vbox.addWidget(lbl)
+        self._apply_theme()
+
+    def _apply_theme(self, theme_name: str | None = None) -> None:
+        if getattr(self, "_applying_theme", False):
+            return
+        resolved = theme_name or _resolve_theme_name(self)
+        if resolved == self._applied_theme:
+            return
+        self._applying_theme = True
+        try:
+            self._applied_theme = resolved
+            tok = get_theme_tokens(resolved)
+            hdr_col = "#29588C" if not tok.is_dark else "#93C5FD"
+            self.setStyleSheet(f"""
+                QFrame#FineTuneGroup {{
+                    background: {tok.bg_elevated};
+                    border: 1px solid {tok.border_subtle};
+                    border-radius: 4px;
+                }}
+            """)
+            if self._title_lbl is not None:
+                self._title_lbl.setStyleSheet(
+                    f"color: {hdr_col}; font-family: 'Segoe UI'; font-size: 9.5pt; "
+                    "font-weight: 600; border: none; background: transparent;"
+                )
+        finally:
+            self._applying_theme = False
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.StyleChange, QEvent.Type.PaletteChange):
+            self._apply_theme()
 
 
 class _AeroFineTuneSlider(QSlider):
@@ -191,26 +392,47 @@ class _AeroFineTuneSlider(QSlider):
         if default_value is not None:
             default_val = default_value
         self.default_val = default_val
+        self._applied_theme: str | None = None
         self.setRange(min_val, max_val)
         self.setValue(default_val)
         self.setFixedHeight(18)
-        self.setStyleSheet("""
-            QSlider::groove:horizontal {
-                height: 4px;
-                background: #D8DFE6;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal {
-                background: #0078D7;
-                border: 1px solid #005A9E;
-                width: 10px;
-                margin: -5px 0;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #2B88D8;
-            }
-        """)
+        self._apply_theme()
+
+    def _apply_theme(self, theme_name: str | None = None) -> None:
+        if getattr(self, "_applying_theme", False):
+            return
+        resolved = theme_name or _resolve_theme_name(self)
+        if resolved == self._applied_theme:
+            return
+        self._applying_theme = True
+        try:
+            self._applied_theme = resolved
+            tok = get_theme_tokens(resolved)
+            groove_bg = "#D8DFE6" if not tok.is_dark else "#333A45"
+            self.setStyleSheet(f"""
+                QSlider::groove:horizontal {{
+                    height: 4px;
+                    background: {groove_bg};
+                    border-radius: 2px;
+                }}
+                QSlider::handle:horizontal {{
+                    background: {tok.accent};
+                    border: 1px solid {tok.accent_hover};
+                    width: 10px;
+                    margin: -5px 0;
+                    border-radius: 2px;
+                }}
+                QSlider::handle:horizontal:hover {{
+                    background: {tok.accent_hover};
+                }}
+            """)
+        finally:
+            self._applying_theme = False
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.StyleChange, QEvent.Type.PaletteChange):
+            self._apply_theme()
 
     def mouseDoubleClickEvent(self, event) -> None:
         self.setValue(self.default_val)
@@ -235,42 +457,9 @@ class CreateStudioZoomBar(QFrame):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("CreateStudioZoomBar")
+        self._applied_theme: str | None = None
         self.setFixedHeight(24)
-        self.setStyleSheet("""
-            QFrame {
-                background: transparent;
-                border: none;
-            }
-            QPushButton {
-                background: transparent;
-                border: 1px solid transparent;
-                border-radius: 2px;
-                padding: 1px;
-            }
-            QPushButton:hover {
-                background: #E5F1FB;
-                border: 1px solid #70C0E7;
-            }
-            QPushButton:pressed {
-                background: #CCE4F7;
-                border: 1px solid #0078D7;
-            }
-            QSlider::groove:horizontal {
-                height: 4px;
-                background: #B4B4B4;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal {
-                background: #0078D7;
-                border: 1px solid #005A9E;
-                width: 10px;
-                margin: -5px 0;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #2B88D8;
-            }
-        """)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -306,8 +495,67 @@ class CreateStudioZoomBar(QFrame):
         layout.addWidget(self.btn_zoom_in)
 
         self.lbl_pct = QLabel("100%", self)
-        self.lbl_pct.setStyleSheet("font-size: 11px; font-weight: 600; color: #444; min-width: 38px; padding-left: 2px;")
         layout.addWidget(self.lbl_pct)
+
+        self._apply_theme()
+
+    def _apply_theme(self, theme_name: str | None = None) -> None:
+        if getattr(self, "_applying_theme", False):
+            return
+        resolved = theme_name or _resolve_theme_name(self)
+        if resolved == self._applied_theme:
+            return
+        self._applying_theme = True
+        try:
+            self._applied_theme = resolved
+            tok = get_theme_tokens(resolved)
+            groove_bg = "#B4B4B4" if not tok.is_dark else "#475569"
+            self.setStyleSheet(f"""
+                QFrame#CreateStudioZoomBar {{
+                    background: transparent;
+                    border: none;
+                }}
+                QFrame#CreateStudioZoomBar QPushButton {{
+                    background: transparent;
+                    border: 1px solid transparent;
+                    border-radius: 2px;
+                    padding: 1px;
+                }}
+                QFrame#CreateStudioZoomBar QPushButton:hover {{
+                    background: {tok.bg_hover};
+                    border: 1px solid {tok.accent};
+                }}
+                QFrame#CreateStudioZoomBar QPushButton:pressed {{
+                    background: {tok.selection_bg};
+                    border: 1px solid {tok.accent};
+                }}
+                QFrame#CreateStudioZoomBar QSlider::groove:horizontal {{
+                    height: 4px;
+                    background: {groove_bg};
+                    border-radius: 2px;
+                }}
+                QFrame#CreateStudioZoomBar QSlider::handle:horizontal {{
+                    background: {tok.accent};
+                    border: 1px solid {tok.accent_hover};
+                    width: 10px;
+                    margin: -5px 0;
+                    border-radius: 2px;
+                }}
+                QFrame#CreateStudioZoomBar QSlider::handle:horizontal:hover {{
+                    background: {tok.accent_hover};
+                }}
+            """)
+            self.lbl_pct.setStyleSheet(
+                f"font-size: 11px; font-weight: 600; color: {tok.text_secondary}; "
+                "min-width: 38px; padding-left: 2px; background: transparent;"
+            )
+        finally:
+            self._applying_theme = False
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.StyleChange, QEvent.Type.PaletteChange):
+            self._apply_theme()
 
     def set_zoom_level(self, percent: int) -> None:
         self.slider.blockSignals(True)
@@ -483,21 +731,18 @@ class PanoramaDialog(QDialog):
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setFixedSize(110, 12)
-        self.progress_bar.setStyleSheet(
-            "QProgressBar { height: 12px; border: 1px solid #c0c0c0; border-radius: 2px; background: #e0e0e0; } "
-            "QProgressBar::chunk { background: #2D72BC; }"
-        )
         self.progress_bar.setVisible(False)
         status_bar.addWidget(self.progress_bar)
 
         self.lbl_status = QLabel("Ready", self)
-        self.lbl_status.setStyleSheet("color: #444; font-size: 11px;")
+        self.lbl_status.setStyleSheet("font-size: 11px;")
         status_bar.addWidget(self.lbl_status)
 
         status_bar.addStretch(1)
 
         self.lbl_dims = QLabel("", self)
-        self.lbl_dims.setStyleSheet("color: #666; font-size: 11px; margin-right: 8px;")
+        self.lbl_dims.setProperty("uiRole", "muted")
+        self.lbl_dims.setStyleSheet("font-size: 11px; margin-right: 8px;")
         status_bar.addWidget(self.lbl_dims)
 
         self.zoom_bar = CreateStudioZoomBar(self)
@@ -536,7 +781,7 @@ class PanoramaDialog(QDialog):
 
         self.btn_restitch = QPushButton(" Re-Stitch Panorama", self)
         self.btn_restitch.setIcon(make_wlpg_icon("refresh", 16))
-        self.btn_restitch.setStyleSheet("padding: 5px 10px; border: 1px solid #7a96df; border-radius: 3px; background: #eef3fa;")
+        self.btn_restitch.setStyleSheet("padding: 5px 10px;")
         self.btn_restitch.clicked.connect(self._load_and_stitch)
         grp_proj.layout().addWidget(self.btn_restitch)
         sidebar_layout.addWidget(grp_proj)
@@ -560,7 +805,8 @@ class PanoramaDialog(QDialog):
         grp_info = _FineTuneGroup("Source Photos")
         lbl_info = QLabel(f"Combining {len(self.photo_paths)} overlapping photos into a wide-angle composite.", self)
         lbl_info.setWordWrap(True)
-        lbl_info.setStyleSheet("color: #555; font-size: 11px;")
+        lbl_info.setProperty("uiRole", "muted")
+        lbl_info.setStyleSheet("font-size: 11px;")
         grp_info.layout().addWidget(lbl_info)
         sidebar_layout.addWidget(grp_info)
 
@@ -572,20 +818,12 @@ class PanoramaDialog(QDialog):
 
         self.btn_save = QPushButton("Save New...", self)
         self.btn_save.setEnabled(False)
-        self.btn_save.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
-                color: white; font-weight: bold; border: 1px solid #143e8c;
-                border-radius: 4px; padding: 6px 14px; min-width: 90px;
-            }
-            QPushButton:hover { background: #4d8ff2; }
-            QPushButton:disabled { background: #cccccc; color: #888888; border: 1px solid #aaaaaa; }
-        """)
+        self.btn_save.setProperty("uiRole", "primary_btn")
         self.btn_save.clicked.connect(self._save_panorama)
         btn_box.addWidget(self.btn_save, 1)
 
         self.btn_cancel = QPushButton("Cancel", self)
-        self.btn_cancel.setStyleSheet("padding: 6px 12px; border-radius: 4px; border: 1px solid #ccc; background: #f0f0f0;")
+        self.btn_cancel.setStyleSheet("padding: 6px 12px;")
         self.btn_cancel.clicked.connect(self.reject)
         btn_box.addWidget(self.btn_cancel)
 
@@ -593,6 +831,7 @@ class PanoramaDialog(QDialog):
 
         sidebar_scroll.setWidget(sidebar_content)
         main_layout.addWidget(sidebar_scroll)
+        _apply_legacy_studio_theme(self)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -842,7 +1081,8 @@ class CollageDialog(QDialog):
         status_bar.setSpacing(8)
 
         self.lbl_info = QLabel("Interactive Preview", self)
-        self.lbl_info.setStyleSheet("color: #555; font-size: 11px;")
+        self.lbl_info.setProperty("uiRole", "muted")
+        self.lbl_info.setStyleSheet("font-size: 11px;")
         status_bar.addWidget(self.lbl_info)
 
         status_bar.addStretch(1)
@@ -885,26 +1125,7 @@ class CollageDialog(QDialog):
         self.btn_shuffle = QPushButton(" Shuffle Photo Order", self)
         self.btn_shuffle.setIcon(make_wlpg_icon("shuffle", 16))
         self.btn_shuffle.setCursor(Qt.PointingHandCursor)
-        self.btn_shuffle.setStyleSheet("""
-            QPushButton {
-                padding: 6px 12px;
-                border: 1px solid #7A96DF;
-                border-radius: 4px;
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F4F8FD, stop:1 #DDE9F8);
-                color: #1E395B;
-                font-family: 'Segoe UI';
-                font-size: 9pt;
-                font-weight: 500;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #EBF3FC, stop:1 #C8DEF5);
-                border: 1px solid #3C7FB1;
-            }
-            QPushButton:pressed {
-                background: #B8D6F2;
-                border: 1px solid #2C628B;
-            }
-        """)
+        self.btn_shuffle.setStyleSheet("padding: 6px 12px; font-weight: 500;")
         self.btn_shuffle.clicked.connect(self._shuffle_photos)
         grp_style.layout().addWidget(self.btn_shuffle)
         sidebar_layout.addWidget(grp_style)
@@ -914,14 +1135,12 @@ class CollageDialog(QDialog):
         self.grp_order.setVisible(True)
         lbl_order_hint = QLabel("Reorder photos, or drag cropped photos with the Hand tool to adjust framing:")
         lbl_order_hint.setWordWrap(True)
-        lbl_order_hint.setStyleSheet("font-size: 10.5px; color: #555;")
+        lbl_order_hint.setProperty("uiRole", "muted")
+        lbl_order_hint.setStyleSheet("font-size: 10.5px;")
         self.grp_order.layout().addWidget(lbl_order_hint)
 
         self.lst_photo_order = QListWidget(self)
         self.lst_photo_order.setMaximumHeight(110)
-        self.lst_photo_order.setStyleSheet(
-            "QListWidget { border: 1px solid #C8C8CC; border-radius: 3px; background: #FFFFFF; font-size: 11px; }"
-        )
         self.grp_order.layout().addWidget(self.lst_photo_order)
 
         order_btn_row = QHBoxLayout()
@@ -950,7 +1169,7 @@ class CollageDialog(QDialog):
         # 2. Seamless Blend Options (Default WLPG mode)
         self.grp_seamless = _FineTuneGroup("Blended Collage Settings")
         lbl_feather = QLabel("Edge Softness / Blending:")
-        lbl_feather.setStyleSheet("font-size: 11px; color: #444; margin-top: 4px;")
+        lbl_feather.setStyleSheet("font-size: 11px; margin-top: 4px;")
         self.grp_seamless.layout().addWidget(lbl_feather)
         self.sld_feather = _AeroFineTuneSlider(default_value=22)
         self.sld_feather.setRange(10, 45)
@@ -968,7 +1187,7 @@ class CollageDialog(QDialog):
         self.grp_grid.layout().addWidget(self.cmb_grid_layout)
 
         lbl_b = QLabel("Border Thickness:")
-        lbl_b.setStyleSheet("font-size: 11px; color: #444; margin-top: 4px;")
+        lbl_b.setStyleSheet("font-size: 11px; margin-top: 4px;")
         self.grp_grid.layout().addWidget(lbl_b)
         self.sld_border = _AeroFineTuneSlider(default_value=12)
         self.sld_border.setRange(0, 40)
@@ -977,7 +1196,7 @@ class CollageDialog(QDialog):
         self.grp_grid.layout().addWidget(self.sld_border)
 
         lbl_c = QLabel("Corner Rounding:")
-        lbl_c.setStyleSheet("font-size: 11px; color: #444; margin-top: 4px;")
+        lbl_c.setStyleSheet("font-size: 11px; margin-top: 4px;")
         self.grp_grid.layout().addWidget(lbl_c)
         self.sld_corner = _AeroFineTuneSlider(default_value=8)
         self.sld_corner.setRange(0, 24)
@@ -987,7 +1206,7 @@ class CollageDialog(QDialog):
 
         self.btn_bg_color = QPushButton(" Pick Background Colour", self)
         self.btn_bg_color.setIcon(make_wlpg_icon("pipette", 16))
-        self.btn_bg_color.setStyleSheet("padding: 4px 8px; border: 1px solid #c0c0c0; border-radius: 3px; background: #ffffff;")
+        self.btn_bg_color.setStyleSheet("padding: 4px 8px;")
         self.btn_bg_color.clicked.connect(self._pick_bg_color)
         self.grp_grid.layout().addWidget(self.btn_bg_color)
         sidebar_layout.addWidget(self.grp_grid)
@@ -1015,7 +1234,7 @@ class CollageDialog(QDialog):
         # 5. Canvas Orientation & Export Resolution
         grp_res = _FineTuneGroup("Orientation & Resolution")
         lbl_orient = QLabel("Orientation:")
-        lbl_orient.setStyleSheet("font-size: 11px; color: #444;")
+        lbl_orient.setStyleSheet("font-size: 11px;")
         grp_res.layout().addWidget(lbl_orient)
         self.cmb_orientation = QComboBox(self)
         self.cmb_orientation.addItems(["Landscape (Horizontal)", "Portrait (Vertical)"])
@@ -1023,7 +1242,7 @@ class CollageDialog(QDialog):
         grp_res.layout().addWidget(self.cmb_orientation)
 
         lbl_res = QLabel("Resolution:")
-        lbl_res.setStyleSheet("font-size: 11px; color: #444; margin-top: 4px;")
+        lbl_res.setStyleSheet("font-size: 11px; margin-top: 4px;")
         grp_res.layout().addWidget(lbl_res)
         self.cmb_resolution = QComboBox(self)
         self.cmb_resolution.addItems([
@@ -1042,19 +1261,12 @@ class CollageDialog(QDialog):
         btn_box.setSpacing(6)
 
         self.btn_save = QPushButton("Save New...", self)
-        self.btn_save.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
-                color: white; font-weight: bold; border: 1px solid #143e8c;
-                border-radius: 4px; padding: 6px 14px; min-width: 90px;
-            }
-            QPushButton:hover { background: #4d8ff2; }
-        """)
+        self.btn_save.setProperty("uiRole", "primary_btn")
         self.btn_save.clicked.connect(self._save_collage)
         btn_box.addWidget(self.btn_save, 1)
 
         btn_cancel = QPushButton("Cancel", self)
-        btn_cancel.setStyleSheet("padding: 6px 12px; border-radius: 4px; border: 1px solid #ccc; background: #f0f0f0;")
+        btn_cancel.setStyleSheet("padding: 6px 12px;")
         btn_cancel.clicked.connect(self.reject)
         btn_box.addWidget(btn_cancel)
 
@@ -1062,6 +1274,7 @@ class CollageDialog(QDialog):
 
         sidebar_scroll.setWidget(sidebar_content)
         main_layout.addWidget(sidebar_scroll)
+        _apply_legacy_studio_theme(self)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -1803,10 +2016,17 @@ class PhotoFuseDialog(QDialog):
         self.lbl_align_warning = QLabel("", self)
         self.lbl_align_warning.setWordWrap(True)
         self.lbl_align_warning.setVisible(False)
-        self.lbl_align_warning.setStyleSheet(
-            "background: #FEF3C7; color: #92400E; border: 1px solid #F59E0B; "
-            "border-radius: 4px; padding: 6px 10px; font-size: 11px; font-weight: bold;"
-        )
+        warn_tok = get_theme_tokens(_resolve_theme_name(self))
+        if warn_tok.is_dark:
+            self.lbl_align_warning.setStyleSheet(
+                "background: #422006; color: #FDE68A; border: 1px solid #D97706; "
+                "border-radius: 4px; padding: 6px 10px; font-size: 11px; font-weight: bold;"
+            )
+        else:
+            self.lbl_align_warning.setStyleSheet(
+                "background: #FEF3C7; color: #92400E; border: 1px solid #F59E0B; "
+                "border-radius: 4px; padding: 6px 10px; font-size: 11px; font-weight: bold;"
+            )
         left_layout.addWidget(self.lbl_align_warning)
 
         # Before/After mode banner (shown only when viewing original base)
@@ -1831,14 +2051,15 @@ class PhotoFuseDialog(QDialog):
 
         # Bottom face replacement strip (tall enough for 64x64 thumbs + full label + scrollbar)
         self.strip_frame = QFrame()
+        self.strip_frame.setObjectName("LegacyStripFrame")
         self.strip_frame.setFixedHeight(162)
-        self.strip_frame.setStyleSheet("background: #F4F6FA; border: 1px solid #D2DFEE; border-radius: 4px;")
         strip_layout = QVBoxLayout(self.strip_frame)
         strip_layout.setContentsMargins(8, 6, 8, 6)
         strip_layout.setSpacing(4)
 
         self.lbl_strip_info = QLabel("Click any highlighted face box above to view expressions from all shots:")
-        self.lbl_strip_info.setStyleSheet("font-weight: bold; font-size: 11px; color: #1e395b;")
+        self.lbl_strip_info.setProperty("uiRole", "accent_val")
+        self.lbl_strip_info.setStyleSheet("font-weight: bold; font-size: 11px;")
         strip_layout.addWidget(self.lbl_strip_info)
 
         self.strip_scroll = QScrollArea()
@@ -1865,15 +2086,11 @@ class PhotoFuseDialog(QDialog):
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setFixedSize(110, 12)
-        self.progress_bar.setStyleSheet(
-            "QProgressBar { height: 12px; border: 1px solid #c0c0c0; border-radius: 2px; background: #e0e0e0; } "
-            "QProgressBar::chunk { background: #2D72BC; }"
-        )
         self.progress_bar.setVisible(False)
         status_bar.addWidget(self.progress_bar)
 
         self.lbl_status = QLabel("Loading & aligning burst frames...", self)
-        self.lbl_status.setStyleSheet("color: #444; font-size: 11px;")
+        self.lbl_status.setStyleSheet("font-size: 11px;")
         status_bar.addWidget(self.lbl_status)
 
         status_bar.addStretch(1)
@@ -1903,7 +2120,8 @@ class PhotoFuseDialog(QDialog):
         # Base Photo Selector (visual thumbnail strip)
         grp_base = _FineTuneGroup("Base Photo")
         lbl_base_hint = QLabel("Pick the starting shot:", self)
-        lbl_base_hint.setStyleSheet("color: #555; font-size: 11px;")
+        lbl_base_hint.setProperty("uiRole", "muted")
+        lbl_base_hint.setStyleSheet("font-size: 11px;")
         grp_base.layout().addWidget(lbl_base_hint)
 
         self.base_strip_scroll = QScrollArea(self)
@@ -1925,7 +2143,8 @@ class PhotoFuseDialog(QDialog):
         # View & Actions
         grp_actions = _FineTuneGroup("View & Actions")
         self.lbl_fuse_summary = QLabel(f"Processing {len(self.photo_paths)} shots...", self)
-        self.lbl_fuse_summary.setStyleSheet("color: #555; font-size: 11px;")
+        self.lbl_fuse_summary.setProperty("uiRole", "muted")
+        self.lbl_fuse_summary.setStyleSheet("font-size: 11px;")
         self.lbl_fuse_summary.setWordWrap(True)
         grp_actions.layout().addWidget(self.lbl_fuse_summary)
 
@@ -1937,13 +2156,13 @@ class PhotoFuseDialog(QDialog):
         self.btn_compare_orig = QPushButton(" View Original Base", self)
         self.btn_compare_orig.setCheckable(True)
         self.btn_compare_orig.setToolTip("Toggle between the fused composite and the unmodified base shot")
-        self.btn_compare_orig.setStyleSheet("padding: 5px 10px; border: 1px solid #8ea4c8; border-radius: 3px; background: #f5f7fb;")
+        self.btn_compare_orig.setStyleSheet("padding: 5px 10px;")
         self.btn_compare_orig.toggled.connect(self._toggle_compare_original)
         grp_actions.layout().addWidget(self.btn_compare_orig)
 
         self.btn_reset = QPushButton(" Reset to Base Shot 1", self)
         self.btn_reset.setIcon(make_wlpg_icon("undo", 16))
-        self.btn_reset.setStyleSheet("padding: 5px 10px; border: 1px solid #7a96df; border-radius: 3px; background: #eef3fa;")
+        self.btn_reset.setStyleSheet("padding: 5px 10px;")
         self.btn_reset.clicked.connect(self._reset_to_base)
         grp_actions.layout().addWidget(self.btn_reset)
         sidebar_layout.addWidget(grp_actions)
@@ -1956,7 +2175,7 @@ class PhotoFuseDialog(QDialog):
             self,
         )
         lbl_how.setWordWrap(True)
-        lbl_how.setStyleSheet("color: #444; font-size: 11px; line-height: 1.4;")
+        lbl_how.setStyleSheet("font-size: 11px; line-height: 1.4;")
         grp_how.layout().addWidget(lbl_how)
         sidebar_layout.addWidget(grp_how)
 
@@ -1968,20 +2187,12 @@ class PhotoFuseDialog(QDialog):
 
         self.btn_save = QPushButton("Save New...", self)
         self.btn_save.setEnabled(False)
-        self.btn_save.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
-                color: white; font-weight: bold; border: 1px solid #143e8c;
-                border-radius: 4px; padding: 6px 14px; min-width: 90px;
-            }
-            QPushButton:hover { background: #4d8ff2; }
-            QPushButton:disabled { background: #ccc; color: #888; }
-        """)
+        self.btn_save.setProperty("uiRole", "primary_btn")
         self.btn_save.clicked.connect(self._save_fused_photo)
         btn_box.addWidget(self.btn_save, 1)
 
         btn_cancel = QPushButton("Cancel", self)
-        btn_cancel.setStyleSheet("padding: 6px 12px; border-radius: 4px; border: 1px solid #ccc; background: #f0f0f0;")
+        btn_cancel.setStyleSheet("padding: 6px 12px;")
         btn_cancel.clicked.connect(self.reject)
         btn_box.addWidget(btn_cancel)
 
@@ -1989,6 +2200,7 @@ class PhotoFuseDialog(QDialog):
 
         sidebar_scroll.setWidget(sidebar_content)
         main_layout.addWidget(sidebar_scroll)
+        _apply_legacy_studio_theme(self)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -2083,18 +2295,20 @@ class PhotoFuseDialog(QDialog):
         self._update_base_strip_styles()
 
     def _update_base_strip_styles(self) -> None:
+        tok = get_theme_tokens(_resolve_theme_name(self))
+        base_bg = tok.bg_card if not tok.is_dark else "#272C36"
         for idx, btn in enumerate(self._base_buttons):
             is_cur = idx == self.base_shot_idx
             if is_cur:
                 btn.setStyleSheet(
-                    "QToolButton { border: 2px solid #0078d4; background: #e8f2fc; "
-                    "border-radius: 4px; padding: 3px; font-size: 10px; font-weight: bold; color: #1e395b; }"
+                    f"QToolButton {{ border: 2px solid {tok.accent}; background: {tok.selection_bg}; "
+                    f"border-radius: 4px; padding: 3px; font-size: 10px; font-weight: bold; color: {tok.selection_text}; }}"
                 )
             else:
                 btn.setStyleSheet(
-                    "QToolButton { border: 1px solid #b0c0d8; background: white; "
-                    "border-radius: 4px; padding: 3px; font-size: 10px; color: #1f2937; }"
-                    "QToolButton:hover { border: 2px solid #0078d4; background: #eef6fc; }"
+                    f"QToolButton {{ border: 1px solid {tok.border_subtle}; background: {base_bg}; "
+                    f"border-radius: 4px; padding: 3px; font-size: 10px; color: {tok.text_primary}; }}"
+                    f"QToolButton:hover {{ border: 2px solid {tok.accent}; background: {tok.bg_hover}; }}"
                 )
 
     def _on_base_shot_selected(self, base_idx: int) -> None:
@@ -2416,20 +2630,24 @@ class PhotoFuseDialog(QDialog):
             btn_card.setText(label)
             btn_card.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
             btn_card.setFixedSize(96, 98)
+            tok = get_theme_tokens(_resolve_theme_name(self))
+            card_bg = tok.bg_card if not tok.is_dark else "#272C36"
             if not is_aligned and not is_base:
                 btn_card.setToolTip(f"Shot {shot_idx + 1} could not be aligned to Shot {self.base_shot_idx + 1}")
-                border_style = "1px solid #f59e0b; background: #fffbeb;"
+                warn_bg = "#422006" if tok.is_dark else "#fffbeb"
+                warn_fg = "#FDE68A" if tok.is_dark else "#92400E"
+                card_style = f"border: 1px solid #f59e0b; background: {warn_bg}; color: {warn_fg};"
             elif is_active:
-                border_style = "2px solid #0078d4; background: #e8f2fc; font-weight: bold;"
+                card_style = f"border: 2px solid {tok.accent}; background: {tok.selection_bg}; color: {tok.selection_text}; font-weight: bold;"
             else:
-                border_style = "1px solid #b0c0d8; background: white;"
+                card_style = f"border: 1px solid {tok.border_subtle}; background: {card_bg}; color: {tok.text_primary};"
             btn_card.setStyleSheet(f"""
                 QToolButton {{
-                    border: {border_style}
-                    border-radius: 4px; padding: 4px; font-size: 10px; color: #1f2937;
+                    {card_style}
+                    border-radius: 4px; padding: 4px; font-size: 10px;
                 }}
                 QToolButton:hover {{
-                    border: 2px solid #0078d4; background: #eef6fc;
+                    border: 2px solid {tok.accent}; background: {tok.bg_hover}; color: {tok.text_primary};
                 }}
             """)
             btn_card.clicked.connect(lambda _, s=shot_idx: self._apply_face_fuse(s))
@@ -2861,12 +3079,13 @@ class ColourPopDialog(QDialog):
         bottom_bar.setSpacing(12)
 
         self.lbl_status = QLabel("Paint over photo to add or remove colour • Click to pick hue")
-        self.lbl_status.setStyleSheet("color: #444; font-size: 11px;")
+        self.lbl_status.setStyleSheet("font-size: 11px;")
         bottom_bar.addWidget(self.lbl_status, 1)
 
         h, w = self.original_bgr.shape[:2]
         self.lbl_dims = QLabel(f"{w} × {h} px")
-        self.lbl_dims.setStyleSheet("color: #666; font-size: 11px;")
+        self.lbl_dims.setProperty("uiRole", "muted")
+        self.lbl_dims.setStyleSheet("font-size: 11px;")
         bottom_bar.addWidget(self.lbl_dims)
 
         self.zoom_bar = CreateStudioZoomBar(self)
@@ -2883,10 +3102,10 @@ class ColourPopDialog(QDialog):
         # 2. Right Sidebar (WLPG Fine-Tune Style Cards)
         # -------------------------------------------------------------
         sidebar_scroll = QScrollArea(self)
+        sidebar_scroll.setObjectName("LegacySidebarScroll")
         sidebar_scroll.setFixedWidth(280)
         sidebar_scroll.setWidgetResizable(True)
         sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        sidebar_scroll.setStyleSheet("QScrollArea { border: 1px solid #D2DFEE; border-radius: 4px; background: #F4F6FA; }")
 
         sidebar = QWidget()
         sidebar_layout = QVBoxLayout(sidebar)
@@ -2898,17 +3117,7 @@ class ColourPopDialog(QDialog):
         self.btn_group_mode = QButtonGroup(self)
         self.btn_group_mode.setExclusive(True)
 
-        mode_btn_style = """
-            QPushButton {
-                background: #FFFFFF; border: 1px solid #B0C0D8;
-                border-radius: 3px; padding: 6px 12px; font-weight: 500; text-align: left;
-            }
-            QPushButton:hover { background: #EAF2FB; border-color: #70C0E7; }
-            QPushButton:checked {
-                background: #CCE5FF; border: 1px solid #0078D4;
-                font-weight: bold; color: #004578;
-            }
-        """
+        mode_btn_style = "padding: 6px 12px; font-weight: 500; text-align: left;"
 
         self.btn_keep = QPushButton("Keep Vibrant Colour (+)", grp_mode)
         self.btn_keep.setIcon(make_wlpg_icon("plus", 16))
@@ -2952,7 +3161,7 @@ class ColourPopDialog(QDialog):
         # Brush & Mask Settings Card
         grp_brush = _FineTuneGroup("Brush & Mask Settings", sidebar)
         self.lbl_radius_val = QLabel(f"Brush Size: {self.brush_radius} px", grp_brush)
-        self.lbl_radius_val.setStyleSheet("color: #333; font-size: 11px;")
+        self.lbl_radius_val.setStyleSheet("font-size: 11px;")
         grp_brush.vbox.addWidget(self.lbl_radius_val)
 
         self.sld_radius = _AeroFineTuneSlider(8, 120, 28, grp_brush)
@@ -2961,7 +3170,7 @@ class ColourPopDialog(QDialog):
         grp_brush.vbox.addWidget(self.sld_radius)
 
         self.lbl_tol_val = QLabel("Colour Tolerance: 25%", grp_brush)
-        self.lbl_tol_val.setStyleSheet("color: #333; font-size: 11px;")
+        self.lbl_tol_val.setStyleSheet("font-size: 11px;")
         grp_brush.vbox.addWidget(self.lbl_tol_val)
 
         self.sld_tol = _AeroFineTuneSlider(5, 80, 25, grp_brush)
@@ -2973,7 +3182,7 @@ class ColourPopDialog(QDialog):
         grp_brush.vbox.addWidget(self.sld_tol)
 
         self.chk_overlay = QCheckBox("Show Mask Overlay (Red)", grp_brush)
-        self.chk_overlay.setStyleSheet("font-size: 11px; color: #333; margin-top: 4px;")
+        self.chk_overlay.setStyleSheet("font-size: 11px; margin-top: 4px;")
         self.chk_overlay.toggled.connect(self._on_overlay_toggled)
         grp_brush.vbox.addWidget(self.chk_overlay)
 
@@ -2983,14 +3192,14 @@ class ColourPopDialog(QDialog):
         self.btn_invert = QPushButton("Invert", grp_brush)
         self.btn_invert.setIcon(make_wlpg_icon("invert", 16))
         self.btn_invert.setToolTip("Swap colour subject and B&W background")
-        self.btn_invert.setStyleSheet("background: #FFFFFF; border: 1px solid #B0C0D8; border-radius: 3px; padding: 4px;")
+        self.btn_invert.setStyleSheet("padding: 4px;")
         self.btn_invert.clicked.connect(self._invert_mask)
         action_row.addWidget(self.btn_invert)
 
         self.btn_auto_detect = QPushButton("Auto-Detect", grp_brush)
         self.btn_auto_detect.setIcon(make_wlpg_icon("refresh", 16))
         self.btn_auto_detect.setToolTip("Re-run AI face and subject segmentation")
-        self.btn_auto_detect.setStyleSheet("background: #FFFFFF; border: 1px solid #B0C0D8; border-radius: 3px; padding: 4px;")
+        self.btn_auto_detect.setStyleSheet("padding: 4px;")
         self.btn_auto_detect.clicked.connect(self._auto_detect_mask)
         action_row.addWidget(self.btn_auto_detect)
         grp_brush.vbox.addLayout(action_row)
@@ -3000,7 +3209,7 @@ class ColourPopDialog(QDialog):
         # Background Adjustments Card
         grp_tone = _FineTuneGroup("Background Tone", sidebar)
         self.lbl_contrast_val = QLabel("Contrast: +15%", grp_tone)
-        self.lbl_contrast_val.setStyleSheet("color: #333; font-size: 11px;")
+        self.lbl_contrast_val.setStyleSheet("font-size: 11px;")
         grp_tone.vbox.addWidget(self.lbl_contrast_val)
 
         self.sld_contrast = _AeroFineTuneSlider(80, 180, 115, grp_tone)
@@ -3009,7 +3218,7 @@ class ColourPopDialog(QDialog):
         grp_tone.vbox.addWidget(self.sld_contrast)
 
         self.lbl_bright_val = QLabel("Brightness: 0", grp_tone)
-        self.lbl_bright_val.setStyleSheet("color: #333; font-size: 11px;")
+        self.lbl_bright_val.setStyleSheet("font-size: 11px;")
         grp_tone.vbox.addWidget(self.lbl_bright_val)
 
         self.sld_bright = _AeroFineTuneSlider(-40, 40, 0, grp_tone)
@@ -3025,21 +3234,21 @@ class ColourPopDialog(QDialog):
         self.btn_undo = QPushButton("Undo", grp_hist)
         self.btn_undo.setIcon(make_wlpg_icon("undo", 16))
         self.btn_undo.setEnabled(False)
-        self.btn_undo.setStyleSheet("background: #FFFFFF; border: 1px solid #B0C0D8; border-radius: 3px; padding: 4px;")
+        self.btn_undo.setStyleSheet("padding: 4px;")
         self.btn_undo.clicked.connect(self._undo_mask)
         hist_row.addWidget(self.btn_undo)
 
         self.btn_redo = QPushButton("Redo", grp_hist)
         self.btn_redo.setIcon(make_wlpg_icon("redo", 16))
         self.btn_redo.setEnabled(False)
-        self.btn_redo.setStyleSheet("background: #FFFFFF; border: 1px solid #B0C0D8; border-radius: 3px; padding: 4px;")
+        self.btn_redo.setStyleSheet("padding: 4px;")
         self.btn_redo.clicked.connect(self._redo_mask)
         hist_row.addWidget(self.btn_redo)
         grp_hist.vbox.addLayout(hist_row)
 
         self.btn_compare = QPushButton("Hold to Compare", grp_hist)
         self.btn_compare.setToolTip("Press and hold to preview original photo")
-        self.btn_compare.setStyleSheet("background: #F0F4FA; border: 1px solid #7A96DF; font-weight: bold; padding: 6px 12px; border-radius: 3px;")
+        self.btn_compare.setStyleSheet("font-weight: bold; padding: 6px 12px;")
         self.btn_compare.pressed.connect(self._show_original)
         self.btn_compare.released.connect(self._restore_color_pop)
         grp_hist.vbox.addWidget(self.btn_compare)
@@ -3049,24 +3258,19 @@ class ColourPopDialog(QDialog):
 
         # Save and Cancel Buttons
         btn_save = QPushButton("Save New Photo...")
-        btn_save.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
-                color: white; font-weight: bold; border: 1px solid #143e8c;
-                border-radius: 4px; padding: 8px 16px; font-size: 11px;
-            }
-            QPushButton:hover { background: #4d8ff2; }
-        """)
+        btn_save.setProperty("uiRole", "primary_btn")
+        btn_save.setStyleSheet("padding: 8px 16px; font-size: 11px;")
         btn_save.clicked.connect(self._save_photo)
         sidebar_layout.addWidget(btn_save)
 
         btn_cancel = QPushButton("Cancel")
-        btn_cancel.setStyleSheet("background: #FFFFFF; border: 1px solid #B0C0D8; border-radius: 4px; padding: 6px;")
+        btn_cancel.setStyleSheet("padding: 6px;")
         btn_cancel.clicked.connect(self.reject)
         sidebar_layout.addWidget(btn_cancel)
 
         sidebar_scroll.setWidget(sidebar)
         main_layout.addWidget(sidebar_scroll)
+        _apply_legacy_studio_theme(self)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -3199,12 +3403,15 @@ class ColourPopDialog(QDialog):
             self.swatches_container.setVisible(False)
             return
 
+        tok = get_theme_tokens(_resolve_theme_name(self))
         self.swatches_container.setVisible(True)
         lbl_info = QLabel(f"Colours ({len(self.picked_colors)}):", self.swatches_container)
-        lbl_info.setStyleSheet("font-size: 10px; color: #555; font-weight: bold;")
+        lbl_info.setProperty("uiRole", "muted")
+        lbl_info.setStyleSheet("font-size: 10px; font-weight: bold;")
         self.swatches_layout.addWidget(lbl_info)
 
         max_visible_chips = 6
+        chip_border = "#CBD5E1" if tok.is_dark else "#475569"
         for idx in range(min(max_visible_chips, len(self.picked_colors))):
             b, g, r = self.picked_colors[idx]
             hex_color = f"#{r:02x}{g:02x}{b:02x}"
@@ -3215,8 +3422,9 @@ class ColourPopDialog(QDialog):
             chip.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {hex_color};
-                    border: 1.5px solid #FFFFFF;
+                    border: 1.5px solid {chip_border};
                     border-radius: 8px;
+                    padding: 0;
                 }}
                 QPushButton:hover {{
                     border: 1.5px solid #E81123;
@@ -3228,15 +3436,19 @@ class ColourPopDialog(QDialog):
         if len(self.picked_colors) > max_visible_chips:
             overflow_count = len(self.picked_colors) - max_visible_chips
             lbl_more = QLabel(f"+{overflow_count}", self.swatches_container)
-            lbl_more.setStyleSheet("font-size: 10px; color: #666; font-weight: bold; padding: 0 2px;")
+            lbl_more.setProperty("uiRole", "muted")
+            lbl_more.setStyleSheet("font-size: 10px; font-weight: bold; padding: 0 2px;")
             lbl_more.setToolTip(f"{len(self.picked_colors)} total isolated colours")
             self.swatches_layout.addWidget(lbl_more)
 
         self.swatches_layout.addStretch(1)
 
+        link_accent = tok.accent if not tok.is_dark else "#60A5FA"
         btn_clear = QPushButton("Clear", self.swatches_container)
         btn_clear.setCursor(Qt.PointingHandCursor)
-        btn_clear.setStyleSheet("font-size: 10px; color: #0078D4; background: transparent; border: none; text-decoration: underline;")
+        btn_clear.setStyleSheet(
+            f"font-size: 10px; color: {link_accent}; background: transparent; border: none; text-decoration: underline;"
+        )
         btn_clear.clicked.connect(self._clear_picked_colors)
         self.swatches_layout.addWidget(btn_clear)
 
@@ -3500,7 +3712,8 @@ class PortraitBokehDialog(QDialog):
         status_bar.setSpacing(8)
 
         lbl_res = QLabel(f"Resolution: {self.original_bgr.shape[1]} × {self.original_bgr.shape[0]} px", self)
-        lbl_res.setStyleSheet("color: #666; font-size: 11px;")
+        lbl_res.setProperty("uiRole", "muted")
+        lbl_res.setStyleSheet("font-size: 11px;")
         status_bar.addWidget(lbl_res)
 
         status_bar.addStretch(1)
@@ -3532,9 +3745,10 @@ class PortraitBokehDialog(QDialog):
         grp_bokeh = _FineTuneGroup("Lens Bokeh Blur")
         lbl_b_hdr = QHBoxLayout()
         lbl_b_title = QLabel("Blur Amount:")
-        lbl_b_title.setStyleSheet("font-size: 11px; color: #444;")
+        lbl_b_title.setStyleSheet("font-size: 11px;")
         self.lbl_blur_val = QLabel("16 px")
-        self.lbl_blur_val.setStyleSheet("font-weight: bold; font-size: 11px; color: #1e395b;")
+        self.lbl_blur_val.setProperty("uiRole", "accent_val")
+        self.lbl_blur_val.setStyleSheet("font-weight: bold; font-size: 11px;")
         lbl_b_hdr.addWidget(lbl_b_title)
         lbl_b_hdr.addStretch(1)
         lbl_b_hdr.addWidget(self.lbl_blur_val)
@@ -3551,9 +3765,10 @@ class PortraitBokehDialog(QDialog):
         grp_light = _FineTuneGroup("Portrait Lighting")
         lbl_l_hdr = QHBoxLayout()
         lbl_l_title = QLabel("Subject Fill Light:")
-        lbl_l_title.setStyleSheet("font-size: 11px; color: #444;")
+        lbl_l_title.setStyleSheet("font-size: 11px;")
         self.lbl_fill_val = QLabel("22%")
-        self.lbl_fill_val.setStyleSheet("font-weight: bold; font-size: 11px; color: #1e395b;")
+        self.lbl_fill_val.setProperty("uiRole", "accent_val")
+        self.lbl_fill_val.setStyleSheet("font-weight: bold; font-size: 11px;")
         lbl_l_hdr.addWidget(lbl_l_title)
         lbl_l_hdr.addStretch(1)
         lbl_l_hdr.addWidget(self.lbl_fill_val)
@@ -3569,7 +3784,7 @@ class PortraitBokehDialog(QDialog):
         # 3. Preview & Compare
         grp_preview = _FineTuneGroup("Preview")
         self.btn_compare = QPushButton("Hold to Compare Original", self)
-        self.btn_compare.setStyleSheet("padding: 6px 12px; border: 1px solid #7a96df; border-radius: 3px; background: #eef3fa; font-weight: bold;")
+        self.btn_compare.setStyleSheet("padding: 6px 12px; font-weight: bold;")
         self.btn_compare.pressed.connect(self._show_original)
         self.btn_compare.released.connect(self._restore_bokeh)
         grp_preview.layout().addWidget(self.btn_compare)
@@ -3582,19 +3797,12 @@ class PortraitBokehDialog(QDialog):
         btn_box.setSpacing(6)
 
         self.btn_save = QPushButton("Save New...", self)
-        self.btn_save.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
-                color: white; font-weight: bold; border: 1px solid #143e8c;
-                border-radius: 4px; padding: 6px 14px; min-width: 90px;
-            }
-            QPushButton:hover { background: #4d8ff2; }
-        """)
+        self.btn_save.setProperty("uiRole", "primary_btn")
         self.btn_save.clicked.connect(self._save_photo)
         btn_box.addWidget(self.btn_save, 1)
 
         btn_cancel = QPushButton("Cancel", self)
-        btn_cancel.setStyleSheet("padding: 6px 12px; border-radius: 4px; border: 1px solid #ccc; background: #f0f0f0;")
+        btn_cancel.setStyleSheet("padding: 6px 12px;")
         btn_cancel.clicked.connect(self.reject)
         btn_box.addWidget(btn_cancel)
 
@@ -3602,6 +3810,7 @@ class PortraitBokehDialog(QDialog):
 
         sidebar_scroll.setWidget(sidebar_content)
         main_layout.addWidget(sidebar_scroll)
+        _apply_legacy_studio_theme(self)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -3873,7 +4082,6 @@ class CinematicMotionDialog(QDialog):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setFixedHeight(8)
-        self.progress_bar.setStyleSheet("QProgressBar { height: 8px; border: none; background: #e0e0e0; border-radius: 4px; } QProgressBar::chunk { background: #2D72BC; border-radius: 4px; }")
         self.progress_bar.setVisible(False)
         left_layout.addWidget(self.progress_bar)
 
@@ -3883,7 +4091,7 @@ class CinematicMotionDialog(QDialog):
         status_bar.setSpacing(8)
 
         self.lbl_status = QLabel("Live 3D Parallax Preview (Interactive Loop)", self)
-        self.lbl_status.setStyleSheet("color: #444; font-size: 11px;")
+        self.lbl_status.setStyleSheet("font-size: 11px;")
         status_bar.addWidget(self.lbl_status)
 
         status_bar.addStretch(1)
@@ -3891,7 +4099,8 @@ class CinematicMotionDialog(QDialog):
         h_orig, w_orig = self.original_bgr.shape[:2]
         exp_w, exp_h = compute_target_dimensions(w_orig, h_orig, max_long_edge=1920)
         lbl_res = QLabel(f"Export: {exp_w} × {exp_h} @ 30fps", self)
-        lbl_res.setStyleSheet("color: #666; font-size: 11px;")
+        lbl_res.setProperty("uiRole", "muted")
+        lbl_res.setStyleSheet("font-size: 11px;")
         status_bar.addWidget(lbl_res)
 
         left_layout.addLayout(status_bar)
@@ -3925,9 +4134,10 @@ class CinematicMotionDialog(QDialog):
 
         lbl_i_hdr = QHBoxLayout()
         lbl_i_title = QLabel("Motion Amplitude:")
-        lbl_i_title.setStyleSheet("font-size: 11px; color: #444;")
+        lbl_i_title.setStyleSheet("font-size: 11px;")
         self.lbl_intensity_val = QLabel("50%")
-        self.lbl_intensity_val.setStyleSheet("font-weight: bold; font-size: 11px; color: #1e395b;")
+        self.lbl_intensity_val.setProperty("uiRole", "accent_val")
+        self.lbl_intensity_val.setStyleSheet("font-weight: bold; font-size: 11px;")
         lbl_i_hdr.addWidget(lbl_i_title)
         lbl_i_hdr.addStretch(1)
         lbl_i_hdr.addWidget(self.lbl_intensity_val)
@@ -3943,7 +4153,7 @@ class CinematicMotionDialog(QDialog):
         # Subtle background bokeh toggle
         self.chk_bokeh = QCheckBox("Enhance 3D depth with optical background blur", self)
         self.chk_bokeh.setChecked(True)
-        self.chk_bokeh.setStyleSheet("color: #333; font-size: 11px; margin-top: 4px;")
+        self.chk_bokeh.setStyleSheet("font-size: 11px; margin-top: 4px;")
         self.chk_bokeh.setToolTip("Applies depth-weighted optical blur to background plate to accentuate foreground separation")
         self.chk_bokeh.toggled.connect(self._build_preview_loop)
         grp_motion.layout().addWidget(self.chk_bokeh)
@@ -3953,7 +4163,7 @@ class CinematicMotionDialog(QDialog):
         # 2. Video Duration
         grp_video = _FineTuneGroup("Video Settings")
         lbl_dur = QLabel("Clip Duration:")
-        lbl_dur.setStyleSheet("font-size: 11px; color: #444;")
+        lbl_dur.setStyleSheet("font-size: 11px;")
         grp_video.layout().addWidget(lbl_dur)
         self.cmb_duration = QComboBox(self)
         self.cmb_duration.addItems(["3 seconds (90 frames)", "5 seconds (150 frames)", "8 seconds (240 frames)"])
@@ -3961,7 +4171,8 @@ class CinematicMotionDialog(QDialog):
         grp_video.layout().addWidget(self.cmb_duration)
 
         lbl_enc = QLabel("Format: H.264 / MP4 (30 FPS)\nSeamless cosine loop trajectory", self)
-        lbl_enc.setStyleSheet("color: #666; font-size: 10px; margin-top: 4px;")
+        lbl_enc.setProperty("uiRole", "muted")
+        lbl_enc.setStyleSheet("font-size: 10px; margin-top: 4px;")
         grp_video.layout().addWidget(lbl_enc)
         sidebar_layout.addWidget(grp_video)
 
@@ -3982,20 +4193,12 @@ class CinematicMotionDialog(QDialog):
         btn_box.setSpacing(6)
 
         self.btn_render = QPushButton("Save Video...", self)
-        self.btn_render.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3c82e6, stop:1 #1c52ba);
-                color: white; font-weight: bold; border: 1px solid #143e8c;
-                border-radius: 4px; padding: 6px 14px; min-width: 90px;
-            }
-            QPushButton:hover { background: #4d8ff2; }
-            QPushButton:disabled { background: #ccc; color: #888; }
-        """)
+        self.btn_render.setProperty("uiRole", "primary_btn")
         self.btn_render.clicked.connect(self._start_render)
         btn_box.addWidget(self.btn_render, 1)
 
         btn_cancel = QPushButton("Cancel", self)
-        btn_cancel.setStyleSheet("padding: 6px 12px; border-radius: 4px; border: 1px solid #ccc; background: #f0f0f0;")
+        btn_cancel.setStyleSheet("padding: 6px 12px;")
         btn_cancel.clicked.connect(self._on_cancel)
         btn_box.addWidget(btn_cancel)
 
@@ -4003,6 +4206,7 @@ class CinematicMotionDialog(QDialog):
 
         sidebar_scroll.setWidget(sidebar_content)
         main_layout.addWidget(sidebar_scroll)
+        _apply_legacy_studio_theme(self)
 
     def _on_intensity_changed(self, val: int) -> None:
         self.lbl_intensity_val.setText(f"{val}%")

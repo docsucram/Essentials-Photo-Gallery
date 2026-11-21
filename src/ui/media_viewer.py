@@ -155,7 +155,7 @@ from src.imaging.image_loader import (
     is_animated_image_file,
     transform_alpha_for_recipe,
 )
-from src.ui.crop_tool import CropOverlayItem, CropScene
+from src.ui.crop_tool import CropOverlayItem, CropRatioComboBox, CropScene
 from src.ui.markup_overlay import (
     MarkupFloatingToolbar,
     MarkupElement,
@@ -951,6 +951,215 @@ class _FaceTagTargetBoxItem(QGraphicsItem):
         painter.restore()
 
 
+class _VirtualLightGizmoItem(QGraphicsItem):
+    """
+    On-canvas 3D Virtual Light Gizmo supporting draggable Light Source (orb)
+    and Aim Point (reticle) for Point / Spot / Rim lights in Depth & Light 2.0.
+    """
+
+    def __init__(
+        self,
+        light_index: int,
+        light_dict: dict[str, Any],
+        master_wh: tuple[int, int],
+        crop_rect: tuple[int, int, int, int] | None = None,
+        selected: bool = False,
+        on_press=None,
+        on_move=None,
+        on_release=None,
+    ) -> None:
+        super().__init__()
+        self.light_index = int(light_index)
+        self.light_dict = dict(light_dict)
+        self._master_w = max(1, int(master_wh[0]))
+        self._master_h = max(1, int(master_wh[1]))
+        self._crop_rect = crop_rect
+        self._selected = bool(selected)
+        self._on_press = on_press
+        self._on_move = on_move
+        self._on_release = on_release
+        self._drag_part: str | None = None
+        self.setZValue(35)
+        self.setAcceptHoverEvents(True)
+        self.setAcceptedMouseButtons(Qt.LeftButton)
+
+    def _inv_scale(self) -> float:
+        if self.scene() and self.scene().views():
+            m11 = self.scene().views()[0].transform().m11()
+            if m11 > 1e-4:
+                return 1.0 / m11
+        return 1.0
+
+    def norm_to_scene(self, nx: float, ny: float) -> QPointF:
+        mx = float(nx) * self._master_w
+        my = float(ny) * self._master_h
+        if self._crop_rect is not None:
+            l, t, _r, _b = self._crop_rect
+            return QPointF(mx - float(l), my - float(t))
+        return QPointF(mx, my)
+
+    def scene_to_norm(self, sp: QPointF) -> tuple[float, float]:
+        if self._crop_rect is not None:
+            l, t, _r, _b = self._crop_rect
+            mx = sp.x() + float(l)
+            my = sp.y() + float(t)
+        else:
+            mx = sp.x()
+            my = sp.y()
+        nx = max(-0.15, min(1.15, mx / float(self._master_w)))
+        ny = max(-0.15, min(1.15, my / float(self._master_h)))
+        return nx, ny
+
+    def source_scene_pos(self) -> QPointF:
+        return self.norm_to_scene(float(self.light_dict.get("x", 0.25)), float(self.light_dict.get("y", 0.25)))
+
+    def aim_scene_pos(self) -> QPointF:
+        return self.norm_to_scene(float(self.light_dict.get("aim_x", 0.50)), float(self.light_dict.get("aim_y", 0.50)))
+
+    def has_aim(self) -> bool:
+        return str(self.light_dict.get("type", "point")).lower() in ("spot", "rim")
+
+    def set_selected(self, selected: bool) -> None:
+        self._selected = bool(selected)
+        self.update()
+
+    def set_position_norm(self, part: str, nx: float, ny: float) -> None:
+        self.prepareGeometryChange()
+        if part == "aim":
+            self.light_dict["aim_x"] = float(nx)
+            self.light_dict["aim_y"] = float(ny)
+        else:
+            self.light_dict["x"] = float(nx)
+            self.light_dict["y"] = float(ny)
+        self.update()
+
+    def hit_test(self, sp: QPointF) -> str | None:
+        inv = self._inv_scale()
+        src_r = 16.0 * inv
+        s_pt = self.source_scene_pos()
+        if math.hypot(sp.x() - s_pt.x(), sp.y() - s_pt.y()) <= src_r:
+            return "source"
+        if self.has_aim():
+            a_pt = self.aim_scene_pos()
+            if math.hypot(sp.x() - a_pt.x(), sp.y() - a_pt.y()) <= 13.0 * inv:
+                return "aim"
+        return None
+
+    def boundingRect(self) -> QRectF:
+        inv = self._inv_scale()
+        pad = 36.0 * inv
+        s_pt = self.source_scene_pos()
+        rect = QRectF(s_pt, s_pt)
+        if self.has_aim():
+            a_pt = self.aim_scene_pos()
+            rect = rect.united(QRectF(a_pt, a_pt))
+        return rect.adjusted(-pad, -pad, pad, pad)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            part = self.hit_test(event.pos())
+            if part is not None:
+                self._drag_part = part
+                if self._on_press is not None:
+                    self._on_press(self.light_index, part)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_part is not None:
+            nx, ny = self.scene_to_norm(event.scenePos())
+            self.set_position_norm(self._drag_part, nx, ny)
+            if self._on_move is not None:
+                self._on_move(self.light_index, self._drag_part, nx, ny)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._drag_part is not None and event.button() == Qt.LeftButton:
+            self._drag_part = None
+            if self._on_release is not None:
+                self._on_release(self.light_index)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def paint(self, painter: QPainter, _option, _widget=None) -> None:
+        if not bool(self.light_dict.get("enabled", True)):
+            return
+        from src.imaging.creative_effects import light_color_srgb
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        inv = self._inv_scale()
+        s_pt = self.source_scene_pos()
+        r_col, g_col, b_col = light_color_srgb(self.light_dict)
+        orb_col = QColor(r_col, g_col, b_col)
+
+        if self.has_aim():
+            a_pt = self.aim_scene_pos()
+            beam_shadow = QPen(QColor(0, 0, 0, 150), 3.0 * inv, Qt.DashLine)
+            beam_pen = QPen(QColor(r_col, g_col, b_col, 210), 1.6 * inv, Qt.DashLine)
+            painter.setPen(beam_shadow)
+            painter.drawLine(s_pt, a_pt)
+            painter.setPen(beam_pen)
+            painter.drawLine(s_pt, a_pt)
+
+            # Translucent spot-cone boundary rays when Spot light is selected
+            if self._selected and str(self.light_dict.get("type", "")).lower() == "spot":
+                b_dx = a_pt.x() - s_pt.x()
+                b_dy = a_pt.y() - s_pt.y()
+                b_len = math.hypot(b_dx, b_dy)
+                if b_len > 8.0:
+                    half_rad = math.radians(max(5.0, float(self.light_dict.get("cone_angle", 40.0))) * 0.5)
+                    base_ang = math.atan2(b_dy, b_dx)
+                    cone_len = b_len * 1.15
+                    cone_pen = QPen(QColor(r_col, g_col, b_col, 130), 1.2 * inv, Qt.DotLine)
+                    painter.setPen(cone_pen)
+                    for sign in (-1.0, 1.0):
+                        ang = base_ang + sign * half_rad
+                        ep = QPointF(s_pt.x() + cone_len * math.cos(ang), s_pt.y() + cone_len * math.sin(ang))
+                        painter.drawLine(s_pt, ep)
+
+            # Aim reticle
+            ar = 7.0 * inv
+            painter.setBrush(QColor(15, 18, 24, 170))
+            painter.setPen(QPen(QColor(255, 255, 255, 240), 1.6 * inv))
+            painter.drawEllipse(a_pt, ar, ar)
+            painter.drawLine(QPointF(a_pt.x() - ar * 1.3, a_pt.y()), QPointF(a_pt.x() + ar * 1.3, a_pt.y()))
+            painter.drawLine(QPointF(a_pt.x(), a_pt.y() - ar * 1.3), QPointF(a_pt.x(), a_pt.y() + ar * 1.3))
+
+        # Source orb
+        sr = (12.5 if self._selected else 10.5) * inv
+        if self._selected:
+            painter.setPen(QPen(QColor(56, 189, 248, 220), 2.5 * inv))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(s_pt, sr + 4.0 * inv, sr + 4.0 * inv)
+
+        painter.setPen(QPen(QColor(0, 0, 0, 210), 3.2 * inv))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(s_pt, sr, sr)
+
+        painter.setPen(QPen(QColor(255, 255, 255, 250), 1.8 * inv))
+        painter.setBrush(orb_col)
+        painter.drawEllipse(s_pt, sr, sr)
+
+        # Crisp light number label
+        font = QFont("Segoe UI")
+        font.setPixelSize(max(9, int(round(10.5 * inv))))
+        font.setBold(True)
+        painter.setFont(font)
+        lum = 0.299 * r_col + 0.587 * g_col + 0.114 * b_col
+        painter.setPen(QColor(15, 18, 24) if lum > 150 else QColor(255, 255, 255))
+        painter.drawText(
+            QRectF(s_pt.x() - sr, s_pt.y() - sr, sr * 2.0, sr * 2.0),
+            Qt.AlignCenter,
+            str(self.light_index + 1),
+        )
+        painter.restore()
+
+
 class _PersonPopupRowButton(QPushButton):
     """Clickable row in the WLPG 'Tag someone' popup with 36x36 square face avatar and name."""
 
@@ -1484,8 +1693,10 @@ class SingleMediaViewer(QWidget):
     zoom_percent_changed = Signal(int)
     image_changed = Signal(object)                                # emitted with current PIL Image
     recipe_changed = Signal(object)                               # emitted with current PhotoAdjustmentRecipe
+    straighten_preview_changed = Signal(float)                    # emitted while adjusting straighten in crop bar
     wb_eyedropper_finished = Signal()                             # emitted when WB eyedropper finishes or cancels
     region_brush_size_shortcut_changed = Signal(int)              # synced back to Fine Tune brush size slider
+    virtual_lights_canvas_changed = Signal(list, int)             # (virtual_lights, selected_idx)
     status_message_requested = Signal(str, int)                  # (message, timeout_ms)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -1527,6 +1738,12 @@ class SingleMediaViewer(QWidget):
         self._region_brush_smart: bool = True
         self._is_painting_region_mask: bool = False
         self._region_brush_before_recipe: PhotoAdjustmentRecipe | None = None
+        self._depth_light_active: bool = False
+        self._virtual_light_gizmos_visible: bool = True
+        self._selected_virtual_light_idx: int = 0
+        self._virtual_light_gizmo_items: list[_VirtualLightGizmoItem] = []
+        self._active_gizmo_drag: tuple[_VirtualLightGizmoItem, str] | None = None
+        self._dragging_virtual_light: bool = False
 
         # Retouch (Magic Eraser) state
         self.is_retouch_mode: bool = False
@@ -1584,6 +1801,10 @@ class SingleMediaViewer(QWidget):
         self.scene.pixmap_item = self.pixmap_item
         self.scene.crop_applied.connect(self.apply_crop)
         self.scene.crop_cancelled.connect(lambda: self.set_crop_mode(False))
+        self.scene.crop_flip_requested.connect(self._on_crop_swap_clicked)
+        self.scene.crop_grid_cycle_requested.connect(self._on_crop_grid_clicked)
+        self.scene.crop_rect_updated.connect(self._on_crop_scene_updated)
+        self.scene.straighten_line_finished.connect(self._on_crop_straighten_line_finished)
         self.graphics_view.setScene(self.scene)
         self.graphics_view.setStyleSheet("background-color: #FFFFFF; border: none;")
         self.graphics_view.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -1991,37 +2212,52 @@ class SingleMediaViewer(QWidget):
         ct_layout.addWidget(grip_crop)
 
         self._updating_crop_inputs = False
+        self._saved_custom_ratios: list[dict[str, Any]] = self._load_saved_custom_ratios()
 
-        self.combo_crop_ratio = QComboBox(self.crop_toolbar)
-        self.combo_crop_ratio.addItems([
-            "Ratio",
-            "Custom",
-            "Full Image (Uncrop)",
-            "Original",
-            "1:1 (Square)",
-            "4:3",
-            "3:4",
-            "3:2",
-            "2:3",
-            "5:4",
-            "4:5",
-            "16:9",
-            "9:16",
-        ])
+        self.combo_crop_ratio = CropRatioComboBox(self.crop_toolbar)
+        self._rebuild_crop_ratio_combo()
         self.combo_crop_ratio.setStyleSheet("""
             QComboBox {
                 border: 1px solid #CBD5E1;
                 border-radius: 4px;
-                padding: 2px 6px;
+                padding: 2px 20px 2px 6px;
                 background: #FFFFFF;
                 color: #1E293B;
                 font-size: 11px;
-                min-width: 68px;
+                min-width: 78px;
             }
             QComboBox:hover { border-color: #94A3B8; }
-            QComboBox::drop-down { border: none; width: 14px; }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 18px;
+                border: none;
+                background: transparent;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+            }
         """)
         self.combo_crop_ratio.currentTextChanged.connect(self._on_crop_ratio_changed)
+
+        self.btn_crop_delete_ratio = QPushButton("🗑", self.crop_toolbar)
+        self.btn_crop_delete_ratio.setFixedSize(24, 24)
+        self.btn_crop_delete_ratio.setToolTip("Delete selected saved custom aspect ratio")
+        self.btn_crop_delete_ratio.setStyleSheet("""
+            QPushButton {
+                border: 1px solid #CBD5E1;
+                border-radius: 4px;
+                background: #F8FAFC;
+                color: #B91C1C;
+                font-size: 11px;
+                padding: 0px;
+            }
+            QPushButton:hover { background: #FEE2E2; border-color: #EF4444; }
+        """)
+        self.btn_crop_delete_ratio.clicked.connect(self._on_crop_delete_ratio_clicked)
+        self.btn_crop_delete_ratio.hide()
 
         input_style = """
             QLineEdit {
@@ -2039,25 +2275,63 @@ class SingleMediaViewer(QWidget):
             }
         """
 
-        self.txt_crop_w = QLineEdit(self.crop_toolbar)
-        self.txt_crop_w.setFixedSize(36, 24)
+        self.crop_custom_ratio_widget = QWidget(self.crop_toolbar)
+        cr_layout = QHBoxLayout(self.crop_custom_ratio_widget)
+        cr_layout.setContentsMargins(0, 0, 0, 0)
+        cr_layout.setSpacing(3)
+
+        self.txt_crop_w = QLineEdit(self.crop_custom_ratio_widget)
+        self.txt_crop_w.setFixedSize(40, 24)
         self.txt_crop_w.setAlignment(Qt.AlignCenter)
         self.txt_crop_w.setStyleSheet(input_style)
         self.txt_crop_w.setPlaceholderText("W")
         self.txt_crop_w.textEdited.connect(self._on_crop_custom_text_edited)
 
-        self.btn_crop_swap = QPushButton("⇄", self.crop_toolbar)
-        self.btn_crop_swap.setFixedSize(26, 24)
-        self.btn_crop_swap.setToolTip("Swap Width and Height (Landscape / Portrait)")
+        lbl_colon = QLabel(":", self.crop_custom_ratio_widget)
+        lbl_colon.setStyleSheet("color: #475569; font-weight: bold; font-size: 11px; background: transparent;")
+
+        self.txt_crop_h = QLineEdit(self.crop_custom_ratio_widget)
+        self.txt_crop_h.setFixedSize(40, 24)
+        self.txt_crop_h.setAlignment(Qt.AlignCenter)
+        self.txt_crop_h.setStyleSheet(input_style)
+        self.txt_crop_h.setPlaceholderText("H")
+        self.txt_crop_h.textEdited.connect(self._on_crop_custom_text_edited)
+
+        self.btn_crop_save_ratio = QPushButton("+ Save", self.crop_custom_ratio_widget)
+        self.btn_crop_save_ratio.setFixedHeight(24)
+        self.btn_crop_save_ratio.setToolTip("Save custom W:H aspect ratio to presets")
+        self.btn_crop_save_ratio.setStyleSheet("""
+            QPushButton {
+                border: 1px solid #CBD5E1;
+                border-radius: 4px;
+                background: #F8FAFC;
+                color: #1E293B;
+                font-size: 11px;
+                padding: 2px 6px;
+            }
+            QPushButton:hover { background: #E2E8F0; border-color: #94A3B8; }
+        """)
+        self.btn_crop_save_ratio.clicked.connect(self._on_crop_save_ratio_clicked)
+
+        cr_layout.addWidget(self.txt_crop_w)
+        cr_layout.addWidget(lbl_colon)
+        cr_layout.addWidget(self.txt_crop_h)
+        cr_layout.addWidget(self.btn_crop_save_ratio)
+        self.crop_custom_ratio_widget.hide()
+
+        self.btn_crop_swap = QPushButton("Flip", self.crop_toolbar)
+        self.btn_crop_swap.setIcon(make_wlpg_icon("rotate_cw", 14))
+        self.btn_crop_swap.setIconSize(QSize(14, 14))
+        self.btn_crop_swap.setFixedHeight(24)
+        self.btn_crop_swap.setToolTip("Flip crop orientation: Portrait ↔ Landscape (X)")
         self.btn_crop_swap.setStyleSheet("""
             QPushButton {
                 border: 1px solid #CBD5E1;
                 border-radius: 4px;
                 background: #F8FAFC;
                 color: #334155;
-                font-size: 13px;
-                font-weight: bold;
-                padding: 0px;
+                font-size: 11px;
+                padding: 2px 7px;
             }
             QPushButton:hover {
                 background: #E2E8F0;
@@ -2069,12 +2343,26 @@ class SingleMediaViewer(QWidget):
         """)
         self.btn_crop_swap.clicked.connect(self._on_crop_swap_clicked)
 
-        self.txt_crop_h = QLineEdit(self.crop_toolbar)
-        self.txt_crop_h.setFixedSize(36, 24)
-        self.txt_crop_h.setAlignment(Qt.AlignCenter)
-        self.txt_crop_h.setStyleSheet(input_style)
-        self.txt_crop_h.setPlaceholderText("H")
-        self.txt_crop_h.textEdited.connect(self._on_crop_custom_text_edited)
+        self.btn_crop_grid = QPushButton("Grid: 3×3 ▾", self.crop_toolbar)
+        self.btn_crop_grid.setIcon(make_wlpg_icon("pixelate", 14))
+        self.btn_crop_grid.setIconSize(QSize(14, 14))
+        self.btn_crop_grid.setFixedHeight(24)
+        self.btn_crop_grid.setToolTip("Cycle composition grid: Rule of Thirds → Golden Ratio → Diagonals → Crosshair → None (G)")
+        self.btn_crop_grid.setStyleSheet("""
+            QPushButton {
+                border: 1px solid #CBD5E1;
+                border-radius: 4px;
+                background: #F8FAFC;
+                color: #334155;
+                font-size: 11px;
+                padding: 2px 7px;
+            }
+            QPushButton:hover {
+                background: #E2E8F0;
+                border-color: #94A3B8;
+            }
+        """)
+        self.btn_crop_grid.clicked.connect(self._on_crop_grid_clicked)
 
         # Subtle vertical separator
         sep = QFrame(self.crop_toolbar)
@@ -2100,6 +2388,7 @@ class SingleMediaViewer(QWidget):
             }
         """)
         btn_crop_apply.clicked.connect(self.apply_crop)
+        self.btn_crop_toolbar_apply = btn_crop_apply
 
         btn_crop_cancel = QPushButton("Cancel", self.crop_toolbar)
         btn_crop_cancel.setIcon(make_symbol_icon("cross", 14))
@@ -2121,35 +2410,44 @@ class SingleMediaViewer(QWidget):
         """)
         btn_crop_cancel.clicked.connect(lambda: self.set_crop_mode(False))
 
-        self.btn_crop_ai_expand = QPushButton("AI Expand", self.crop_toolbar)
-        self.btn_crop_ai_expand.setCheckable(True)
-        self.btn_crop_ai_expand.setChecked(False)
-        self.btn_crop_ai_expand.setToolTip(
-            "Optional: Drag crop handles slightly outside the photo (up to 25%) and fill new margins with AI "
-            "(or built-in texture fill if the AI model is not installed)."
+        sep_str = QFrame(self.crop_toolbar)
+        sep_str.setFrameShape(QFrame.VLine)
+        sep_str.setStyleSheet("color: #CBD5E1; margin: 2px 2px;")
+
+        self.btn_crop_straighten_line = QPushButton("Straighten", self.crop_toolbar)
+        self.btn_crop_straighten_line.setCheckable(True)
+        self.btn_crop_straighten_line.setChecked(False)
+        self.btn_crop_straighten_line.setFixedHeight(24)
+        self.btn_crop_straighten_line.setIcon(make_wlpg_icon("straighten", 14))
+        self.btn_crop_straighten_line.setIconSize(QSize(14, 14))
+        self.btn_crop_straighten_line.setToolTip(
+            "Straighten the image by drawing a line on it"
         )
-        self.btn_crop_ai_expand.setStyleSheet("""
+        self.btn_crop_straighten_line.setStyleSheet("""
             QPushButton {
-                background: #F8F9FA;
+                background: #F8FAFC;
                 border: 1px solid #CBD5E1;
-                border-radius: 3px;
-                padding: 3px 7px;
+                border-radius: 4px;
+                padding: 2px 7px;
                 font-size: 11px;
-                color: #1E293B;
+                color: #334155;
             }
+            QPushButton:hover { background: #E2E8F0; border-color: #94A3B8; }
             QPushButton:checked {
                 background: #DBEAFE;
-                border: 1px solid #3B82F6;
-                color: #1E3A8A;
+                border: 1px solid #2563EB;
+                color: #1D4ED8;
                 font-weight: bold;
             }
         """)
-        self.btn_crop_ai_expand.toggled.connect(self._on_crop_ai_expand_toggled)
+        self.btn_crop_straighten_line.toggled.connect(self._on_crop_straighten_line_toggled)
 
-        self.btn_crop_clear_ratio = QPushButton("Clear", self.crop_toolbar)
-        self.btn_crop_clear_ratio.setFixedHeight(24)
-        self.btn_crop_clear_ratio.setToolTip("Clear aspect ratio lock (Freeform crop)")
-        self.btn_crop_clear_ratio.setStyleSheet("""
+        self.btn_crop_auto_straighten = QPushButton("Auto", self.crop_toolbar)
+        self.btn_crop_auto_straighten.setIcon(make_wlpg_icon("auto_adjust", 14))
+        self.btn_crop_auto_straighten.setIconSize(QSize(14, 14))
+        self.btn_crop_auto_straighten.setFixedHeight(24)
+        self.btn_crop_auto_straighten.setToolTip("Auto-detect horizon / vertical straighten angle")
+        self.btn_crop_auto_straighten.setStyleSheet("""
             QPushButton {
                 border: 1px solid #CBD5E1;
                 border-radius: 4px;
@@ -2158,20 +2456,74 @@ class SingleMediaViewer(QWidget):
                 font-size: 11px;
                 padding: 2px 7px;
             }
+            QPushButton:hover { background: #E2E8F0; border-color: #94A3B8; }
+        """)
+        self.btn_crop_auto_straighten.clicked.connect(self._on_crop_auto_straighten_clicked)
+
+        self.slider_crop_straighten = QSlider(Qt.Horizontal, self.crop_toolbar)
+        self.slider_crop_straighten.setRange(-150, 150)
+        self.slider_crop_straighten.setValue(0)
+        self.slider_crop_straighten.setFixedWidth(84)
+        self.slider_crop_straighten.setToolTip("Straighten angle (-15.0° to +15.0°) — double-click to reset")
+        self.slider_crop_straighten.valueChanged.connect(self._on_crop_straighten_slider_changed)
+        self.slider_crop_straighten.sliderPressed.connect(
+            lambda: self.scene.crop_rect_item.set_fine_grid_active(True)
+        )
+        self.slider_crop_straighten.sliderReleased.connect(
+            lambda: self.scene.crop_rect_item.set_fine_grid_active(False)
+        )
+        self.slider_crop_straighten.installEventFilter(self)
+
+        self.lbl_crop_straighten = QLabel("0.0°", self.crop_toolbar)
+        self.lbl_crop_straighten.setFixedWidth(40)
+        self.lbl_crop_straighten.setAlignment(Qt.AlignCenter)
+        self.lbl_crop_straighten.setToolTip("Straighten angle (double-click to reset to 0.0°)")
+        self.lbl_crop_straighten.setStyleSheet(
+            "color: #1E293B; font-size: 11px; font-weight: 600; background: transparent;"
+        )
+        self.lbl_crop_straighten.installEventFilter(self)
+
+        self.btn_crop_ai_expand = QPushButton("AI Expand", self.crop_toolbar)
+        self.btn_crop_ai_expand.setIcon(make_wlpg_icon("resize_photo", 14))
+        self.btn_crop_ai_expand.setIconSize(QSize(14, 14))
+        self.btn_crop_ai_expand.setCheckable(True)
+        self.btn_crop_ai_expand.setChecked(False)
+        self.btn_crop_ai_expand.setFixedHeight(24)
+        self.btn_crop_ai_expand.setToolTip(
+            "Allow dragging outside image bounds or rotating without cropping; fills new margins with AI texture."
+        )
+        self.btn_crop_ai_expand.setStyleSheet("""
+            QPushButton {
+                background: #F8F9FA;
+                border: 1px solid #CBD5E1;
+                border-radius: 3px;
+                padding: 2px 8px;
+                font-size: 11px;
+                color: #1E293B;
+            }
             QPushButton:hover {
-                background: #E2E8F0;
+                background: #EDF2F7;
                 border-color: #94A3B8;
             }
+            QPushButton:checked {
+                background: #DBEAFE;
+                border: 1px solid #2563EB;
+                color: #1D4ED8;
+                font-weight: bold;
+            }
         """)
-        self.btn_crop_clear_ratio.clicked.connect(
-            lambda: self.combo_crop_ratio.setCurrentText("Custom")
-        )
+        self.btn_crop_ai_expand.toggled.connect(self._on_crop_ai_expand_toggled)
 
         ct_layout.addWidget(self.combo_crop_ratio)
-        ct_layout.addWidget(self.btn_crop_clear_ratio)
-        ct_layout.addWidget(self.txt_crop_w)
+        ct_layout.addWidget(self.btn_crop_delete_ratio)
+        ct_layout.addWidget(self.crop_custom_ratio_widget)
         ct_layout.addWidget(self.btn_crop_swap)
-        ct_layout.addWidget(self.txt_crop_h)
+        ct_layout.addWidget(self.btn_crop_grid)
+        ct_layout.addWidget(sep_str)
+        ct_layout.addWidget(self.btn_crop_straighten_line)
+        ct_layout.addWidget(self.btn_crop_auto_straighten)
+        ct_layout.addWidget(self.slider_crop_straighten)
+        ct_layout.addWidget(self.lbl_crop_straighten)
         ct_layout.addWidget(self.btn_crop_ai_expand)
         ct_layout.addWidget(sep)
         ct_layout.addWidget(btn_crop_apply)
@@ -2953,6 +3305,7 @@ class SingleMediaViewer(QWidget):
         # Update face overlays for current static image (clears overlays when empty)
         if hasattr(self, "_current_people_regions") and not self.current_is_video:
             self.render_face_regions(self._current_people_regions)
+        self._sync_virtual_light_gizmos()
 
         # Cache unedited original pixmap for instantaneous, high-fidelity compare
         if self.current_recipe.is_default():
@@ -3227,13 +3580,14 @@ class SingleMediaViewer(QWidget):
                     item.setVisible(False)
         self._sync_animation_playback()
 
-    def _dismiss_depth_light_pane_if_active(self) -> None:
+    def _dismiss_depth_light_pane_if_active(self, *, keep_fine_tune: bool = False) -> None:
         mw = self.window()
         if hasattr(mw, "right_tag_dock") and hasattr(mw.right_tag_dock, "current_mode"):
-            if mw.right_tag_dock.current_mode() in ("depth_light", "fine_tune"):
+            modes_to_dismiss = ("depth_light",) if keep_fine_tune else ("depth_light", "fine_tune")
+            if mw.right_tag_dock.current_mode() in modes_to_dismiss:
                 mw.right_tag_dock.set_mode("info")
 
-    def set_crop_mode(self, enabled: bool) -> None:
+    def set_crop_mode(self, enabled: bool, *, focus_straighten: bool = False) -> None:
         self.is_crop_mode = bool(enabled)
         if hasattr(self, "scene") and hasattr(self.scene, "set_crop_mode"):
             self.scene.set_crop_mode(self.is_crop_mode)
@@ -3243,8 +3597,9 @@ class SingleMediaViewer(QWidget):
         self.btn_crop_apply.setEnabled(self.is_crop_mode)
 
         if self.is_crop_mode:
-            self._dismiss_depth_light_pane_if_active()
+            self._dismiss_depth_light_pane_if_active(keep_fine_tune=focus_straighten)
             self._crop_pre_existing_rect = self.current_recipe.crop_rect
+            self._crop_pre_existing_straighten_deg = float(getattr(self.current_recipe, "straighten_deg", 0.0))
             self._crop_committed = False
 
             self.stop_face_tagging_mode()
@@ -3257,10 +3612,11 @@ class SingleMediaViewer(QWidget):
             self._position_floating_toolbars()
             self.crop_toolbar.raise_()
 
-            # WLPG behavior: if image was already cropped, temporarily display the uncropped image
-            # with the existing crop rectangle placed on top, allowing uncrop or readjustment!
-            if self._crop_pre_existing_rect is not None:
+            # WLPG behavior: if image was already cropped or straightened, temporarily display
+            # the uncropped/unrotated image with the crop/straighten overlay placed on top!
+            if self._crop_pre_existing_rect is not None or abs(self._crop_pre_existing_straighten_deg) >= 0.05:
                 self.current_recipe.crop_rect = None
+                self.current_recipe.straighten_deg = 0.0
                 self._original_pixmap = None
                 self._render_current_recipe()
             self.set_zoom_mode("fit")
@@ -3274,7 +3630,7 @@ class SingleMediaViewer(QWidget):
                 self.scene.crop_rect_item.setRect(QRectF(float(ml), float(mt), pw, ph))
                 self.scene.crop_rect_item.show()
                 self._sync_crop_ratio_from_rect(self.scene.crop_rect_item.rect())
-                self._show_status("Crop Tool: Drag handles outwards to uncrop, or adjust boundaries • Enter to apply, Esc to cancel", 5000)
+                self._show_status("Crop & Straighten: Drag handles or corners • X flip, G grid, Enter apply, Esc cancel", 5000)
             else:
                 if self.current_pil_image is not None:
                     w, h = self.current_pil_image.size
@@ -3282,11 +3638,25 @@ class SingleMediaViewer(QWidget):
                     self.scene.crop_rect_item.setRect(QRectF((w - cw) / 2.0, (h - ch) / 2.0, cw, ch))
                     self.scene.crop_rect_item.show()
                     self._sync_crop_ratio_from_rect(self.scene.crop_rect_item.rect())
-                self._show_status("Crop Tool: Drag handles or crop rectangle to adjust • Enter to commit, Esc to cancel", 5000)
+                self._show_status("Crop & Straighten: Drag handles to frame or corners to rotate • X flip, G grid, Enter apply, Esc cancel", 5000)
+
+            self._sync_crop_straighten_ui(self._crop_pre_existing_straighten_deg)
+            if abs(self._crop_pre_existing_straighten_deg) >= 0.05:
+                self.scene.set_straighten_deg(self._crop_pre_existing_straighten_deg)
+
+            self._update_crop_custom_disclosure()
+            self._update_crop_apply_button_text()
+            if focus_straighten and hasattr(self, "btn_crop_straighten_line"):
+                self.btn_crop_straighten_line.setChecked(True)
         else:
             self.crop_toolbar.hide()
             if hasattr(self, "btn_crop_ai_expand"):
                 self.btn_crop_ai_expand.setChecked(False)
+            if hasattr(self, "btn_crop_straighten_line"):
+                self.btn_crop_straighten_line.blockSignals(True)
+                self.btn_crop_straighten_line.setChecked(False)
+                self.btn_crop_straighten_line.blockSignals(False)
+            self._sync_crop_straighten_ui(0.0, emit_signal=False)
             self.scene.set_allow_ai_expand(False)
             self.scene.clear_crop_rect()
             if self.pixmap_item:
@@ -3296,20 +3666,148 @@ class SingleMediaViewer(QWidget):
                 self.graphics_view.viewport().unsetCursor()
                 self.graphics_view.setDragMode(ImageGraphicsView.ScrollHandDrag)
 
-            # If user exited without committing (e.g. Cancel button or Esc), restore previous crop
-            if not getattr(self, "_crop_committed", False) and getattr(self, "_crop_pre_existing_rect", None) is not None:
+            # If user exited without committing (e.g. Cancel button or Esc), restore previous crop & straighten
+            if not getattr(self, "_crop_committed", False) and (
+                getattr(self, "_crop_pre_existing_rect", None) is not None
+                or abs(getattr(self, "_crop_pre_existing_straighten_deg", 0.0)) >= 0.05
+            ):
                 self.current_recipe.crop_rect = self._crop_pre_existing_rect
+                self.current_recipe.straighten_deg = float(getattr(self, "_crop_pre_existing_straighten_deg", 0.0))
                 self._original_pixmap = None
                 self._render_current_recipe()
                 self.set_zoom_mode("fit")
+            if not getattr(self, "_crop_committed", False):
+                self.recipe_changed.emit(self.current_recipe)
 
             self._crop_pre_existing_rect = None
+            self._crop_pre_existing_straighten_deg = 0.0
             self._crop_committed = False
             self._show_status("", 0)
+
+    def _load_saved_custom_ratios(self) -> list[dict[str, Any]]:
+        import json
+        from PySide6.QtCore import QSettings
+
+        settings = QSettings("PhotoGallery64", "PhotoGallery64")
+        raw = settings.value("crop/custom_ratios", "[]")
+        try:
+            items = json.loads(raw) if isinstance(raw, str) else list(raw or [])
+        except Exception:
+            items = []
+        valid: list[dict[str, Any]] = []
+        for it in items:
+            if isinstance(it, dict) and "name" in it and "w" in it and "h" in it:
+                try:
+                    w_v = float(it["w"])
+                    h_v = float(it["h"])
+                    if w_v > 0 and h_v > 0:
+                        valid.append({"name": str(it["name"]), "w": w_v, "h": h_v})
+                except (TypeError, ValueError):
+                    pass
+        return valid
+
+    def _save_custom_ratios_to_settings(self) -> None:
+        import json
+        from PySide6.QtCore import QSettings
+
+        settings = QSettings("PhotoGallery64", "PhotoGallery64")
+        settings.setValue("crop/custom_ratios", json.dumps(self._saved_custom_ratios))
+
+    def _rebuild_crop_ratio_combo(self, select_text: str | None = None) -> None:
+        self._updating_crop_inputs = True
+        try:
+            current = select_text if select_text is not None else self.combo_crop_ratio.currentText()
+            self.combo_crop_ratio.clear()
+            standard_items = [
+                "Free",
+                "Original",
+                "1:1 (Square)",
+                "4:3",
+                "3:2",
+                "5:4",
+                "16:9",
+                "Full Image (Uncrop)",
+                "Custom",
+            ]
+            self.combo_crop_ratio.addItems(standard_items)
+            for item in self._saved_custom_ratios:
+                self.combo_crop_ratio.addItem(item["name"])
+            idx = self.combo_crop_ratio.findText(current)
+            self.combo_crop_ratio.setCurrentIndex(idx if idx >= 0 else 0)
+        finally:
+            self._updating_crop_inputs = False
+
+    def _update_crop_custom_disclosure(self) -> None:
+        text = self.combo_crop_ratio.currentText()
+        is_custom = text == "Custom"
+        is_saved = any(it["name"] == text for it in getattr(self, "_saved_custom_ratios", []))
+        if hasattr(self, "crop_custom_ratio_widget"):
+            self.crop_custom_ratio_widget.setVisible(is_custom)
+        if hasattr(self, "btn_crop_delete_ratio"):
+            self.btn_crop_delete_ratio.setVisible(is_saved)
+        if hasattr(self, "crop_toolbar"):
+            self.crop_toolbar.adjustSize()
+            self._position_floating_toolbars()
+
+    def _on_crop_save_ratio_clicked(self) -> None:
+        w_str = self.txt_crop_w.text().strip()
+        h_str = self.txt_crop_h.text().strip()
+        try:
+            w_val = float(w_str)
+            h_val = float(h_str)
+        except ValueError:
+            self._show_status("Enter valid positive W and H values before saving.", 3000)
+            return
+        if w_val <= 0 or h_val <= 0:
+            self._show_status("Enter positive W and H values before saving.", 3000)
+            return
+
+        w_disp = str(int(w_val) if w_val.is_integer() else w_val)
+        h_disp = str(int(h_val) if h_val.is_integer() else h_val)
+        base_name = f"{w_disp}:{h_disp}"
+        existing_names = {self.combo_crop_ratio.itemText(i) for i in range(self.combo_crop_ratio.count())}
+        name = base_name
+        if name in existing_names:
+            name = f"{base_name} (Saved)"
+            idx = 2
+            while name in existing_names:
+                name = f"{base_name} ({idx})"
+                idx += 1
+
+        self._saved_custom_ratios.append({"name": name, "w": w_val, "h": h_val})
+        self._save_custom_ratios_to_settings()
+        self._rebuild_crop_ratio_combo(select_text=name)
+        self._update_crop_custom_disclosure()
+        self._show_status(f"Saved custom crop ratio: {name}", 2500)
+
+    def _on_crop_delete_ratio_clicked(self) -> None:
+        name = self.combo_crop_ratio.currentText()
+        before_len = len(self._saved_custom_ratios)
+        self._saved_custom_ratios = [it for it in self._saved_custom_ratios if it["name"] != name]
+        if len(self._saved_custom_ratios) != before_len:
+            self._save_custom_ratios_to_settings()
+            self._rebuild_crop_ratio_combo(select_text="Free")
+            self._on_crop_ratio_changed("Free")
+            self._show_status(f"Removed custom crop ratio: {name}", 2500)
+
+    def _on_crop_grid_clicked(self) -> None:
+        mode = self.scene.crop_rect_item.cycle_grid_mode()
+        labels = {
+            "thirds": ("Grid: 3×3 ▾", "Rule of Thirds (3×3)"),
+            "golden": ("Grid: Phi ▾", "Golden Ratio (Phi)"),
+            "diagonals": ("Grid: Diag ▾", "Diagonals"),
+            "crosshair": ("Grid: + ▾", "Center Crosshair"),
+            "none": ("Grid: Off ▾", "No Grid"),
+        }
+        btn_text, desc = labels.get(mode, ("Grid ▾", mode))
+        if hasattr(self, "btn_crop_grid"):
+            self.btn_crop_grid.setText(btn_text)
+        self._show_status(f"Crop grid: {desc} (G to cycle)", 2000)
 
     def _on_crop_ratio_changed(self, text: str) -> None:
         if getattr(self, "_updating_crop_inputs", False):
             return
+        self._update_crop_custom_disclosure()
         if self.current_pil_image is None:
             return
         img_w, img_h = self.current_pil_image.size
@@ -3318,9 +3816,25 @@ class SingleMediaViewer(QWidget):
 
         self._updating_crop_inputs = True
         try:
-            if text in ("Ratio", "Custom"):
+            if text in ("Free", "Ratio"):
                 self.txt_crop_w.setText("")
                 self.txt_crop_h.setText("")
+                self.scene.crop_rect_item.set_aspect_ratio(None)
+                self.scene.crop_rect_updated.emit()
+                return
+
+            if text == "Custom":
+                w_str = self.txt_crop_w.text().strip()
+                h_str = self.txt_crop_h.text().strip()
+                try:
+                    w_v = float(w_str)
+                    h_v = float(h_str)
+                    if w_v > 0 and h_v > 0:
+                        self.scene.crop_rect_item.set_aspect_ratio(w_v / h_v)
+                        self.scene.crop_rect_updated.emit()
+                        return
+                except ValueError:
+                    pass
                 self.scene.crop_rect_item.set_aspect_ratio(None)
                 self.scene.crop_rect_updated.emit()
                 return
@@ -3335,7 +3849,14 @@ class SingleMediaViewer(QWidget):
 
             w_val: float
             h_val: float
-            if text == "Original":
+            saved_match = next(
+                (it for it in getattr(self, "_saved_custom_ratios", []) if it["name"] == text),
+                None,
+            )
+            if saved_match is not None:
+                w_val = float(saved_match["w"])
+                h_val = float(saved_match["h"])
+            elif text == "Original":
                 import math
                 g = math.gcd(img_w, img_h)
                 if g > 1 and img_w // g < 100:
@@ -3374,43 +3895,42 @@ class SingleMediaViewer(QWidget):
             self._updating_crop_inputs = False
 
     def _on_crop_swap_clicked(self) -> None:
-        """Swaps Width and Height ratio inputs (Landscape <-> Portrait) Photoshop-style."""
+        """Flips crop orientation (Portrait <-> Landscape) for both the active crop box and ratio."""
+        rect = self.scene.get_crop_rect()
+        cur_ratio = self.scene.crop_rect_item.aspect_ratio()
+
         w_str = self.txt_crop_w.text().strip()
         h_str = self.txt_crop_h.text().strip()
 
-        # If empty, default to 4 and 3 or current crop ratio
-        if not w_str and not h_str:
-            cur_ratio = self.scene.crop_rect_item.aspect_ratio()
-            if cur_ratio is not None and cur_ratio > 0:
-                w_str, h_str = str(round(cur_ratio, 2)), "1"
-            elif self.current_pil_image:
-                iw, ih = self.current_pil_image.size
-                if iw >= ih:
-                    w_str, h_str = "4", "3"
-                else:
-                    w_str, h_str = "3", "4"
-            else:
-                w_str, h_str = "4", "3"
-
-        # Swap values
-        new_w, new_h = h_str, w_str
         self._updating_crop_inputs = True
         try:
-            self.txt_crop_w.setText(new_w)
-            self.txt_crop_h.setText(new_h)
-            try:
-                nw_val = float(new_w)
-                nh_val = float(new_h)
-            except ValueError:
-                return
-            if nw_val <= 0 or nh_val <= 0:
-                return
-            new_ratio = nw_val / nh_val
-            self.scene.crop_rect_item.set_aspect_ratio(new_ratio)
-            self.scene.crop_rect_updated.emit()
-
-            # Update combo text if it matches a preset
-            self._match_crop_combo_to_inputs(nw_val, nh_val)
+            if cur_ratio is not None and cur_ratio > 0:
+                new_ratio = 1.0 / cur_ratio
+                if w_str and h_str:
+                    self.txt_crop_w.setText(h_str)
+                    self.txt_crop_h.setText(w_str)
+                    try:
+                        self._match_crop_combo_to_inputs(float(h_str), float(w_str))
+                    except ValueError:
+                        pass
+                self.scene.crop_rect_item.set_aspect_ratio(new_ratio)
+                if rect is not None and not rect.isEmpty():
+                    self.scene.crop_rect_item.setRect(
+                        self.scene._clamp_rect_to_scene(self.scene.crop_rect_item.rect())
+                    )
+                self.scene.crop_rect_updated.emit()
+            elif rect is not None and not rect.isEmpty():
+                cx, cy = rect.center().x(), rect.center().y()
+                nw, nh = rect.height(), rect.width()
+                bounds = self.scene._crop_bounds_rect()
+                if not bounds.isEmpty() and nw > 0 and nh > 0:
+                    scale = min(1.0, bounds.width() / nw, bounds.height() / nh)
+                    nw *= scale
+                    nh *= scale
+                flipped = QRectF(cx - nw / 2.0, cy - nh / 2.0, nw, nh)
+                self.scene.crop_rect_item.setRect(self.scene._clamp_rect_to_scene(flipped))
+                self.scene.crop_rect_updated.emit()
+            self._update_crop_custom_disclosure()
         finally:
             self._updating_crop_inputs = False
 
@@ -3449,6 +3969,13 @@ class SingleMediaViewer(QWidget):
             self._updating_crop_inputs = False
 
     def _sync_crop_ratio_from_rect(self, rect: QRectF) -> None:
+        if self.scene.crop_rect_item.aspect_ratio() is None:
+            self._updating_crop_inputs = True
+            try:
+                self.combo_crop_ratio.setCurrentText("Free")
+            finally:
+                self._updating_crop_inputs = False
+            return
         if rect.width() > 0 and rect.height() > 0:
             self._match_crop_combo_to_inputs(rect.width(), rect.height())
 
@@ -3458,19 +3985,101 @@ class SingleMediaViewer(QWidget):
         presets = [
             ("1:1 (Square)", 1.0),
             ("4:3", 4.0 / 3.0),
-            ("3:4", 3.0 / 4.0),
             ("3:2", 3.0 / 2.0),
-            ("2:3", 2.0 / 3.0),
             ("5:4", 5.0 / 4.0),
-            ("4:5", 4.0 / 5.0),
             ("16:9", 16.0 / 9.0),
-            ("9:16", 9.0 / 16.0),
         ]
+        for it in getattr(self, "_saved_custom_ratios", []):
+            presets.append((it["name"], float(it["w"]) / float(it["h"])))
         for name, r in presets:
-            if abs(ratio - r) < 0.005:
+            if abs(ratio - r) < 0.005 or abs(ratio - (1.0 / r)) < 0.005:
                 self.combo_crop_ratio.setCurrentText(name)
                 return
         self.combo_crop_ratio.setCurrentText("Custom")
+
+    def _sync_crop_straighten_ui(self, deg: float, *, emit_signal: bool = True) -> None:
+        clamped = max(-15.0, min(15.0, float(deg)))
+        if hasattr(self, "slider_crop_straighten"):
+            self.slider_crop_straighten.blockSignals(True)
+            self.slider_crop_straighten.setValue(int(round(clamped * 10.0)))
+            self.slider_crop_straighten.blockSignals(False)
+        if hasattr(self, "lbl_crop_straighten"):
+            self.lbl_crop_straighten.setText(f"{float(deg):.1f}°")
+        if emit_signal:
+            self.straighten_preview_changed.emit(clamped)
+
+    def _on_crop_straighten_slider_changed(self, value: int) -> None:
+        if getattr(self, "_updating_crop_inputs", False) or not getattr(self, "is_crop_mode", False):
+            return
+        deg = float(value) / 10.0
+        if hasattr(self, "lbl_crop_straighten"):
+            self.lbl_crop_straighten.setText(f"{deg:.1f}°")
+        self.scene.set_straighten_deg(deg)
+        self._update_crop_apply_button_text()
+        self.straighten_preview_changed.emit(deg)
+
+    def _on_crop_straighten_line_toggled(self, checked: bool) -> None:
+        if not getattr(self, "is_crop_mode", False):
+            return
+        self.scene.set_straighten_line_mode(bool(checked))
+        if checked:
+            self._show_status(
+                "Straighten: Click and drag along a horizon or vertical edge to level the photo",
+                4500,
+            )
+
+    def _on_crop_straighten_line_finished(self, new_deg: float) -> None:
+        if hasattr(self, "btn_crop_straighten_line"):
+            self.btn_crop_straighten_line.blockSignals(True)
+            self.btn_crop_straighten_line.setChecked(False)
+            self.btn_crop_straighten_line.blockSignals(False)
+        self._sync_crop_straighten_ui(new_deg)
+        self._update_crop_apply_button_text()
+        self._show_status(f"Straightened to {new_deg:+.1f}°", 2500)
+
+    def _reset_crop_straighten(self) -> None:
+        if not getattr(self, "is_crop_mode", False):
+            return
+        self._sync_crop_straighten_ui(0.0)
+        self.scene.set_straighten_deg(0.0)
+        self._update_crop_apply_button_text()
+        self._show_status("Straighten reset to 0.0°", 2000)
+
+    def _on_crop_auto_straighten_clicked(self) -> None:
+        if self.master_np_rgb is None or not getattr(self, "is_crop_mode", False):
+            return
+        angle = max(-15.0, min(15.0, float(detect_auto_straighten_angle(self.master_np_rgb))))
+        self._sync_crop_straighten_ui(angle)
+        self.scene.set_straighten_deg(angle)
+        self._update_crop_apply_button_text()
+        self._show_status(f"Auto straighten: {angle:+.1f}° (click Apply to commit)", 3000)
+
+    def _on_crop_scene_updated(self) -> None:
+        if not getattr(self, "is_crop_mode", False):
+            return
+        rot = float(getattr(self.scene, "crop_rotation_deg", 0.0))
+        self._sync_crop_straighten_ui(rot)
+        self._update_crop_apply_button_text()
+
+    def _update_crop_apply_button_text(self) -> None:
+        if not hasattr(self, "btn_crop_toolbar_apply"):
+            return
+        ai_on = bool(hasattr(self, "btn_crop_ai_expand") and self.btn_crop_ai_expand.isChecked())
+        will_fill = False
+        if ai_on:
+            rot_deg = float(getattr(self.scene, "crop_rotation_deg", 0.0))
+            rect = self.scene.get_crop_rect()
+            extends_outside = False
+            if rect is not None and self.master_np_rgb is not None:
+                mh, mw = self.master_np_rgb.shape[:2]
+                extends_outside = (
+                    rect.left() < -0.5
+                    or rect.top() < -0.5
+                    or rect.right() > mw + 0.5
+                    or rect.bottom() > mh + 0.5
+                )
+            will_fill = extends_outside or abs(rot_deg) >= 0.05
+        self.btn_crop_toolbar_apply.setText("Apply & Fill" if will_fill else "Apply")
 
     def _on_crop_ai_expand_toggled(self, checked: bool) -> None:
         if checked:
@@ -3481,11 +4090,13 @@ class SingleMediaViewer(QWidget):
                     self.btn_crop_ai_expand.setChecked(False)
                     self.btn_crop_ai_expand.blockSignals(False)
                 self.scene.set_allow_ai_expand(False)
+                self._update_crop_apply_button_text()
                 return
         self.scene.set_allow_ai_expand(bool(checked))
+        self._update_crop_apply_button_text()
         if checked:
             self._show_status(
-                "AI Expand enabled: drag crop handles outside the photo (up to 25%) to extend the canvas.",
+                "AI Expand enabled: drag crop handles outside the photo (up to 25%) or rotate to fill margins.",
                 4500,
             )
 
@@ -3540,6 +4151,7 @@ class SingleMediaViewer(QWidget):
                 QApplication.restoreOverrideCursor()
 
             self.current_recipe.crop_rect = None
+            self.current_recipe.straighten_deg = 0.0
             self._crop_committed = True
             self._original_pixmap = None
             cmd = PixelArrayUndoCommand(self, before_px, self.master_np_rgb.copy(), "AI Expand Canvas")
@@ -3566,9 +4178,10 @@ class SingleMediaViewer(QWidget):
 
         before = self.current_recipe.copy()
         before.crop_rect = getattr(self, "_crop_pre_existing_rect", None)
+        before.straighten_deg = float(getattr(self, "_crop_pre_existing_straighten_deg", before.straighten_deg))
 
         if abs(rot_deg) >= 0.05:
-            self.current_recipe.straighten_deg = float(self.current_recipe.straighten_deg + rot_deg)
+            self.current_recipe.straighten_deg = float(rot_deg)
             # Without AI Expand, clamp any explicit crop box inside the rotated inscribed rect
             # so mirrored/blank corner wedges never leak into the cropped result.
             if new_crop is not None and not getattr(self.current_recipe, "straighten_ai_fill", False):
@@ -5082,6 +5695,7 @@ class SingleMediaViewer(QWidget):
     def _purge_all_transient_scene_items(self) -> None:
         """Purges any loose, orphaned, or abandoned graphics items from the scene."""
         self._cleanup_markup_temp_items()
+        self._clear_virtual_light_gizmos()
         protected = {
             getattr(self, "pixmap_item", None),
             getattr(self, "_alpha_backdrop_item", None),
@@ -5212,6 +5826,7 @@ class SingleMediaViewer(QWidget):
         # Update face overlays for current static image (clears overlays when empty)
         if hasattr(self, "_current_people_regions") and not self.current_is_video:
             self.render_face_regions(self._current_people_regions)
+        self._sync_virtual_light_gizmos()
         self._sync_animation_playback()
 
     def _on_master_render_finished(
@@ -5576,6 +6191,180 @@ class SingleMediaViewer(QWidget):
         self.current_recipe.depth_haze_warmth = float(haze_warmth)
         self._render_current_recipe()
 
+    def set_depth_light_active(self, active: bool) -> None:
+        self._depth_light_active = bool(active)
+        self._sync_virtual_light_gizmos()
+
+    def set_virtual_light_gizmos_visible(self, visible: bool) -> None:
+        self._virtual_light_gizmos_visible = bool(visible)
+        if not self._virtual_light_gizmos_visible:
+            self._dragging_virtual_light = False
+        self._sync_virtual_light_gizmos()
+        if hasattr(self, "scene") and self.scene is not None:
+            self.scene.update()
+        if hasattr(self, "view") and self.view is not None and self.view.viewport() is not None:
+            self.view.viewport().update()
+
+    def set_selected_virtual_light(self, idx: int) -> None:
+        self._selected_virtual_light_idx = max(0, int(idx))
+        for it in getattr(self, "_virtual_light_gizmo_items", []):
+            it.set_selected(it.light_index == self._selected_virtual_light_idx)
+
+    def set_virtual_lights_parameters(
+        self,
+        ambient_dim: int,
+        virtual_lights: list[dict],
+        commit: bool = False,
+    ) -> None:
+        lights_copy = [dict(lt) for lt in (virtual_lights or [])[:3]]
+        if commit:
+            before = self.current_recipe.copy()
+            new_rec = self.current_recipe.copy()
+            new_rec.relight_ambient_dim = float(ambient_dim)
+            new_rec.virtual_lights = lights_copy
+            if new_rec != before:
+                cmd = RecipeUndoCommand(self, before, new_rec, "Virtual Light Studio")
+                self.undo_stack.push(cmd)
+            self.current_recipe = new_rec
+            self._render_current_recipe()
+            self.recipe_changed.emit(self.current_recipe)
+        else:
+            if self._recipe_before_slider is None:
+                self._recipe_before_slider = self.current_recipe.copy()
+            self._is_sliding = True
+            self.current_recipe.relight_ambient_dim = float(ambient_dim)
+            self.current_recipe.virtual_lights = lights_copy
+            self._render_current_recipe()
+        self._sync_virtual_light_gizmos()
+
+    def _clear_virtual_light_gizmos(self) -> None:
+        for it in getattr(self, "_virtual_light_gizmo_items", []):
+            try:
+                it.prepareGeometryChange()
+                it.setVisible(False)
+                if it.scene() is self.scene:
+                    self.scene.removeItem(it)
+            except Exception:
+                pass
+        self._virtual_light_gizmo_items = []
+        self._active_gizmo_drag = None
+        self._dragging_virtual_light = False
+        if hasattr(self, "scene") and self.scene is not None:
+            self.scene.update()
+        if hasattr(self, "view") and self.view is not None and self.view.viewport() is not None:
+            self.view.viewport().update()
+
+    def _on_gizmo_press(self, idx: int, _part: str) -> None:
+        self._dragging_virtual_light = True
+        self._selected_virtual_light_idx = int(idx)
+        self.begin_slider_adjustment()
+        for it in getattr(self, "_virtual_light_gizmo_items", []):
+            it.set_selected(it.light_index == self._selected_virtual_light_idx)
+        self.virtual_lights_canvas_changed.emit(
+            [dict(lt) for lt in self.current_recipe.virtual_lights],
+            self._selected_virtual_light_idx,
+        )
+
+    def _on_gizmo_move(self, idx: int, part: str, nx: float, ny: float) -> None:
+        lights = [dict(lt) for lt in self.current_recipe.virtual_lights]
+        if 0 <= idx < len(lights):
+            if part == "aim":
+                lights[idx]["aim_x"] = float(nx)
+                lights[idx]["aim_y"] = float(ny)
+            else:
+                lights[idx]["x"] = float(nx)
+                lights[idx]["y"] = float(ny)
+            self.current_recipe.virtual_lights = lights
+            self._render_current_recipe()
+            self.virtual_lights_canvas_changed.emit(
+                [dict(lt) for lt in lights],
+                self._selected_virtual_light_idx,
+            )
+
+    def _on_gizmo_release(self, _idx: int) -> None:
+        self._dragging_virtual_light = False
+        self.commit_slider_adjustment("Move Virtual Light")
+
+    def _sync_virtual_light_gizmos(self) -> None:
+        if getattr(self, "_dragging_virtual_light", False):
+            return
+        should_show = (
+            getattr(self, "_depth_light_active", False)
+            and getattr(self, "_virtual_light_gizmos_visible", True)
+            and not getattr(self, "_is_comparing", False)
+            and not self.current_is_video
+            and self.master_np_rgb is not None
+            and not getattr(self, "is_crop_mode", False)
+            and not getattr(self, "is_retouch_mode", False)
+            and not getattr(self, "is_red_eye_mode", False)
+            and not getattr(self, "is_markup_mode", False)
+        )
+        if not should_show:
+            self._clear_virtual_light_gizmos()
+            return
+
+        lights = list(getattr(self.current_recipe, "virtual_lights", []) or [])
+        if not lights:
+            self._clear_virtual_light_gizmos()
+            return
+
+        mh, mw = self.master_np_rgb.shape[:2]
+        crop_rect = getattr(self.current_recipe, "crop_rect", None)
+        sel_idx = max(0, min(len(lights) - 1, getattr(self, "_selected_virtual_light_idx", 0)))
+        self._selected_virtual_light_idx = sel_idx
+
+        existing = getattr(self, "_virtual_light_gizmo_items", [])
+        target_slice = lights[:3]
+        if (
+            len(existing) == len(target_slice)
+            and all(
+                it._master_w == mw and it._master_h == mh and it._crop_rect == crop_rect and it.scene() is self.scene
+                for it in existing
+            )
+        ):
+            for idx, (it, lt) in enumerate(zip(existing, target_slice)):
+                it.prepareGeometryChange()
+                it.light_dict = dict(lt)
+                it.set_selected(idx == sel_idx)
+            return
+
+        self._clear_virtual_light_gizmos()
+        for idx, lt in enumerate(target_slice):
+            item = _VirtualLightGizmoItem(
+                light_index=idx,
+                light_dict=lt,
+                master_wh=(mw, mh),
+                crop_rect=crop_rect,
+                selected=(idx == sel_idx),
+                on_press=self._on_gizmo_press,
+                on_move=self._on_gizmo_move,
+                on_release=self._on_gizmo_release,
+            )
+            self.scene.addItem(item)
+            self._virtual_light_gizmo_items.append(item)
+        if hasattr(self, "scene") and self.scene is not None:
+            self.scene.update()
+        if hasattr(self, "view") and self.view is not None and self.view.viewport() is not None:
+            self.view.viewport().update()
+
+    def clear_relight_only(self) -> None:
+        """Resets 3D Relight controls and virtual lights while preserving Bokeh, Cutout, and Haze."""
+        before = self.current_recipe.copy()
+        new_rec = self.current_recipe.copy()
+        new_rec.relight_near = 0.0
+        new_rec.relight_far = 0.0
+        new_rec.warmth_near = 0.0
+        new_rec.warmth_far = 0.0
+        new_rec.relight_ambient_dim = 0.0
+        new_rec.virtual_lights = []
+        if new_rec != before:
+            cmd = RecipeUndoCommand(self, before, new_rec, "Clear 3D Relight")
+            self.undo_stack.push(cmd)
+        self.current_recipe = new_rec
+        self._render_current_recipe()
+        self._sync_virtual_light_gizmos()
+        self.recipe_changed.emit(self.current_recipe)
+
     def reset_depth_light(self) -> None:
         before = self.current_recipe.copy()
         new_rec = self.current_recipe.copy()
@@ -5588,12 +6377,15 @@ class SingleMediaViewer(QWidget):
         new_rec.relight_far = 0.0
         new_rec.warmth_near = 0.0
         new_rec.warmth_far = 0.0
+        new_rec.relight_ambient_dim = 0.0
+        new_rec.virtual_lights = []
         new_rec.depth_haze = 0.0
         new_rec.depth_haze_warmth = 0.0
         cmd = RecipeUndoCommand(self, before, new_rec, "Reset Depth & Light")
         self.undo_stack.push(cmd)
         self.current_recipe = new_rec
         self._render_current_recipe()
+        self._sync_virtual_light_gizmos()
         self.recipe_changed.emit(self.current_recipe)
     def copy_subject_to_clipboard(self) -> bool:
         """
@@ -5698,6 +6490,7 @@ class SingleMediaViewer(QWidget):
                 self.pixmap_item.setPixmap(self._adjusted_pixmap)
             else:
                 self._render_current_recipe()
+        self._sync_virtual_light_gizmos()
 
     def get_effect_preview_pixmaps(self, width: int = 46, height: int = 64) -> dict[str, QPixmap]:
         """Generates live mini-thumbnails of the current photo for each of the ribbon effect buttons."""
@@ -5780,6 +6573,12 @@ class SingleMediaViewer(QWidget):
             self.pixel_edit_saved.emit(int(self.current_media_id), "")
 
     def set_straighten(self, angle_deg: float) -> None:
+        if getattr(self, "is_crop_mode", False):
+            clamped = max(-15.0, min(15.0, float(angle_deg)))
+            self._sync_crop_straighten_ui(clamped, emit_signal=False)
+            self.scene.set_straighten_deg(clamped)
+            self._update_crop_apply_button_text()
+            return
         if self._recipe_before_slider is None:
             self._recipe_before_slider = self.current_recipe.copy()
         self._is_sliding = True
@@ -5936,6 +6735,9 @@ class SingleMediaViewer(QWidget):
         """Detects dominant horizon/vertical tilt using Canny & Hough line transforms."""
         if self.master_np_rgb is None:
             return 0.0
+        if getattr(self, "is_crop_mode", False):
+            self._on_crop_auto_straighten_clicked()
+            return float(getattr(self.scene, "crop_rotation_deg", 0.0))
         angle = detect_auto_straighten_angle(self.master_np_rgb)
         before = self.current_recipe.copy()
         self.current_recipe.straighten_deg = angle
@@ -5946,6 +6748,7 @@ class SingleMediaViewer(QWidget):
         self.undo_stack.push(cmd)
         self._render_current_recipe()
         self.recipe_changed.emit(self.current_recipe)
+        return float(angle)
 
     def apply_exposure_contrast(self, brightness: int, contrast: int) -> None:
         before = self.current_recipe.copy()
@@ -6198,6 +7001,36 @@ class SingleMediaViewer(QWidget):
         self._purge_all_transient_scene_items()
         self.update_revert_state()
         return str(backup_path)
+
+    def save_as_resized_copy(self) -> list[Path]:
+        """Bakes active non-destructive edits/crop and opens ResizePhotoDialog for a single photo."""
+        if (
+            self.master_np_rgb is None
+            or self.current_file_path is None
+            or self.current_is_video
+        ):
+            return []
+
+        self.ensure_master_rendered()
+        final_rendered = render_adjusted_image(
+            self.master_np_rgb, self.current_recipe, media_id=self.current_media_id
+        )
+        final_alpha = (
+            transform_alpha_for_recipe(
+                self.master_alpha, self.current_recipe, target_hw=final_rendered.shape[:2]
+            )
+            if self.master_alpha is not None
+            else None
+        )
+        target_sfx = self.current_file_path.suffix.lower()
+        baked_img = build_save_pil_image(final_rendered, final_alpha, target_sfx)
+
+        from src.ui.dialogs import ResizePhotoDialog
+
+        dlg = ResizePhotoDialog([self.current_file_path], parent=self, in_memory_image=baked_img)
+        if dlg.exec() == ResizePhotoDialog.Accepted:
+            return list(dlg.generated_files)
+        return []
 
     def save_as_copy(self, forced_target: str | None = None) -> str | None:
         """
@@ -7841,6 +8674,52 @@ class SingleMediaViewer(QWidget):
                         self._face_target_item.setRect(QRectF(nx, ny, nw, nh))
                         self._tag_someone_popup.focus_input()
                         return True
+            if (
+                getattr(self, "_depth_light_active", False)
+                and getattr(self, "_virtual_light_gizmo_items", None)
+                and not getattr(self, "is_crop_mode", False)
+                and not getattr(self, "is_retouch_mode", False)
+                and not getattr(self, "is_red_eye_mode", False)
+                and not getattr(self, "is_markup_mode", False)
+            ):
+                if (
+                    getattr(self, "_active_gizmo_drag", None) is not None
+                    and event.type() == QEvent.MouseMove
+                ):
+                    g_item, part = self._active_gizmo_drag
+                    sp = self.graphics_view.mapToScene(event.position().toPoint())
+                    nx, ny = g_item.scene_to_norm(sp)
+                    g_item.set_position_norm(part, nx, ny)
+                    self._on_gizmo_move(g_item.light_index, part, nx, ny)
+                    return True
+                elif (
+                    getattr(self, "_active_gizmo_drag", None) is not None
+                    and event.type() == QEvent.MouseButtonRelease
+                    and getattr(event, "button", lambda: None)() == Qt.LeftButton
+                ):
+                    g_item, _part = self._active_gizmo_drag
+                    self._active_gizmo_drag = None
+                    self._on_gizmo_release(g_item.light_index)
+                    return True
+                elif (
+                    event.type() == QEvent.MouseButtonPress
+                    and getattr(event, "button", lambda: None)() == Qt.LeftButton
+                ):
+                    sp = self.graphics_view.mapToScene(event.position().toPoint())
+                    ordered = sorted(
+                        self._virtual_light_gizmo_items,
+                        key=lambda it: 1 if it.light_index == self._selected_virtual_light_idx else 0,
+                        reverse=True,
+                    )
+                    for g_item in ordered:
+                        part = g_item.hit_test(sp)
+                        if part is not None:
+                            self._active_gizmo_drag = (g_item, part)
+                            self._on_gizmo_press(g_item.light_index, part)
+                            nx, ny = g_item.scene_to_norm(sp)
+                            g_item.set_position_norm(part, nx, ny)
+                            self._on_gizmo_move(g_item.light_index, part, nx, ny)
+                            return True
             if self.is_retouch_mode:
                 if event.type() == QEvent.MouseButtonPress and getattr(event, "button", lambda: None)() == Qt.LeftButton:
                     sp = self.graphics_view.mapToScene(event.position().toPoint())
@@ -7996,6 +8875,14 @@ class SingleMediaViewer(QWidget):
                 self.set_compare_mode(False)
                 event.accept()
                 return True
+
+        if event.type() == QEvent.MouseButtonDblClick and watched in (
+            getattr(self, "slider_crop_straighten", None),
+            getattr(self, "lbl_crop_straighten", None),
+        ):
+            self._reset_crop_straighten()
+            event.accept()
+            return True
 
         if event.type() == QEvent.KeyPress and isinstance(event, QKeyEvent):
             if event.key() == Qt.Key_Backslash:
@@ -8170,10 +9057,24 @@ class SingleMediaViewer(QWidget):
                 event.accept()
                 return True
 
-            if event.key() in (Qt.Key_Return, Qt.Key_Enter) and self.is_crop_mode:
-                self.apply_crop()
-                event.accept()
-                return True
+            if self.is_crop_mode:
+                if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                    self.apply_crop()
+                    event.accept()
+                    return True
+                elif event.key() == Qt.Key_Escape:
+                    self.set_crop_mode(False)
+                    event.accept()
+                    return True
+                elif not isinstance(QApplication.focusWidget(), QLineEdit):
+                    if event.key() == Qt.Key_X:
+                        self._on_crop_swap_clicked()
+                        event.accept()
+                        return True
+                    elif event.key() == Qt.Key_G:
+                        self._on_crop_grid_clicked()
+                        event.accept()
+                        return True
 
             # Previous / Next image navigation (Left / Right arrow)
             if not self.is_crop_mode and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier):
@@ -8284,15 +9185,17 @@ class SingleMediaViewer(QWidget):
         return menu
 
     def _build_viewer_context_menu(self) -> QMenu | None:
-        """Constructs the authentic context menu for SingleMediaViewer (Open with, Rotate, Copy, Delete, etc.)."""
+        """Constructs the WLPG-faithful context menu for SingleMediaViewer."""
         menu = QMenu(self)
         menu.setFont(QFont("Segoe UI", 9))
         mw = getattr(self, "main_window", None) or self.window()
         is_mw = hasattr(mw, "rescan_faces_for_selection")
         mid = self.current_media_id
+        is_vid = getattr(self, "current_is_video", False)
 
-        # 1. Open with ▸ at the very top of context menu
+        # 1. Open: Open with ▸, Open file location
         open_with_menu = menu.addMenu("Open with")
+        menu._open_with_menu = open_with_menu
         open_with_menu.setFont(QFont("Segoe UI", 9))
 
         ext = "jpg"
@@ -8301,7 +9204,6 @@ class SingleMediaViewer(QWidget):
             if p_ext:
                 ext = p_ext
 
-        is_vid = getattr(self, "current_is_video", False)
         default_label = "System default player" if is_vid else "System default viewer"
         default_icon_name = "play" if is_vid else "view_file"
         act_default = open_with_menu.addAction(make_wlpg_icon(default_icon_name, 16), default_label)
@@ -8340,38 +9242,89 @@ class SingleMediaViewer(QWidget):
 
         act_choose.triggered.connect(_on_open_choose)
 
+        act_loc = menu.addAction("Open file location")
+        if hasattr(mw, "open_file_location_for_media") and mid is not None:
+            act_loc.triggered.connect(lambda: mw.open_file_location_for_media(mid))
+
         menu.addSeparator()
 
-        act_rot_cw = menu.addAction("Rotate clockwise\tCtrl+.")
+        # 2. Quick Actions (Classic WLPG Order)
+        if not is_vid:
+            act_bg = menu.addAction("Set as desktop background")
+            if is_mw and hasattr(mw, "set_desktop_background_for_media") and mid is not None:
+                act_bg.triggered.connect(lambda: mw.set_desktop_background_for_media(mid))
+
+        act_rot_cw = menu.addAction("Rotate right")
+        act_rot_cw.setShortcut("Ctrl+.")
         act_rot_cw.triggered.connect(lambda: self.rotate_media(clockwise=True))
-        act_rot_ccw = menu.addAction("Rotate counter-clockwise\tCtrl+,")
+
+        act_rot_ccw = menu.addAction("Rotate left")
+        act_rot_ccw.setShortcut("Ctrl+,")
         act_rot_ccw.triggered.connect(lambda: self.rotate_media(clockwise=False))
 
         menu.addSeparator()
 
-        act_copy = menu.addAction("Copy")
-        act_copy.setShortcut("Ctrl+C")
-        if is_mw and hasattr(mw, "copy_selection_to_clipboard"):
-            act_copy.triggered.connect(mw.copy_selection_to_clipboard)
+        # 3. Organize & AI
+        add_album_menu = menu.addMenu("Add to Album")
+        menu._add_album_menu = add_album_menu
+        add_album_menu.setFont(QFont("Segoe UI", 9))
+        repo = getattr(mw, "catalog_repo", None)
+        if repo is not None and mid is not None:
+            try:
+                albums = repo.get_albums_with_counts()
+            except Exception:
+                albums = []
+            for alb in albums:
+                aid = int(alb["id"])
+                aname = str(alb["name"])
+                cnt = int(alb.get("item_count", 0))
+                act_alb = add_album_menu.addAction(f"{aname} ({cnt})")
+                act_alb.triggered.connect(
+                    lambda _chk=False, album_id=aid, album_name=aname, target_id=int(mid): (
+                        repo.add_media_to_album(album_id, [target_id]),
+                        mw.refresh_navigation_and_autocomplete() if hasattr(mw, "refresh_navigation_and_autocomplete") else None,
+                        mw.show_status_message(f"✓ Added to album '{album_name}'", 3000) if hasattr(mw, "show_status_message") else None,
+                    )
+                )
+            if albums:
+                add_album_menu.addSeparator()
+            act_new_alb = add_album_menu.addAction("New Album...")
+            if hasattr(mw, "create_new_album_with_media"):
+                act_new_alb.triggered.connect(lambda _chk=False, target_id=int(mid): mw.create_new_album_with_media([target_id]))
+
+        ai_menu = menu.addMenu("AI && Scan")
+        menu._ai_scan_menu = ai_menu
+        ai_menu.setFont(QFont("Segoe UI", 9))
 
         if not is_vid:
-            act_copy_subj = menu.addAction("Copy subject")
+            act_sim = ai_menu.addAction("Find Similar Photos...")
+            if is_mw and hasattr(mw, "open_find_similar_for_media") and mid is not None:
+                act_sim.triggered.connect(lambda: mw.open_find_similar_for_media(mid))
+
+            act_copy_subj = ai_menu.addAction("Copy subject to clipboard")
             act_copy_subj.triggered.connect(self.copy_subject_to_clipboard)
-            act_rm_bg = menu.addAction("Remove background")
+
+            act_rm_bg = ai_menu.addAction("Remove background")
             act_rm_bg.triggered.connect(self.remove_background_cutout)
 
-        act_del = menu.addAction("Delete")
-        act_del.setShortcut("Del")
-        if is_mw and hasattr(mw, "delete_selection_to_recycle_bin"):
-            act_del.triggered.connect(mw.delete_selection_to_recycle_bin)
+        act_rescan = ai_menu.addAction("Rescan for faces")
+        if is_mw and mid is not None:
+            act_rescan.triggered.connect(lambda: mw.rescan_faces_for_selection([mid]))
 
-        menu.addSeparator()
+        if not is_vid:
+            already_ocr = False
+            if repo is not None and mid is not None:
+                try:
+                    det = repo.get_media_detail(int(mid))
+                    already_ocr = bool(det and det.get("ocr_scanned"))
+                except Exception:
+                    already_ocr = False
+            ocr_label = "Rescan for text (OCR)" if already_ocr else "Scan for text (OCR)"
+            act_ocr = ai_menu.addAction(ocr_label)
+            if is_mw and hasattr(mw, "scan_ocr_for_selection") and mid is not None:
+                act_ocr.triggered.connect(lambda: mw.scan_ocr_for_selection([mid]))
 
-        act_rescan = menu.addAction("Rescan for faces")
-        if is_mw:
-            act_rescan.triggered.connect(lambda: mw.rescan_faces_for_selection([self.current_media_id]))
-
-        # Boxless tag quick-healing options in right-click menu
+        # Boxless tag quick-healing options in AI & Scan submenu
         boxless_tags = [
             p for p in getattr(self, "_current_people_regions", [])
             if int(p.get("state", 1)) == 1
@@ -8379,42 +9332,48 @@ class SingleMediaViewer(QWidget):
             and (p.get("person_name") or p.get("name"))
         ]
         if boxless_tags:
+            ai_menu.addSeparator()
             for bt in boxless_tags:
                 b_name = str(bt.get("person_name") or bt.get("name"))
                 b_pid = int(bt.get("person_id") or bt.get("id") or 0)
-                act_b = menu.addAction(f"Locate {b_name} on photo...")
+                act_b = ai_menu.addAction(f"Locate {b_name} on photo...")
                 act_b.triggered.connect(
                     lambda checked=False, pid_val=b_pid, name_val=b_name: self.start_face_tag_mode_for_person(pid_val, name_val)
                 )
 
-        if not is_vid and is_mw and hasattr(mw, "open_find_similar_for_media") and mid is not None:
-            act_sim = menu.addAction("Find Similar Photos...")
-            act_sim.triggered.connect(lambda: mw.open_find_similar_for_media(mid))
+        menu.addSeparator()
 
-        if is_mw and hasattr(mw, "open_file_location_for_media"):
-            act_loc = menu.addAction("Open file location")
-            act_loc.triggered.connect(lambda: mw.open_file_location_for_media(self.current_media_id))
+        # 4. File Actions (Classic WLPG Order)
+        act_copy = menu.addAction("Copy")
+        act_copy.setShortcut("Ctrl+C")
+        if is_mw and hasattr(mw, "copy_selection_to_clipboard"):
+            act_copy.triggered.connect(mw.copy_selection_to_clipboard)
+
+        act_del = menu.addAction("Delete")
+        act_del.setShortcut("Del")
+        if is_mw and hasattr(mw, "delete_selection_to_recycle_bin"):
+            act_del.triggered.connect(mw.delete_selection_to_recycle_bin)
+
+        act_ren = menu.addAction("Rename...")
+        act_ren.setShortcut("F2")
+        if hasattr(mw, "rename_selection"):
+            act_ren.triggered.connect(mw.rename_selection)
+
+        if not is_vid:
+            act_res = menu.addAction("Export / Resize...")
+            if hasattr(mw, "dispatch_ribbon_action"):
+                act_res.triggered.connect(lambda: mw.dispatch_ribbon_action("save_as_resized_copy"))
+            elif hasattr(mw, "open_resize_dialog"):
+                act_res.triggered.connect(mw.open_resize_dialog)
 
         menu.addSeparator()
 
-        if is_mw and hasattr(mw, "set_desktop_background_for_media"):
-            act_bg = menu.addAction("Set as desktop background")
-            act_bg.triggered.connect(lambda: mw.set_desktop_background_for_media(self.current_media_id))
-
-        if is_mw and hasattr(mw, "open_print_dialog") and not self.current_is_video:
-            act_print = menu.addAction("Print...")
-            act_print.setShortcut("Ctrl+P")
-            act_print.triggered.connect(mw.open_print_dialog)
-
-        if is_mw:
-            act_prop = menu.addAction("Properties")
-            act_prop.setShortcut("Alt+Enter")
-            if hasattr(mw, "open_file_properties") and self.current_media_id is not None:
-                act_prop.triggered.connect(lambda: mw.open_file_properties(self.current_media_id))
-            elif hasattr(mw, "toggle_right_pane"):
-                act_prop.triggered.connect(lambda: mw.toggle_right_pane("info"))
-
-        act_close = menu.addAction("Back to gallery")
-        act_close.triggered.connect(self.closed.emit)
+        # 5. Properties (Always final item)
+        act_prop = menu.addAction("Properties")
+        act_prop.setShortcut("Alt+Enter")
+        if hasattr(mw, "open_file_properties") and mid is not None:
+            act_prop.triggered.connect(lambda: mw.open_file_properties(mid))
+        elif hasattr(mw, "toggle_right_pane"):
+            act_prop.triggered.connect(lambda: mw.toggle_right_pane("info"))
 
         return menu

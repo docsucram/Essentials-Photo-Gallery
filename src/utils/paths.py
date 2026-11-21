@@ -93,3 +93,38 @@ def get_icons_dir() -> Path:
 def get_themes_dir() -> Path:
     """Returns the absolute path to assets/themes/."""
     return get_resource_path("assets/themes")
+
+
+# Windows cloud placeholder / OneDrive Files On-Demand attribute bitmasks.
+# Reading these flags via os.stat() never triggers cloud file hydration.
+FILE_ATTRIBUTE_OFFLINE = 0x1000
+FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x40000
+FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000
+_CLOUD_ONLY_ATTR_MASK = (
+    FILE_ATTRIBUTE_OFFLINE
+    | FILE_ATTRIBUTE_RECALL_ON_OPEN
+    | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+)
+
+
+def is_cloud_only_stat(st: os.stat_result | None) -> bool:
+    """
+    Returns True if stat attributes indicate an online-only cloud placeholder
+    (e.g., Windows OneDrive Files On-Demand) whose content is not resident locally.
+    """
+    if st is None:
+        return False
+    attrs = getattr(st, "st_file_attributes", 0) or 0
+    return bool(int(attrs) & _CLOUD_ONLY_ATTR_MASK)
+
+
+def is_cloud_only_file(path: Path | str) -> bool:
+    """
+    Checks live filesystem attributes without opening the file or triggering
+    an OS cloud-placeholder download (OneDrive Files On-Demand).
+    """
+    try:
+        st = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    return is_cloud_only_stat(st)

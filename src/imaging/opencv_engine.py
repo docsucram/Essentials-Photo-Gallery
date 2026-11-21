@@ -329,6 +329,8 @@ class PhotoAdjustmentRecipe:
     relight_far: float = 0.0      # -100.0 .. +100.0 (Exposure shift on distant background)
     warmth_near: float = 0.0      # -100.0 .. +100.0 (CIE LAB B* warmth shift on foreground)
     warmth_far: float = 0.0       # -100.0 .. +100.0 (CIE LAB B* warmth shift on background)
+    relight_ambient_dim: float = 0.0  # 0.0 .. 100.0 (Dim original ambient light in linear space)
+    virtual_lights: list[dict[str, Any]] = field(default_factory=list)  # Up to 3 virtual 3D lights
     depth_haze: float = 0.0       # 0.0 .. 100.0 (Beer-Lambert exponential atmospheric depth mist)
     depth_haze_warmth: float = 0.0 # -100.0 .. +100.0 (Mist tint: cool blue <-> golden amber)
 
@@ -381,6 +383,11 @@ class PhotoAdjustmentRecipe:
             and abs(self.relight_far) < 0.1
             and abs(self.warmth_near) < 0.1
             and abs(self.warmth_far) < 0.1
+            and abs(self.relight_ambient_dim) < 0.1
+            and not any(
+                bool(lt.get("enabled", True)) and float(lt.get("intensity", 0.0)) >= 0.1
+                for lt in self.virtual_lights
+            )
             and abs(self.depth_haze) < 0.1
             and abs(self.depth_haze_warmth) < 0.1
         )
@@ -443,6 +450,8 @@ class PhotoAdjustmentRecipe:
             relight_far=self.relight_far,
             warmth_near=self.warmth_near,
             warmth_far=self.warmth_far,
+            relight_ambient_dim=self.relight_ambient_dim,
+            virtual_lights=[dict(lt) for lt in self.virtual_lights],
             depth_haze=self.depth_haze,
             depth_haze_warmth=self.depth_haze_warmth,
         )
@@ -1213,19 +1222,29 @@ def render_adjusted_image(
             img = np.clip(base_f + alpha * (eff_f - base_f), 0.0, 255.0).astype(np.uint8)
 
     # 5b. 3D Depth Bokeh, Relighting & Atmospheric Haze
+    has_virtual_lights = any(
+        bool(lt.get("enabled", True)) and float(lt.get("intensity", 0.0)) >= 0.1
+        for lt in getattr(recipe, "virtual_lights", [])
+    )
+    has_ambient_dim = abs(getattr(recipe, "relight_ambient_dim", 0.0)) >= 0.1
     has_depth_and_light = (
         abs(recipe.depth_blur) >= 0.1
         or abs(recipe.relight_near) >= 0.1
         or abs(recipe.relight_far) >= 0.1
         or abs(recipe.warmth_near) >= 0.1
         or abs(recipe.warmth_far) >= 0.1
+        or has_ambient_dim
+        or has_virtual_lights
         or abs(recipe.depth_haze) >= 0.1
         or abs(recipe.boundary_shift) >= 0.1
         or abs(recipe.boundary_feather) >= 0.1
     )
     if has_depth_and_light:
         try:
-            from src.imaging.creative_effects import get_depth_and_matte_engine
+            from src.imaging.creative_effects import (
+                apply_virtual_3d_relighting,
+                get_depth_and_matte_engine,
+            )
             engine = get_depth_and_matte_engine()
             depth_map, alpha_matte, near_weight, far_weight = engine.get_depth_matte_and_weights(img, media_id=media_id)
 
@@ -1249,30 +1268,45 @@ def render_adjusted_image(
                 near_weight = np.maximum(alpha_matte, 1.0 - depth_map).astype(np.float32)
                 far_weight = (depth_map * (1.0 - alpha_matte)).astype(np.float32)
 
-            # 3D Relighting & Warmth (Vectorized direct RGB for real-time 60+ FPS without RGB->LAB->RGB overhead)
+            # 3D Surface-Normal Relighting, Albedo-Preserving De-Lighting & Virtual Lights
             has_relight = (
                 abs(recipe.relight_near) >= 0.1
                 or abs(recipe.relight_far) >= 0.1
                 or abs(recipe.warmth_near) >= 0.1
                 or abs(recipe.warmth_far) >= 0.1
+                or has_ambient_dim
+                or has_virtual_lights
             )
             if has_relight:
-                d_light = (recipe.relight_near * 0.45) * near_weight + (recipe.relight_far * 0.45) * far_weight
-                d_warmth = (recipe.warmth_near * 0.35) * near_weight + (recipe.warmth_far * 0.35) * far_weight
-
-                img_f = img.astype(np.float32)
-                img_f[:, :, 0] += d_light + d_warmth
-                img_f[:, :, 1] += d_light + d_warmth * 0.2
-                img_f[:, :, 2] += d_light - d_warmth
-                img = np.clip(img_f, 0, 255).astype(np.uint8)
+                refined_depth, _, normal_map = engine.get_refined_depth_and_normals(img, media_id=media_id)
+                img = apply_virtual_3d_relighting(
+                    img,
+                    refined_depth,
+                    alpha_matte,
+                    normal_map,
+                    near_weight,
+                    far_weight,
+                    relight_near=recipe.relight_near,
+                    relight_far=recipe.relight_far,
+                    warmth_near=recipe.warmth_near,
+                    warmth_far=recipe.warmth_far,
+                    ambient_dim=getattr(recipe, "relight_ambient_dim", 0.0),
+                    virtual_lights=getattr(recipe, "virtual_lights", ()),
+                )
 
             # Portrait Bokeh & Focus Defocus Blur with Normalized Convolution (Zero Foreground Color Bleed)
             if abs(recipe.depth_blur) >= 0.1:
+                vlights_key = tuple(
+                    tuple(sorted((str(k), round(v, 3) if isinstance(v, float) else v) for k, v in lt.items()))
+                    for lt in getattr(recipe, "virtual_lights", [])
+                )
                 relight_key = (
                     round(recipe.relight_near, 2),
                     round(recipe.relight_far, 2),
                     round(recipe.warmth_near, 2),
                     round(recipe.warmth_far, 2),
+                    round(getattr(recipe, "relight_ambient_dim", 0.0), 2),
+                    vlights_key,
                 )
                 region_key = tuple(
                     (

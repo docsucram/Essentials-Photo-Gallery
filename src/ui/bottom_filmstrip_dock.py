@@ -1,0 +1,512 @@
+"""Reusable Bottom Dock hosting either Single Image View Filmstrip or active Create Workspace Tray."""
+from __future__ import annotations
+
+from collections import OrderedDict
+from typing import Any
+
+from PySide6.QtCore import (
+    QAbstractListModel,
+    QEvent,
+    QModelIndex,
+    QRect,
+    QSize,
+    Qt,
+    Signal,
+)
+from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QDockWidget,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QListView,
+    QPushButton,
+    QStackedWidget,
+    QStyledItemDelegate,
+    QStyle,
+    QStyleOptionViewItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from src.ui.theme_tokens import get_theme_tokens
+
+_FILMSTRIP_ID_ROLE = Qt.ItemDataRole.UserRole + 101
+_FILMSTRIP_IS_VIDEO_ROLE = Qt.ItemDataRole.UserRole + 102
+_FILMSTRIP_NAME_ROLE = Qt.ItemDataRole.UserRole + 103
+_FILMSTRIP_PATH_ROLE = Qt.ItemDataRole.UserRole + 104
+
+
+class _FilmstripListModel(QAbstractListModel):
+    """Lightweight horizontal model filtering out group headers from CatalogListModel."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._items: list[Any] = []
+        self._id_to_row: dict[int, int] = {}
+
+    def set_records(self, records: list[Any]) -> None:
+        self.beginResetModel()
+        self._items = [
+            rec
+            for rec in records
+            if not getattr(rec, "is_group_header", False) and getattr(rec, "id", None) is not None
+        ]
+        self._id_to_row = {int(rec.id): idx for idx, rec in enumerate(self._items)}
+        self.endResetModel()
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        if parent.isValid():
+            return 0
+        return len(self._items)
+
+    def row_for_media_id(self, media_id: int | None) -> int | None:
+        if media_id is None:
+            return None
+        return self._id_to_row.get(int(media_id))
+
+    def media_id_at_row(self, row: int) -> int | None:
+        if 0 <= row < len(self._items):
+            return int(self._items[row].id)
+        return None
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> Any:
+        if not index.isValid() or not (0 <= index.row() < len(self._items)):
+            return None
+        rec = self._items[index.row()]
+        if role == _FILMSTRIP_ID_ROLE:
+            return int(rec.id)
+        if role == _FILMSTRIP_IS_VIDEO_ROLE:
+            return bool(getattr(rec, "is_video", 0))
+        if role == _FILMSTRIP_NAME_ROLE or role == Qt.ItemDataRole.ToolTipRole:
+            return str(getattr(rec, "filename", ""))
+        if role == _FILMSTRIP_PATH_ROLE:
+            return str(getattr(rec, "file_path", "") or "")
+        return None
+
+
+class _FilmstripItemDelegate(QStyledItemDelegate):
+    """Crisp rounded thumbnail item delegate for Single Image View Filmstrip."""
+
+    ITEM_W = 96
+    ITEM_H = 68
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._pixmap_cache: dict[int, QPixmap] | None = None
+        self._thumb_repo: Any = None
+        self._local_thumbs: OrderedDict[int, QPixmap] = OrderedDict()
+        self._theme_name: str = "wlpg_aero"
+
+    def set_sources(self, pixmap_cache: dict[int, QPixmap] | None, thumb_repo: Any) -> None:
+        self._pixmap_cache = pixmap_cache
+        self._thumb_repo = thumb_repo
+        self._local_thumbs.clear()
+
+    def set_theme_name(self, theme_name: str) -> None:
+        self._theme_name = theme_name or "wlpg_aero"
+
+    def sizeHint(self, _option: QStyleOptionViewItem, _index: QModelIndex) -> QSize:
+        return QSize(self.ITEM_W, self.ITEM_H)
+
+    def _resolve_pixmap(self, media_id: int, file_path: str = "", is_video: bool = False) -> QPixmap | None:
+        if self._pixmap_cache is not None and media_id in self._pixmap_cache:
+            pm = self._pixmap_cache[media_id]
+            if isinstance(pm, QPixmap) and not pm.isNull():
+                return pm
+        if media_id in self._local_thumbs:
+            self._local_thumbs.move_to_end(media_id)
+            return self._local_thumbs[media_id]
+        if self._thumb_repo is not None:
+            try:
+                blob = self._thumb_repo.get_webp_blob(media_id)
+                if blob:
+                    qimg = QImage.fromData(blob)
+                    if not qimg.isNull():
+                        pm = QPixmap.fromImage(qimg)
+                        self._local_thumbs[media_id] = pm
+                        if len(self._local_thumbs) > 256:
+                            self._local_thumbs.popitem(last=False)
+                        return pm
+            except Exception:
+                pass
+        if file_path and not is_video:
+            try:
+                reader = QImageReader(file_path)
+                reader.setAutoTransform(True)
+                orig = reader.size()
+                if orig.isValid() and orig.width() > 0 and orig.height() > 0:
+                    scaled_sz = orig.scaled(160, 120, Qt.AspectRatioMode.KeepAspectRatioByExpanding)
+                    reader.setScaledSize(scaled_sz)
+                qimg = reader.read()
+                if not qimg.isNull():
+                    pm = QPixmap.fromImage(qimg)
+                    self._local_thumbs[media_id] = pm
+                    if len(self._local_thumbs) > 256:
+                        self._local_thumbs.popitem(last=False)
+                    return pm
+            except Exception:
+                pass
+        return None
+
+    def paint(
+        self,
+        painter: QPainter,
+        option: QStyleOptionViewItem,
+        index: QModelIndex,
+    ) -> None:
+        mid = index.data(_FILMSTRIP_ID_ROLE)
+        if mid is None:
+            return
+        is_video = bool(index.data(_FILMSTRIP_IS_VIDEO_ROLE))
+        tok = get_theme_tokens(self._theme_name)
+        is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        is_hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        outer = option.rect.adjusted(3, 3, -3, -3)
+        thumb_rect = outer.adjusted(3, 3, -3, -3)
+
+        # Card / selection ring
+        if is_selected:
+            painter.setBrush(QColor(tok.selection_bg))
+            painter.setPen(QPen(QColor(tok.accent), 2.2))
+            painter.drawRoundedRect(outer, 5, 5)
+        elif is_hover:
+            painter.setBrush(QColor(tok.bg_hover))
+            painter.setPen(QPen(QColor(tok.border_subtle), 1.0))
+            painter.drawRoundedRect(outer, 5, 5)
+        else:
+            painter.setBrush(QColor(tok.bg_card))
+            painter.setPen(QPen(QColor(tok.border_subtle), 0.8))
+            painter.drawRoundedRect(outer, 5, 5)
+
+        pm = self._resolve_pixmap(int(mid), str(index.data(_FILMSTRIP_PATH_ROLE) or ""), is_video)
+        clip_path = QPainterPath()
+        clip_path.addRoundedRect(thumb_rect.x(), thumb_rect.y(), thumb_rect.width(), thumb_rect.height(), 3, 3)
+        painter.setClipPath(clip_path)
+
+        if pm is not None and not pm.isNull():
+            scaled = pm.scaled(
+                thumb_rect.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            sx = max(0, (scaled.width() - thumb_rect.width()) // 2)
+            sy = max(0, (scaled.height() - thumb_rect.height()) // 2)
+            painter.drawPixmap(
+                thumb_rect.topLeft(),
+                scaled,
+                QRect(sx, sy, thumb_rect.width(), thumb_rect.height()),
+            )
+        else:
+            painter.fillRect(thumb_rect, QColor(tok.bg_input))
+
+        painter.setClipping(False)
+
+        if is_video:
+            badge_w, badge_h = 18, 13
+            bx = thumb_rect.right() - badge_w - 3
+            by = thumb_rect.bottom() - badge_h - 3
+            painter.setBrush(QColor(15, 23, 42, 190))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(bx, by, badge_w, badge_h, 3, 3)
+            painter.setBrush(QColor("#FFFFFF"))
+            tri_x, tri_y = bx + 6, by + 3
+            from PySide6.QtCore import QPointF
+            from PySide6.QtGui import QPolygonF
+
+            painter.drawPolygon(
+                QPolygonF([
+                    QPointF(tri_x, tri_y),
+                    QPointF(tri_x + 7, tri_y + 3.5),
+                    QPointF(tri_x, tri_y + 7),
+                ])
+            )
+
+        painter.restore()
+
+
+class BottomFilmstripDock(QDockWidget):
+    """
+    Reusable bottom dock supporting:
+    - Page 0: Optional Single Image View Filmstrip
+    - Page 1: Create Studio Workspace Tray
+    """
+
+    media_selected = Signal(int)
+    close_requested = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__("", parent)
+        self.setObjectName("BottomFilmstripDock")
+        self.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
+        self.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+        self.setTitleBarWidget(QWidget(self))  # Hide standard QDockWidget title bar
+
+        self._theme_name: str = "wlpg_aero"
+        self._catalog_model: Any = None
+        self._pixmap_cache: dict[int, QPixmap] | None = None
+        self._thumb_repo: Any = None
+        self._hosted_tray: QWidget | None = None
+        self._syncing_selection = False
+
+        self.container = QFrame(self)
+        self.container.setObjectName("BottomDockContainer")
+        outer = QVBoxLayout(self.container)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Compact Header Bar
+        header = QWidget(self.container)
+        header.setObjectName("BottomDockHeader")
+        header.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        header.setFixedHeight(22)
+        h_lay = QHBoxLayout(header)
+        h_lay.setContentsMargins(10, 1, 6, 1)
+        h_lay.setSpacing(8)
+
+        self.lbl_title = QLabel("Filmstrip", header)
+        self.lbl_title.setFont(QFont("Segoe UI", 8.5, QFont.DemiBold))
+        h_lay.addWidget(self.lbl_title)
+
+        self.lbl_count = QLabel("", header)
+        self.lbl_count.setFont(QFont("Segoe UI", 8))
+        h_lay.addWidget(self.lbl_count)
+        h_lay.addStretch(1)
+
+        self.btn_close = QPushButton("✕", header)
+        self.btn_close.setObjectName("BottomDockCloseBtn")
+        self.btn_close.setFixedSize(20, 18)
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.setToolTip("Hide bottom panel")
+        self.btn_close.clicked.connect(self.close_requested.emit)
+        h_lay.addWidget(self.btn_close)
+        outer.addWidget(header)
+
+        # Stacked content: Page 0 = Filmstrip, Page 1 = Workspace Tray
+        self.stack = QStackedWidget(self.container)
+        outer.addWidget(self.stack, 1)
+
+        # Page 0: Filmstrip with crisp ‹ / › edge scroll chevrons
+        self.page_filmstrip = QWidget(self.stack)
+        self.page_filmstrip.setObjectName("FilmstripPage")
+        self.page_filmstrip.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        p0_lay = QHBoxLayout(self.page_filmstrip)
+        p0_lay.setContentsMargins(4, 2, 4, 4)
+        p0_lay.setSpacing(4)
+
+        self.btn_scroll_left = QPushButton("‹", self.page_filmstrip)
+        self.btn_scroll_left.setObjectName("FilmstripScrollBtn")
+        self.btn_scroll_left.setFixedWidth(20)
+        self.btn_scroll_left.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_scroll_left.setToolTip("Scroll filmstrip left")
+        self.btn_scroll_left.clicked.connect(lambda: self._scroll_filmstrip(-3))
+        p0_lay.addWidget(self.btn_scroll_left)
+
+        self.filmstrip_model = _FilmstripListModel(self.page_filmstrip)
+        self.filmstrip_delegate = _FilmstripItemDelegate(self.page_filmstrip)
+        self.filmstrip_view = QListView(self.page_filmstrip)
+        self.filmstrip_view.setObjectName("FilmstripListView")
+        self.filmstrip_view.setFlow(QListView.Flow.LeftToRight)
+        self.filmstrip_view.setWrapping(False)
+        self.filmstrip_view.setResizeMode(QListView.ResizeMode.Adjust)
+        self.filmstrip_view.setUniformItemSizes(True)
+        self.filmstrip_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.filmstrip_view.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.filmstrip_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.filmstrip_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.filmstrip_view.setFrameShape(QFrame.Shape.NoFrame)
+        self.filmstrip_view.setModel(self.filmstrip_model)
+        self.filmstrip_view.setItemDelegate(self.filmstrip_delegate)
+        self.filmstrip_view.viewport().installEventFilter(self)
+        self.filmstrip_view.selectionModel().currentChanged.connect(self._on_filmstrip_current_changed)
+        self.filmstrip_view.clicked.connect(self._on_filmstrip_clicked)
+        p0_lay.addWidget(self.filmstrip_view, 1)
+
+        self.btn_scroll_right = QPushButton("›", self.page_filmstrip)
+        self.btn_scroll_right.setObjectName("FilmstripScrollBtn")
+        self.btn_scroll_right.setFixedWidth(20)
+        self.btn_scroll_right.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_scroll_right.setToolTip("Scroll filmstrip right")
+        self.btn_scroll_right.clicked.connect(lambda: self._scroll_filmstrip(3))
+        p0_lay.addWidget(self.btn_scroll_right)
+
+        # Page 1: Create Studio Workspace Tray Host
+        self.page_tray = QWidget(self.stack)
+        self.page_tray.setObjectName("BottomTrayHost")
+        self.page_tray.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.tray_layout = QVBoxLayout(self.page_tray)
+        self.tray_layout.setContentsMargins(6, 2, 6, 4)
+        self.tray_layout.setSpacing(0)
+
+        self.stack.addWidget(self.page_filmstrip)
+        self.stack.addWidget(self.page_tray)
+
+        self.setWidget(self.container)
+        self.setMinimumHeight(98)
+        self.setMaximumHeight(168)
+        self.apply_theme_mode("wlpg_aero")
+
+    def eventFilter(self, watched: Any, event: QEvent) -> bool:
+        if watched is self.filmstrip_view.viewport() and event.type() == QEvent.Type.Wheel:
+            sb = self.filmstrip_view.horizontalScrollBar()
+            if sb is not None:
+                delta = event.angleDelta().y() or event.angleDelta().x()
+                sb.setValue(sb.value() - int(delta * 0.6))
+                return True
+        return super().eventFilter(watched, event)
+
+    def bind_sources(
+        self,
+        catalog_model: Any,
+        pixmap_cache: dict[int, QPixmap] | None = None,
+        thumb_repo: Any = None,
+    ) -> None:
+        self._catalog_model = catalog_model
+        self._pixmap_cache = pixmap_cache
+        self._thumb_repo = thumb_repo
+        self.filmstrip_delegate.set_sources(pixmap_cache, thumb_repo)
+        self.refresh_items()
+
+    def refresh_items(self) -> None:
+        if self._catalog_model is None:
+            self.filmstrip_model.set_records([])
+            self.lbl_count.setText("")
+            return
+        records = list(getattr(self._catalog_model, "_records", []) or [])
+        self.filmstrip_model.set_records(records)
+        cnt = self.filmstrip_model.rowCount()
+        self.lbl_count.setText(f"({cnt:,} items)" if cnt else "")
+
+    def _scroll_filmstrip(self, step_items: int) -> None:
+        sb = self.filmstrip_view.horizontalScrollBar()
+        if sb is not None:
+            sb.setValue(sb.value() + step_items * _FilmstripItemDelegate.ITEM_W)
+
+    def set_active_media_id(self, media_id: int | None) -> None:
+        row = self.filmstrip_model.row_for_media_id(media_id)
+        if row is None:
+            return
+        self._syncing_selection = True
+        try:
+            idx = self.filmstrip_model.index(row, 0)
+            self.filmstrip_view.setCurrentIndex(idx)
+            self.filmstrip_view.scrollTo(idx, QAbstractItemView.ScrollHint.PositionAtCenter)
+            cnt = self.filmstrip_model.rowCount()
+            if self.stack.currentIndex() == 0 and cnt > 0:
+                self.lbl_count.setText(f"({row + 1:,} of {cnt:,})")
+        finally:
+            self._syncing_selection = False
+
+    def _on_filmstrip_current_changed(self, current: QModelIndex, _prev: QModelIndex) -> None:
+        if self._syncing_selection or not current.isValid():
+            return
+        mid = self.filmstrip_model.media_id_at_row(current.row())
+        if mid is not None:
+            self.media_selected.emit(mid)
+
+    def _on_filmstrip_clicked(self, index: QModelIndex) -> None:
+        if not index.isValid():
+            return
+        mid = self.filmstrip_model.media_id_at_row(index.row())
+        if mid is not None:
+            self.media_selected.emit(mid)
+
+    def set_filmstrip_mode(self) -> None:
+        self.clear_tray_widget()
+        self.stack.setCurrentIndex(0)
+        self.lbl_title.setText("Filmstrip")
+        cnt = self.filmstrip_model.rowCount()
+        self.lbl_count.setText(f"({cnt:,} items)" if cnt else "")
+        self.btn_close.setVisible(True)
+        self.setMinimumHeight(98)
+        self.setMaximumHeight(124)
+
+    def set_tray_widget(self, widget: QWidget | None, title: str = "") -> None:
+        self.clear_tray_widget()
+        if widget is None:
+            return
+        self._hosted_tray = widget
+        widget.setParent(self.page_tray)
+        self.tray_layout.addWidget(widget)
+        self.stack.setCurrentIndex(1)
+        self.lbl_title.setText(title or "Tools Tray")
+        self.lbl_count.setText("")
+        self.btn_close.setVisible(False)
+        self.setMinimumHeight(104)
+        self.setMaximumHeight(168)
+
+    def clear_tray_widget(self) -> None:
+        if self._hosted_tray is not None:
+            self.tray_layout.removeWidget(self._hosted_tray)
+            self._hosted_tray.setParent(None)
+            self._hosted_tray = None
+
+    def set_dark_mode(self, is_dark: bool) -> None:
+        self.apply_theme_mode("dark" if is_dark else "wlpg_aero")
+
+    def apply_theme_mode(self, theme_name: str) -> None:
+        self._theme_name = theme_name or "wlpg_aero"
+        tok = get_theme_tokens(self._theme_name)
+        self.filmstrip_delegate.set_theme_name(self._theme_name)
+        self.container.setStyleSheet(
+            f"""
+            QFrame#BottomDockContainer {{
+                background-color: {tok.bg_surface};
+                border-top: 1px solid {tok.border_subtle};
+            }}
+            QWidget#BottomDockHeader {{
+                background-color: {tok.bg_card};
+                border-bottom: 1px solid {tok.border_subtle};
+            }}
+            QWidget#BottomDockHeader QLabel {{
+                color: {tok.text_primary};
+                background: transparent;
+            }}
+            QPushButton#BottomDockCloseBtn {{
+                border: none;
+                background: transparent;
+                color: {tok.text_secondary};
+                font-weight: bold;
+                border-radius: 3px;
+            }}
+            QPushButton#BottomDockCloseBtn:hover {{
+                background-color: {tok.danger};
+                color: {tok.text_on_accent};
+            }}
+            QPushButton#FilmstripScrollBtn {{
+                background-color: {tok.bg_card};
+                color: {tok.text_primary};
+                border: 1px solid {tok.border_subtle};
+                border-radius: 4px;
+                padding: 0px;
+                font-size: 13pt;
+                font-weight: 600;
+            }}
+            QPushButton#FilmstripScrollBtn:hover {{
+                background-color: {tok.bg_hover};
+                border-color: {tok.accent};
+            }}
+            QWidget#FilmstripPage {{
+                background-color: {tok.bg_surface};
+                border: none;
+            }}
+            QListView#FilmstripListView {{
+                background-color: {tok.bg_surface};
+                border: none;
+            }}
+            QListView#FilmstripListView::viewport {{
+                background-color: {tok.bg_surface};
+            }}
+            QWidget#BottomTrayHost {{
+                background-color: {tok.bg_surface};
+            }}
+            """
+        )
+        self.lbl_count.setStyleSheet(f"color: {tok.text_secondary}; background: transparent;")
+        self.filmstrip_view.viewport().update()

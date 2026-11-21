@@ -103,6 +103,7 @@ from src.ui.win32_frame import (
     is_win32_frameless_supported,
 )
 from src.ui.albums_view import AlbumsView
+from src.ui.bottom_filmstrip_dock import BottomFilmstripDock
 from src.ui.compare_view import CompareMediaView
 from src.ui.media_viewer import SingleMediaViewer
 from src.ui.people_directory_view import PeopleDirectoryView
@@ -1034,6 +1035,14 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.right_tag_dock = TagAndCaptionDock(self)
         self.addDockWidget(Qt.RightDockWidgetArea, self.right_tag_dock)
 
+        self.bottom_dock = BottomFilmstripDock(self)
+        self.bottom_dock.bind_sources(self.catalog_model, self.pixmap_cache, self.thumb_repo)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.bottom_dock)
+        self.bottom_dock.hide()
+        self._filmstrip_viewer_enabled: bool = False
+        self._active_create_workspace: Any = None
+        self._create_ws_snapshot: dict[str, Any] | None = None
+
         # 4. WLPG Bottom Status Bar
         self._build_status_bar()
 
@@ -1267,6 +1276,17 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.btn_status_grid.clicked.connect(self._on_status_grid_or_details_clicked)
         r_hbox.addWidget(self.btn_status_grid)
 
+        self.btn_status_filmstrip = QPushButton(right_ctrl)
+        self.btn_status_filmstrip.setCheckable(True)
+        self.btn_status_filmstrip.setChecked(False)
+        self.btn_status_filmstrip.setIcon(make_wlpg_icon("filmstrip", 18))
+        self.btn_status_filmstrip.setIconSize(QSize(18, 18))
+        self.btn_status_filmstrip.setFixedSize(22, 22)
+        self.btn_status_filmstrip.setToolTip("Show / hide filmstrip (Ctrl+Shift+F)")
+        self.btn_status_filmstrip.clicked.connect(lambda: self.dispatch_ribbon_action("toggle_filmstrip_pane"))
+        self.btn_status_filmstrip.setVisible(False)
+        r_hbox.addWidget(self.btn_status_filmstrip)
+
         self.btn_status_fit = QPushButton(right_ctrl)
         self.btn_status_fit.setIcon(make_wlpg_icon("actual_size", 18))
         self.btn_status_fit.setIconSize(QSize(18, 18))
@@ -1317,6 +1337,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.btn_status_delete,
             self.btn_status_slideshow,
             self.btn_status_grid,
+            self.btn_status_filmstrip,
             self.btn_status_fit,
             self.btn_status_zoom_out,
             self.slider_status_zoom,
@@ -1560,7 +1581,10 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.right_tag_dock.slider_region_brush_size.setValue
         )
         self.right_tag_dock.dock_mode_changed.connect(
-            lambda m: self.media_viewer.set_suppress_face_overlays(m in ("fine_tune", "depth_light"))
+            lambda m: (
+                self.media_viewer.set_suppress_face_overlays(m in ("fine_tune", "depth_light")),
+                self.media_viewer.set_depth_light_active(m == "depth_light"),
+            )
         )
         self.right_tag_dock.pane_interacted.connect(self._on_right_pane_interacted)
         self.right_tag_dock.region_scope_changed.connect(
@@ -1614,6 +1638,14 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.right_tag_dock.auto_straighten_requested.connect(
             self.media_viewer.apply_auto_straighten
         )
+        self.right_tag_dock.draw_line_straighten_requested.connect(
+            lambda: self.media_viewer.set_crop_mode(True, focus_straighten=True)
+            if not getattr(self.media_viewer, "is_crop_mode", False)
+            else self.media_viewer.btn_crop_straighten_line.setChecked(True)
+        )
+        self.media_viewer.straighten_preview_changed.connect(
+            self.right_tag_dock.sync_straighten_angle
+        )
         self.right_tag_dock.fine_tune_auto_adjust.connect(
             self.media_viewer.apply_auto_adjust
         )
@@ -1622,6 +1654,21 @@ class PhotoGalleryMainWindow(QMainWindow):
         )
         self.right_tag_dock.depth_relight_changed.connect(
             self.media_viewer.set_depth_relight_parameters
+        )
+        self.right_tag_dock.depth_virtual_lights_changed.connect(
+            self.media_viewer.set_virtual_lights_parameters
+        )
+        self.right_tag_dock.depth_light_gizmos_toggled.connect(
+            self.media_viewer.set_virtual_light_gizmos_visible
+        )
+        self.right_tag_dock.depth_selected_light_changed.connect(
+            self.media_viewer.set_selected_virtual_light
+        )
+        self.right_tag_dock.depth_relight_clear_requested.connect(
+            self.media_viewer.clear_relight_only
+        )
+        self.media_viewer.virtual_lights_canvas_changed.connect(
+            self.right_tag_dock.sync_virtual_lights_from_canvas
         )
         self.right_tag_dock.depth_haze_changed.connect(
             self.media_viewer.set_depth_haze_parameters
@@ -1632,6 +1679,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.right_tag_dock.copy_subject_requested.connect(
             self.media_viewer.copy_subject_to_clipboard
         )
+        self.bottom_dock.media_selected.connect(self._on_filmstrip_media_selected)
+        self.bottom_dock.close_requested.connect(self._on_bottom_dock_close_requested)
         self.right_tag_dock.remove_background_requested.connect(
             self.media_viewer.remove_background_cutout
         )
@@ -1729,6 +1778,14 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         self.sc_save_copy = QShortcut(QKeySequence("Ctrl+Shift+S"), self)
         self.sc_save_copy.activated.connect(lambda: self.dispatch_ribbon_action("save_as_copy"))
+
+        self.sc_filmstrip = QShortcut(QKeySequence("Ctrl+Shift+F"), self)
+        self.sc_filmstrip.activated.connect(
+            lambda: self.dispatch_ribbon_action("toggle_filmstrip_pane")
+            if self.central_stack.currentWidget() == self.media_viewer
+            and getattr(self, "_active_create_workspace", None) is None
+            else None
+        )
 
         self.sc_properties_ret = QShortcut(QKeySequence("Alt+Return"), self)
         self.sc_properties_ret.activated.connect(self.open_file_properties)
@@ -2265,15 +2322,32 @@ class PhotoGalleryMainWindow(QMainWindow):
             4000,
         )
 
-    def _start_ocr_worker(self, folder_id: int | None = None) -> None:
-        """Launch background OCR indexing for unread photos respecting folder scan_ocr policy."""
-        if getattr(self, "_workers_paused", False):
+    def scan_ocr_for_selection(self, media_ids: Sequence[int] | None = None) -> None:
+        """On-demand OCR scan for selected/active photos, even if folder scan_ocr is disabled."""
+        target_ids = [int(m) for m in media_ids] if media_ids else list(self.get_active_target_ids())
+        if not target_ids:
+            return
+        from src.core.ocr_engine import has_configured_ocr_engine
+        from src.ui.dialogs import prompt_and_download_rapidocr_addon
+
+        if not has_configured_ocr_engine():
+            if not prompt_and_download_rapidocr_addon(self, engine=self.engine):
+                return
+        self._start_ocr_worker(media_ids=target_ids)
+
+    def _start_ocr_worker(
+        self,
+        folder_id: int | None = None,
+        media_ids: Sequence[int] | None = None,
+    ) -> None:
+        """Launch background OCR indexing for unread photos (or forced on-demand media_ids)."""
+        if getattr(self, "_workers_paused", False) and not media_ids:
             return
         from src.workers.ocr_worker import OcrScanWorker
 
         if getattr(self, "_active_ocr_worker", None) is not None:
             self._active_ocr_worker.cancel()
-        worker = OcrScanWorker(self.engine, folder_id=folder_id)
+        worker = OcrScanWorker(self.engine, folder_id=folder_id, media_ids=media_ids)
         self._ocr_status_text = "OCR: Starting..."
         self._update_worker_monitor()
 
@@ -2282,6 +2356,13 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self._ocr_status_text = f"OCR: {cur:,} / {total:,}"
                 self._update_worker_monitor()
 
+        def _on_ocr_media_updated(mid: int) -> None:
+            self._media_meta_lookup.pop(int(mid), None)
+            active_ids = self.get_active_target_ids()
+            if active_ids and int(active_ids[0]) == int(mid) and hasattr(self, "right_tag_dock"):
+                summary = self.catalog_repo.get_selection_summary([int(mid)])
+                self.right_tag_dock.bind_selection([int(mid)], summary)
+
         def _on_ocr_finished(count: int) -> None:
             if getattr(self, "_active_ocr_worker", None) is worker:
                 self._active_ocr_worker = None
@@ -2289,7 +2370,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self._update_worker_monitor()
             if count > 0:
                 self.statusBar().showMessage(
-                    f"OCR text indexing finished ({count:,} photo(s) indexed).", 4000
+                    f"✓ OCR text indexing finished ({count:,} photo(s) indexed).", 4000
                 )
 
         def _on_ocr_error(_err: str) -> None:
@@ -2302,6 +2383,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             lambda msg: self.statusBar().showMessage(msg, 4000)
         )
         worker.signals.progressed.connect(_on_ocr_progressed)
+        worker.signals.media_updated.connect(_on_ocr_media_updated)
         worker.signals.finished.connect(_on_ocr_finished)
         worker.signals.error.connect(_on_ocr_error)
         self._active_ocr_worker = worker
@@ -2865,6 +2947,12 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.ribbon.btn_toggle_tag_pane.setChecked(True)
 
     def _on_undo(self) -> None:
+        ws = getattr(self, "_active_create_workspace", None)
+        if ws is not None:
+            ws.undo()
+            self._update_undo_redo_enabled()
+            self._sync_create_ws_ribbon_states()
+            return
         if self.central_stack.currentWidget() == self.media_viewer:
             if getattr(self.media_viewer, "is_markup_mode", False):
                 self.media_viewer._undo_markup()
@@ -2876,6 +2964,12 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.undo_stack.undo()
 
     def _on_redo(self) -> None:
+        ws = getattr(self, "_active_create_workspace", None)
+        if ws is not None:
+            ws.redo()
+            self._update_undo_redo_enabled()
+            self._sync_create_ws_ribbon_states()
+            return
         if self.central_stack.currentWidget() == self.media_viewer:
             if self.media_viewer.undo_stack.canRedo():
                 self.media_viewer.undo_stack.redo()
@@ -2886,6 +2980,11 @@ class PhotoGalleryMainWindow(QMainWindow):
 
     def _update_undo_redo_enabled(self) -> None:
         try:
+            ws = getattr(self, "_active_create_workspace", None)
+            if ws is not None:
+                self.ribbon.set_undo_enabled(bool(ws.can_undo()))
+                self.ribbon.set_redo_enabled(bool(ws.can_redo()))
+                return
             if self.central_stack.currentWidget() == self.media_viewer:
                 can_u = self.media_viewer.undo_stack.canUndo() or self.undo_stack.canUndo()
                 can_r = self.media_viewer.undo_stack.canRedo() or self.undo_stack.canRedo()
@@ -2918,6 +3017,9 @@ class PhotoGalleryMainWindow(QMainWindow):
 
     def navigate_history_back(self) -> None:
         """Navigates to the previous state in history (browser/explorer style)."""
+        if getattr(self, "_active_create_workspace", None) is not None:
+            self.close_create_workspace()
+            return
         if self._nav_index > 0:
             self._nav_index -= 1
             state = self._nav_history[self._nav_index]
@@ -2925,6 +3027,9 @@ class PhotoGalleryMainWindow(QMainWindow):
 
     def navigate_history_forward(self) -> None:
         """Navigates to the next state in history (browser/explorer style)."""
+        if getattr(self, "_active_create_workspace", None) is not None:
+            if not self.close_create_workspace():
+                return
         if 0 <= self._nav_index < len(self._nav_history) - 1:
             self._nav_index += 1
             state = self._nav_history[self._nav_index]
@@ -3233,6 +3338,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         ]
         self.left_nav_dock.setVisible(False)
         self.right_tag_dock.setVisible(False)
+        if hasattr(self, "bottom_dock") and getattr(self, "_active_create_workspace", None) is None:
+            self.bottom_dock.hide()
         self.compare_view.bind_repositories(self.catalog_repo, self.thumb_repo)
         self.compare_view.set_dark_mode(getattr(self, "_dark_mode", False))
         self.compare_view.open_media_ids(ids, all_grid_ids=all_grid_ids, repo=self.catalog_repo, thumb_repo=self.thumb_repo)
@@ -3728,6 +3835,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             records.sort(key=lambda r: rank_map.get(int(r.id), len(rank_map)))
             headers_enabled = False
         self.catalog_model.set_records(records, group_headers_enabled=headers_enabled)
+        if hasattr(self, "bottom_dock") and self.bottom_dock is not None:
+            self.bottom_dock.refresh_items()
 
         # Update empty state overlay
         is_empty = (len(records) == 0)
@@ -4069,6 +4178,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.show_status_message("✓ Updated caption", 3000)
 
     def _on_rating_shortcut(self, rating: int) -> None:
+        if getattr(self, "_active_create_workspace", None) is not None:
+            return
         focused = QApplication.focusWidget()
         if isinstance(focused, (QLineEdit, QTextEdit, QPlainTextEdit)):
             return
@@ -5171,6 +5282,10 @@ class PhotoGalleryMainWindow(QMainWindow):
                 old_path.rename(new_path)
             self.catalog_repo.rename_media(mid, new_fname)
             self._media_meta_lookup.pop(mid, None)
+            if getattr(self.media_viewer, "current_media_id", None) == mid:
+                self.media_viewer.current_file_path = new_path
+                if self.central_stack.currentWidget() == self.media_viewer:
+                    self.setWindowTitle(f"{new_fname} - Essentials Photo Gallery")
             self.rebuild_and_run_query()
             summary = self.catalog_repo.get_selection_summary(target_ids)
             self.right_tag_dock.bind_selection(target_ids, summary)
@@ -5357,6 +5472,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.scope_bar.hide()
             self.btn_status_prev.setVisible(True)
             self.btn_status_next.setVisible(True)
+            self.btn_status_filmstrip.setVisible(True)
             self.btn_status_fit.setVisible(True)
             self._update_status_zoom_toggle_button()
             self._update_status_grid_button()
@@ -5376,6 +5492,21 @@ class PhotoGalleryMainWindow(QMainWindow):
 
             if hasattr(self.ribbon, "btn_toggle_tag_pane"):
                 self.ribbon.btn_toggle_tag_pane.setChecked(self.right_tag_dock.isVisible())
+
+            if hasattr(self, "bottom_dock") and self.bottom_dock is not None and getattr(self, "_active_create_workspace", None) is None:
+                self.bottom_dock.refresh_items()
+                self.bottom_dock.set_filmstrip_mode()
+                self.bottom_dock.set_active_media_id(media_id)
+                show_fs = bool(getattr(self, "_filmstrip_viewer_enabled", False))
+                self.bottom_dock.setVisible(show_fs)
+                if hasattr(self.ribbon, "btn_toggle_filmstrip"):
+                    self.ribbon.btn_toggle_filmstrip.blockSignals(True)
+                    self.ribbon.btn_toggle_filmstrip.setChecked(show_fs)
+                    self.ribbon.btn_toggle_filmstrip.blockSignals(False)
+                if hasattr(self, "btn_status_filmstrip"):
+                    self.btn_status_filmstrip.blockSignals(True)
+                    self.btn_status_filmstrip.setChecked(show_fs)
+                    self.btn_status_filmstrip.blockSignals(False)
 
             records = self.catalog_model._records
             pos = self.catalog_model.record_index_for_id(media_id)
@@ -5466,6 +5597,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         return False
 
     def show_grid_view(self) -> None:
+        if getattr(self, "_active_create_workspace", None) is not None:
+            if not self.close_create_workspace():
+                return
         if hasattr(self, "duplicate_finder_view") and self.central_stack.currentWidget() == self.duplicate_finder_view:
             self.duplicate_finder_view.stop_scan()
 
@@ -5482,6 +5616,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.media_viewer.set_retouch_mode(False)
         self.media_viewer.set_red_eye_mode(False)
         self.media_viewer.set_crop_mode(False)
+        if hasattr(self, "bottom_dock") and self.bottom_dock is not None and getattr(self, "_active_create_workspace", None) is None:
+            self.bottom_dock.hide()
         if hasattr(self, "right_tag_dock") and hasattr(self.right_tag_dock, "clear_mask_editing_session"):
             self.right_tag_dock.clear_mask_editing_session()
 
@@ -5538,6 +5674,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.right_tag_dock.setVisible(True)
         self.btn_status_prev.setVisible(False)
         self.btn_status_next.setVisible(False)
+        self.btn_status_filmstrip.setVisible(False)
         self.btn_status_fit.setVisible(False)
         self.btn_status_actual.setVisible(False)
         self._update_status_grid_button()
@@ -5593,6 +5730,10 @@ class PhotoGalleryMainWindow(QMainWindow):
         if self._map_view is None:
             self._map_view = WorldMapView(self.central_stack)
             self._map_view.bind_repository(self.catalog_repo, self.thumb_repo)
+            self._map_view.bind_thumbnail_pool(
+                self.thumbnail_pool,
+                is_paused_fn=lambda: bool(getattr(self, "_workers_paused", False)),
+            )
             self._map_view.close_requested.connect(self.show_grid_view)
             self._map_view.filter_to_bbox_requested.connect(self.on_map_bbox_filter_requested)
             self._map_view.cluster_selected.connect(self._on_map_cluster_selected)
@@ -5654,6 +5795,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.ribbon.set_active_mode("map")
         self.left_nav_dock.hide()
         self.right_tag_dock.hide()
+        if hasattr(self, "bottom_dock") and self.bottom_dock is not None:
+            self.bottom_dock.hide()
         if hasattr(self.ribbon, "sync_map_pane_buttons"):
             self.ribbon.sync_map_pane_buttons(
                 self.left_nav_dock.isVisible(), self.right_tag_dock.isVisible()
@@ -5717,6 +5860,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.ribbon.update_batch_action_labels(getattr(self.batch_people_view, "_current_view_mode", "suggestions"))
         self.left_nav_dock.hide()
         self.right_tag_dock.hide()
+        if hasattr(self, "bottom_dock") and self.bottom_dock is not None:
+            self.bottom_dock.hide()
         if not self._is_navigating_history:
             self._push_nav_state({"view": "batch_people", "person_id": person_id})
 
@@ -6820,13 +6965,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         return False
 
     def rename_selection(self) -> None:
-        """Selects the filename field in the right Information panel for inline renaming."""
-        target_ids = self.grid_view.selected_media_ids() or list(self._selected_ids)
+        """Selects the filename field in the right Information panel (or prompts) for renaming."""
+        target_ids = list(self.get_active_target_ids())
         if not target_ids:
             return
         if len(target_ids) == 1:
-            if hasattr(self, "right_tag_dock") and self.right_tag_dock is not None:
-                self.right_tag_dock.show()
+            if hasattr(self, "right_tag_dock") and self.right_tag_dock is not None and self.right_tag_dock.isVisible():
                 self.right_tag_dock.raise_()
                 self.right_tag_dock.focus_filename_rename()
                 return
@@ -6852,6 +6996,13 @@ class PhotoGalleryMainWindow(QMainWindow):
                     old_path.rename(new_path)
                 self.catalog_repo.rename_media(mid, new_fname)
                 self._media_meta_lookup.pop(mid, None)
+                if getattr(self.media_viewer, "current_media_id", None) == mid:
+                    self.media_viewer.current_file_path = new_path
+                    if self.central_stack.currentWidget() == self.media_viewer:
+                        self.setWindowTitle(f"{new_fname} - Essentials Photo Gallery")
+                if hasattr(self, "right_tag_dock") and self.right_tag_dock is not None:
+                    summary = self.catalog_repo.get_selection_summary([mid])
+                    self.right_tag_dock.bind_selection([mid], summary)
                 self.rebuild_and_run_query()
                 self.show_status_message(f"✓ Renamed file to '{new_fname}'", 4000)
             except Exception as e:
@@ -7106,6 +7257,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._immersive_saved_state = {
                 "left_nav": self.left_nav_dock.isVisible() if hasattr(self, "left_nav_dock") else False,
                 "right_tag": self.right_tag_dock.isVisible() if hasattr(self, "right_tag_dock") else False,
+                "bottom_dock": self.bottom_dock.isVisible() if hasattr(self, "bottom_dock") else False,
                 "fix_pane": (
                     self.media_viewer.fix_pane.isVisible()
                     if hasattr(self, "media_viewer") and hasattr(self.media_viewer, "fix_pane")
@@ -7122,6 +7274,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.left_nav_dock.hide()
             if hasattr(self, "right_tag_dock"):
                 self.right_tag_dock.hide()
+            if hasattr(self, "bottom_dock"):
+                self.bottom_dock.hide()
             if hasattr(self, "media_viewer") and hasattr(self.media_viewer, "fix_pane"):
                 self.media_viewer.fix_pane.hide()
             if self.statusBar():
@@ -7146,6 +7300,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                     pass
             if saved.get("right_tag") and hasattr(self, "right_tag_dock"):
                 self.right_tag_dock.show()
+            if saved.get("bottom_dock") and hasattr(self, "bottom_dock"):
+                self.bottom_dock.show()
             if saved.get("fix_pane") and hasattr(self, "media_viewer") and hasattr(self.media_viewer, "fix_pane"):
                 self.media_viewer.fix_pane.show()
             if saved.get("status_bar", True) and self.statusBar():
@@ -7347,17 +7503,65 @@ class PhotoGalleryMainWindow(QMainWindow):
                     self.open_single_viewer(sel[0])
             self.toggle_right_pane("depth_light")
         elif action_id == "save_photo":
-            if self.central_stack.currentWidget() == self.media_viewer:
+            ws = getattr(self, "_active_create_workspace", None)
+            if ws is not None:
+                out_p = ws.save_result()
+                if out_p is not None:
+                    self.close_create_workspace(force=True, saved_path=out_p)
+            elif self.central_stack.currentWidget() == self.media_viewer:
                 self.media_viewer.save_current_image_with_backup()
+        elif action_id == "toggle_filmstrip_pane":
+            new_fs = not bool(getattr(self, "_filmstrip_viewer_enabled", False))
+            self._filmstrip_viewer_enabled = new_fs
+            if hasattr(self.ribbon, "btn_toggle_filmstrip"):
+                self.ribbon.btn_toggle_filmstrip.blockSignals(True)
+                self.ribbon.btn_toggle_filmstrip.setChecked(new_fs)
+                self.ribbon.btn_toggle_filmstrip.blockSignals(False)
+            if hasattr(self, "btn_status_filmstrip"):
+                self.btn_status_filmstrip.blockSignals(True)
+                self.btn_status_filmstrip.setChecked(new_fs)
+                self.btn_status_filmstrip.blockSignals(False)
+            if self.central_stack.currentWidget() == self.media_viewer and hasattr(self, "bottom_dock"):
+                self.bottom_dock.refresh_items()
+                self.bottom_dock.set_filmstrip_mode()
+                self.bottom_dock.set_active_media_id(getattr(self.media_viewer, "current_media_id", None))
+                self.bottom_dock.setVisible(new_fs)
+        elif action_id == "create_ws_save":
+            ws = getattr(self, "_active_create_workspace", None)
+            if ws is not None:
+                out_p = ws.save_result()
+                if out_p is not None:
+                    self.close_create_workspace(force=True, saved_path=out_p)
+        elif action_id == "create_ws_cancel":
+            self.close_create_workspace()
+        elif action_id.startswith("create_ws:"):
+            ws = getattr(self, "_active_create_workspace", None)
+            if ws is not None:
+                ws.handle_ribbon_action(action_id.split(":", 1)[1])
+                self._sync_create_ws_ribbon_states()
+                self._update_undo_redo_enabled()
         elif action_id == "save_as_copy":
             if self.central_stack.currentWidget() == self.media_viewer:
-                self.media_viewer.save_as_copy()
+                saved = self.media_viewer.save_as_copy()
+                if saved:
+                    self.show_status_message(f"✓ Saved copy: {Path(saved).name}", 4000)
         elif action_id == "save_as_copy_original":
             if self.central_stack.currentWidget() == self.media_viewer:
-                self.media_viewer.save_as_copy(forced_target="original")
+                saved = self.media_viewer.save_as_copy(forced_target="original")
+                if saved:
+                    self.show_status_message(f"✓ Quick saved copy in original location: {Path(saved).name}", 4000)
         elif action_id == "save_as_copy_choose_location":
             if self.central_stack.currentWidget() == self.media_viewer:
-                self.media_viewer.save_as_copy(forced_target="choose")
+                saved = self.media_viewer.save_as_copy(forced_target="choose")
+                if saved:
+                    self.show_status_message(f"✓ Saved copy: {Path(saved).name}", 4000)
+        elif action_id == "save_as_resized_copy":
+            if self.central_stack.currentWidget() == self.media_viewer:
+                generated = self.media_viewer.save_as_resized_copy()
+                if generated:
+                    for d in {p.parent for p in generated}:
+                        self.scan_folder(d, include_subfolders=False)
+                    self.show_status_message(f"✓ Resized and saved {len(generated)} photo(s)", 4000)
         elif action_id == "open_options_edit":
             from src.ui.options_dialog import OptionsDialog
             dlg = OptionsDialog(engine=self.engine, initial_tab="edit", parent=self)
@@ -7554,7 +7758,11 @@ class PhotoGalleryMainWindow(QMainWindow):
                 sel = self.grid_view.selected_media_ids() or list(self._selected_ids)
                 if sel:
                     self.open_single_viewer(sel[0])
-            self.media_viewer.apply_auto_straighten()
+            angle = float(self.media_viewer.apply_auto_straighten() or 0.0)
+            if abs(angle) >= 0.05:
+                self.show_status_message(f"✓ Auto straightened ({angle:+.1f}°)", 3000)
+            else:
+                self.show_status_message("Photo is already level (0.0°)", 3000)
         elif action_id == "noise_reduction":
             if self.central_stack.currentWidget() != self.media_viewer:
                 sel = self.grid_view.selected_media_ids() or list(self._selected_ids)
@@ -7685,7 +7893,10 @@ class PhotoGalleryMainWindow(QMainWindow):
                 else:
                     self.grid_view.select_media_id(last_id)
         elif action_id == "zoom_in":
-            if self.central_stack.currentWidget() == self.media_viewer:
+            ws = getattr(self, "_active_create_workspace", None)
+            if ws is not None:
+                ws.zoom_in()
+            elif self.central_stack.currentWidget() == self.media_viewer:
                 self.media_viewer.zoom_in()
             elif hasattr(self, "duplicate_finder_view") and self.central_stack.currentWidget() == self.duplicate_finder_view:
                 self.duplicate_finder_view._zoom_in()
@@ -7694,7 +7905,10 @@ class PhotoGalleryMainWindow(QMainWindow):
                     min(self.slider_status_zoom.maximum(), self.slider_status_zoom.value() + 25)
                 )
         elif action_id == "zoom_out":
-            if self.central_stack.currentWidget() == self.media_viewer:
+            ws = getattr(self, "_active_create_workspace", None)
+            if ws is not None:
+                ws.zoom_out()
+            elif self.central_stack.currentWidget() == self.media_viewer:
                 self.media_viewer.zoom_out()
             elif hasattr(self, "duplicate_finder_view") and self.central_stack.currentWidget() == self.duplicate_finder_view:
                 self.duplicate_finder_view._zoom_out()
@@ -7703,10 +7917,16 @@ class PhotoGalleryMainWindow(QMainWindow):
                     max(self.slider_status_zoom.minimum(), self.slider_status_zoom.value() - 25)
                 )
         elif action_id in ("viewer_zoom_actual", "zoom_actual"):
-            if self.central_stack.currentWidget() == self.media_viewer:
+            ws = getattr(self, "_active_create_workspace", None)
+            if ws is not None:
+                ws.zoom_actual()
+            elif self.central_stack.currentWidget() == self.media_viewer:
                 self.media_viewer.set_zoom_mode("100")
         elif action_id in ("viewer_zoom_fit", "zoom_fit"):
-            if self.central_stack.currentWidget() == self.media_viewer:
+            ws = getattr(self, "_active_create_workspace", None)
+            if ws is not None:
+                ws.zoom_fit()
+            elif self.central_stack.currentWidget() == self.media_viewer:
                 if self._is_viewer_image_bigger_than_window():
                     self.media_viewer.set_zoom_mode("fit")
                 else:
@@ -7884,9 +8104,261 @@ class PhotoGalleryMainWindow(QMainWindow):
         else:
             self.show_status_message(f"✓ Saved {tool_name} to: {out_file.name}", 4000)
 
+    def _on_filmstrip_media_selected(self, media_id: int) -> None:
+        if getattr(self, "_active_create_workspace", None) is not None:
+            return
+        if self.central_stack.currentWidget() == self.media_viewer:
+            cur_id = getattr(self.media_viewer, "current_media_id", None)
+            if cur_id is not None and int(cur_id) == int(media_id):
+                return
+            if self.media_viewer.has_unsaved_adjustments():
+                if not self.media_viewer.prompt_save_changes_if_needed("navigate"):
+                    self.bottom_dock.set_active_media_id(cur_id)
+                    return
+            self.open_single_viewer(int(media_id))
+
+    def _on_bottom_dock_close_requested(self) -> None:
+        if getattr(self, "_active_create_workspace", None) is not None:
+            self.bottom_dock.hide()
+            return
+        self._filmstrip_viewer_enabled = False
+        self.bottom_dock.hide()
+        if hasattr(self.ribbon, "btn_toggle_filmstrip"):
+            self.ribbon.btn_toggle_filmstrip.blockSignals(True)
+            self.ribbon.btn_toggle_filmstrip.setChecked(False)
+            self.ribbon.btn_toggle_filmstrip.blockSignals(False)
+        if hasattr(self, "btn_status_filmstrip"):
+            self.btn_status_filmstrip.blockSignals(True)
+            self.btn_status_filmstrip.setChecked(False)
+            self.btn_status_filmstrip.blockSignals(False)
+
+    def _sync_create_ws_ribbon_states(self) -> None:
+        ws = getattr(self, "_active_create_workspace", None)
+        if ws is None:
+            return
+        if hasattr(self.ribbon, "sync_create_studio_action_states"):
+            self.ribbon.sync_create_studio_action_states(ws.ribbon_action_states())
+
+    def open_create_workspace(self, workspace: Any) -> None:
+        """Mount a Create Studio workspace inside MainWindow with contextual ribbon and panes."""
+        if getattr(self, "_active_create_workspace", None) is not None:
+            if not self.close_create_workspace():
+                workspace.deleteLater()
+                return
+
+        cur_widget = self.central_stack.currentWidget()
+        self._create_ws_snapshot = {
+            "central_widget": cur_widget,
+            "ribbon_tab": self.ribbon.tab_widget.currentWidget(),
+            "nav_visible": not self.left_nav_dock.isHidden(),
+            "tag_visible": not self.right_tag_dock.isHidden(),
+            "tag_mode": self.right_tag_dock.current_mode(),
+            "bottom_visible": not self.bottom_dock.isHidden() if hasattr(self, "bottom_dock") else False,
+            "window_title": self.windowTitle(),
+            "was_viewer": cur_widget == self.media_viewer,
+        }
+
+        self._active_create_workspace = workspace
+        workspace.apply_theme_mode(getattr(self, "current_theme", "wlpg_aero"))
+
+        canvas_w = workspace.canvas_widget()
+        if self.central_stack.indexOf(canvas_w) < 0:
+            self.central_stack.addWidget(canvas_w)
+        self.central_stack.setCurrentWidget(canvas_w)
+
+        self.left_nav_dock.hide()
+        if hasattr(self, "scope_bar") and self.scope_bar is not None:
+            self.scope_bar.hide()
+        for btn in (
+            getattr(self, "btn_status_prev", None),
+            getattr(self, "btn_status_next", None),
+            getattr(self, "btn_status_filmstrip", None),
+            getattr(self, "btn_status_fit", None),
+            getattr(self, "btn_status_actual", None),
+        ):
+            if btn is not None:
+                btn.setVisible(False)
+
+        inspector_w = workspace.inspector_widget()
+        if inspector_w is not None:
+            self.right_tag_dock.set_custom_inspector(inspector_w, workspace.display_title)
+            self.right_tag_dock.show()
+            try:
+                self.resizeDocks([self.right_tag_dock], [310], Qt.Horizontal)
+            except Exception:
+                pass
+        else:
+            self.right_tag_dock.clear_custom_inspector()
+            self.right_tag_dock.hide()
+
+        tray_w = workspace.bottom_tray_widget()
+        if hasattr(self, "bottom_dock") and self.bottom_dock is not None:
+            if tray_w is not None:
+                self.bottom_dock.set_tray_widget(tray_w, workspace.tray_title())
+                self.bottom_dock.show()
+            else:
+                self.bottom_dock.clear_tray_widget()
+                self.bottom_dock.hide()
+
+        self.ribbon.configure_create_studio_tab(workspace.display_title, workspace.ribbon_actions())
+        self.ribbon.set_active_mode("create_studio")
+        self._sync_create_ws_ribbon_states()
+
+        workspace.saved.connect(lambda p: self.close_create_workspace(force=True, saved_path=p))
+        workspace.cancelled.connect(self.close_create_workspace)
+        workspace.status_message.connect(self.show_status_message)
+        workspace.ribbon_state_changed.connect(self._sync_create_ws_ribbon_states)
+        workspace.undo_redo_state_changed.connect(lambda _u, _r: self._update_undo_redo_enabled())
+
+        title = f"{workspace.display_title} - Essentials Photo Gallery"
+        self.setWindowTitle(title)
+        self._update_undo_redo_enabled()
+        canvas_w.setFocus()
+
+    def close_create_workspace(self, *, force: bool = False, saved_path: Path | None = None) -> bool:
+        """Close the active Create Studio workspace, prompting if unsaved and restoring prior state."""
+        ws = getattr(self, "_active_create_workspace", None)
+        if ws is None:
+            return True
+
+        effective_saved = saved_path if saved_path is not None else getattr(ws, "saved_file_path", None)
+        if not force and effective_saved is None and ws.has_unsaved_changes():
+            res = QMessageBox.question(
+                self,
+                ws.display_title,
+                f"Save changes before leaving {ws.display_title}?",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save,
+            )
+            if res == QMessageBox.StandardButton.Cancel:
+                return False
+            if res == QMessageBox.StandardButton.Save:
+                out = ws.save_result()
+                if self._active_create_workspace is not ws:
+                    return True
+                if out is None:
+                    return False
+                effective_saved = out
+
+        tool_label = getattr(ws, "tool_save_label", "creation")
+        snap = self._create_ws_snapshot or {}
+
+        try:
+            ws.cleanup()
+        except Exception:
+            pass
+
+        self._active_create_workspace = None
+        self._create_ws_snapshot = None
+
+        self.right_tag_dock.clear_custom_inspector()
+        if hasattr(self, "bottom_dock") and self.bottom_dock is not None:
+            self.bottom_dock.clear_tray_widget()
+            self.bottom_dock.hide()
+
+        canvas_w = ws.canvas_widget()
+        if self.central_stack.indexOf(canvas_w) >= 0:
+            self.central_stack.removeWidget(canvas_w)
+        ws.deleteLater()
+
+        was_viewer = bool(snap.get("was_viewer", False))
+        target_central = snap.get("central_widget")
+        if target_central is not None and self.central_stack.indexOf(target_central) >= 0:
+            self.central_stack.setCurrentWidget(target_central)
+        else:
+            self.central_stack.setCurrentWidget(self.grid_view)
+            was_viewer = False
+
+        if was_viewer:
+            self.ribbon.set_active_mode("viewer")
+            self.right_tag_dock.set_view_mode("viewer")
+            for btn in (
+                getattr(self, "btn_status_prev", None),
+                getattr(self, "btn_status_next", None),
+                getattr(self, "btn_status_filmstrip", None),
+                getattr(self, "btn_status_fit", None),
+            ):
+                if btn is not None:
+                    btn.setVisible(True)
+            self._update_status_zoom_toggle_button()
+            if hasattr(self, "bottom_dock") and self.bottom_dock is not None:
+                self.bottom_dock.refresh_items()
+                self.bottom_dock.set_filmstrip_mode()
+                self.bottom_dock.set_active_media_id(getattr(self.media_viewer, "current_media_id", None))
+                show_fs = bool(getattr(self, "_filmstrip_viewer_enabled", False) and snap.get("bottom_visible", False))
+                self.bottom_dock.setVisible(show_fs)
+                if hasattr(self.ribbon, "btn_toggle_filmstrip"):
+                    self.ribbon.btn_toggle_filmstrip.blockSignals(True)
+                    self.ribbon.btn_toggle_filmstrip.setChecked(show_fs)
+                    self.ribbon.btn_toggle_filmstrip.blockSignals(False)
+                if hasattr(self, "btn_status_filmstrip"):
+                    self.btn_status_filmstrip.blockSignals(True)
+                    self.btn_status_filmstrip.setChecked(show_fs)
+                    self.btn_status_filmstrip.blockSignals(False)
+        else:
+            self.ribbon.set_active_mode("grid")
+            self.right_tag_dock.set_view_mode("grid")
+            try:
+                self._update_scope_bar_visibility()
+            except Exception:
+                pass
+
+        prev_tab = snap.get("ribbon_tab")
+        if prev_tab is not None and prev_tab is not getattr(self.ribbon, "tab_create_studio", None):
+            idx = self.ribbon.tab_widget.indexOf(prev_tab)
+            if idx >= 0 and self.ribbon.tab_widget.tabBar().isTabVisible(idx):
+                self.ribbon.tab_widget.setCurrentWidget(prev_tab)
+        if self.ribbon.tab_widget.currentWidget() is getattr(self.ribbon, "tab_create_studio", None):
+            fallback_tab = self.ribbon.tab_edit if was_viewer else self.ribbon.tab_home
+            self.ribbon.tab_widget.setCurrentWidget(fallback_tab)
+        self.ribbon.tab_widget.tabBar().updateGeometry()
+        self.ribbon.tab_widget.updateGeometry()
+        self.ribbon.tab_widget.tabBar().update()
+
+        nav_vis = bool(snap.get("nav_visible", not was_viewer))
+        self.left_nav_dock.setVisible(nav_vis)
+        if nav_vis:
+            self.left_nav_dock.show()
+            try:
+                self.resizeDocks([self.left_nav_dock], [230], Qt.Horizontal)
+            except Exception:
+                pass
+        if hasattr(self.ribbon, "btn_toggle_nav_pane"):
+            self.ribbon.btn_toggle_nav_pane.blockSignals(True)
+            self.ribbon.btn_toggle_nav_pane.setChecked(nav_vis)
+            self.ribbon.btn_toggle_nav_pane.blockSignals(False)
+
+        prev_mode = str(snap.get("tag_mode", "info") or "info")
+        if prev_mode not in ("info", "fine_tune", "depth_light"):
+            prev_mode = "info"
+        self.right_tag_dock.set_mode(prev_mode)
+        tag_vis = bool(snap.get("tag_visible", True))
+        self.right_tag_dock.setVisible(tag_vis)
+        if tag_vis:
+            self.right_tag_dock.show()
+            try:
+                self.resizeDocks([self.right_tag_dock], [310], Qt.Horizontal)
+            except Exception:
+                pass
+        if hasattr(self.ribbon, "btn_toggle_tag_pane"):
+            self.ribbon.btn_toggle_tag_pane.blockSignals(True)
+            self.ribbon.btn_toggle_tag_pane.setChecked(tag_vis)
+            self.ribbon.btn_toggle_tag_pane.blockSignals(False)
+
+        restored_title = str(snap.get("window_title") or "Essentials Photo Gallery")
+        self.setWindowTitle(restored_title)
+        self._update_undo_redo_enabled()
+        self._update_status_grid_button()
+
+        if effective_saved is not None:
+            self._on_creation_saved(Path(effective_saved), tool_label)
+        return True
+
     def open_panorama_dialog(self) -> None:
-        """Launches the Microsoft ICE-Style Panorama Stitcher."""
-        from src.ui.create_studio_dialogs import PanoramaDialog
+        """Launches the integrated Microsoft ICE-Style Panorama Stitcher Workspace."""
+        from src.ui.create_studio.panorama_workspace import PanoramaWorkspace
 
         paths, _ = self._get_selected_photo_paths_and_details()
         if len(paths) < 2:
@@ -7897,13 +8369,12 @@ class PhotoGalleryMainWindow(QMainWindow):
             )
             return
 
-        dlg = PanoramaDialog(paths, self)
-        if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
-            self._on_creation_saved(dlg.saved_file_path, "panorama")
+        ws = PanoramaWorkspace(paths, self)
+        self.open_create_workspace(ws)
 
     def open_collage_dialog(self) -> None:
-        """Launches the Interactive Collage & 'Then & Now' Studio."""
-        from src.ui.create_studio_dialogs import CollageDialog
+        """Launches the integrated Interactive Collage & 'Then & Now' Workspace."""
+        from src.ui.create_studio.collage_workspace import CollageWorkspace
 
         _, details = self._get_selected_photo_paths_and_details()
         if not details:
@@ -7914,13 +8385,12 @@ class PhotoGalleryMainWindow(QMainWindow):
             )
             return
 
-        dlg = CollageDialog(details, self)
-        if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
-            self._on_creation_saved(dlg.saved_file_path, "collage")
+        ws = CollageWorkspace(details, self)
+        self.open_create_workspace(ws)
 
     def open_photo_fuse_dialog(self) -> None:
-        """Launches the Photo Fuse Best-Face Group Shot Combiner."""
-        from src.ui.create_studio_dialogs import PhotoFuseDialog
+        """Launches the integrated Photo Fuse Best-Face Group Shot Workspace."""
+        from src.ui.create_studio.photo_fuse_workspace import PhotoFuseWorkspace
 
         paths, _ = self._get_selected_photo_paths_and_details()
         if len(paths) < 2:
@@ -7931,9 +8401,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             )
             return
 
-        dlg = PhotoFuseDialog(paths, self)
-        if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
-            self._on_creation_saved(dlg.saved_file_path, "fused photo")
+        ws = PhotoFuseWorkspace(paths, self)
+        self.open_create_workspace(ws)
 
     def toggle_markup_mode(self) -> None:
         """Toggles the Quick Markup, Callouts & Privacy Redaction tool in the viewer."""
@@ -7964,17 +8433,16 @@ class PhotoGalleryMainWindow(QMainWindow):
         return p, bgr
 
     def open_color_pop_dialog(self) -> None:
-        """Launches the Google Photos-Style Colour Pop Studio."""
-        from src.ui.create_studio_dialogs import ColourPopDialog
+        """Launches the integrated Colour Pop Workspace."""
+        from src.ui.create_studio.colour_pop_workspace import ColourPopWorkspace
 
         p, bgr = self._get_single_selected_photo_and_bgr()
         if bgr is None:
             QMessageBox.information(self, "Colour Pop", "Please select a photo to apply Colour Pop.")
             return
 
-        dlg = ColourPopDialog(bgr, p, self)
-        if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
-            self._on_creation_saved(dlg.saved_file_path, "Colour Pop photo")
+        ws = ColourPopWorkspace(bgr, p, self)
+        self.open_create_workspace(ws)
 
     def open_portrait_bokeh_dialog(self) -> None:
         """Opens photo in single image viewer with Depth & light panel active."""
@@ -7988,17 +8456,35 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.toggle_right_pane("depth_light")
 
     def open_cinematic_motion_dialog(self) -> None:
-        """Launches the 3D Cinematic Motion Video Generator."""
-        from src.ui.create_studio_dialogs import CinematicMotionDialog
+        """Launches the integrated 3D Cinematic Motion Workspace."""
+        from src.ui.create_studio.cinematic_workspace import CinematicWorkspace
+
+        paths, details = self._get_selected_photo_paths_and_details()
+        bgrs: list[Any] = []
+        valid_paths: list[Path] = []
+        if len(paths) > 1 or len(details) > 1:
+            import cv2
+            for idx, d in enumerate(details):
+                img = d.get("image_bgr")
+                fp = Path(d["file_path"]) if d.get("file_path") else (paths[idx] if idx < len(paths) else None)
+                if img is None and fp is not None and fp.is_file():
+                    img = cv2.imread(str(fp))
+                if img is not None:
+                    bgrs.append(img)
+                    if fp is not None:
+                        valid_paths.append(fp)
+        if len(bgrs) > 1:
+            ws = CinematicWorkspace(bgrs, valid_paths, self)
+            self.open_create_workspace(ws)
+            return
 
         p, bgr = self._get_single_selected_photo_and_bgr()
         if bgr is None:
             QMessageBox.information(self, "3D Cinematic", "Please select a photo to generate 3D Cinematic Motion video.")
             return
 
-        dlg = CinematicMotionDialog(bgr, p, self)
-        if dlg.exec() == QDialog.Accepted and dlg.saved_file_path:
-            self._on_creation_saved(dlg.saved_file_path, "3D Cinematic video")
+        ws = CinematicWorkspace(bgr, p, self)
+        self.open_create_workspace(ws)
 
     def _select_file_in_grid(self, file_path: Path) -> None:
         try:
@@ -8163,18 +8649,46 @@ class PhotoGalleryMainWindow(QMainWindow):
         """Stops background workers, wipes catalog.db & thumbnails.db, and resets the app to a Fresh Start state."""
         if hasattr(self, "_scanner_cancel"):
             self._scanner_cancel.set()
+        for flag in list(getattr(self, "_active_thumb_flags", {}).values()):
+            try:
+                flag.set()
+            except Exception:
+                pass
+        if hasattr(self, "_active_thumb_flags"):
+            self._active_thumb_flags.clear()
+        if getattr(self, "_map_view", None) is not None and hasattr(self._map_view, "cancel_pending_thumbnail_work"):
+            self._map_view.cancel_pending_thumbnail_work()
         if hasattr(self, "stop_face_detection"):
             try:
                 self.stop_face_detection()
             except Exception:
                 pass
-        if hasattr(self, "scanner_pool"):
-            self.scanner_pool.waitForDone(2000)
-        if hasattr(self, "thumb_pool"):
-            self.thumb_pool.waitForDone(2000)
+        if getattr(self, "_active_ocr_worker", None) is not None:
+            try:
+                self._active_ocr_worker.cancel()
+            except Exception:
+                pass
+            self._active_ocr_worker = None
+        if hasattr(self, "xmp_daemon"):
+            try:
+                self.xmp_daemon.set_paused(True)
+            except Exception:
+                pass
+        for pool_name in ("scanner_pool", "thumbnail_pool", "face_pool", "priority_face_pool", "ocr_pool"):
+            pool = getattr(self, pool_name, None)
+            if pool is not None:
+                try:
+                    pool.clear()
+                    pool.waitForDone(2000)
+                except Exception:
+                    pass
 
         self.pixmap_cache.clear()
         self._media_meta_lookup.clear()
+        if hasattr(self, "_failed_thumb_ids"):
+            self._failed_thumb_ids.clear()
+        if hasattr(self, "_pending_visible_media_ids"):
+            self._pending_visible_media_ids.clear()
         self._selected_ids = []
         self._lead_selected_id = None
         self._active_map_media_ids = None
@@ -8187,6 +8701,16 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._active_date_label = None
 
         self.engine.reset_all_databases()
+        if hasattr(self, "_scanner_cancel") and not getattr(self, "_workers_paused", False):
+            self._scanner_cancel.clear()
+        if hasattr(self, "xmp_daemon"):
+            try:
+                self.xmp_daemon.set_paused(
+                    bool(getattr(self, "write_back_paused", True))
+                    or bool(getattr(self, "_workers_paused", False))
+                )
+            except Exception:
+                pass
 
         settings = QSettings("PhotoGallery64", "PhotoGallery64")
         for key in ("last_selected_id", "ui/show_private_folders"):
@@ -8461,6 +8985,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._tag_dock_was_visible = self.right_tag_dock.isVisible()
         self.left_nav_dock.hide()
         self.right_tag_dock.hide()
+        if hasattr(self, "bottom_dock") and self.bottom_dock is not None:
+            self.bottom_dock.hide()
 
         # Switch view immediately so the user always sees the Duplicate Finder
         if hasattr(self, "duplicate_finder_view"):
@@ -8651,6 +9177,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._workers_paused = not self._workers_paused
         if self._workers_paused:
             self._scanner_cancel.set()
+            if getattr(self, "_map_view", None) is not None and hasattr(self._map_view, "cancel_pending_thumbnail_work"):
+                self._map_view.cancel_pending_thumbnail_work()
             self.stop_face_detection()
             if getattr(self, "_active_ocr_worker", None) is not None:
                 self._active_ocr_worker.cancel()
@@ -9044,6 +9572,9 @@ class PhotoGalleryMainWindow(QMainWindow):
 
     def trigger_thumbnail_view(self) -> None:
         """Switches to Thumbnail View (Ctrl+0) from Single Image View, All Details mode, or auxiliary views."""
+        if getattr(self, "_active_create_workspace", None) is not None:
+            if not self.close_create_workspace():
+                return
         self._prev_central_widget = None
         if hasattr(self, "_prev_ribbon_tab"):
             delattr(self, "_prev_ribbon_tab")
@@ -9320,6 +9851,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                 getattr(self, "grid_view", None),
                 getattr(self, "media_viewer", None),
                 getattr(self, "right_tag_dock", None),
+                getattr(self, "bottom_dock", None),
+                getattr(self, "_active_create_workspace", None),
                 getattr(self, "person_header_bar", None),
                 getattr(self, "scope_bar", None),
                 getattr(self, "people_directory_view", None),
@@ -9598,6 +10131,20 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.update()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        ws = getattr(self, "_active_create_workspace", None)
+        if ws is not None:
+            if event.key() == Qt.Key_Escape:
+                self.close_create_workspace()
+                event.accept()
+                return
+            if ws.handle_key_press(event):
+                event.accept()
+                return
+            if event.key() in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+                event.accept()
+                return
+            super().keyPressEvent(event)
+            return
         focus_w = QApplication.focusWidget() or self.focusWidget()
         if not focus_w and hasattr(self, "right_tag_dock") and self.right_tag_dock is not None:
             focus_w = self.right_tag_dock.focusWidget()
@@ -9797,22 +10344,28 @@ class PhotoGalleryMainWindow(QMainWindow):
             settings.setValue("windowState", self.saveState())
             filter_state = self.left_nav_dock.current_filter_state()
             settings.setValue("filter_state", json.dumps(filter_state))
-            settings.setValue("tag_dock_visible", not self.right_tag_dock.isHidden())
-            if self.central_stack.currentWidget() == self.media_viewer:
-                settings.setValue("nav_dock_visible", getattr(self, "_nav_dock_was_visible", True))
+            ws_snap = getattr(self, "_create_ws_snapshot", None)
+            if getattr(self, "_active_create_workspace", None) is not None and ws_snap is not None:
+                settings.setValue("tag_dock_visible", bool(ws_snap.get("tag_visible", True)))
+                settings.setValue("nav_dock_visible", bool(ws_snap.get("nav_visible", True)))
+                current_view = "viewer" if ws_snap.get("was_viewer") else "grid"
             else:
-                settings.setValue("nav_dock_visible", not self.left_nav_dock.isHidden())
+                settings.setValue("tag_dock_visible", not self.right_tag_dock.isHidden())
+                if self.central_stack.currentWidget() == self.media_viewer:
+                    settings.setValue("nav_dock_visible", getattr(self, "_nav_dock_was_visible", True))
+                else:
+                    settings.setValue("nav_dock_visible", not self.left_nav_dock.isHidden())
+                current_view = "grid"
+                if self.central_stack.currentWidget() == self.media_viewer:
+                    current_view = "viewer"
+                elif self.central_stack.currentWidget() == self.map_view:
+                    current_view = "map"
+            settings.setValue("filmstrip_visible", bool(getattr(self, "_filmstrip_viewer_enabled", False)))
             settings.setValue("arrange_by", self._arrange_by)
             settings.setValue("reverse_sort", self._reverse_sort)
             settings.setValue("group_by", self._group_by)
             settings.setValue("sort_by", self._sort_by)
             settings.setValue("zoom_val", self.slider_status_zoom.value())
-
-            current_view = "grid"
-            if self.central_stack.currentWidget() == self.media_viewer:
-                current_view = "viewer"
-            elif self.central_stack.currentWidget() == self.map_view:
-                current_view = "map"
             settings.setValue("view_mode", current_view)
 
             lead_id = (
@@ -9896,6 +10449,9 @@ class PhotoGalleryMainWindow(QMainWindow):
             win_state = settings.value("windowState")
             if win_state is not None:
                 self.restoreState(win_state)
+            self._filmstrip_viewer_enabled = str(settings.value("filmstrip_visible", "false")).lower() in ("true", "1")
+            if hasattr(self, "bottom_dock") and self.bottom_dock is not None:
+                self.bottom_dock.hide()
 
             f_json = settings.value("filter_state")
             if f_json and isinstance(f_json, str):
@@ -10046,12 +10602,20 @@ class PhotoGalleryMainWindow(QMainWindow):
         if self._is_shutting_down:
             return
         self._is_shutting_down = True
+        ws = getattr(self, "_active_create_workspace", None)
+        if ws is not None:
+            try:
+                ws.cleanup()
+            except Exception:
+                pass
 
         # 1. Signal cancellation to all workers simultaneously before waiting
         self._scanner_cancel.set()
         for flag in self._active_thumb_flags.values():
             flag.set()
         self._active_thumb_flags.clear()
+        if getattr(self, "_map_view", None) is not None and hasattr(self._map_view, "cancel_pending_thumbnail_work"):
+            self._map_view.cancel_pending_thumbnail_work()
         self.stop_face_detection()
         if hasattr(self, "_monitor_timer") and self._monitor_timer.isActive():
             self._monitor_timer.stop()
@@ -10581,6 +11145,10 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._sync_window_title_for_current_view()
 
     def _sync_window_title_for_current_view(self) -> None:
+        ws = getattr(self, "_active_create_workspace", None)
+        if ws is not None:
+            self.setWindowTitle(f"{ws.display_title} - Essentials Photo Gallery")
+            return
         w = self.central_stack.currentWidget() if hasattr(self, "central_stack") else None
         if w is None:
             return
@@ -10611,6 +11179,10 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.ribbon.lbl_app_title.setText(title)
 
     def closeEvent(self, event) -> None:
+        if getattr(self, "_active_create_workspace", None) is not None:
+            if not self.close_create_workspace():
+                event.ignore()
+                return
         self._save_app_state()
         self.hide()
         self.shutdown()

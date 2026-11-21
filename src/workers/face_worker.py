@@ -26,6 +26,7 @@ from src.core.face_matcher import (
 )
 from src.db.connection import DualDatabaseEngine
 from src.db.repository import CatalogRepository, ThumbnailRepository, _iter_id_chunks
+from src.utils.paths import is_cloud_only_file
 
 logger = logging.getLogger(__name__)
 
@@ -303,6 +304,8 @@ class FaceDetectionWorker(QRunnable):
             if not fpath.exists():
                 self.repo.mark_face_scan_failed([mid])
                 continue
+            if is_cloud_only_file(fpath):
+                continue
 
             try:
                 detected_faces = self.face_engine.detect_and_embed(
@@ -488,7 +491,7 @@ class FaceDetectionWorker(QRunnable):
 
                 first = m_items[0]
                 fpath = Path(first["folder_path"]) / str(first["filename"])
-                if not fpath.exists():
+                if not fpath.exists() or is_cloud_only_file(fpath):
                     continue
 
                 for it in m_items:
@@ -943,6 +946,7 @@ class FaceDetectionWorker(QRunnable):
         )
         self.signals.batch_progressed.emit(already_scanned, progress_total)
 
+        last_seen_id = 0
         while not self._is_cancelled():
             batch_rows = conn.execute(
                 """
@@ -952,10 +956,11 @@ class FaceDetectionWorker(QRunnable):
                 WHERE m.is_missing = 0 AND m.is_video = 0 AND m.face_scan_version >= 0 AND m.face_scan_version < ?
                   AND COALESCE(f.scan_faces, 1) = 1
                   AND COALESCE(f.monitor_mode, 'always') != 'excluded'
+                  AND m.id > ?
                 ORDER BY m.id ASC
                 LIMIT ?;
                 """,
-                (TARGET_FACE_SCAN_VERSION, self.batch_size),
+                (TARGET_FACE_SCAN_VERSION, last_seen_id, self.batch_size),
             ).fetchall()
 
             if not batch_rows:
@@ -967,10 +972,15 @@ class FaceDetectionWorker(QRunnable):
                     break
 
                 mid = int(r["id"])
+                last_seen_id = mid
                 fpath = Path(r["folder_path"]) / str(r["filename"])
 
                 if not fpath.exists():
                     self.repo.mark_face_scan_failed([mid])
+                    processed += 1
+                    continue
+
+                if is_cloud_only_file(fpath):
                     processed += 1
                     continue
 

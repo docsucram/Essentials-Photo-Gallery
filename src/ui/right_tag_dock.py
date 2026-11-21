@@ -54,10 +54,12 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QPolygonF,
+    QRadialGradient,
     QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QColorDialog,
     QComboBox,
     QCompleter,
     QDateEdit,
@@ -65,6 +67,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -98,6 +101,7 @@ from src.core.geotag_resolver import (
 )
 from src.db.repository import _epoch_to_datetime_utc
 from src.ui.ribbon_toolbar import make_person_avatar_pixmap, make_symbol_icon, make_wlpg_icon
+from src.ui.theme_tokens import set_ui_role
 
 
 class _AeroFineTuneSlider(QSlider):
@@ -837,7 +841,8 @@ class _CollapsibleDrawer(QWidget):
     def _refresh_label(self) -> None:
         arrow = "▾" if self._expanded else "▸"
         dot = " ●" if self._has_active else ""
-        self.btn_toggle.setText(f"{arrow}  {self._title}{dot}")
+        safe_title = self._title.replace("&&", "&").replace("&", "&&")
+        self.btn_toggle.setText(f"{arrow}  {safe_title}{dot}")
 
     def _on_toggled(self, checked: bool) -> None:
         self._expanded = bool(checked)
@@ -2455,7 +2460,8 @@ class _FineTuneGroup(QFrame):
         outer.addWidget(self.btn_header)
 
         self.body = QWidget(self)
-        self.body.setStyleSheet("background: transparent; border: none;")
+        self.body.setObjectName("FineTuneGroupBody")
+        self.body.setStyleSheet("QWidget#FineTuneGroupBody { background: transparent; border: none; }")
         self.vbox = QVBoxLayout(self.body)
         self.vbox.setContentsMargins(0, 0, 0, 0)
         self.vbox.setSpacing(4)
@@ -2464,12 +2470,13 @@ class _FineTuneGroup(QFrame):
 
     def _refresh_header(self) -> None:
         dot = " ●" if self._has_active else ""
+        safe_title = self._title.replace("&&", "&").replace("&", "&&")
         if self._collapsible:
             arrow = "▾ " if self._expanded else "▸ "
-            self.btn_header.setText(f"{arrow}{self._title}{dot}")
+            self.btn_header.setText(f"{arrow}{safe_title}{dot}")
             self.btn_header.setCursor(Qt.PointingHandCursor)
         else:
-            self.btn_header.setText(f"{self._title}{dot}")
+            self.btn_header.setText(f"{safe_title}{dot}")
             self.btn_header.setCursor(Qt.ArrowCursor)
 
     def _on_header_clicked(self) -> None:
@@ -2626,6 +2633,107 @@ class WLPGSplitter(QSplitter):
         return handle
 
 
+class _RelightSphereButton(QToolButton):
+    """1-click '3D Relight' look preset button with custom-shaded 3D sphere preview."""
+
+    def __init__(self, preset: dict[str, Any], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.preset = preset
+        c1, c2 = preset.get("preview_colors", ("#ffe8d5", "#23252a"))
+        style = str(preset.get("preview_style", preset.get("id", "")))
+        self._pix = self._render_sphere_pixmap(style, c1, c2)
+        self.setIcon(QIcon(self._pix))
+        self.setIconSize(QSize(32, 32))
+        self.setText(str(preset.get("name", "Look")))
+        self.setCheckable(True)
+        self.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(62)
+        set_ui_role(self, "card")
+        self.setStyleSheet(
+            """
+            QToolButton {
+                font-size: 8pt;
+                padding: 3px 2px;
+                border-radius: 5px;
+                border: 1px solid rgba(128, 145, 165, 0.25);
+            }
+            QToolButton:hover {
+                border-color: rgba(59, 130, 246, 0.65);
+                background: rgba(59, 130, 246, 0.08);
+            }
+            QToolButton:checked {
+                border: 1.5px solid #2563EB;
+                background: rgba(37, 99, 235, 0.16);
+                font-weight: 600;
+            }
+            """
+        )
+
+    @staticmethod
+    def _render_sphere_pixmap(style: str, hi_hex: str, lo_hex: str) -> QPixmap:
+        pix = QPixmap(34, 34)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        sphere_rect = QRectF(2.0, 2.0, 30.0, 30.0)
+        clip = QPainterPath()
+        clip.addEllipse(sphere_rect)
+        p.setClipPath(clip)
+
+        if style == "dual_neon":
+            g_l = QRadialGradient(QPointF(8.0, 17.0), 22.0, QPointF(7.0, 17.0))
+            g_l.setColorAt(0.0, QColor(hi_hex))
+            g_l.setColorAt(0.75, QColor("#181b24"))
+            g_l.setColorAt(1.0, QColor("#12141c"))
+            p.fillRect(sphere_rect, QBrush(g_l))
+            g_r = QRadialGradient(QPointF(26.0, 17.0), 20.0, QPointF(27.0, 17.0))
+            rc = QColor(lo_hex)
+            rc.setAlpha(210)
+            g_r.setColorAt(0.0, rc)
+            rc2 = QColor(lo_hex)
+            rc2.setAlpha(0)
+            g_r.setColorAt(1.0, rc2)
+            p.fillRect(sphere_rect, QBrush(g_r))
+        elif style in ("golden_rim", "moonlit_backlight"):
+            grad = QRadialGradient(QPointF(15.0, 17.0), 17.0, QPointF(14.0, 17.0))
+            grad.setColorAt(0.0, QColor(lo_hex))
+            grad.setColorAt(0.7, QColor("#12151f"))
+            grad.setColorAt(1.0, QColor(hi_hex))
+            p.fillRect(sphere_rect, QBrush(grad))
+            rim_pen = QPen(QColor(hi_hex), 2.8)
+            p.setPen(rim_pen)
+            p.setBrush(Qt.NoBrush)
+            if style == "golden_rim":
+                p.drawArc(sphere_rect.adjusted(1.5, 1.5, -1.5, -1.5), -50 * 16, 120 * 16)
+            else:
+                p.drawArc(sphere_rect.adjusted(1.5, 1.5, -1.5, -1.5), 35 * 16, 110 * 16)
+        elif style == "window_gobo":
+            grad = QRadialGradient(QPointF(11.0, 11.0), 20.0, QPointF(10.0, 10.0))
+            grad.setColorAt(0.0, QColor("#ffffff"))
+            grad.setColorAt(0.35, QColor(hi_hex))
+            grad.setColorAt(1.0, QColor(lo_hex))
+            p.fillRect(sphere_rect, QBrush(grad))
+            p.setPen(QPen(QColor(25, 22, 20, 200), 2.6))
+            p.drawLine(QPointF(17.0, 2.0), QPointF(17.0, 32.0))
+            p.drawLine(QPointF(2.0, 17.0), QPointF(32.0, 17.0))
+        else:
+            fx = 10.0 if style == "warm_streetlamp" else 12.0
+            fy = 9.0 if style == "warm_streetlamp" else 11.0
+            grad = QRadialGradient(QPointF(fx, fy), 20.0, QPointF(fx - 1.0, fy - 1.0))
+            grad.setColorAt(0.0, QColor("#ffffff"))
+            grad.setColorAt(0.30, QColor(hi_hex))
+            grad.setColorAt(1.0, QColor(lo_hex))
+            p.fillRect(sphere_rect, QBrush(grad))
+
+        p.setClipping(False)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(130, 145, 165, 170), 1.1))
+        p.drawEllipse(sphere_rect)
+        p.end()
+        return pix
+
+
 class TagAndCaptionDock(QDockWidget):
     """
     Unified Right Sidebar for PhotoGallery64:
@@ -2691,6 +2799,7 @@ class TagAndCaptionDock(QDockWidget):
     fine_tune_reset_requested = Signal()                           # reset all adjustments to default
     fine_tune_auto_adjust = Signal()
     auto_straighten_requested = Signal()
+    draw_line_straighten_requested = Signal()
     analyze_noise_requested = Signal()
     compare_started = Signal()
     compare_ended = Signal()
@@ -2702,6 +2811,10 @@ class TagAndCaptionDock(QDockWidget):
     # Signals for Depth & Light adjustments
     depth_bokeh_changed = Signal(int, int, int, int, int)    # blur, focal_plane, glow, boundary_shift, boundary_feather
     depth_relight_changed = Signal(int, int, int, int)       # near, far, warmth_near, warmth_far
+    depth_virtual_lights_changed = Signal(int, list, bool)   # ambient_dim, virtual_lights, commit
+    depth_light_gizmos_toggled = Signal(bool)
+    depth_selected_light_changed = Signal(int)
+    depth_relight_clear_requested = Signal()
     depth_haze_changed = Signal(int, int)                    # haze, haze_warmth
     depth_reset_requested = Signal()
     copy_subject_requested = Signal()
@@ -2740,7 +2853,10 @@ class TagAndCaptionDock(QDockWidget):
         self._dl_timer.timeout.connect(self._flush_depth_light_emits)
         self._pending_dl_bokeh = False
         self._pending_dl_relight = False
+        self._pending_dl_virtual_lights = False
         self._pending_dl_haze = False
+        self._dl_virtual_lights: list[dict[str, Any]] = []
+        self._dl_selected_light_idx: int = 0
 
         self._ft_timer = QTimer(self)
         self._ft_timer.setSingleShot(True)
@@ -2828,16 +2944,18 @@ class TagAndCaptionDock(QDockWidget):
         h_layout.addWidget(self.btn_close_dock)
         outer_vbox.addWidget(header_row)
 
-        # Mode Stack: Page 0 = Information & Tags, Page 1 = Fine-Tune, Page 2 = Depth & Light
+        # Mode Stack: Page 0 = Information & Tags, Page 1 = Fine-Tune, Page 2 = Depth & Light, Page 3 = Custom Inspector
         self.mode_stack = QStackedWidget(self.container)
 
         self.page_info = self._build_info_page()
         self.page_fine_tune = self._build_fine_tune_page()
         self.page_depth_light = self._build_depth_light_page()
+        self.page_custom_inspector = self._build_custom_inspector_page()
 
         self.mode_stack.addWidget(self.page_info)
         self.mode_stack.addWidget(self.page_fine_tune)
         self.mode_stack.addWidget(self.page_depth_light)
+        self.mode_stack.addWidget(self.page_custom_inspector)
         outer_vbox.addWidget(self.mode_stack, 1)
 
         self.setWidget(self.container)
@@ -2857,10 +2975,12 @@ class TagAndCaptionDock(QDockWidget):
         super().mousePressEvent(event)
 
     def sizeHint(self) -> QSize:
-        return QSize(310, 600) if getattr(self, "_current_mode", "info") in ("fine_tune", "depth_light") else QSize(280, 600)
+        return QSize(310, 600) if getattr(self, "_current_mode", "info") in ("fine_tune", "depth_light", "custom_inspector") else QSize(280, 600)
 
     def minimumSizeHint(self) -> QSize:
-        min_w = 285 if getattr(self, "_current_mode", "info") in ("fine_tune", "depth_light") else 240
+        min_w = 295 if getattr(self, "_current_mode", "info") == "custom_inspector" else (
+            285 if getattr(self, "_current_mode", "info") in ("fine_tune", "depth_light") else 240
+        )
         return QSize(min_w, 300)
 
     def keyPressEvent(self, event: Any) -> None:
@@ -2873,13 +2993,60 @@ class TagAndCaptionDock(QDockWidget):
             return
         super().keyPressEvent(event)
 
-    def set_mode(self, mode: Literal["info", "fine_tune", "depth_light"]) -> None:
-        """Switches between Tag & Caption (Ctrl+I), Fine-Tune (Ctrl+F), and Depth & Light."""
+    def _build_custom_inspector_page(self) -> QWidget:
+        page = QWidget(self.mode_stack)
+        page.setObjectName("CustomInspectorPage")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(8, 4, 8, 8)
+        lay.setSpacing(6)
+
+        self.lbl_custom_inspector_title = QLabel("", page)
+        self.lbl_custom_inspector_title.setFont(QFont("Segoe UI", 12, QFont.DemiBold))
+        self.lbl_custom_inspector_title.setProperty("uiRole", "heading")
+        self.lbl_custom_inspector_title.hide()
+        lay.addWidget(self.lbl_custom_inspector_title)
+
+        self.custom_inspector_scroll = QScrollArea(page)
+        self.custom_inspector_scroll.setObjectName("StudioInspectorScroll")
+        self.custom_inspector_scroll.setWidgetResizable(True)
+        self.custom_inspector_scroll.setFrameShape(QFrame.NoFrame)
+        lay.addWidget(self.custom_inspector_scroll, 1)
+        return page
+
+    def set_custom_inspector(self, widget: QWidget | None, title: str = "") -> None:
+        """Host an external Create Studio workspace inspector panel inside RightTagDock."""
+        self.clear_custom_inspector()
+        if title:
+            self.lbl_custom_inspector_title.setText(title)
+            self.lbl_custom_inspector_title.show()
+        else:
+            self.lbl_custom_inspector_title.hide()
+        if widget is not None:
+            self.custom_inspector_scroll.setWidget(widget)
+            theme_name = getattr(self, "_theme_name", "dark" if getattr(self, "_is_dark", False) else "wlpg_aero")
+            if hasattr(widget, "apply_theme_mode"):
+                widget.apply_theme_mode(theme_name)
+        self.set_mode("custom_inspector")
+
+    def clear_custom_inspector(self) -> None:
+        """Detach hosted inspector widget cleanly without deleting workspace-owned objects."""
+        if hasattr(self, "custom_inspector_scroll"):
+            old = self.custom_inspector_scroll.takeWidget()
+            if old is not None:
+                old.setParent(None)
+        if hasattr(self, "lbl_custom_inspector_title"):
+            self.lbl_custom_inspector_title.hide()
+
+    def set_mode(self, mode: Literal["info", "fine_tune", "depth_light", "custom_inspector"]) -> None:
+        """Switches between Tag & Caption (Ctrl+I), Fine-Tune (Ctrl+F), Depth & Light, and Custom Inspector."""
         prev_mode = getattr(self, "_current_mode", "info")
         self._current_mode = mode
         if prev_mode == "fine_tune" and mode != "fine_tune":
             self.clear_mask_editing_session()
-        if mode == "depth_light":
+        if mode == "custom_inspector":
+            self.setMinimumWidth(295)
+            self.mode_stack.setCurrentIndex(3)
+        elif mode == "depth_light":
             self.setMinimumWidth(285)
             self.mode_stack.setCurrentIndex(2)
         elif mode == "fine_tune":
@@ -4079,12 +4246,24 @@ class TagAndCaptionDock(QDockWidget):
         self._grp_str = _FineTuneGroup("Straighten photo", content)
         grp_str = self._grp_str
         str_row = QHBoxLayout()
+        str_row.setSpacing(6)
         self.btn_auto_straighten = QPushButton("Auto straighten", grp_str)
         self.btn_auto_straighten.setObjectName("FineTuneActionBtn")
         self.btn_auto_straighten.setFixedHeight(22)
         self.btn_auto_straighten.setCursor(Qt.PointingHandCursor)
         self.btn_auto_straighten.clicked.connect(self.auto_straighten_requested.emit)
         str_row.addWidget(self.btn_auto_straighten)
+
+        self.btn_draw_straighten = QPushButton("", grp_str)
+        self.btn_draw_straighten.setObjectName("FineTuneActionBtn")
+        self.btn_draw_straighten.setIcon(make_wlpg_icon("straighten", 14))
+        self.btn_draw_straighten.setIconSize(QSize(14, 14))
+        self.btn_draw_straighten.setFixedSize(26, 22)
+        self.btn_draw_straighten.setCursor(Qt.PointingHandCursor)
+        self.btn_draw_straighten.setToolTip("Straighten the image by drawing a line on it")
+        self.btn_draw_straighten.clicked.connect(self.draw_line_straighten_requested.emit)
+        str_row.addWidget(self.btn_draw_straighten)
+
         str_row.addStretch(1)
         grp_str.vbox.addLayout(str_row)
 
@@ -5080,7 +5259,12 @@ class TagAndCaptionDock(QDockWidget):
             self.drawer_color_mixer.set_active_indicator(hsl_active)
 
     @staticmethod
-    def _make_slider_header(text: str, slider: _AeroFineTuneSlider | None = None, unit: str = "") -> QWidget:
+    def _make_slider_header(
+        text: str,
+        slider: _AeroFineTuneSlider | None = None,
+        unit: str = "",
+        signed: bool | None = None,
+    ) -> QWidget:
         container = QWidget()
         container.setStyleSheet("background: transparent; border: none;")
         h_layout = QHBoxLayout(container)
@@ -5092,9 +5276,16 @@ class TagAndCaptionDock(QDockWidget):
         h_layout.addWidget(lbl)
         h_layout.addStretch(1)
 
-        val_lbl = QLabel("0" if not unit else f"0{unit}", container)
+        use_signed = (slider.minimum() < 0) if (slider is not None and signed is None) else bool(signed)
+
+        def _fmt(v: int) -> str:
+            prefix = "+" if (use_signed and v > 0) else ""
+            return f"{prefix}{v}{unit}"
+
+        init_val = slider.value() if slider is not None else 0
+        val_lbl = QLabel(_fmt(init_val), container)
         val_lbl.setObjectName("val_lbl")
-        val_lbl.setMinimumWidth(32)
+        val_lbl.setMinimumWidth(42)
         val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         h_layout.addWidget(val_lbl)
 
@@ -5113,8 +5304,7 @@ class TagAndCaptionDock(QDockWidget):
             val_lbl.mouseDoubleClickEvent = on_double_click
 
             def on_val_changed(val: int):
-                prefix = "+" if val > 0 else ""
-                val_lbl.setText(f"{prefix}{val}{unit}")
+                val_lbl.setText(_fmt(val))
 
             slider.valueChanged.connect(on_val_changed)
         return container
@@ -5219,12 +5409,16 @@ class TagAndCaptionDock(QDockWidget):
         vbox.setContentsMargins(6, 2, 6, 8)
         vbox.setSpacing(6)
 
+        self._active_relight_preset_id: str | None = None
+
         # -------------------------------------------------------------
-        # Group 1: Subject Mask & Cutout (Foundational mask for Cutout, Bokeh, Light & Haze)
+        # Group 1: Subject Mask & Cutout (Collapsible)
         # -------------------------------------------------------------
         grp_cutout = _FineTuneGroup("Subject Mask & Cutout", content)
+        grp_cutout.set_collapsible(True)
+        grp_cutout.set_expanded(True)
+        self._dl_grp_cutout = grp_cutout
 
-        # Top row: Primary 1-Click Action Buttons with authentic icons
         cutout_row = QHBoxLayout()
         cutout_row.setSpacing(6)
         cutout_row.setContentsMargins(0, 2, 0, 4)
@@ -5255,7 +5449,6 @@ class TagAndCaptionDock(QDockWidget):
 
         grp_cutout.vbox.addLayout(cutout_row)
 
-        # Boundary Shift & Feather Controls (affects subject cutout, bokeh, light & haze)
         self.dl_slider_boundary_shift = self._make_aero_slider(-20, 20, 0)
         grp_cutout.vbox.addWidget(
             self._make_slider_header("Boundary shift (shrink / grow)", self.dl_slider_boundary_shift)
@@ -5268,7 +5461,6 @@ class TagAndCaptionDock(QDockWidget):
         )
         grp_cutout.vbox.addWidget(self.dl_slider_boundary_feather)
 
-        # Live Mask Preview checkbox button
         mask_row = QHBoxLayout()
         mask_row.setContentsMargins(0, 2, 0, 0)
         self.btn_toggle_mask_preview = QPushButton("Preview Subject Mask", grp_cutout)
@@ -5277,29 +5469,6 @@ class TagAndCaptionDock(QDockWidget):
         self.btn_toggle_mask_preview.setCursor(Qt.PointingHandCursor)
         self.btn_toggle_mask_preview.setToolTip(
             "Show semi-transparent ruby mask overlay to verify edge alignment"
-        )
-        self.btn_toggle_mask_preview.setStyleSheet(
-            """
-            QPushButton {
-                background: #F7FAFD;
-                border: 1px solid #C8D6E5;
-                border-radius: 2px;
-                color: #5A7A9E;
-                font-family: 'Segoe UI';
-                font-size: 7.5pt;
-                font-weight: 600;
-                padding: 1px 6px;
-            }
-            QPushButton:hover {
-                background: #EBF3FB;
-                color: #0066CC;
-            }
-            QPushButton:checked {
-                background: #FFE8E8;
-                border-color: #D9534F;
-                color: #C9302C;
-            }
-            """
         )
         self.btn_toggle_mask_preview.toggled.connect(self.mask_preview_toggled.emit)
         mask_row.addWidget(self.btn_toggle_mask_preview)
@@ -5320,19 +5489,23 @@ class TagAndCaptionDock(QDockWidget):
         vbox.addWidget(grp_cutout)
 
         # -------------------------------------------------------------
-        # Group 2: Portrait Bokeh & Focus
+        # Group 2: Portrait Bokeh & Focus (Collapsible)
         # -------------------------------------------------------------
         grp_bokeh = _FineTuneGroup("Portrait Bokeh & Focus", content)
+        grp_bokeh.set_collapsible(True)
+        grp_bokeh.set_expanded(False)
+        self._dl_grp_bokeh = grp_bokeh
+
         self.dl_slider_blur = self._make_aero_slider(0, 100, 0)
-        grp_bokeh.vbox.addWidget(self._make_slider_header("Bokeh blur strength", self.dl_slider_blur))
+        grp_bokeh.vbox.addWidget(self._make_slider_header("Bokeh blur strength", self.dl_slider_blur, unit="%"))
         grp_bokeh.vbox.addWidget(self.dl_slider_blur)
 
         self.dl_slider_focal = self._make_aero_slider(0, 100, 0)
-        grp_bokeh.vbox.addWidget(self._make_slider_header("Change focal depth", self.dl_slider_focal))
+        grp_bokeh.vbox.addWidget(self._make_slider_header("Change focal depth", self.dl_slider_focal, unit="%"))
         grp_bokeh.vbox.addWidget(self.dl_slider_focal)
 
         self.dl_slider_glow = self._make_aero_slider(0, 100, 0)
-        grp_bokeh.vbox.addWidget(self._make_slider_header("Specular highlight bloom", self.dl_slider_glow))
+        grp_bokeh.vbox.addWidget(self._make_slider_header("Specular highlight bloom", self.dl_slider_glow, unit="%"))
         grp_bokeh.vbox.addWidget(self.dl_slider_glow)
 
         for s in (self.dl_slider_blur, self.dl_slider_focal, self.dl_slider_glow):
@@ -5343,42 +5516,19 @@ class TagAndCaptionDock(QDockWidget):
         vbox.addWidget(grp_bokeh)
 
         # -------------------------------------------------------------
-        # Group 3: 3D Depth Relighting
-        # -------------------------------------------------------------
-        grp_relight = _FineTuneGroup("3D Depth Relighting", content)
-        self.dl_slider_near = self._make_aero_slider(-100, 100, 0)
-        grp_relight.vbox.addWidget(self._make_slider_header("Near subject light", self.dl_slider_near))
-        grp_relight.vbox.addWidget(self.dl_slider_near)
-
-        self.dl_slider_far = self._make_aero_slider(-100, 100, 0)
-        grp_relight.vbox.addWidget(self._make_slider_header("Background light", self.dl_slider_far))
-        grp_relight.vbox.addWidget(self.dl_slider_far)
-
-        self.dl_slider_warmth_near = self._make_aero_slider(-100, 100, 0)
-        grp_relight.vbox.addWidget(self._make_slider_header("Near subject warmth", self.dl_slider_warmth_near))
-        grp_relight.vbox.addWidget(self.dl_slider_warmth_near)
-
-        self.dl_slider_warmth_far = self._make_aero_slider(-100, 100, 0)
-        grp_relight.vbox.addWidget(self._make_slider_header("Background warmth", self.dl_slider_warmth_far))
-        grp_relight.vbox.addWidget(self.dl_slider_warmth_far)
-
-        for s in (self.dl_slider_near, self.dl_slider_far, self.dl_slider_warmth_near, self.dl_slider_warmth_far):
-            s.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
-            s.valueChanged.connect(self._emit_depth_relight)
-            s.sliderReleased.connect(lambda: self._on_depth_slider_released("3D Depth Relighting"))
-
-        vbox.addWidget(grp_relight)
-
-        # -------------------------------------------------------------
-        # Group 4: Atmospheric Depth Haze
+        # Group 3: Atmospheric Depth Haze (Collapsible)
         # -------------------------------------------------------------
         grp_haze = _FineTuneGroup("Atmospheric Depth Haze", content)
+        grp_haze.set_collapsible(True)
+        grp_haze.set_expanded(False)
+        self._dl_grp_haze = grp_haze
+
         self.dl_slider_haze = self._make_aero_slider(0, 100, 0)
-        grp_haze.vbox.addWidget(self._make_slider_header("Atmospheric haze / mist", self.dl_slider_haze))
+        grp_haze.vbox.addWidget(self._make_slider_header("Atmospheric haze / mist", self.dl_slider_haze, unit="%"))
         grp_haze.vbox.addWidget(self.dl_slider_haze)
 
         self.dl_slider_haze_warmth = self._make_aero_slider(-100, 100, 0)
-        grp_haze.vbox.addWidget(self._make_slider_header("Haze warmth (Blue <-> Amber)", self.dl_slider_haze_warmth))
+        grp_haze.vbox.addWidget(self._make_slider_header("Haze warmth (Blue ↔ Amber)", self.dl_slider_haze_warmth))
         grp_haze.vbox.addWidget(self.dl_slider_haze_warmth)
 
         for s in (self.dl_slider_haze, self.dl_slider_haze_warmth):
@@ -5388,7 +5538,294 @@ class TagAndCaptionDock(QDockWidget):
 
         vbox.addWidget(grp_haze)
 
-        # Bottom Actions: Hold to Compare & Reset stacked cleanly to prevent horizontal overflow
+        # -------------------------------------------------------------
+        # Group 4: Near & Far Fill (Separate Collapsible Section above 3D Relight)
+        # -------------------------------------------------------------
+        grp_near_far = _FineTuneGroup("Near & Far Fill", content)
+        grp_near_far.set_collapsible(True)
+        grp_near_far.set_expanded(False)
+        self._dl_grp_near_far = grp_near_far
+
+        self.dl_slider_near = self._make_aero_slider(-100, 100, 0)
+        grp_near_far.vbox.addWidget(self._make_slider_header("Near subject light", self.dl_slider_near))
+        grp_near_far.vbox.addWidget(self.dl_slider_near)
+
+        self.dl_slider_far = self._make_aero_slider(-100, 100, 0)
+        grp_near_far.vbox.addWidget(self._make_slider_header("Background light", self.dl_slider_far))
+        grp_near_far.vbox.addWidget(self.dl_slider_far)
+
+        self.dl_slider_warmth_near = self._make_aero_slider(-100, 100, 0)
+        grp_near_far.vbox.addWidget(self._make_slider_header("Near subject warmth", self.dl_slider_warmth_near))
+        grp_near_far.vbox.addWidget(self.dl_slider_warmth_near)
+
+        self.dl_slider_warmth_far = self._make_aero_slider(-100, 100, 0)
+        grp_near_far.vbox.addWidget(self._make_slider_header("Background warmth", self.dl_slider_warmth_far))
+        grp_near_far.vbox.addWidget(self.dl_slider_warmth_far)
+
+        for s in (self.dl_slider_near, self.dl_slider_far, self.dl_slider_warmth_near, self.dl_slider_warmth_far):
+            s.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+            s.valueChanged.connect(self._emit_depth_relight)
+            s.sliderReleased.connect(lambda: self._on_depth_slider_released("Near & Far Fill"))
+
+        vbox.addWidget(grp_near_far)
+
+        # -------------------------------------------------------------
+        # Group 5 (LAST): 3D Relight (Collapsible)
+        # -------------------------------------------------------------
+        grp_relight = _FineTuneGroup("3D Relight", content)
+        grp_relight.set_collapsible(True)
+        grp_relight.set_expanded(True)
+        self._dl_grp_relight = grp_relight
+
+        from src.imaging.creative_effects import RELIGHT_LOOK_PRESETS
+
+        presets_hdr = QHBoxLayout()
+        presets_hdr.setSpacing(4)
+        lbl_looks = QLabel("Presets", grp_relight)
+        set_ui_role(lbl_looks, "muted")
+        presets_hdr.addWidget(lbl_looks)
+        presets_hdr.addStretch(1)
+
+        self.btn_dl_clear_relight = QPushButton("Clear", grp_relight)
+        self.btn_dl_clear_relight.setFixedHeight(22)
+        self.btn_dl_clear_relight.setCursor(Qt.PointingHandCursor)
+        self.btn_dl_clear_relight.setToolTip("Reset all 3D Relight presets, virtual lights, and near/far fill")
+        self.btn_dl_clear_relight.clicked.connect(self._on_clear_relight_clicked)
+        presets_hdr.addWidget(self.btn_dl_clear_relight)
+        grp_relight.vbox.addLayout(presets_hdr)
+
+        looks_grid = QGridLayout()
+        looks_grid.setSpacing(5)
+        self.dl_look_buttons: list[_RelightSphereButton] = []
+        for idx, preset in enumerate(RELIGHT_LOOK_PRESETS):
+            btn_look = _RelightSphereButton(preset, grp_relight)
+            btn_look.setToolTip(f"Apply {preset['name']} 3D lighting preset")
+            btn_look.clicked.connect(lambda _=False, pr=preset: self._apply_relight_look_preset(pr))
+            looks_grid.addWidget(btn_look, idx // 3, idx % 3)
+            self.dl_look_buttons.append(btn_look)
+        grp_relight.vbox.addLayout(looks_grid)
+
+        self.dl_slider_original_light = self._make_aero_slider(0, 100, 100)
+        self.dl_slider_original_light.setToolTip(
+            "Original scene brightness (100% = untouched; drag left to darken ambient light)"
+        )
+        grp_relight.vbox.addWidget(
+            self._make_slider_header("Original light", self.dl_slider_original_light, unit="%", signed=False)
+        )
+        grp_relight.vbox.addWidget(self.dl_slider_original_light)
+        self.dl_slider_original_light.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+        self.dl_slider_original_light.valueChanged.connect(self._emit_depth_virtual_lights)
+        self.dl_slider_original_light.sliderReleased.connect(
+            lambda: self._on_depth_slider_released("3D Relight")
+        )
+
+        # Row 1: Light Slots (colored dots) + Add + Gizmos
+        slot_btn_qss = """
+            QPushButton {
+                padding: 2px 8px;
+                border-radius: 4px;
+                font-size: 8.5pt;
+                font-weight: 600;
+            }
+            QPushButton:checked {
+                background: rgba(37, 99, 235, 0.22);
+                border: 1.5px solid #2563EB;
+            }
+        """
+
+        vlight_bar = QHBoxLayout()
+        vlight_bar.setSpacing(4)
+        self.dl_light_slot_btns: list[QPushButton] = []
+        for slot_i in range(3):
+            b_slot = QPushButton(f"{slot_i + 1}", grp_relight)
+            b_slot.setCheckable(True)
+            b_slot.setFixedHeight(26)
+            b_slot.setMinimumWidth(42)
+            b_slot.setCursor(Qt.PointingHandCursor)
+            b_slot.setStyleSheet(slot_btn_qss)
+            b_slot.setVisible(False)
+            b_slot.clicked.connect(lambda _=False, s_idx=slot_i: self._select_virtual_light_slot(s_idx))
+            vlight_bar.addWidget(b_slot)
+            self.dl_light_slot_btns.append(b_slot)
+
+        self.btn_dl_add_light = QPushButton("+ Add", grp_relight)
+        self.btn_dl_add_light.setFixedHeight(26)
+        self.btn_dl_add_light.setMinimumWidth(56)
+        self.btn_dl_add_light.setCursor(Qt.PointingHandCursor)
+        self.btn_dl_add_light.setToolTip("Add a virtual 3D light (up to 3)")
+        self.btn_dl_add_light.clicked.connect(self._on_add_virtual_light_clicked)
+        vlight_bar.addWidget(self.btn_dl_add_light)
+
+        vlight_bar.addStretch(1)
+
+        self.btn_dl_show_gizmos = QPushButton("Gizmos", grp_relight)
+        self.btn_dl_show_gizmos.setCheckable(True)
+        self.btn_dl_show_gizmos.setChecked(True)
+        self.btn_dl_show_gizmos.setFixedHeight(26)
+        self.btn_dl_show_gizmos.setMinimumWidth(58)
+        self.btn_dl_show_gizmos.setStyleSheet(slot_btn_qss)
+        self.btn_dl_show_gizmos.setCursor(Qt.PointingHandCursor)
+        self.btn_dl_show_gizmos.setToolTip("Show / hide draggable 3D light handles on photo")
+        self.btn_dl_show_gizmos.toggled.connect(self.depth_light_gizmos_toggled.emit)
+        vlight_bar.addWidget(self.btn_dl_show_gizmos)
+        grp_relight.vbox.addLayout(vlight_bar)
+
+        # Active Light Inspector
+        self.dl_light_editor_box = QWidget(grp_relight)
+        ed_lay = QVBoxLayout(self.dl_light_editor_box)
+        ed_lay.setContentsMargins(0, 6, 0, 2)
+        ed_lay.setSpacing(6)
+
+        # Row 2: Full-width Type Segmented Control (Point | Spot | Rim)
+        type_seg_row = QHBoxLayout()
+        type_seg_row.setSpacing(4)
+        self.btn_dl_type_point = QPushButton("Point", self.dl_light_editor_box)
+        self.btn_dl_type_spot = QPushButton("Spot", self.dl_light_editor_box)
+        self.btn_dl_type_rim = QPushButton("Rim", self.dl_light_editor_box)
+        self._dl_type_btns = {
+            "point": self.btn_dl_type_point,
+            "spot": self.btn_dl_type_spot,
+            "rim": self.btn_dl_type_rim,
+        }
+        for key, b_t in self._dl_type_btns.items():
+            b_t.setCheckable(True)
+            b_t.setFixedHeight(24)
+            b_t.setCursor(Qt.PointingHandCursor)
+            b_t.setStyleSheet(slot_btn_qss)
+            b_t.clicked.connect(lambda _=False, k=key: self._set_active_light_type(k))
+            type_seg_row.addWidget(b_t, 1)
+        ed_lay.addLayout(type_seg_row)
+
+        # Row 3: Uncramped Light On/Off + Delete Light
+        state_row = QHBoxLayout()
+        state_row.setSpacing(6)
+        self.btn_dl_light_enabled = QPushButton("Light On", self.dl_light_editor_box)
+        self.btn_dl_light_enabled.setCheckable(True)
+        self.btn_dl_light_enabled.setChecked(True)
+        self.btn_dl_light_enabled.setFixedHeight(24)
+        self.btn_dl_light_enabled.setStyleSheet(slot_btn_qss)
+        self.btn_dl_light_enabled.setCursor(Qt.PointingHandCursor)
+        self.btn_dl_light_enabled.setToolTip("Temporarily toggle this light on or off")
+        self.btn_dl_light_enabled.clicked.connect(self._on_light_enabled_toggled)
+        state_row.addWidget(self.btn_dl_light_enabled, 1)
+
+        self.btn_dl_remove_light = QPushButton("Delete Light", self.dl_light_editor_box)
+        self.btn_dl_remove_light.setFixedHeight(24)
+        self.btn_dl_remove_light.setCursor(Qt.PointingHandCursor)
+        self.btn_dl_remove_light.setToolTip("Remove the selected virtual light")
+        self.btn_dl_remove_light.clicked.connect(self._on_remove_virtual_light_clicked)
+        state_row.addWidget(self.btn_dl_remove_light, 1)
+        ed_lay.addLayout(state_row)
+
+        # Row 4: Color + Swatches + Auto K
+        col_row = QHBoxLayout()
+        col_row.setSpacing(4)
+        col_row.addWidget(QLabel("Color", self.dl_light_editor_box))
+        self.btn_dl_light_color = QPushButton("", self.dl_light_editor_box)
+        self.btn_dl_light_color.setFixedSize(26, 20)
+        self.btn_dl_light_color.setToolTip("Pick custom light color")
+        self.btn_dl_light_color.clicked.connect(self._on_pick_virtual_light_color)
+        col_row.addWidget(self.btn_dl_light_color)
+        for sw_hex in ("#ff7e28", "#ffb85c", "#ffe8d5", "#ffffff", "#00e5ff", "#ff2a9d"):
+            b_sw = QPushButton("", self.dl_light_editor_box)
+            b_sw.setFixedSize(16, 16)
+            b_sw.setStyleSheet(f"background-color: {sw_hex}; border: 1px solid #64748B; border-radius: 3px;")
+            b_sw.setToolTip(f"Set color {sw_hex}")
+            b_sw.clicked.connect(lambda _=False, hx=sw_hex: self._apply_swatch_to_active_light(hx))
+            col_row.addWidget(b_sw)
+        col_row.addStretch(1)
+        self.btn_dl_color_kelvin_reset = QPushButton("Auto K", self.dl_light_editor_box)
+        self.btn_dl_color_kelvin_reset.setFixedHeight(22)
+        self.btn_dl_color_kelvin_reset.setCursor(Qt.PointingHandCursor)
+        self.btn_dl_color_kelvin_reset.setToolTip("Clear custom swatch color and use Kelvin temperature")
+        self.btn_dl_color_kelvin_reset.clicked.connect(self._on_clear_light_color_override)
+        col_row.addWidget(self.btn_dl_color_kelvin_reset)
+        ed_lay.addLayout(col_row)
+
+        # Essential Light Sliders (unsigned formatted readouts)
+        self.dl_slider_light_kelvin = self._make_aero_slider(1800, 10000, 4500)
+        ed_lay.addWidget(self._make_slider_header("Temperature", self.dl_slider_light_kelvin, unit="K", signed=False))
+        ed_lay.addWidget(self.dl_slider_light_kelvin)
+
+        self.dl_slider_light_intensity = self._make_aero_slider(0, 100, 70)
+        ed_lay.addWidget(self._make_slider_header("Intensity", self.dl_slider_light_intensity, unit="%", signed=False))
+        ed_lay.addWidget(self.dl_slider_light_intensity)
+
+        self.dl_slider_light_softness = self._make_aero_slider(0, 100, 45)
+        ed_lay.addWidget(self._make_slider_header("Softness", self.dl_slider_light_softness, unit="%", signed=False))
+        ed_lay.addWidget(self.dl_slider_light_softness)
+
+        self.dl_slider_light_z = self._make_aero_slider(0, 100, 25)
+        ed_lay.addWidget(self._make_slider_header("Distance (Close ↔ Far)", self.dl_slider_light_z, unit="%", signed=False))
+        ed_lay.addWidget(self.dl_slider_light_z)
+
+        # Conditional Spot Cone Slider (hidden unless type == "spot")
+        self.dl_spot_cone_container = QWidget(self.dl_light_editor_box)
+        cone_lay = QVBoxLayout(self.dl_spot_cone_container)
+        cone_lay.setContentsMargins(0, 0, 0, 0)
+        cone_lay.setSpacing(2)
+        self.dl_slider_light_cone = self._make_aero_slider(10, 90, 40)
+        cone_lay.addWidget(self._make_slider_header("Spot cone", self.dl_slider_light_cone, unit="°", signed=False))
+        cone_lay.addWidget(self.dl_slider_light_cone)
+        self.dl_spot_cone_container.setVisible(False)
+        ed_lay.addWidget(self.dl_spot_cone_container)
+
+        # Collapsible Fine Shaping Drawer (Gloss, Depth range, Light Pattern)
+        self.dl_drawer_shaping = _CollapsibleDrawer("Fine Shaping (Gloss, Depth, Pattern)", self.dl_light_editor_box, expanded=False)
+        self.dl_slider_light_gloss = self._make_aero_slider(0, 100, 30)
+        self.dl_drawer_shaping.body_layout.addWidget(
+            self._make_slider_header("Gloss / Specular", self.dl_slider_light_gloss, unit="%", signed=False)
+        )
+        self.dl_drawer_shaping.body_layout.addWidget(self.dl_slider_light_gloss)
+
+        self.dl_slider_light_depth_from = self._make_aero_slider(0, 100, 0)
+        self.dl_drawer_shaping.body_layout.addWidget(
+            self._make_slider_header("Depth range: From", self.dl_slider_light_depth_from, unit="%", signed=False)
+        )
+        self.dl_drawer_shaping.body_layout.addWidget(self.dl_slider_light_depth_from)
+
+        self.dl_slider_light_depth_to = self._make_aero_slider(0, 100, 100)
+        self.dl_drawer_shaping.body_layout.addWidget(
+            self._make_slider_header("Depth range: To", self.dl_slider_light_depth_to, unit="%", signed=False)
+        )
+        self.dl_drawer_shaping.body_layout.addWidget(self.dl_slider_light_depth_to)
+
+        gobo_row = QHBoxLayout()
+        gobo_row.setSpacing(6)
+        lbl_pattern = QLabel("Pattern:", self.dl_drawer_shaping)
+        lbl_pattern.setToolTip("Projects a shaped shadow pattern (like window frames or blinds) from this light")
+        gobo_row.addWidget(lbl_pattern)
+        self.cmb_dl_light_gobo = QComboBox(self.dl_drawer_shaping)
+        self.cmb_dl_light_gobo.setToolTip("Projects a shaped shadow pattern (like window frames or blinds) from this light")
+        self.cmb_dl_light_gobo.addItem("None", "none")
+        self.cmb_dl_light_gobo.addItem("Venetian Blinds", "blinds")
+        self.cmb_dl_light_gobo.addItem("Window Frame", "window")
+        self.cmb_dl_light_gobo.addItem("Tree Foliage", "foliage")
+        self.cmb_dl_light_gobo.currentIndexChanged.connect(self._on_virtual_light_combo_or_color_changed)
+        gobo_row.addWidget(self.cmb_dl_light_gobo, 1)
+        self.dl_drawer_shaping.body_layout.addLayout(gobo_row)
+        ed_lay.addWidget(self.dl_drawer_shaping)
+
+        for sl in (
+            self.dl_slider_light_kelvin,
+            self.dl_slider_light_intensity,
+            self.dl_slider_light_softness,
+            self.dl_slider_light_z,
+            self.dl_slider_light_gloss,
+            self.dl_slider_light_cone,
+            self.dl_slider_light_depth_from,
+            self.dl_slider_light_depth_to,
+        ):
+            sl.sliderPressed.connect(self.fine_tune_slider_pressed.emit)
+            sl.valueChanged.connect(self._on_virtual_light_slider_changed)
+            sl.sliderReleased.connect(lambda: self._on_depth_slider_released("Adjust Virtual Light"))
+
+        self.dl_light_editor_box.setVisible(False)
+        grp_relight.vbox.addWidget(self.dl_light_editor_box)
+
+        vbox.addWidget(grp_relight)
+
+        # Bottom Actions
         action_bar = QVBoxLayout()
         action_bar.setSpacing(5)
         action_bar.setContentsMargins(0, 4, 0, 4)
@@ -5402,11 +5839,11 @@ class TagAndCaptionDock(QDockWidget):
         self.btn_dl_hold_compare.released.connect(self.compare_ended.emit)
         action_bar.addWidget(self.btn_dl_hold_compare)
 
-        self.btn_dl_reset = QPushButton("Reset to Default", content)
+        self.btn_dl_reset = QPushButton("Reset All Depth && Light", content)
         self.btn_dl_reset.setObjectName("FineTuneResetBtn")
         self.btn_dl_reset.setFixedHeight(26)
         self.btn_dl_reset.setCursor(Qt.PointingHandCursor)
-        self.btn_dl_reset.setToolTip("Reset all depth, blur, relight, and haze adjustments to default")
+        self.btn_dl_reset.setToolTip("Reset all cutout, bokeh, haze, and 3D Relight adjustments")
         self.btn_dl_reset.clicked.connect(self.depth_reset_requested.emit)
         action_bar.addWidget(self.btn_dl_reset)
 
@@ -5615,6 +6052,25 @@ class TagAndCaptionDock(QDockWidget):
         if not self._ft_timer.isActive():
             self._ft_timer.start()
 
+    def sync_straighten_angle(self, angle_deg: float) -> None:
+        """Synchronize the Fine Tune straighten slider with live Crop & Straighten adjustments."""
+        if not hasattr(self, "ft_slider_straighten"):
+            return
+        val = int(round(max(-15.0, min(15.0, float(angle_deg)))))
+        self.ft_slider_straighten.blockSignals(True)
+        self.ft_slider_straighten.setValue(val)
+        self.ft_slider_straighten.blockSignals(False)
+        hdr = getattr(self.ft_slider_straighten, "_header_widget", None)
+        if hdr is not None:
+            val_lbl = hdr.findChild(QLabel, "val_lbl")
+            if val_lbl is not None:
+                if abs(float(angle_deg)) < 0.05:
+                    val_lbl.setText("0°")
+                else:
+                    val_lbl.setText(f"{float(angle_deg):+.1f}°")
+        if hasattr(self, "_grp_str"):
+            self._grp_str.set_active_indicator(abs(float(angle_deg)) >= 0.05)
+
     def _emit_fine_tune_straighten(self) -> None:
         self._refresh_group_indicators()
         if self._updating_ui:
@@ -5787,6 +6243,332 @@ class TagAndCaptionDock(QDockWidget):
         if not self._dl_timer.isActive():
             self._dl_timer.start()
 
+    def _emit_depth_virtual_lights(self) -> None:
+        if self._updating_ui:
+            return
+        if not getattr(self, "_is_sliding_depth", False):
+            self._is_sliding_depth = True
+            self.fine_tune_slider_pressed.emit()
+        self._pending_dl_virtual_lights = True
+        if not self._dl_timer.isActive():
+            self._dl_timer.start()
+
+    @staticmethod
+    def _make_color_dot_icon(rgb: tuple[int, int, int]) -> QIcon:
+        pix = QPixmap(10, 10)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setBrush(QBrush(QColor(rgb[0], rgb[1], rgb[2])))
+        p.setPen(QPen(QColor(30, 41, 59, 180), 1.0))
+        p.drawEllipse(QRectF(1.0, 1.0, 8.0, 8.0))
+        p.end()
+        return QIcon(pix)
+
+    def _ambient_dim_value(self) -> int:
+        if hasattr(self, "dl_slider_original_light"):
+            return max(0, min(100, 100 - int(self.dl_slider_original_light.value())))
+        return 0
+
+    def _refresh_depth_light_group_indicators(self) -> None:
+        if hasattr(self, "_dl_grp_cutout"):
+            has_cutout = (
+                self.dl_slider_boundary_shift.value() != 0
+                or self.dl_slider_boundary_feather.value() != 0
+            )
+            self._dl_grp_cutout.set_active_indicator(has_cutout)
+        if hasattr(self, "_dl_grp_bokeh"):
+            has_bokeh = (
+                self.dl_slider_blur.value() > 0
+                or self.dl_slider_focal.value() > 0
+                or self.dl_slider_glow.value() > 0
+            )
+            self._dl_grp_bokeh.set_active_indicator(has_bokeh)
+        if hasattr(self, "_dl_grp_haze"):
+            has_haze = self.dl_slider_haze.value() > 0 or self.dl_slider_haze_warmth.value() != 0
+            self._dl_grp_haze.set_active_indicator(has_haze)
+        has_near_far = any(
+            getattr(self, a).value() != 0
+            for a in ("dl_slider_near", "dl_slider_far", "dl_slider_warmth_near", "dl_slider_warmth_far")
+            if hasattr(self, a)
+        )
+        if hasattr(self, "_dl_grp_near_far"):
+            self._dl_grp_near_far.set_active_indicator(has_near_far)
+        has_relight = bool(self._dl_virtual_lights) or self._ambient_dim_value() > 0
+        if hasattr(self, "_dl_grp_relight"):
+            self._dl_grp_relight.set_active_indicator(has_relight)
+        if hasattr(self, "dl_drawer_shaping") and self._dl_virtual_lights:
+            lt = self._dl_virtual_lights[self._dl_selected_light_idx]
+            has_shape = (
+                int(round(float(lt.get("gloss", 30.0)))) != 30
+                or int(round(float(lt.get("depth_from", 0.0)) * 100.0)) != 0
+                or int(round(float(lt.get("depth_to", 1.0)) * 100.0)) != 100
+                or str(lt.get("gobo", "none")).lower() != "none"
+            )
+            self.dl_drawer_shaping.set_active_indicator(has_shape)
+
+    def _refresh_virtual_lights_ui(self) -> None:
+        from src.imaging.creative_effects import light_color_srgb
+
+        lights = self._dl_virtual_lights
+        if lights:
+            self._dl_selected_light_idx = max(0, min(len(lights) - 1, self._dl_selected_light_idx))
+        else:
+            self._dl_selected_light_idx = 0
+
+        for idx, btn in enumerate(getattr(self, "dl_light_slot_btns", [])):
+            has_slot = idx < len(lights)
+            btn.setVisible(has_slot)
+            if has_slot:
+                btn.blockSignals(True)
+                btn.setChecked(idx == self._dl_selected_light_idx)
+                btn.setIcon(self._make_color_dot_icon(light_color_srgb(lights[idx])))
+                btn.setIconSize(QSize(10, 10))
+                btn.setText(f"{idx + 1}")
+                btn.blockSignals(False)
+
+        for b_look in getattr(self, "dl_look_buttons", []):
+            pid = str(b_look.preset.get("id", ""))
+            b_look.blockSignals(True)
+            b_look.setChecked(pid == self._active_relight_preset_id and bool(lights))
+            b_look.blockSignals(False)
+
+        if hasattr(self, "btn_dl_add_light"):
+            self.btn_dl_add_light.setEnabled(len(lights) < 3)
+        if hasattr(self, "dl_light_editor_box"):
+            self.dl_light_editor_box.setVisible(len(lights) > 0)
+
+        self._refresh_depth_light_group_indicators()
+        if not lights:
+            return
+
+        lt = lights[self._dl_selected_light_idx]
+        prev = self._updating_ui
+        self._updating_ui = True
+        try:
+            ltype = str(lt.get("type", "point")).lower()
+            for t_key, b_t in getattr(self, "_dl_type_btns", {}).items():
+                b_t.blockSignals(True)
+                b_t.setChecked(t_key == ltype)
+                b_t.blockSignals(False)
+
+            if hasattr(self, "btn_dl_light_enabled"):
+                self.btn_dl_light_enabled.blockSignals(True)
+                self.btn_dl_light_enabled.setChecked(bool(lt.get("enabled", True)))
+                self.btn_dl_light_enabled.setText("Light On" if lt.get("enabled", True) else "Light Off")
+                self.btn_dl_light_enabled.blockSignals(False)
+
+            gobo = str(lt.get("gobo", "none")).lower()
+            idx_g = self.cmb_dl_light_gobo.findData(gobo)
+            self.cmb_dl_light_gobo.setCurrentIndex(max(0, idx_g))
+
+            self.dl_slider_light_kelvin.setValue(int(round(float(lt.get("kelvin", 4500)))))
+            self.dl_slider_light_intensity.setValue(int(round(float(lt.get("intensity", 70.0)))))
+            self.dl_slider_light_softness.setValue(int(round(float(lt.get("softness", 45.0)))))
+            self.dl_slider_light_z.setValue(int(round(float(lt.get("z", 0.25)) * 100.0)))
+            self.dl_slider_light_gloss.setValue(int(round(float(lt.get("gloss", 30.0)))))
+            self.dl_slider_light_cone.setValue(int(round(float(lt.get("cone_angle", 40.0)))))
+            if hasattr(self, "dl_spot_cone_container"):
+                self.dl_spot_cone_container.setVisible(ltype == "spot")
+            self.dl_slider_light_depth_from.setValue(int(round(float(lt.get("depth_from", 0.0)) * 100.0)))
+            self.dl_slider_light_depth_to.setValue(int(round(float(lt.get("depth_to", 1.0)) * 100.0)))
+
+            r_c, g_c, b_c = light_color_srgb(lt)
+            self.btn_dl_light_color.setStyleSheet(
+                f"background-color: rgb({r_c}, {g_c}, {b_c}); border: 1px solid #64748B; border-radius: 3px;"
+            )
+            self._refresh_depth_light_group_indicators()
+        finally:
+            self._updating_ui = prev
+
+    def _apply_relight_look_preset(self, preset: dict[str, Any]) -> None:
+        from src.imaging.creative_effects import make_default_virtual_light
+
+        self._active_relight_preset_id = str(preset.get("id", "")) or None
+        self._dl_virtual_lights = [make_default_virtual_light(**lt) for lt in preset.get("lights", [])][:3]
+        self._dl_selected_light_idx = 0
+        self._updating_ui = True
+        try:
+            if hasattr(self, "dl_slider_original_light"):
+                dim_v = int(round(float(preset.get("ambient_dim", 0.0))))
+                self.dl_slider_original_light.setValue(max(0, min(100, 100 - dim_v)))
+        finally:
+            self._updating_ui = False
+        self._refresh_virtual_lights_ui()
+        self.depth_virtual_lights_changed.emit(
+            self._ambient_dim_value(),
+            [dict(lt) for lt in self._dl_virtual_lights],
+            True,
+        )
+
+    def _on_clear_relight_clicked(self) -> None:
+        self._active_relight_preset_id = None
+        self._dl_virtual_lights = []
+        self._dl_selected_light_idx = 0
+        self._updating_ui = True
+        try:
+            if hasattr(self, "dl_slider_original_light"):
+                self.dl_slider_original_light.setValue(100)
+            for a in ("dl_slider_near", "dl_slider_far", "dl_slider_warmth_near", "dl_slider_warmth_far"):
+                if hasattr(self, a):
+                    getattr(self, a).setValue(0)
+        finally:
+            self._updating_ui = False
+        self._refresh_virtual_lights_ui()
+        self.depth_relight_clear_requested.emit()
+
+    def _on_add_virtual_light_clicked(self) -> None:
+        if len(self._dl_virtual_lights) >= 3:
+            return
+        from src.imaging.creative_effects import make_default_virtual_light
+
+        self._active_relight_preset_id = None
+        offsets = [(0.25, 0.25), (0.75, 0.25), (0.50, 0.15)]
+        lx, ly = offsets[len(self._dl_virtual_lights) % len(offsets)]
+        self._dl_virtual_lights.append(make_default_virtual_light(x=lx, y=ly))
+        self._dl_selected_light_idx = len(self._dl_virtual_lights) - 1
+        self._refresh_virtual_lights_ui()
+        self.depth_selected_light_changed.emit(self._dl_selected_light_idx)
+        self.depth_virtual_lights_changed.emit(
+            self._ambient_dim_value(),
+            [dict(lt) for lt in self._dl_virtual_lights],
+            True,
+        )
+
+    def _on_remove_virtual_light_clicked(self) -> None:
+        if not self._dl_virtual_lights:
+            return
+        self._active_relight_preset_id = None
+        idx = max(0, min(len(self._dl_virtual_lights) - 1, self._dl_selected_light_idx))
+        self._dl_virtual_lights.pop(idx)
+        self._dl_selected_light_idx = max(0, min(len(self._dl_virtual_lights) - 1, idx - 1))
+        self._refresh_virtual_lights_ui()
+        self.depth_virtual_lights_changed.emit(
+            self._ambient_dim_value(),
+            [dict(lt) for lt in self._dl_virtual_lights],
+            True,
+        )
+
+    def _select_virtual_light_slot(self, slot_idx: int) -> None:
+        if 0 <= slot_idx < len(self._dl_virtual_lights):
+            self._dl_selected_light_idx = slot_idx
+            self._refresh_virtual_lights_ui()
+            self.depth_selected_light_changed.emit(slot_idx)
+
+    def _set_active_light_type(self, ltype: str) -> None:
+        if self._updating_ui or not self._dl_virtual_lights:
+            return
+        self._active_relight_preset_id = None
+        self._dl_virtual_lights[self._dl_selected_light_idx]["type"] = ltype
+        self._refresh_virtual_lights_ui()
+        self.depth_virtual_lights_changed.emit(
+            self._ambient_dim_value(),
+            [dict(x) for x in self._dl_virtual_lights],
+            True,
+        )
+
+    def _on_light_enabled_toggled(self, checked: bool) -> None:
+        if self._updating_ui or not self._dl_virtual_lights:
+            return
+        self._dl_virtual_lights[self._dl_selected_light_idx]["enabled"] = bool(checked)
+        self._refresh_virtual_lights_ui()
+        self.depth_virtual_lights_changed.emit(
+            self._ambient_dim_value(),
+            [dict(x) for x in self._dl_virtual_lights],
+            True,
+        )
+
+    def _on_clear_light_color_override(self) -> None:
+        if not self._dl_virtual_lights:
+            return
+        self._active_relight_preset_id = None
+        self._dl_virtual_lights[self._dl_selected_light_idx]["color"] = ""
+        self._refresh_virtual_lights_ui()
+        self.depth_virtual_lights_changed.emit(
+            self._ambient_dim_value(),
+            [dict(lt) for lt in self._dl_virtual_lights],
+            True,
+        )
+
+    def _on_virtual_light_slider_changed(self) -> None:
+        if self._updating_ui or not self._dl_virtual_lights:
+            return
+        self._active_relight_preset_id = None
+        idx = self._dl_selected_light_idx
+        lt = self._dl_virtual_lights[idx]
+        old_kelvin = int(round(float(lt.get("kelvin", 4500))))
+        new_kelvin = int(self.dl_slider_light_kelvin.value())
+        lt["kelvin"] = new_kelvin
+        if new_kelvin != old_kelvin and lt.get("color"):
+            lt["color"] = ""
+        lt["intensity"] = float(self.dl_slider_light_intensity.value())
+        lt["softness"] = float(self.dl_slider_light_softness.value())
+        lt["z"] = float(self.dl_slider_light_z.value()) / 100.0
+        lt["gloss"] = float(self.dl_slider_light_gloss.value())
+        lt["cone_angle"] = float(self.dl_slider_light_cone.value())
+        lt["depth_from"] = float(self.dl_slider_light_depth_from.value()) / 100.0
+        lt["depth_to"] = float(self.dl_slider_light_depth_to.value()) / 100.0
+
+        from src.imaging.creative_effects import light_color_srgb
+
+        rgb = light_color_srgb(lt)
+        self.btn_dl_light_color.setStyleSheet(
+            f"background-color: rgb({rgb[0]}, {rgb[1]}, {rgb[2]}); border: 1px solid #64748B; border-radius: 3px;"
+        )
+        if 0 <= idx < len(getattr(self, "dl_light_slot_btns", [])):
+            self.dl_light_slot_btns[idx].setIcon(self._make_color_dot_icon(rgb))
+        for b_look in getattr(self, "dl_look_buttons", []):
+            b_look.blockSignals(True)
+            b_look.setChecked(False)
+            b_look.blockSignals(False)
+        self._refresh_depth_light_group_indicators()
+        self._emit_depth_virtual_lights()
+
+    def _on_virtual_light_combo_or_color_changed(self) -> None:
+        if self._updating_ui or not self._dl_virtual_lights:
+            return
+        self._active_relight_preset_id = None
+        lt = self._dl_virtual_lights[self._dl_selected_light_idx]
+        lt["gobo"] = str(self.cmb_dl_light_gobo.currentData() or "none")
+        self._refresh_virtual_lights_ui()
+        self.depth_virtual_lights_changed.emit(
+            self._ambient_dim_value(),
+            [dict(x) for x in self._dl_virtual_lights],
+            True,
+        )
+
+    def _apply_swatch_to_active_light(self, hex_col: str) -> None:
+        if not self._dl_virtual_lights:
+            return
+        self._active_relight_preset_id = None
+        self._dl_virtual_lights[self._dl_selected_light_idx]["color"] = hex_col
+        self._refresh_virtual_lights_ui()
+        self.depth_virtual_lights_changed.emit(
+            self._ambient_dim_value(),
+            [dict(lt) for lt in self._dl_virtual_lights],
+            True,
+        )
+
+    def _on_pick_virtual_light_color(self) -> None:
+        if not self._dl_virtual_lights:
+            return
+        from src.imaging.creative_effects import light_color_srgb
+
+        lt = self._dl_virtual_lights[self._dl_selected_light_idx]
+        r_c, g_c, b_c = light_color_srgb(lt)
+        chosen = QColorDialog.getColor(QColor(r_c, g_c, b_c), self, "Select Light Color")
+        if chosen.isValid():
+            self._apply_swatch_to_active_light(chosen.name())
+
+    def sync_virtual_lights_from_canvas(self, lights: list[dict], selected_idx: int) -> None:
+        self._updating_ui = True
+        try:
+            self._dl_virtual_lights = [dict(lt) for lt in (lights or [])[:3]]
+            self._dl_selected_light_idx = max(0, int(selected_idx))
+            self._refresh_virtual_lights_ui()
+        finally:
+            self._updating_ui = False
+
     def _emit_depth_haze(self) -> None:
         if self._updating_ui:
             return
@@ -5817,6 +6599,13 @@ class TagAndCaptionDock(QDockWidget):
                 self.dl_slider_warmth_near.value(),
                 self.dl_slider_warmth_far.value(),
             )
+        if self._pending_dl_virtual_lights:
+            self._pending_dl_virtual_lights = False
+            self.depth_virtual_lights_changed.emit(
+                self._ambient_dim_value(),
+                [dict(lt) for lt in self._dl_virtual_lights],
+                False,
+            )
         if self._pending_dl_haze:
             self._pending_dl_haze = False
             self.depth_haze_changed.emit(
@@ -5829,6 +6618,7 @@ class TagAndCaptionDock(QDockWidget):
         if self._dl_timer.isActive():
             self._dl_timer.stop()
         self._flush_depth_light_emits()
+        self._refresh_depth_light_group_indicators()
         self.fine_tune_slider_released.emit(action_name)
 
     def set_denoise_analyzed_value(self, val: float) -> None:
@@ -5843,7 +6633,8 @@ class TagAndCaptionDock(QDockWidget):
                 b = se = c = s = h = w_val = bl_val = cl = st_val = t = ti = sat = dh = str_deg = sh = sh_mask = dn = vig = og_val = gh_val = 0
                 sh_rad = 25
                 dn_det = 50
-                d_blur = d_focal = d_glow = d_bshift = d_bfeather = d_near = d_far = d_wn = d_wf = d_haze = d_hw = 0
+                d_blur = d_focal = d_glow = d_bshift = d_bfeather = d_near = d_far = d_wn = d_wf = d_ambient_dim = d_haze = d_hw = 0
+                d_vlights: list[dict[str, Any]] = []
             else:
                 b = int(round(getattr(recipe, "brightness", 0.0)))
                 se = int(round(getattr(recipe, "smart_enhance", 0.0)))
@@ -5881,6 +6672,8 @@ class TagAndCaptionDock(QDockWidget):
                 d_far = int(round(getattr(recipe, "relight_far", 0.0)))
                 d_wn = int(round(getattr(recipe, "warmth_near", 0.0)))
                 d_wf = int(round(getattr(recipe, "warmth_far", 0.0)))
+                d_ambient_dim = int(round(getattr(recipe, "relight_ambient_dim", 0.0)))
+                d_vlights = [dict(lt) for lt in (getattr(recipe, "virtual_lights", []) or [])[:3]]
                 d_haze = int(round(getattr(recipe, "depth_haze", 0.0)))
                 d_hw = int(round(getattr(recipe, "depth_haze_warmth", 0.0)))
 
@@ -6014,8 +6807,21 @@ class TagAndCaptionDock(QDockWidget):
                 self.dl_slider_far.setValue(d_far)
                 self.dl_slider_warmth_near.setValue(d_wn)
                 self.dl_slider_warmth_far.setValue(d_wf)
+                if hasattr(self, "dl_slider_original_light"):
+                    self.dl_slider_original_light.setValue(max(0, min(100, 100 - d_ambient_dim)))
+                    if not d_vlights and d_ambient_dim == 0:
+                        self._active_relight_preset_id = None
+                    self._dl_virtual_lights = d_vlights
+                    self._refresh_virtual_lights_ui()
                 self.dl_slider_haze.setValue(d_haze)
                 self.dl_slider_haze_warmth.setValue(d_hw)
+                self._refresh_depth_light_group_indicators()
+                if d_blur > 0 or d_focal > 0 or d_glow > 0:
+                    self._dl_grp_bokeh.set_expanded(True)
+                if d_haze > 0 or d_hw != 0:
+                    self._dl_grp_haze.set_expanded(True)
+                if d_near != 0 or d_far != 0 or d_wn != 0 or d_wf != 0:
+                    self._dl_grp_near_far.set_expanded(True)
         finally:
             self._updating_ui = False
 
@@ -6675,10 +7481,27 @@ class TagAndCaptionDock(QDockWidget):
         self.txt_add_person.setText(person_name)
         self._on_add_person_return()
 
+    def apply_theme_mode(self, theme_name: str) -> None:
+        self._theme_name = theme_name or "wlpg_aero"
+        self.set_dark_mode(self._theme_name == "dark")
+
     def set_dark_mode(self, is_dark: bool) -> None:
         """Applies Dark Studio or standard light styling to the Right Tag & Caption / Fine-Tune Dock."""
         self._is_dark = bool(is_dark)
+        if not hasattr(self, "_theme_name") or (is_dark and self._theme_name != "dark") or (not is_dark and self._theme_name == "dark"):
+            self._theme_name = "dark" if is_dark else "wlpg_aero"
         self._apply_stylesheet()
+        if hasattr(self, "lbl_custom_inspector_title"):
+            self.lbl_custom_inspector_title.setStyleSheet(
+                f"color: {'#93C5FD' if is_dark else '#0F4C81'}; background: transparent;"
+            )
+        if hasattr(self, "page_custom_inspector"):
+            bg = "#1B1E24" if is_dark else "#FFFFFF"
+            self.page_custom_inspector.setStyleSheet(f"QWidget#CustomInspectorPage {{ background-color: {bg}; }}")
+        if hasattr(self, "custom_inspector_scroll"):
+            hosted = self.custom_inspector_scroll.widget()
+            if hosted is not None and hasattr(hosted, "apply_theme_mode"):
+                hosted.apply_theme_mode(self._theme_name)
 
         # Update splitter handle
         if hasattr(self, "info_splitter"):

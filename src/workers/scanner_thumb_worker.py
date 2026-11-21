@@ -61,6 +61,7 @@ from legacy_reference.imgBrowserv13 import (
 )
 from src.db.connection import DualDatabaseEngine
 from src.db.repository import CatalogRepository, ThumbnailRepository
+from src.utils.paths import is_cloud_only_file, is_cloud_only_stat
 from src.workers.xmp_sync_worker import (
     _parse_iso_or_exif_datetime,
     read_xmp_from_file,
@@ -1352,9 +1353,12 @@ class FolderSyncWorker(QRunnable):
                                             "is_video": is_vid,
                                         }
                                     )
-                                needs_enrichment.append(
-                                    (folder_id, Path(entry.path), bool(is_vid), mtime_int)
-                                )
+                                # Never read online-only cloud placeholders (e.g. OneDrive Files On-Demand)
+                                # during Stage 2 metadata extraction, which would force OS cloud hydration.
+                                if not is_cloud_only_stat(st):
+                                    needs_enrichment.append(
+                                        (folder_id, Path(entry.path), bool(is_vid), mtime_int)
+                                    )
 
                                 now = time.perf_counter()
                                 if now - last_emit > 0.25:
@@ -1393,7 +1397,10 @@ class FolderSyncWorker(QRunnable):
                     self.signals.progress.emit(s2_idx, f"Metadata {s2_idx:,}/{total_enrich:,}")
                     last_s2_emit = now_s2
                 try:
-                    size_int = int(fpath.stat().st_size)
+                    st2 = fpath.stat(follow_symlinks=False)
+                    if is_cloud_only_stat(st2):
+                        continue
+                    size_int = int(st2.st_size)
                 except OSError:
                     continue
 
@@ -1577,6 +1584,15 @@ class ThumbnailDecodeWorker(QRunnable):
                     return
 
             if self.cancel_flag.is_set:
+                return
+
+            # Never open online-only cloud placeholders (e.g. OneDrive Files On-Demand)
+            # during background thumbnail decoding, which would force unwanted cloud downloads.
+            if is_cloud_only_file(self.file_path):
+                if not self.cancel_flag.is_set:
+                    self.signals.error.emit(
+                        self.media_id, f"Skipped cloud-only file {self.file_path}"
+                    )
                 return
 
             # 2. Decode from disk
