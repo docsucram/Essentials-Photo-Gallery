@@ -1574,6 +1574,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         # Right Tag & Caption / Fine-Tune Dock
         self.right_tag_dock.rating_edited.connect(self.apply_rating_to_selection)
         self.right_tag_dock.flag_edited.connect(self.apply_flag_to_selection)
+        self.right_tag_dock.favourite_edited.connect(self.apply_favourite_to_selection)
         self.right_tag_dock.caption_committed.connect(self.apply_caption_to_selection)
         self.right_tag_dock.geotag_edited.connect(self.apply_geotag_to_selection)
         self.right_tag_dock.adjust_geotag_requested.connect(self.open_adjust_location_dialog)
@@ -4478,6 +4479,11 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.left_nav_dock.refresh_albums_only(self.catalog_repo)
             except Exception:
                 pass
+        if hasattr(self, "right_tag_dock") and self.right_tag_dock is not None:
+            try:
+                self.right_tag_dock._update_flag_button(int(flag))
+            except Exception:
+                pass
         if flag == 1:
             lbl = "Picked"
         elif flag == -1:
@@ -4496,6 +4502,13 @@ class PhotoGalleryMainWindow(QMainWindow):
             return
         cmd = _FavouriteUndoCommand(self, ids, 1 if is_fav else 0)
         self.undo_stack.push(cmd)
+        if hasattr(self, "right_tag_dock") and self.right_tag_dock is not None:
+            try:
+                self.right_tag_dock._update_flag_button(
+                    self.right_tag_dock._current_flag, bool(is_fav)
+                )
+            except Exception:
+                pass
         self.show_status_message(
             f"{'♥ Added' if is_fav else '♡ Removed'} {len(ids)} item(s) {'to' if is_fav else 'from'} Favourites",
             3000,
@@ -4569,6 +4582,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.ribbon.set_favourites_enabled(enabled)
         if hasattr(self, "left_nav_dock") and self.left_nav_dock is not None:
             self.left_nav_dock.set_favourites_enabled(enabled)
+        if hasattr(self, "right_tag_dock") and self.right_tag_dock is not None:
+            self.right_tag_dock.set_favourites_enabled(enabled)
         if not enabled:
             needs_requery = False
             if getattr(self, "_favourites_only", False):
@@ -4699,6 +4714,11 @@ class PhotoGalleryMainWindow(QMainWindow):
         if hasattr(self, "left_nav_dock") and hasattr(self, "catalog_repo"):
             try:
                 self.left_nav_dock.refresh_albums_only(self.catalog_repo)
+            except Exception:
+                pass
+        if hasattr(self, "right_tag_dock") and self.right_tag_dock is not None:
+            try:
+                self.right_tag_dock._update_flag_button(int(new_flag))
             except Exception:
                 pass
 

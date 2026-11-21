@@ -3411,27 +3411,43 @@ class ThumbnailGridView(QListView):
             # 3. Organize & AI
             if (
                 is_mw
-                and hasattr(main_win, "toggle_favourite_selection")
+                and hasattr(main_win, "apply_favourite_to_selection")
                 and getattr(self.card_delegate, "favourites_enabled", True)
             ):
+                sel_ids = self.selected_media_ids() or ([int(media_id)] if media_id is not None else [])
+                all_fav = bool(sel_ids) and all(
+                    bool(getattr(self.catalog_model.record_by_id(int(mid)), "is_favourite", 0))
+                    for mid in sel_ids
+                )
+                target_fav_state = not all_fav
+                fav_label = "Unfavourite" if all_fav else "Favourite"
+
                 hpm = QPixmap(32, 32)
                 hpm.fill(Qt.transparent)
                 hp = QPainter(hpm)
                 hp.setRenderHint(QPainter.Antialiasing, True)
-                hp.setPen(Qt.NoPen)
-                hp.setBrush(QColor("#F43F5E"))
                 hpath = QPainterPath()
                 hpath.moveTo(16.0, 26.5)
                 hpath.cubicTo(5.5, 19.8, 4.0, 11.5, 8.8, 7.2)
                 hpath.cubicTo(12.2, 4.4, 15.0, 6.6, 16.0, 9.2)
                 hpath.cubicTo(17.0, 6.6, 19.8, 4.4, 23.2, 7.2)
                 hpath.cubicTo(28.0, 11.5, 26.5, 19.8, 16.0, 26.5)
+                if all_fav:
+                    hp.setPen(QPen(QColor("#F43F5E"), 2.4))
+                    hp.setBrush(Qt.NoBrush)
+                else:
+                    hp.setPen(Qt.NoPen)
+                    hp.setBrush(QColor("#F43F5E"))
                 hp.drawPath(hpath)
                 hp.end()
                 hpm.setDevicePixelRatio(2.0)
-                act_fav = menu.addAction(QIcon(hpm), "Toggle Favourite")
+                act_fav = menu.addAction(QIcon(hpm), fav_label)
                 act_fav.setShortcut("F")
-                act_fav.triggered.connect(lambda: main_win.toggle_favourite_selection())
+                act_fav.triggered.connect(
+                    lambda _c=False, st=target_fav_state, tids=list(sel_ids): main_win.apply_favourite_to_selection(
+                        st, target_ids=tids
+                    )
+                )
 
             self._append_album_menu_actions(menu, media_id, main_win)
 

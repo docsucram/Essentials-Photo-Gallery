@@ -2743,7 +2743,8 @@ class TagAndCaptionDock(QDockWidget):
 
     # Signals for information editing
     rating_edited = Signal(int)             # 0..5
-    flag_edited = Signal(int)               # 0 or 1
+    flag_edited = Signal(int)               # -1, 0, or 1
+    favourite_edited = Signal(bool)         # True or False
     caption_committed = Signal(str)         # new caption string
     tag_added = Signal(str)                 # full_path or tag name
     tag_removed = Signal(int)               # tag_id
@@ -2839,6 +2840,8 @@ class TagAndCaptionDock(QDockWidget):
         self._selected_ids: list[int] = []
         self._current_rating: int = 0
         self._current_flag: int = 0
+        self._current_favourite: bool = False
+        self._favourites_enabled: bool = True
         self._total_view_count: int = 0
         self._updating_ui: bool = False
         self._original_filename: str = ""
@@ -3396,20 +3399,42 @@ class TagAndCaptionDock(QDockWidget):
         self.star_rating_widget.rating_changed.connect(self._on_hover_rating_changed)
         form.addRow(make_field_lbl("Rating:"), self.star_rating_widget)
 
-        # Flag icon row (matching WLPG hollow/filled flag)
+        # Flag & Favourite row (Picked / Rejected / Favourite)
         flag_widget = QWidget(self.info_form_frame)
         flag_hbox = QHBoxLayout(flag_widget)
         flag_hbox.setContentsMargins(0, 0, 0, 0)
+        flag_hbox.setSpacing(4)
+
         self.btn_flag = QPushButton(flag_widget)
-        self.btn_flag.setFixedSize(22, 18)
+        self.btn_flag.setFixedSize(24, 22)
         self.btn_flag.setFlat(True)
         self.btn_flag.setCursor(Qt.PointingHandCursor)
-        self.btn_flag.setIcon(make_wlpg_icon("flag_off", 15))
         self.btn_flag.setIconSize(QSize(15, 15))
+        self.btn_flag.setToolTip("Pick / Flag (P)")
         self.btn_flag.clicked.connect(self._on_flag_button_clicked)
         flag_hbox.addWidget(self.btn_flag)
+
+        self.btn_flag_reject = QPushButton(flag_widget)
+        self.btn_flag_reject.setFixedSize(24, 22)
+        self.btn_flag_reject.setFlat(True)
+        self.btn_flag_reject.setCursor(Qt.PointingHandCursor)
+        self.btn_flag_reject.setIconSize(QSize(15, 15))
+        self.btn_flag_reject.setToolTip("Reject (X)")
+        self.btn_flag_reject.clicked.connect(self._on_reject_flag_clicked)
+        flag_hbox.addWidget(self.btn_flag_reject)
+
+        self.btn_info_fav = QPushButton(flag_widget)
+        self.btn_info_fav.setFixedSize(24, 22)
+        self.btn_info_fav.setFlat(True)
+        self.btn_info_fav.setCursor(Qt.PointingHandCursor)
+        self.btn_info_fav.setIconSize(QSize(15, 15))
+        self.btn_info_fav.setToolTip("Favourite (F)")
+        self.btn_info_fav.clicked.connect(self._on_favourite_button_clicked)
+        flag_hbox.addWidget(self.btn_info_fav)
+
         flag_hbox.addStretch(1)
         form.addRow(make_field_lbl("Flag:"), flag_widget)
+        self._update_flag_button(0, False)
 
         self.lbl_dimensions = make_val_lbl()
         form.addRow(make_field_lbl("Dimensions:"), self.lbl_dimensions)
@@ -6925,7 +6950,7 @@ class TagAndCaptionDock(QDockWidget):
                 self.lbl_size.setText("-")
                 self.lbl_size.setToolTip("")
                 self.star_rating_widget.set_rating(0)
-                self._update_flag_button(0)
+                self._update_flag_button(0, False)
                 self.lbl_dimensions.setText("-")
                 self.lbl_published.setText("-")
                 self.lbl_camera.setText("-")
@@ -7103,7 +7128,9 @@ class TagAndCaptionDock(QDockWidget):
                 rating_val = int(summary.get("rating") or 0)
                 self.star_rating_widget.set_rating(rating_val)
                 self._current_rating = rating_val
-                self._update_flag_button(int(summary.get("flag") or 0))
+                fl_val = -1 if int(summary.get("is_rejected") or 0) else int(summary.get("flag") or 0)
+                fav_val = bool(summary.get("is_favourite") or 0)
+                self._update_flag_button(fl_val, fav_val)
 
                 w = summary.get("width")
                 h = summary.get("height")
@@ -7189,7 +7216,11 @@ class TagAndCaptionDock(QDockWidget):
                 self._current_rating = r_val
 
                 common_flag = summary.get("common_flag")
-                self._update_flag_button(int(common_flag) if common_flag is not None else 0)
+                common_fav = summary.get("common_favourite")
+                self._update_flag_button(
+                    int(common_flag) if common_flag is not None else 0,
+                    bool(common_fav) if common_fav is not None else False,
+                )
 
                 self.lbl_dimensions.setText("-")
                 self.lbl_published.setText("-")
@@ -7259,11 +7290,85 @@ class TagAndCaptionDock(QDockWidget):
         self._current_rating = max(0, min(5, int(rating)))
         self.star_rating_widget.set_rating(self._current_rating)
 
-    def _update_flag_button(self, flag: int) -> None:
-        self._current_flag = 1 if flag else 0
-        self.btn_flag.setIcon(
-            make_wlpg_icon("flag_on" if self._current_flag == 1 else "flag_off", 15)
-        )
+    def set_favourites_enabled(self, enabled: bool) -> None:
+        self._favourites_enabled = bool(enabled)
+        if hasattr(self, "btn_info_fav"):
+            self.btn_info_fav.setVisible(self._favourites_enabled)
+
+    def _make_info_cull_icon(self, kind: str, active: bool) -> QIcon:
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QLinearGradient, QPainterPath, QPolygonF
+
+        pm = QPixmap(30, 30)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        muted = QColor("#94A3B8")
+        if kind == "pick":
+            banner = QPolygonF([QPointF(9.0, 5.5), QPointF(24.5, 10.5), QPointF(9.0, 16.0)])
+            if active:
+                grad = QLinearGradient(9.0, 5.5, 9.0, 16.5)
+                grad.setColorAt(0.0, QColor("#F87171"))
+                grad.setColorAt(0.5, QColor("#DC2626"))
+                grad.setColorAt(1.0, QColor("#991B1B"))
+                p.setPen(QPen(QColor("#7F1D1D"), 1.1))
+                p.setBrush(grad)
+                p.drawPolygon(banner)
+                p.setPen(QPen(QColor("#CBD5E1"), 2.2, Qt.SolidLine, Qt.RoundCap))
+                p.drawLine(8, 5, 8, 25)
+            else:
+                p.setPen(QPen(muted, 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                p.setBrush(Qt.NoBrush)
+                p.drawLine(8, 5, 8, 25)
+                p.drawPolygon(banner)
+        elif kind == "reject":
+            p.setPen(QPen(QColor("#CBD5E1") if active else muted, 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(Qt.NoBrush)
+            p.drawLine(8, 5, 8, 25)
+            banner = QPolygonF([QPointF(8.0, 5.5), QPointF(23.5, 10.5), QPointF(8.0, 16.0)])
+            p.drawPolygon(banner)
+            p.setPen(QPen(QColor("#EF4444") if active else QColor("#94A3B8"), 2.6 if active else 2.0, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(5, 24, 25, 5)
+        elif kind == "fav":
+            hpath = QPainterPath()
+            hpath.moveTo(15.0, 24.5)
+            hpath.cubicTo(5.2, 18.2, 4.0, 10.8, 8.4, 7.0)
+            hpath.cubicTo(11.6, 4.4, 14.1, 6.4, 15.0, 8.8)
+            hpath.cubicTo(15.9, 6.4, 18.4, 4.4, 21.6, 7.0)
+            hpath.cubicTo(26.0, 10.8, 24.8, 18.2, 15.0, 24.5)
+            if active:
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor("#F43F5E"))
+            else:
+                p.setPen(QPen(muted, 2.0))
+                p.setBrush(Qt.NoBrush)
+            p.drawPath(hpath)
+        p.end()
+        pm.setDevicePixelRatio(2.0)
+        return QIcon(pm)
+
+    def _update_flag_button(self, flag: int, is_favourite: bool | None = None) -> None:
+        self._current_flag = int(flag) if int(flag) in (-1, 0, 1) else (1 if flag else 0)
+        if is_favourite is not None:
+            self._current_favourite = bool(is_favourite)
+        self.btn_flag.setIcon(self._make_info_cull_icon("pick", self._current_flag == 1))
+        if hasattr(self, "btn_flag_reject"):
+            self.btn_flag_reject.setIcon(self._make_info_cull_icon("reject", self._current_flag == -1))
+        if hasattr(self, "btn_info_fav"):
+            self.btn_info_fav.setVisible(bool(getattr(self, "_favourites_enabled", True)))
+            self.btn_info_fav.setIcon(self._make_info_cull_icon("fav", self._current_favourite))
+            self.btn_info_fav.setToolTip("Unfavourite (F)" if self._current_favourite else "Favourite (F)")
+
+        for btn, active_bg in (
+            (self.btn_flag, "rgba(220, 38, 38, 42)" if self._current_flag == 1 else "transparent"),
+            (getattr(self, "btn_flag_reject", None), "rgba(239, 68, 68, 38)" if self._current_flag == -1 else "transparent"),
+            (getattr(self, "btn_info_fav", None), "rgba(244, 63, 94, 42)" if self._current_favourite else "transparent"),
+        ):
+            if btn is not None:
+                btn.setStyleSheet(
+                    f"QPushButton {{ background: {active_bg}; border: 1px solid transparent; border-radius: 4px; padding: 0px; }} "
+                    "QPushButton:hover { background: rgba(148, 163, 184, 45); border: 1px solid rgba(148, 163, 184, 90); }"
+                )
 
     # -------------------------------------------------------------------------
     # Editing Slots
@@ -7317,6 +7422,20 @@ class TagAndCaptionDock(QDockWidget):
         new_flag = 0 if self._current_flag == 1 else 1
         self._update_flag_button(new_flag)
         self.flag_edited.emit(new_flag)
+
+    def _on_reject_flag_clicked(self) -> None:
+        if self._updating_ui or not self._selected_ids:
+            return
+        new_flag = 0 if self._current_flag == -1 else -1
+        self._update_flag_button(new_flag)
+        self.flag_edited.emit(new_flag)
+
+    def _on_favourite_button_clicked(self) -> None:
+        if self._updating_ui or not self._selected_ids or not getattr(self, "_favourites_enabled", True):
+            return
+        new_fav = not self._current_favourite
+        self._update_flag_button(self._current_flag, new_fav)
+        self.favourite_edited.emit(new_fav)
 
     def _on_caption_return_pressed(self) -> None:
         self._on_caption_editing_finished()

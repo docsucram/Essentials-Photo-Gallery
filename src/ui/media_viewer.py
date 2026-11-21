@@ -1891,15 +1891,17 @@ class SingleMediaViewer(QWidget):
         self.btn_filmstrip_toggle = QPushButton(self.graphics_view.viewport())
         self.btn_filmstrip_toggle.setCheckable(True)
         self.btn_filmstrip_toggle.setFocusPolicy(Qt.NoFocus)
-        self.btn_filmstrip_toggle.setFixedSize(32, 32)
-        self.btn_filmstrip_toggle.setIconSize(QSize(16, 16))
+        self.btn_filmstrip_toggle.setFixedSize(44, 20)
+        self.btn_filmstrip_toggle.setIconSize(QSize(18, 12))
         self.btn_filmstrip_toggle.setCursor(Qt.PointingHandCursor)
         self.btn_filmstrip_toggle.setToolTip("Show / Hide Filmstrip")
         self.btn_filmstrip_toggle.setStyleSheet(
-            "QPushButton { background-color: rgba(15, 23, 42, 135); "
-            "border: 1px solid rgba(148, 163, 184, 85); border-radius: 9px; }"
-            "QPushButton:hover { background-color: rgba(15, 23, 42, 230); "
-            "border: 1px solid rgba(248, 250, 252, 155); }"
+            "QPushButton { background-color: rgba(24, 29, 38, 235); "
+            "border: 1px solid rgba(148, 163, 184, 80); border-bottom: none; "
+            "border-top-left-radius: 7px; border-top-right-radius: 7px; "
+            "border-bottom-left-radius: 0px; border-bottom-right-radius: 0px; }"
+            "QPushButton:hover { background-color: rgba(36, 44, 58, 250); "
+            "border-color: rgba(203, 213, 225, 145); }"
         )
         self.btn_filmstrip_toggle.clicked.connect(self._on_filmstrip_toggle_clicked)
         self.btn_filmstrip_toggle.hide()
@@ -2992,23 +2994,44 @@ class SingleMediaViewer(QWidget):
             return
         enabled = bool(getattr(mw, "_filmstrip_viewer_enabled", False))
 
-        # Keep anchored to bottom-left of graphics_view viewport so it rides smoothly atop the filmstrip's top-left edge
+        # Attached pull-tab welded flush onto the bottom-left edge of the viewer (top of filmstrip)
         if btn.parentWidget() is not vp:
             btn.setParent(vp)
 
-        pm = QPixmap(32, 32)
+        is_dark = bool(getattr(mw, "current_theme", "dark") == "dark")
+        if is_dark:
+            btn.setStyleSheet(
+                "QPushButton { background-color: rgba(27, 30, 36, 240); "
+                "border: 1px solid rgba(100, 116, 139, 110); border-bottom: none; "
+                "border-top-left-radius: 7px; border-top-right-radius: 7px; "
+                "border-bottom-left-radius: 0px; border-bottom-right-radius: 0px; }"
+                "QPushButton:hover { background-color: rgba(42, 48, 60, 252); "
+                "border-color: rgba(148, 163, 184, 180); }"
+            )
+            col = QColor("#E2E8F0")
+        else:
+            btn.setStyleSheet(
+                "QPushButton { background-color: rgba(241, 245, 249, 242); "
+                "border: 1px solid rgba(148, 163, 184, 150); border-bottom: none; "
+                "border-top-left-radius: 7px; border-top-right-radius: 7px; "
+                "border-bottom-left-radius: 0px; border-bottom-right-radius: 0px; }"
+                "QPushButton:hover { background-color: rgba(226, 232, 240, 252); "
+                "border-color: rgba(100, 116, 139, 200); }"
+            )
+            col = QColor("#334155")
+
+        pm = QPixmap(36, 24)
         pm.fill(Qt.transparent)
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing, True)
-        col = QColor("#E2E8F0")
-        p.setPen(QPen(col, 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setPen(QPen(col, 2.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         p.setBrush(Qt.NoBrush)
-        # Main frame + bottom strip of 3 mini filmstrip frames
-        p.drawRoundedRect(5, 6, 22, 13, 2.5, 2.5)
-        p.setBrush(QBrush(col) if enabled else Qt.NoBrush)
-        p.drawRoundedRect(5, 22, 6, 5, 1.2, 1.2)
-        p.drawRoundedRect(13, 22, 6, 5, 1.2, 1.2)
-        p.drawRoundedRect(21, 22, 6, 5, 1.2, 1.2)
+        if enabled:
+            # Filmstrip open -> downward collapse chevron (hide)
+            p.drawPolyline([QPointF(11.0, 9.0), QPointF(18.0, 15.5), QPointF(25.0, 9.0)])
+        else:
+            # Filmstrip hidden -> upward expand chevron (show)
+            p.drawPolyline([QPointF(11.0, 15.5), QPointF(18.0, 9.0), QPointF(25.0, 15.5)])
         p.end()
         pm.setDevicePixelRatio(2.0)
 
@@ -3017,7 +3040,7 @@ class SingleMediaViewer(QWidget):
         btn.setIcon(QIcon(pm))
         btn.setToolTip("Hide Filmstrip" if enabled else "Show Filmstrip")
         btn.blockSignals(False)
-        btn.move(8, max(8, vp.height() - btn.height() - 8))
+        btn.move(10, max(0, vp.height() - btn.height()))
         btn.show()
         btn.raise_()
 

@@ -6078,6 +6078,8 @@ class CatalogRepository:
         max_rating: int | None = None
         min_flag: int | None = None
         max_flag: int | None = None
+        min_fav: int | None = None
+        max_fav: int | None = None
 
         for chunk in _iter_id_chunks(media_ids, 900):
             placeholders = ",".join("?" for _ in chunk)
@@ -6088,8 +6090,10 @@ class CatalogRepository:
                     SUM(size) AS total_size,
                     MIN(rating) AS min_rating,
                     MAX(rating) AS max_rating,
-                    MIN(flag) AS min_flag,
-                    MAX(flag) AS max_flag
+                    MIN(CASE WHEN COALESCE(is_rejected, 0) = 1 THEN -1 ELSE COALESCE(flag, 0) END) AS min_flag,
+                    MAX(CASE WHEN COALESCE(is_rejected, 0) = 1 THEN -1 ELSE COALESCE(flag, 0) END) AS max_flag,
+                    MIN(COALESCE(is_favourite, 0)) AS min_fav,
+                    MAX(COALESCE(is_favourite, 0)) AS max_fav
                 FROM media
                 WHERE id IN ({placeholders});
                 """,
@@ -6102,6 +6106,8 @@ class CatalogRepository:
                 cur_max_r = int(agg["max_rating"]) if agg["max_rating"] is not None else None
                 cur_min_f = int(agg["min_flag"]) if agg["min_flag"] is not None else None
                 cur_max_f = int(agg["max_flag"]) if agg["max_flag"] is not None else None
+                cur_min_fv = int(agg["min_fav"]) if agg["min_fav"] is not None else None
+                cur_max_fv = int(agg["max_fav"]) if agg["max_fav"] is not None else None
 
                 if cur_min_r is not None:
                     min_rating = cur_min_r if min_rating is None else min(min_rating, cur_min_r)
@@ -6111,6 +6117,10 @@ class CatalogRepository:
                     min_flag = cur_min_f if min_flag is None else min(min_flag, cur_min_f)
                 if cur_max_f is not None:
                     max_flag = cur_max_f if max_flag is None else max(max_flag, cur_max_f)
+                if cur_min_fv is not None:
+                    min_fav = cur_min_fv if min_fav is None else min(min_fav, cur_min_fv)
+                if cur_max_fv is not None:
+                    max_fav = cur_max_fv if max_fav is None else max(max_fav, cur_max_fv)
 
         # Tags shared by ALL selected items
         tag_occurrence_counts: dict[int, int] = {}
@@ -6173,6 +6183,7 @@ class CatalogRepository:
             "total_size": total_size,
             "common_rating": min_rating if min_rating == max_rating else None,
             "common_flag": min_flag if min_flag == max_flag else None,
+            "common_favourite": min_fav if min_fav == max_fav else None,
             "tags": tags_list,
             "people": people_list,
         }
