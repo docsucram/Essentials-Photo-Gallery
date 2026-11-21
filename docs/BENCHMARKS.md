@@ -102,3 +102,19 @@ All bottlenecks identified in the 100,000- and 500,000-item scale benchmark have
 | **Editor `960px` Active Scrub Proxy (cold)** | `270.3 ms` | **`87.0 ms`** | **3.1× faster** |
 | **Colour Pop 4-Colour Mask (active tolerance scrub)** | `112.1 ms` | **`32.6 ms`** | **3.4× faster** |
 | **Colour Pop 4-Colour Mask (released, `guided_filter_matte`)** | `112.1 ms` | **`43.9 ms`** | **2.6× faster** |
+
+---
+
+## 4. v0.16.0 P1/P2 & New Subsystem Micro-Benchmarks (20,000-Item Catalog)
+
+*Measured: 2026-11-21 (Temporary SSD `DualDatabaseEngine`, 20,000 geotagged rows)*
+
+| Operation (v0.16.0) | Measured Latency | Throughput / Notes |
+| :--- | :---: | :--- |
+| **`query_media_records()` (20k rows + `_annotate_media_records`)** | **`43.01 ms`** | Scales linearly with `100k` (`212.9 ms` in §2C) — zero regression from stacking/offline/live-photo annotations |
+| **`query_map_cluster_media_ids()` (lazy click, 2,040 IDs)** | **`1.47 ms`** | Replaces upfront `GROUP_CONCAT` string splitting across all clusters |
+| **`put_webp_blobs_batch()` (256 × 4 KB blobs)** | **`3.39 ms`** | Batched single-transaction commits (`ThumbnailWriteCoalescer`) |
+| **`get_webp_blobs_batch()` (256 cached blobs)** | **`0.27 ms`** | **~1.05 µs/thumb** (vs `23.8 ms` for 40× individual reads in §2D baseline) |
+| **`extract_tiff_embedded_jpeg()` (Tier-0 RAW fast-path)** | **`0.291 ms/file`** | `14.56 ms` for 50 files — avoids `rawpy.imread()` completely |
+| **`detect_motion_photo_offset()` (EOI/XMP tail scan)** | **`0.277 ms/file`** | `27.73 ms` for 100 JPEGs |
+| **`query_map_overview_cells()` (20k *distinct* 0.01° cells)** | `84.17 ms` | Worst-case 1-item-per-cell spread; runs **once** on map load, 0 SQL on pan/zoom |
