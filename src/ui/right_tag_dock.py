@@ -3410,18 +3410,9 @@ class TagAndCaptionDock(QDockWidget):
         self.btn_flag.setFlat(True)
         self.btn_flag.setCursor(Qt.PointingHandCursor)
         self.btn_flag.setIconSize(QSize(15, 15))
-        self.btn_flag.setToolTip("Pick / Flag (P)")
+        self.btn_flag.setToolTip("Cycle Flag: Pick → Reject → Unflagged (P / X / U)")
         self.btn_flag.clicked.connect(self._on_flag_button_clicked)
         flag_hbox.addWidget(self.btn_flag)
-
-        self.btn_flag_reject = QPushButton(flag_widget)
-        self.btn_flag_reject.setFixedSize(24, 22)
-        self.btn_flag_reject.setFlat(True)
-        self.btn_flag_reject.setCursor(Qt.PointingHandCursor)
-        self.btn_flag_reject.setIconSize(QSize(15, 15))
-        self.btn_flag_reject.setToolTip("Reject (X)")
-        self.btn_flag_reject.clicked.connect(self._on_reject_flag_clicked)
-        flag_hbox.addWidget(self.btn_flag_reject)
 
         self.btn_info_fav = QPushButton(flag_widget)
         self.btn_info_fav.setFixedSize(24, 22)
@@ -7353,17 +7344,25 @@ class TagAndCaptionDock(QDockWidget):
         self._current_flag = int(flag) if int(flag) in (-1, 0, 1) else (1 if flag else 0)
         if is_favourite is not None:
             self._current_favourite = bool(is_favourite)
-        self.btn_flag.setIcon(self._make_info_cull_icon("pick", self._current_flag == 1))
-        if hasattr(self, "btn_flag_reject"):
-            self.btn_flag_reject.setIcon(self._make_info_cull_icon("reject", self._current_flag == -1))
+        if self._current_flag == -1:
+            self.btn_flag.setIcon(self._make_info_cull_icon("reject", True))
+            self.btn_flag.setToolTip("Rejected — click to clear flag (P / X / U)")
+            flag_bg = "rgba(239, 68, 68, 38)"
+        elif self._current_flag == 1:
+            self.btn_flag.setIcon(self._make_info_cull_icon("pick", True))
+            self.btn_flag.setToolTip("Picked — click to mark Rejected (P / X / U)")
+            flag_bg = "rgba(220, 38, 38, 42)"
+        else:
+            self.btn_flag.setIcon(self._make_info_cull_icon("pick", False))
+            self.btn_flag.setToolTip("Unflagged — click to mark Picked (P / X / U)")
+            flag_bg = "transparent"
         if hasattr(self, "btn_info_fav"):
             self.btn_info_fav.setVisible(bool(getattr(self, "_favourites_enabled", True)))
             self.btn_info_fav.setIcon(self._make_info_cull_icon("fav", self._current_favourite))
             self.btn_info_fav.setToolTip("Unfavourite (F)" if self._current_favourite else "Favourite (F)")
 
         for btn, active_bg in (
-            (self.btn_flag, "rgba(220, 38, 38, 42)" if self._current_flag == 1 else "transparent"),
-            (getattr(self, "btn_flag_reject", None), "rgba(239, 68, 68, 38)" if self._current_flag == -1 else "transparent"),
+            (self.btn_flag, flag_bg),
             (getattr(self, "btn_info_fav", None), "rgba(244, 63, 94, 42)" if self._current_favourite else "transparent"),
         ):
             if btn is not None:
@@ -7421,14 +7420,7 @@ class TagAndCaptionDock(QDockWidget):
     def _on_flag_button_clicked(self) -> None:
         if self._updating_ui or not self._selected_ids:
             return
-        new_flag = 0 if self._current_flag == 1 else 1
-        self._update_flag_button(new_flag)
-        self.flag_edited.emit(new_flag)
-
-    def _on_reject_flag_clicked(self) -> None:
-        if self._updating_ui or not self._selected_ids:
-            return
-        new_flag = 0 if self._current_flag == -1 else -1
+        new_flag = 1 if self._current_flag == 0 else (-1 if self._current_flag == 1 else 0)
         self._update_flag_button(new_flag)
         self.flag_edited.emit(new_flag)
 
