@@ -7323,15 +7323,20 @@ class TagAndCaptionDock(QDockWidget):
             p.setPen(QPen(QColor("#EF4444") if active else QColor("#94A3B8"), 2.6 if active else 2.0, Qt.SolidLine, Qt.RoundCap))
             p.drawLine(5, 24, 25, 5)
         elif kind == "fav":
+            from PySide6.QtCore import QRectF
+            cx, cy, r = 15.0, 15.0, 7.8
             hpath = QPainterPath()
-            hpath.moveTo(15.0, 24.5)
-            hpath.cubicTo(5.2, 18.2, 4.0, 10.8, 8.4, 7.0)
-            hpath.cubicTo(11.6, 4.4, 14.1, 6.4, 15.0, 8.8)
-            hpath.cubicTo(15.9, 6.4, 18.4, 4.4, 21.6, 7.0)
-            hpath.cubicTo(26.0, 10.8, 24.8, 18.2, 15.0, 24.5)
+            hpath.moveTo(cx, cy + 1.0 * r)
+            hpath.cubicTo(cx - 1.15 * r, cy + 0.30 * r, cx - 1.20 * r, cy - 0.72 * r, cx - 0.64 * r, cy - 0.96 * r)
+            hpath.cubicTo(cx - 0.28 * r, cy - 1.12 * r, cx - 0.06 * r, cy - 0.76 * r, cx, cy - 0.46 * r)
+            hpath.cubicTo(cx + 0.06 * r, cy - 0.76 * r, cx + 0.28 * r, cy - 1.12 * r, cx + 0.64 * r, cy - 0.96 * r)
+            hpath.cubicTo(cx + 1.20 * r, cy - 0.72 * r, cx + 1.15 * r, cy + 0.30 * r, cx, cy + 1.0 * r)
             if active:
+                hgrad = QLinearGradient(cx, cy - r, cx, cy + r)
+                hgrad.setColorAt(0.0, QColor("#FB7185"))
+                hgrad.setColorAt(1.0, QColor("#E11D48"))
                 p.setPen(Qt.NoPen)
-                p.setBrush(QColor("#F43F5E"))
+                p.setBrush(hgrad)
             else:
                 p.setPen(QPen(muted, 2.0))
                 p.setBrush(Qt.NoBrush)
@@ -7361,13 +7366,10 @@ class TagAndCaptionDock(QDockWidget):
             self.btn_info_fav.setIcon(self._make_info_cull_icon("fav", self._current_favourite))
             self.btn_info_fav.setToolTip("Unfavourite (F)" if self._current_favourite else "Favourite (F)")
 
-        for btn, active_bg in (
-            (self.btn_flag, flag_bg),
-            (getattr(self, "btn_info_fav", None), "rgba(244, 63, 94, 42)" if self._current_favourite else "transparent"),
-        ):
+        for btn in (self.btn_flag, getattr(self, "btn_info_fav", None)):
             if btn is not None:
                 btn.setStyleSheet(
-                    f"QPushButton {{ background: {active_bg}; border: 1px solid transparent; border-radius: 4px; padding: 0px; }} "
+                    "QPushButton { background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 0px; } "
                     "QPushButton:hover { background: rgba(148, 163, 184, 45); border: 1px solid rgba(148, 163, 184, 90); }"
                 )
 

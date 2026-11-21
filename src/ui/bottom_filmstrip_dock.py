@@ -227,22 +227,6 @@ class _FilmstripItemDelegate(QStyledItemDelegate):
 
         painter.setClipping(False)
 
-        # Top-left: Favourite Heart badge
-        if is_fav and getattr(self, "favourites_enabled", True):
-            hr = QRect(thumb_rect.left() + 3, thumb_rect.top() + 3, 14, 14)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(15, 23, 42, 195))
-            painter.drawRoundedRect(hr, 3, 3)
-            cx, cy = hr.center().x(), hr.center().y()
-            hp = QPainterPath()
-            hp.moveTo(cx, cy + 3.8)
-            hp.cubicTo(cx - 4.4, cy + 1.0, cx - 4.7, cy - 2.7, cx - 2.5, cy - 3.7)
-            hp.cubicTo(cx - 1.1, cy - 4.4, cx - 0.2, cy - 3.0, cx, cy - 1.9)
-            hp.cubicTo(cx + 0.2, cy - 3.0, cx + 1.1, cy - 4.4, cx + 2.5, cy - 3.7)
-            hp.cubicTo(cx + 4.7, cy - 2.7, cx + 4.4, cy + 1.0, cx, cy + 3.8)
-            painter.setBrush(QColor("#F43F5E"))
-            painter.drawPath(hp)
-
         # Top-right: Picked / Crossed-out Rejected Flag badge
         if flag_val in (1, -1):
             from PySide6.QtCore import QPointF
@@ -251,7 +235,7 @@ class _FilmstripItemDelegate(QStyledItemDelegate):
             fr = QRect(thumb_rect.right() - 17, thumb_rect.top() + 3, 14, 14)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(15, 23, 42, 195))
-            painter.drawRoundedRect(fr, 3, 3)
+            painter.drawRoundedRect(fr, 4, 4)
             px = fr.left() + 4
             painter.setPen(QPen(QColor("#E81123" if flag_val == 1 else "#CBD5E1"), 1.2))
             painter.drawLine(px, fr.top() + 2, px, fr.bottom() - 2)
@@ -262,15 +246,63 @@ class _FilmstripItemDelegate(QStyledItemDelegate):
                 painter.setPen(QPen(QColor("#EF4444"), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
                 painter.drawLine(fr.left() + 2, fr.bottom() - 2, fr.right() - 2, fr.top() + 2)
 
-        # Bottom-left: Rating pill
-        if rating_val > 0:
-            rr = QRect(thumb_rect.left() + 3, thumb_rect.bottom() - 15, 22, 12)
-            painter.setPen(Qt.PenStyle.NoPen)
+        # Bottom-right squircle pill: Lap-style star-turns-into-heart when favourited (+ rating digit)
+        show_fav = bool(is_fav and getattr(self, "favourites_enabled", True))
+        if show_fav or rating_val > 0:
+            from PySide6.QtCore import QPointF, QRectF
+            from PySide6.QtGui import QLinearGradient, QPolygonF
+
+            has_num = rating_val > 0
+            pill_w = 28 if has_num else 18
+            pill_h = 18
+            # Shift left if video badge occupies bottom-right
+            right_offset = 24 if is_video else 4
+            pr = QRectF(
+                thumb_rect.right() - pill_w - right_offset,
+                thumb_rect.bottom() - pill_h - 4,
+                pill_w,
+                pill_h,
+            )
+            painter.setPen(QPen(QColor(255, 255, 255, 55), 0.9))
             painter.setBrush(QColor(15, 23, 42, 195))
-            painter.drawRoundedRect(rr, 3, 3)
-            painter.setPen(QColor("#FBBF24"))
-            painter.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
-            painter.drawText(rr, Qt.AlignmentFlag.AlignCenter, f"★{rating_val}")
+            painter.drawRoundedRect(pr, 5.0, 5.0)
+
+            icx = (pr.left() + 8.5) if has_num else pr.center().x()
+            icy = pr.center().y()
+            if show_fav:
+                r_h = 4.3
+                hp = QPainterPath()
+                hp.moveTo(icx, icy + 1.0 * r_h)
+                hp.cubicTo(icx - 1.15 * r_h, icy + 0.30 * r_h, icx - 1.20 * r_h, icy - 0.72 * r_h, icx - 0.64 * r_h, icy - 0.96 * r_h)
+                hp.cubicTo(icx - 0.28 * r_h, icy - 1.12 * r_h, icx - 0.06 * r_h, icy - 0.76 * r_h, icx, icy - 0.46 * r_h)
+                hp.cubicTo(icx + 0.06 * r_h, icy - 0.76 * r_h, icx + 0.28 * r_h, icy - 1.12 * r_h, icx + 0.64 * r_h, icy - 0.96 * r_h)
+                hp.cubicTo(icx + 1.20 * r_h, icy - 0.72 * r_h, icx + 1.15 * r_h, icy + 0.30 * r_h, icx, icy + 1.0 * r_h)
+                hgrad = QLinearGradient(icx, icy - r_h, icx, icy + r_h)
+                hgrad.setColorAt(0.0, QColor("#FB7185"))
+                hgrad.setColorAt(1.0, QColor("#E11D48"))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(hgrad)
+                painter.drawPath(hp)
+            else:
+                # 5-point gold star
+                import math
+                pts: list[QPointF] = []
+                for k in range(10):
+                    ang = -math.pi / 2.0 + k * (math.pi / 5.0)
+                    rad = 4.6 if (k % 2 == 0) else 2.0
+                    pts.append(QPointF(icx + math.cos(ang) * rad, icy + math.sin(ang) * rad))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor("#FBBF24"))
+                painter.drawPolygon(QPolygonF(pts))
+
+            if has_num:
+                painter.setPen(QColor("#F8FAFC"))
+                painter.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+                painter.drawText(
+                    QRectF(pr.left() + 14.0, pr.top(), pr.width() - 16.0, pr.height()),
+                    Qt.AlignmentFlag.AlignCenter,
+                    str(rating_val),
+                )
 
         if is_video:
             badge_w, badge_h = 18, 13

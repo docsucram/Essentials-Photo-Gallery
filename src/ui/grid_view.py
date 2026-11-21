@@ -731,37 +731,95 @@ class MediaCardDelegate(QStyledItemDelegate):
         if rec_meta is None:
             return
 
-        # Option A: Favourite Heart in a subtle translucent dark pill on bottom-right corner of the photo
-        if getattr(self, "favourites_enabled", True):
-            is_fav = bool(getattr(rec_meta, "is_favourite", 0))
-            if is_fav or is_hovered:
-                hr_rect = self.heart_rect(card_rect, img_box)
+        # Option A: Bottom-right squircle pill
+        # - In Mosaic mode: Lap-style star-turns-into-heart when favourited (+ rating digit)
+        # - In Standard Grid mode: Centered heart squircle (solid rose when fav, outline on hover)
+        fav_enabled = bool(getattr(self, "favourites_enabled", True))
+        is_fav = bool(getattr(rec_meta, "is_favourite", 0)) if fav_enabled else False
+        rating_val = int(getattr(rec_meta, "rating", 0) or 0)
+        is_mosaic = (getattr(self, "_layout_mode", "wlpg_grid") == "mosaic")
+
+        if is_mosaic:
+            show_pill = is_fav or rating_val > 0 or (fav_enabled and is_hovered)
+            if show_pill:
+                has_num = rating_val > 0
+                pill_w = 36 if has_num else 26
+                pill_h = 26
+                hr_rect = QRect(img_box.right() - pill_w - 4, img_box.bottom() - pill_h - 4, pill_w, pill_h)
                 painter.save()
                 painter.setRenderHint(QPainter.Antialiasing, True)
-                pill_bg = QColor(15, 23, 42, 185 if is_fav else 135)
-                pill_bd = QColor(255, 255, 255, 65 if is_fav else 45)
+                pill_bg = QColor(15, 23, 42, 195 if (is_fav or has_num) else 135)
+                pill_bd = QColor(255, 255, 255, 65 if (is_fav or has_num) else 45)
                 painter.setBrush(pill_bg)
                 painter.setPen(QPen(pill_bd, 1.0))
-                painter.drawRoundedRect(QRectF(hr_rect).adjusted(0.5, 0.5, -0.5, -0.5), 13.0, 13.0)
+                painter.drawRoundedRect(QRectF(hr_rect).adjusted(0.5, 0.5, -0.5, -0.5), 6.0, 6.0)
 
-                cx, cy = hr_rect.center().x() + 0.5, hr_rect.center().y() + 0.8
-                hpath = QPainterPath()
-                hpath.moveTo(cx, cy + 5.6)
-                hpath.cubicTo(cx - 6.6, cy + 1.4, cx - 7.0, cy - 4.0, cx - 3.7, cy - 5.4)
-                hpath.cubicTo(cx - 1.6, cy - 6.4, cx - 0.3, cy - 4.4, cx, cy - 2.6)
-                hpath.cubicTo(cx + 0.3, cy - 4.4, cx + 1.6, cy - 6.4, cx + 3.7, cy - 5.4)
-                hpath.cubicTo(cx + 7.0, cy - 4.0, cx + 6.6, cy + 1.4, cx, cy + 5.6)
-                if is_fav:
-                    hgrad = QLinearGradient(cx, cy - 6, cx, cy + 6)
-                    hgrad.setColorAt(0.0, QColor("#FB7185"))
-                    hgrad.setColorAt(1.0, QColor("#E11D48"))
+                rf = QRectF(hr_rect)
+                icx = (rf.left() + 11.5) if has_num else rf.center().x()
+                icy = rf.center().y()
+                if is_fav or (not has_num and is_hovered):
+                    r_h = 5.4
+                    hpath = QPainterPath()
+                    hpath.moveTo(icx, icy + 1.0 * r_h)
+                    hpath.cubicTo(icx - 1.15 * r_h, icy + 0.30 * r_h, icx - 1.20 * r_h, icy - 0.72 * r_h, icx - 0.64 * r_h, icy - 0.96 * r_h)
+                    hpath.cubicTo(icx - 0.28 * r_h, icy - 1.12 * r_h, icx - 0.06 * r_h, icy - 0.76 * r_h, icx, icy - 0.46 * r_h)
+                    hpath.cubicTo(icx + 0.06 * r_h, icy - 0.76 * r_h, icx + 0.28 * r_h, icy - 1.12 * r_h, icx + 0.64 * r_h, icy - 0.96 * r_h)
+                    hpath.cubicTo(icx + 1.20 * r_h, icy - 0.72 * r_h, icx + 1.15 * r_h, icy + 0.30 * r_h, icx, icy + 1.0 * r_h)
+                    if is_fav:
+                        hgrad = QLinearGradient(icx, icy - r_h, icx, icy + r_h)
+                        hgrad.setColorAt(0.0, QColor("#FB7185"))
+                        hgrad.setColorAt(1.0, QColor("#E11D48"))
+                        painter.setPen(Qt.NoPen)
+                        painter.setBrush(hgrad)
+                    else:
+                        painter.setPen(QPen(QColor("#E2E8F0"), 1.5))
+                        painter.setBrush(Qt.NoBrush)
+                    painter.drawPath(hpath)
+                elif has_num:
+                    poly = _build_star_polygon(icx, icy, outer_r=5.8, inner_r=2.5)
                     painter.setPen(Qt.NoPen)
-                    painter.setBrush(hgrad)
-                else:
-                    painter.setPen(QPen(QColor("#E2E8F0"), 1.5))
-                    painter.setBrush(Qt.NoBrush)
-                painter.drawPath(hpath)
+                    painter.setBrush(QColor("#FBBF24"))
+                    painter.drawPolygon(poly)
+
+                if has_num:
+                    painter.setPen(QColor("#F8FAFC"))
+                    painter.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+                    painter.drawText(
+                        QRectF(rf.left() + 19.0, rf.top(), rf.width() - 22.0, rf.height()),
+                        Qt.AlignCenter,
+                        str(rating_val),
+                    )
                 painter.restore()
+        elif fav_enabled and (is_fav or is_hovered):
+            hr_rect = self.heart_rect(card_rect, img_box)
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            pill_bg = QColor(15, 23, 42, 190 if is_fav else 135)
+            pill_bd = QColor(255, 255, 255, 65 if is_fav else 45)
+            painter.setBrush(pill_bg)
+            painter.setPen(QPen(pill_bd, 1.0))
+            painter.drawRoundedRect(QRectF(hr_rect).adjusted(0.5, 0.5, -0.5, -0.5), 6.0, 6.0)
+
+            rf = QRectF(hr_rect)
+            cx, cy = rf.center().x(), rf.center().y()
+            r_h = 5.4
+            hpath = QPainterPath()
+            hpath.moveTo(cx, cy + 1.0 * r_h)
+            hpath.cubicTo(cx - 1.15 * r_h, cy + 0.30 * r_h, cx - 1.20 * r_h, cy - 0.72 * r_h, cx - 0.64 * r_h, cy - 0.96 * r_h)
+            hpath.cubicTo(cx - 0.28 * r_h, cy - 1.12 * r_h, cx - 0.06 * r_h, cy - 0.76 * r_h, cx, cy - 0.46 * r_h)
+            hpath.cubicTo(cx + 0.06 * r_h, cy - 0.76 * r_h, cx + 0.28 * r_h, cy - 1.12 * r_h, cx + 0.64 * r_h, cy - 0.96 * r_h)
+            hpath.cubicTo(cx + 1.20 * r_h, cy - 0.72 * r_h, cx + 1.15 * r_h, cy + 0.30 * r_h, cx, cy + 1.0 * r_h)
+            if is_fav:
+                hgrad = QLinearGradient(cx, cy - r_h, cx, cy + r_h)
+                hgrad.setColorAt(0.0, QColor("#FB7185"))
+                hgrad.setColorAt(1.0, QColor("#E11D48"))
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(hgrad)
+            else:
+                painter.setPen(QPen(QColor("#E2E8F0"), 1.5))
+                painter.setBrush(Qt.NoBrush)
+            painter.drawPath(hpath)
+            painter.restore()
 
         is_live = bool(getattr(rec_meta, "is_live_photo", 0))
         is_offline = bool(getattr(rec_meta, "is_offline", 0))

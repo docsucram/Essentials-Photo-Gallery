@@ -1488,16 +1488,17 @@ class LeftNavigationDock(QDockWidget):
             p.setRenderHint(QPainter.Antialiasing, True)
             if kind == "heart":
                 p.setPen(Qt.NoPen)
-                grad = QLinearGradient(16, 6, 16, 26)
+                cx, cy, r = 16.0, 16.0, 8.6
+                grad = QLinearGradient(cx, cy - r, cx, cy + r)
                 grad.setColorAt(0.0, QColor("#FB7185"))
                 grad.setColorAt(1.0, QColor("#E11D48"))
                 p.setBrush(grad)
                 hpath = QPainterPath()
-                hpath.moveTo(16.0, 26.5)
-                hpath.cubicTo(5.5, 19.8, 4.0, 11.5, 8.8, 7.2)
-                hpath.cubicTo(12.2, 4.4, 15.0, 6.6, 16.0, 9.2)
-                hpath.cubicTo(17.0, 6.6, 19.8, 4.4, 23.2, 7.2)
-                hpath.cubicTo(28.0, 11.5, 26.5, 19.8, 16.0, 26.5)
+                hpath.moveTo(cx, cy + 1.0 * r)
+                hpath.cubicTo(cx - 1.15 * r, cy + 0.30 * r, cx - 1.20 * r, cy - 0.72 * r, cx - 0.64 * r, cy - 0.96 * r)
+                hpath.cubicTo(cx - 0.28 * r, cy - 1.12 * r, cx - 0.06 * r, cy - 0.76 * r, cx, cy - 0.46 * r)
+                hpath.cubicTo(cx + 0.06 * r, cy - 0.76 * r, cx + 0.28 * r, cy - 1.12 * r, cx + 0.64 * r, cy - 0.96 * r)
+                hpath.cubicTo(cx + 1.20 * r, cy - 0.72 * r, cx + 1.15 * r, cy + 0.30 * r, cx, cy + 1.0 * r)
                 p.drawPath(hpath)
             elif kind == "picked":
                 banner = QPolygonF([QPointF(9.0, 6.0), QPointF(26.0, 11.5), QPointF(9.0, 17.5)])
