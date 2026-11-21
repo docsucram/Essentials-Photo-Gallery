@@ -465,6 +465,7 @@ class LeftNavigationDock(QDockWidget):
     folder_created = Signal(str)  # new_folder_path
     folder_deleted = Signal(int, str)  # folder_id, folder_path
     favourite_path_selected = Signal(str)
+    favourite_filter_requested = Signal(bool)
     files_dropped_on_folder = Signal(int, str, list, bool)
     people_directory_requested = Signal()
     albums_view_requested = Signal()
@@ -1453,6 +1454,34 @@ class LeftNavigationDock(QDockWidget):
         album_icon = make_wlpg_icon("pictures_library", 16)
         smart_icon = make_wlpg_icon("star_filled", 16)
 
+        # Permanent "Favourites" smart item with its own rose heart icon
+        try:
+            fav_cnt = int((repo.get_favourite_and_flag_counts() or {}).get("favourites", 0))
+        except Exception:
+            fav_cnt = 0
+        from PySide6.QtGui import QPainterPath
+
+        hpm = QPixmap(32, 32)
+        hpm.fill(Qt.transparent)
+        hp = QPainter(hpm)
+        hp.setRenderHint(QPainter.Antialiasing, True)
+        hp.setPen(Qt.NoPen)
+        hp.setBrush(QColor("#F43F5E"))
+        hpath = QPainterPath()
+        hpath.moveTo(16.0, 26.5)
+        hpath.cubicTo(5.5, 19.8, 4.0, 11.5, 8.8, 7.2)
+        hpath.cubicTo(12.2, 4.4, 15.0, 6.6, 16.0, 9.2)
+        hpath.cubicTo(17.0, 6.6, 19.8, 4.4, 23.2, 7.2)
+        hpath.cubicTo(28.0, 11.5, 26.5, 19.8, 16.0, 26.5)
+        hp.drawPath(hpath)
+        hp.end()
+        hpm.setDevicePixelRatio(2.0)
+        fav_item = QTreeWidgetItem([f"Favourites ({fav_cnt})"])
+        fav_item.setData(0, _NODE_TYPE_ROLE, "favourites")
+        fav_item.setData(0, _NODE_PAYLOAD_ROLE, True)
+        fav_item.setIcon(0, QIcon(hpm))
+        self.root_smart_albums.addChild(fav_item)
+
         try:
             static_albums = repo.get_albums_with_counts()
         except Exception:
@@ -1737,7 +1766,11 @@ class LeftNavigationDock(QDockWidget):
                 album_tuple = (int(payload[0]), str(payload[1]))
             elif ntype == "smart_album" and isinstance(payload, tuple):
                 smart_album_tuple = (int(payload[0]), str(payload[1]))
+            elif ntype == "favourites":
+                self.favourite_filter_requested.emit(True)
+                return
             elif ntype == "all_media":
+                self.favourite_filter_requested.emit(False)
                 all_media = True
 
         if all_media and (

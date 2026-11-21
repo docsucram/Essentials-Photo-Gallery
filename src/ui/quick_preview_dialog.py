@@ -29,42 +29,66 @@ class QuickPreviewDialog(QDialog):
         self.setWindowTitle("Quick Preview")
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setModal(False)
-        self.resize(860, 620)
-        self.setStyleSheet(
-            "QDialog { background-color: #11161D; border: 1px solid #334155; border-radius: 8px; }"
-        )
+        self.resize(1040, 760)
+        self.setStyleSheet("QDialog { background: transparent; }")
 
         self._current_media_id: int | None = None
         self._current_pixmap: QPixmap = QPixmap()
 
-        vbox = QVBoxLayout(self)
-        vbox.setContentsMargins(12, 10, 12, 10)
-        vbox.setSpacing(8)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(36, 32, 36, 32)
+
+        from PySide6.QtWidgets import QFrame
+
+        self._card = QFrame(self)
+        self._card.setStyleSheet(
+            "QFrame { background-color: #0F141B; border: 1px solid #334155; border-radius: 10px; }"
+        )
+        outer.addWidget(self._card, 1)
+
+        vbox = QVBoxLayout(self._card)
+        vbox.setContentsMargins(16, 12, 16, 12)
+        vbox.setSpacing(10)
 
         hdr = QHBoxLayout()
-        self.lbl_title = QLabel("", self)
-        self.lbl_title.setStyleSheet("color: #F8FAFC; font-size: 10pt; font-weight: 600;")
+        self.lbl_title = QLabel("", self._card)
+        self.lbl_title.setStyleSheet("color: #F8FAFC; font-size: 10.5pt; font-weight: 600; border: none;")
         hdr.addWidget(self.lbl_title, 1)
 
-        self.lbl_meta = QLabel("", self)
-        self.lbl_meta.setStyleSheet("color: #94A3B8; font-size: 9pt;")
+        self.lbl_meta = QLabel("", self._card)
+        self.lbl_meta.setStyleSheet("color: #94A3B8; font-size: 9.5pt; border: none;")
         hdr.addWidget(self.lbl_meta)
         vbox.addLayout(hdr)
 
-        self.lbl_image = QLabel(self)
+        self.lbl_image = QLabel(self._card)
         self.lbl_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_image.setMinimumSize(400, 320)
-        self.lbl_image.setStyleSheet("background-color: #0B0F14; border-radius: 4px;")
+        self.lbl_image.setStyleSheet("background-color: #090D12; border-radius: 6px; border: none;")
         vbox.addWidget(self.lbl_image, 1)
 
         self.lbl_hint = QLabel(
             "Space / Esc: Close   •   ← / →: Prev / Next   •   1–5: Rate   •   P: Flag   •   Enter: Full View",
-            self,
+            self._card,
         )
         self.lbl_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_hint.setStyleSheet("color: #64748B; font-size: 8.5pt;")
+        self.lbl_hint.setStyleSheet("color: #64748B; font-size: 8.5pt; border: none;")
         vbox.addWidget(self.lbl_hint)
+
+    def paintEvent(self, event) -> None:
+        from PySide6.QtGui import QColor, QPainter
+
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(8, 12, 18, 205))
+        p.end()
+
+    def mousePressEvent(self, event) -> None:
+        if not self._card.geometry().contains(event.position().toPoint()):
+            self.hide()
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
     def show_media(
         self,
@@ -84,10 +108,14 @@ class QuickPreviewDialog(QDialog):
         pix = self._load_preview_pixmap(Path(file_path), fallback_pixmap)
         self._current_pixmap = pix
         self._update_scaled_pixmap()
+        pw = self.parentWidget()
+        if pw is not None:
+            self.setGeometry(pw.geometry())
         if not self.isVisible():
             self.show()
         self.raise_()
         self.activateWindow()
+        self.setFocus()
 
     def _load_preview_pixmap(
         self, path: Path, fallback_pixmap: QPixmap | None
@@ -145,6 +173,9 @@ class QuickPreviewDialog(QDialog):
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
+        if key == Qt.Key.Key_Space and event.isAutoRepeat():
+            event.accept()
+            return
         if key in (Qt.Key.Key_Space, Qt.Key.Key_Escape):
             self.hide()
             event.accept()

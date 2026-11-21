@@ -1408,6 +1408,7 @@ class PhotoGalleryMainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         # Left Navigation Dock
         self.left_nav_dock.filter_changed.connect(self._on_nav_filter_changed)
+        self.left_nav_dock.favourite_filter_requested.connect(self._on_favourite_filter_selected)
         self.left_nav_dock.people_directory_requested.connect(self.open_people_directory_view)
         self.left_nav_dock.albums_section_requested.connect(self.open_albums_view)
         self.left_nav_dock.dates_section_requested.connect(self._on_dates_section_requested)
@@ -10707,6 +10708,15 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.update()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        qp = getattr(self, "_quick_preview_dialog", None)
+        if qp is not None and qp.isVisible():
+            if event.key() == Qt.Key_Escape or (event.key() == Qt.Key_Space and not event.isAutoRepeat()):
+                qp.hide()
+                event.accept()
+                return
+            if event.key() == Qt.Key_Space and event.isAutoRepeat():
+                event.accept()
+                return
         ws = getattr(self, "_active_create_workspace", None)
         if ws is not None:
             if event.key() == Qt.Key_Escape:
@@ -10913,6 +10923,9 @@ class PhotoGalleryMainWindow(QMainWindow):
 
             # Space: Grid -> Quick Preview; Viewer -> Next slide
             if event.key() == Qt.Key_Space:
+                if event.isAutoRepeat():
+                    event.accept()
+                    return
                 if self.central_stack.currentWidget() == self.grid_view:
                     grid_sel = self.grid_view.selected_media_ids()
                     target_id = (

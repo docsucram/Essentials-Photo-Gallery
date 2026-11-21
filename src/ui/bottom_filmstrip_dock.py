@@ -36,6 +36,9 @@ _FILMSTRIP_ID_ROLE = Qt.ItemDataRole.UserRole + 101
 _FILMSTRIP_IS_VIDEO_ROLE = Qt.ItemDataRole.UserRole + 102
 _FILMSTRIP_NAME_ROLE = Qt.ItemDataRole.UserRole + 103
 _FILMSTRIP_PATH_ROLE = Qt.ItemDataRole.UserRole + 104
+_FILMSTRIP_FAV_ROLE = Qt.ItemDataRole.UserRole + 105
+_FILMSTRIP_FLAG_ROLE = Qt.ItemDataRole.UserRole + 106
+_FILMSTRIP_RATING_ROLE = Qt.ItemDataRole.UserRole + 107
 
 
 class _FilmstripListModel(QAbstractListModel):
@@ -83,6 +86,12 @@ class _FilmstripListModel(QAbstractListModel):
             return str(getattr(rec, "filename", ""))
         if role == _FILMSTRIP_PATH_ROLE:
             return str(getattr(rec, "file_path", "") or "")
+        if role == _FILMSTRIP_FAV_ROLE:
+            return bool(getattr(rec, "is_favourite", 0))
+        if role == _FILMSTRIP_FLAG_ROLE:
+            return int(getattr(rec, "flag", 0) or 0)
+        if role == _FILMSTRIP_RATING_ROLE:
+            return int(getattr(rec, "rating", 0) or 0)
         return None
 
 
@@ -160,6 +169,9 @@ class _FilmstripItemDelegate(QStyledItemDelegate):
         if mid is None:
             return
         is_video = bool(index.data(_FILMSTRIP_IS_VIDEO_ROLE))
+        is_fav = bool(index.data(_FILMSTRIP_FAV_ROLE))
+        flag_val = int(index.data(_FILMSTRIP_FLAG_ROLE) or 0)
+        rating_val = int(index.data(_FILMSTRIP_RATING_ROLE) or 0)
         tok = get_theme_tokens(self._theme_name)
         is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
         is_hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
@@ -168,26 +180,26 @@ class _FilmstripItemDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
-        outer = option.rect.adjusted(3, 3, -3, -3)
-        thumb_rect = outer.adjusted(3, 3, -3, -3)
+        outer = option.rect.adjusted(2, 3, -2, -3)
+        thumb_rect = outer.adjusted(2, 2, -2, -2)
 
         # Card / selection ring
         if is_selected:
             painter.setBrush(QColor(tok.selection_bg))
             painter.setPen(QPen(QColor(tok.accent), 2.2))
-            painter.drawRoundedRect(outer, 5, 5)
+            painter.drawRoundedRect(outer, 6, 6)
         elif is_hover:
             painter.setBrush(QColor(tok.bg_hover))
             painter.setPen(QPen(QColor(tok.border_subtle), 1.0))
-            painter.drawRoundedRect(outer, 5, 5)
+            painter.drawRoundedRect(outer, 6, 6)
         else:
             painter.setBrush(QColor(tok.bg_card))
-            painter.setPen(QPen(QColor(tok.border_subtle), 0.8))
-            painter.drawRoundedRect(outer, 5, 5)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(outer, 6, 6)
 
         pm = self._resolve_pixmap(int(mid), str(index.data(_FILMSTRIP_PATH_ROLE) or ""), is_video)
         clip_path = QPainterPath()
-        clip_path.addRoundedRect(thumb_rect.x(), thumb_rect.y(), thumb_rect.width(), thumb_rect.height(), 3, 3)
+        clip_path.addRoundedRect(thumb_rect.x(), thumb_rect.y(), thumb_rect.width(), thumb_rect.height(), 4, 4)
         painter.setClipPath(clip_path)
 
         if pm is not None and not pm.isNull():
@@ -206,7 +218,58 @@ class _FilmstripItemDelegate(QStyledItemDelegate):
         else:
             painter.fillRect(thumb_rect, QColor(tok.bg_input))
 
+        # Subtle focus dimming on inactive items (or stronger dim on rejected items)
+        if flag_val == -1:
+            painter.fillRect(thumb_rect, QColor(15, 23, 42, 125))
+        elif not is_selected and not is_hover:
+            painter.fillRect(thumb_rect, QColor(0, 0, 0, 38))
+
         painter.setClipping(False)
+
+        # Top-left: Favourite Heart badge
+        if is_fav:
+            hr = QRect(thumb_rect.left() + 3, thumb_rect.top() + 3, 14, 14)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(15, 23, 42, 195))
+            painter.drawRoundedRect(hr, 3, 3)
+            cx, cy = hr.center().x(), hr.center().y()
+            hp = QPainterPath()
+            hp.moveTo(cx, cy + 3.8)
+            hp.cubicTo(cx - 4.4, cy + 1.0, cx - 4.7, cy - 2.7, cx - 2.5, cy - 3.7)
+            hp.cubicTo(cx - 1.1, cy - 4.4, cx - 0.2, cy - 3.0, cx, cy - 1.9)
+            hp.cubicTo(cx + 0.2, cy - 3.0, cx + 1.1, cy - 4.4, cx + 2.5, cy - 3.7)
+            hp.cubicTo(cx + 4.7, cy - 2.7, cx + 4.4, cy + 1.0, cx, cy + 3.8)
+            painter.setBrush(QColor("#F43F5E"))
+            painter.drawPath(hp)
+
+        # Top-right: Picked / Crossed-out Rejected Flag badge
+        if flag_val in (1, -1):
+            from PySide6.QtCore import QPointF
+            from PySide6.QtGui import QPolygonF
+
+            fr = QRect(thumb_rect.right() - 17, thumb_rect.top() + 3, 14, 14)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(15, 23, 42, 195))
+            painter.drawRoundedRect(fr, 3, 3)
+            px = fr.left() + 4
+            painter.setPen(QPen(QColor("#22C55E" if flag_val == 1 else "#EF4444"), 1.2))
+            painter.drawLine(px, fr.top() + 2, px, fr.bottom() - 2)
+            poly = QPolygonF([QPointF(px, fr.top() + 2), QPointF(fr.right() - 2, fr.top() + 5), QPointF(px, fr.top() + 8)])
+            painter.setBrush(QColor("#22C55E") if flag_val == 1 else QColor(239, 68, 68, 90))
+            painter.drawPolygon(poly)
+            if flag_val == -1:
+                painter.setPen(QPen(QColor("#EF4444"), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                painter.drawLine(fr.left() + 2, fr.bottom() - 2, fr.right() - 2, fr.top() + 2)
+
+        # Bottom-left: Rating pill
+        if rating_val > 0:
+            rr = QRect(thumb_rect.left() + 3, thumb_rect.bottom() - 15, 22, 12)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(15, 23, 42, 195))
+            painter.drawRoundedRect(rr, 3, 3)
+            painter.setPen(QColor("#FBBF24"))
+            painter.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+            painter.drawText(rr, Qt.AlignmentFlag.AlignCenter, f"★{rating_val}")
 
         if is_video:
             badge_w, badge_h = 18, 13

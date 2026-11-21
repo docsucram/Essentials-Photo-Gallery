@@ -51,6 +51,7 @@ from PySide6.QtGui import (
     QLinearGradient,
     QMouseEvent,
     QPainter,
+    QPainterPath,
     QPaintEvent,
     QPen,
     QPixmap,
@@ -920,13 +921,20 @@ class MediaCardDelegate(QStyledItemDelegate):
         if "flag" in self._visible_details or "all" in self._visible_details:
             if flag == -1:
                 fl_rect = self.flag_rect(card_rect)
+                pole_x = fl_rect.left() + 4
                 painter.save()
-                painter.setPen(QPen(QColor("#EF4444"), 1.2))
-                painter.setBrush(QColor(127, 29, 29, 220))
-                painter.drawRoundedRect(fl_rect, 3, 3)
-                painter.setPen(QPen(QColor("#FEE2E2"), 1.8))
-                painter.drawLine(fl_rect.left() + 4, fl_rect.top() + 4, fl_rect.right() - 4, fl_rect.bottom() - 4)
-                painter.drawLine(fl_rect.right() - 4, fl_rect.top() + 4, fl_rect.left() + 4, fl_rect.bottom() - 4)
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                painter.setPen(QPen(QColor("#EF4444"), 1.3))
+                painter.drawLine(pole_x, fl_rect.top() + 2, pole_x, fl_rect.bottom() - 2)
+                banner = QPolygonF([
+                    QPointF(pole_x, fl_rect.top() + 2),
+                    QPointF(fl_rect.right() - 2, fl_rect.top() + 5),
+                    QPointF(pole_x, fl_rect.top() + 9),
+                ])
+                painter.setBrush(QColor(239, 68, 68, 80))
+                painter.drawPolygon(banner)
+                painter.setPen(QPen(QColor("#EF4444"), 1.8, Qt.SolidLine, Qt.RoundCap))
+                painter.drawLine(fl_rect.left() + 2, fl_rect.bottom() - 2, fl_rect.right() - 2, fl_rect.top() + 2)
                 painter.restore()
             elif flag == 1 or is_hovered:
                 fl_rect = self.flag_rect(card_rect)
@@ -948,13 +956,24 @@ class MediaCardDelegate(QStyledItemDelegate):
             if is_fav or is_hovered:
                 hr_rect = self.heart_rect(card_rect)
                 painter.save()
-                painter.setFont(QFont("Segoe UI Symbol", 10, QFont.Weight.Bold))
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(15, 23, 42, 185))
+                painter.drawRoundedRect(hr_rect, 4, 4)
+                cx, cy = hr_rect.center().x(), hr_rect.center().y()
+                hpath = QPainterPath()
+                hpath.moveTo(cx, cy + 4.5)
+                hpath.cubicTo(cx - 5.2, cy + 1.2, cx - 5.6, cy - 3.2, cx - 3.0, cy - 4.4)
+                hpath.cubicTo(cx - 1.3, cy - 5.2, cx - 0.3, cy - 3.6, cx, cy - 2.3)
+                hpath.cubicTo(cx + 0.3, cy - 3.6, cx + 1.3, cy - 5.2, cx + 3.0, cy - 4.4)
+                hpath.cubicTo(cx + 5.6, cy - 3.2, cx + 5.2, cy + 1.2, cx, cy + 4.5)
                 if is_fav:
-                    painter.setPen(QColor("#F43F5E"))
-                    painter.drawText(hr_rect, Qt.AlignCenter, "♥")
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(QColor("#F43F5E"))
                 else:
-                    painter.setPen(QColor(148, 163, 184, 210) if self.dark_mode else QColor(100, 116, 139, 190))
-                    painter.drawText(hr_rect, Qt.AlignCenter, "♡")
+                    painter.setPen(QPen(QColor("#CBD5E1"), 1.2))
+                    painter.setBrush(Qt.NoBrush)
+                painter.drawPath(hpath)
                 painter.restore()
             is_live = bool(getattr(rec_meta, "is_live_photo", 0))
             is_offline = bool(getattr(rec_meta, "is_offline", 0))
@@ -1458,10 +1477,10 @@ class MediaCardDelegate(QStyledItemDelegate):
                     self.favourite_toggled.emit(int(media_id), not cur_fav)
                     return True
 
-                # 2. Check top-right flag pin hit
+                # 2. Check top-right flag pin hit (cycles: Unreviewed 0 -> Pick 1 -> Reject -1 -> Unreviewed 0)
                 if self.flag_rect(card_rect).contains(pos):
                     curr_flag = int(index.data(CatalogRoles.FlagRole) or 0)
-                    new_flag = 0 if curr_flag in (1, -1) else 1
+                    new_flag = 1 if curr_flag == 0 else (-1 if curr_flag == 1 else 0)
                     self.flag_toggled.emit(int(media_id), new_flag)
                     return True
 
@@ -2851,6 +2870,9 @@ class ThumbnailGridView(QListView):
                     event.accept()
                     return
             if event.key() == Qt.Key_Space and not shift_held:
+                if event.isAutoRepeat():
+                    event.accept()
+                    return
                 sel_ids = self.selected_media_ids()
                 if sel_ids:
                     main_win = getattr(self, "main_window", None) or self.window()

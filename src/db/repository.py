@@ -7504,6 +7504,30 @@ def _compile_single_smart_rule(
             return f"({face_cnt_expr} != ?)", [fc_num]
         return f"({face_cnt_expr} = ?)", [fc_num]
 
+    # 21. Favourite (♥)
+    if raw_field in ("favourite", "favorite", "is_favourite", "is_favorite"):
+        if op in ("is_not_favourite", "is_not_favorite", "is_not", "neq", "!=", "false", "no"):
+            want_fav = False
+        elif op in ("is_favourite", "is_favorite", "is", "eq", "=", "true", "yes", ""):
+            want_fav = True
+        else:
+            want_fav = val_str.lower() in ("1", "true", "yes", "favourite", "favorite", "")
+        if val_str.lower() in ("0", "false", "no"):
+            want_fav = not want_fav
+        return f"COALESCE({alias}.is_favourite, 0) = ?", [1 if want_fav else 0]
+
+    # 22. Rejected Culling Flag
+    if raw_field in ("rejected", "is_rejected"):
+        if op in ("is_not_rejected", "is_not", "neq", "!=", "false", "no"):
+            want_rej = False
+        elif op in ("is_rejected", "is", "eq", "=", "true", "yes", ""):
+            want_rej = True
+        else:
+            want_rej = val_str.lower() in ("1", "true", "yes", "rejected", "")
+        if val_str.lower() in ("0", "false", "no"):
+            want_rej = not want_rej
+        return f"COALESCE({alias}.is_rejected, 0) = ?", [1 if want_rej else 0]
+
     return None
 
 

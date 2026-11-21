@@ -201,6 +201,26 @@ SMART_FIELD_SPECS: list[tuple[str, str, list[tuple[str, str]], str, Any]] = [
         "",
     ),
     (
+        "favourite",
+        "Favourite (♥)",
+        [
+            ("is_favourite", "is favourite"),
+            ("is_not_favourite", "is not favourite"),
+        ],
+        "unary",
+        "",
+    ),
+    (
+        "rejected",
+        "Rejected",
+        [
+            ("is_rejected", "is rejected"),
+            ("is_not_rejected", "is not rejected"),
+        ],
+        "unary",
+        "",
+    ),
+    (
         "media_type",
         "Media type",
         [

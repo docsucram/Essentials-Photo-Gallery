@@ -1871,11 +1871,9 @@ class SingleMediaViewer(QWidget):
         hud_lay.setSpacing(4)
         self.btn_hud_fav = QPushButton(self.cull_hud)
         self.btn_hud_fav.setToolTip("Favourite (F / Shift+F)")
-        self.btn_hud_pick = QPushButton(self.cull_hud)
-        self.btn_hud_pick.setToolTip("Pick / Flag (P / Shift+P)")
-        self.btn_hud_reject = QPushButton(self.cull_hud)
-        self.btn_hud_reject.setToolTip("Reject (X / Shift+X)")
-        for b in (self.btn_hud_fav, self.btn_hud_pick, self.btn_hud_reject):
+        self.btn_hud_flag = QPushButton(self.cull_hud)
+        self.btn_hud_flag.setToolTip("Cycle Flag: Pick → Reject → Unreviewed (P / X / U)")
+        for b in (self.btn_hud_fav, self.btn_hud_flag):
             b.setFixedSize(28, 28)
             b.setIconSize(QSize(16, 16))
             b.setCursor(Qt.PointingHandCursor)
@@ -1886,8 +1884,7 @@ class SingleMediaViewer(QWidget):
             hud_lay.addWidget(b)
         self.cull_hud.adjustSize()
         self.btn_hud_fav.clicked.connect(self._on_hud_fav_clicked)
-        self.btn_hud_pick.clicked.connect(self._on_hud_pick_clicked)
-        self.btn_hud_reject.clicked.connect(self._on_hud_reject_clicked)
+        self.btn_hud_flag.clicked.connect(self._on_hud_flag_clicked)
         self.cull_hud.hide()
 
         self.media_stack.addWidget(self.graphics_view)
@@ -2919,21 +2916,31 @@ class SingleMediaViewer(QWidget):
                 p.drawLine(8, 5, 8, 27)
                 poly = QPolygonF([QPointF(8, 6), QPointF(25, 10.5), QPointF(8, 16)])
                 p.drawPolygon(poly)
-            elif kind == "reject":
-                p.drawLine(8, 8, 24, 24)
-                p.drawLine(24, 8, 8, 24)
+            elif kind == "flag_rejected":
+                p.drawLine(8, 5, 8, 27)
+                poly = QPolygonF([QPointF(8, 6), QPointF(25, 10.5), QPointF(8, 16)])
+                p.drawPolygon(poly)
+                slash_pen = QPen(QColor("#EF4444"), 3.0, Qt.SolidLine, Qt.RoundCap)
+                p.setPen(slash_pen)
+                p.drawLine(5, 25, 27, 6)
             p.end()
             pm.setDevicePixelRatio(2.0)
             return QIcon(pm)
 
         self.btn_hud_fav.setIcon(_make_hud_icon("heart", "#F43F5E" if is_fav else "#CBD5E1", filled=is_fav))
-        self.btn_hud_pick.setIcon(_make_hud_icon("flag", "#22C55E" if flag == 1 else "#CBD5E1", filled=(flag == 1)))
-        self.btn_hud_reject.setIcon(_make_hud_icon("reject", "#EF4444" if flag == -1 else "#CBD5E1", filled=False))
+        if flag == 1:
+            self.btn_hud_flag.setIcon(_make_hud_icon("flag", "#22C55E", filled=True))
+            flag_bg = "rgba(34, 197, 94, 48)"
+        elif flag == -1:
+            self.btn_hud_flag.setIcon(_make_hud_icon("flag_rejected", "#EF4444", filled=False))
+            flag_bg = "rgba(239, 68, 68, 48)"
+        else:
+            self.btn_hud_flag.setIcon(_make_hud_icon("flag", "#CBD5E1", filled=False))
+            flag_bg = "transparent"
 
         for btn, active_bg in (
             (self.btn_hud_fav, "rgba(244, 63, 94, 48)" if is_fav else "transparent"),
-            (self.btn_hud_pick, "rgba(34, 197, 94, 48)" if flag == 1 else "transparent"),
-            (self.btn_hud_reject, "rgba(239, 68, 68, 48)" if flag == -1 else "transparent"),
+            (self.btn_hud_flag, flag_bg),
         ):
             btn.setStyleSheet(
                 f"QPushButton {{ background: {active_bg}; border: none; border-radius: 14px; }}"
@@ -2972,18 +2979,13 @@ class SingleMediaViewer(QWidget):
             mw.toggle_favourite_selection()
             self._update_cull_hud()
 
-    def _on_hud_pick_clicked(self) -> None:
+    def _on_hud_flag_clicked(self) -> None:
         mw = getattr(self, "main_window", None) or self.window()
         if self.current_media_id is not None and hasattr(mw, "apply_flag_to_selection"):
             _, cur_flag = self._get_current_cull_state()
-            mw.apply_flag_to_selection(0 if cur_flag == 1 else 1)
-            self._update_cull_hud()
-
-    def _on_hud_reject_clicked(self) -> None:
-        mw = getattr(self, "main_window", None) or self.window()
-        if self.current_media_id is not None and hasattr(mw, "apply_flag_to_selection"):
-            _, cur_flag = self._get_current_cull_state()
-            mw.apply_flag_to_selection(0 if cur_flag == -1 else -1)
+            # Cycle: Unreviewed (0) -> Picked (1) -> Rejected (-1) -> Unreviewed (0)
+            nxt = 1 if cur_flag == 0 else (-1 if cur_flag == 1 else 0)
+            mw.apply_flag_to_selection(nxt)
             self._update_cull_hud()
 
     def _update_live_badge(self) -> None:
