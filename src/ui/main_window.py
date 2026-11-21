@@ -8101,7 +8101,10 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.bottom_dock.refresh_items()
                 self.bottom_dock.set_filmstrip_mode()
                 self.bottom_dock.set_active_media_id(getattr(self.media_viewer, "current_media_id", None))
-                self.bottom_dock.setVisible(new_fs)
+                if hasattr(self.bottom_dock, "animate_visible"):
+                    self.bottom_dock.animate_visible(new_fs)
+                else:
+                    self.bottom_dock.setVisible(new_fs)
                 if hasattr(self.media_viewer, "_update_filmstrip_toggle"):
                     self.media_viewer._update_filmstrip_toggle()
                 self.media_viewer.setFocus()

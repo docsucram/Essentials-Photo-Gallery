@@ -623,20 +623,122 @@ class MediaCardDelegate(QStyledItemDelegate):
         return QRect(card_rect.left() + 6, card_rect.top() + 6, 16, 16)
 
     def heart_rect(self, card_rect: QRect) -> QRect:
-        cb = self.checkbox_rect(card_rect)
-        return QRect(cb.right() + 6, cb.top(), 20, 20)
-
-    def flag_rect(self, card_rect: QRect) -> QRect:
         if getattr(self, "is_horizontal_card", False):
             thumb_side = max(70, min(int(card_rect.height() - 12), 120))
             img_x = card_rect.left() + 8
             img_y = card_rect.top() + (card_rect.height() - thumb_side) // 2
-            return QRect(img_x + thumb_side - 20, img_y + 4, 16, 16)
-        return QRect(card_rect.right() - 22, card_rect.top() + 6, 16, 16)
+            return QRect(img_x + thumb_side - 20, img_y + 4, 18, 18)
+        return QRect(card_rect.right() - 23, card_rect.top() + 5, 18, 18)
+
+    def flag_rect(self, card_rect: QRect) -> QRect:
+        hr = self.heart_rect(card_rect)
+        return QRect(hr.left() - 21, hr.top(), 18, 18)
 
     def stack_badge_rect(self, card_rect: QRect) -> QRect:
         fl = self.flag_rect(card_rect)
         return QRect(fl.left() - 44, fl.top(), 40, 16)
+
+    def _paint_cull_and_status_badges(
+        self,
+        painter: QPainter,
+        card_rect: QRect,
+        img_box: QRect,
+        flag: int,
+        is_hovered: bool,
+        index: QModelIndex,
+    ) -> None:
+        if flag == -1:
+            painter.fillRect(img_box, QColor(15, 23, 42, 115))
+
+        # Flag (Pick = 1 / Reject = -1 crossed-out / Unreviewed = 0 on hover)
+        if "flag" in self._visible_details or "all" in self._visible_details:
+            if flag == -1:
+                fl_rect = self.flag_rect(card_rect)
+                pole_x = fl_rect.left() + 4
+                painter.save()
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                painter.setPen(QPen(QColor("#EF4444"), 1.4))
+                painter.drawLine(pole_x, fl_rect.top() + 3, pole_x, fl_rect.bottom() - 2)
+                banner = QPolygonF([
+                    QPointF(pole_x, fl_rect.top() + 3),
+                    QPointF(fl_rect.right() - 2, fl_rect.top() + 6.5),
+                    QPointF(pole_x, fl_rect.top() + 10),
+                ])
+                painter.setBrush(QColor(239, 68, 68, 85))
+                painter.drawPolygon(banner)
+                painter.setPen(QPen(QColor("#EF4444"), 1.9, Qt.SolidLine, Qt.RoundCap))
+                painter.drawLine(fl_rect.left() + 2, fl_rect.bottom() - 2, fl_rect.right() - 2, fl_rect.top() + 2)
+                painter.restore()
+            elif flag == 1 or is_hovered:
+                fl_rect = self.flag_rect(card_rect)
+                pole_x = fl_rect.left() + 4
+                painter.save()
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                painter.setPen(QPen(QColor("#22C55E") if flag == 1 else QColor("#94A3B8"), 1.4))
+                painter.drawLine(pole_x, fl_rect.top() + 3, pole_x, fl_rect.bottom() - 2)
+                banner = QPolygonF([
+                    QPointF(pole_x, fl_rect.top() + 3),
+                    QPointF(fl_rect.right() - 2, fl_rect.top() + 6.5),
+                    QPointF(pole_x, fl_rect.top() + 10),
+                ])
+                painter.setBrush(QColor("#22C55E") if flag == 1 else Qt.NoBrush)
+                painter.drawPolygon(banner)
+                painter.restore()
+
+        rec_meta = index.data(CatalogRoles.RecordRole)
+        if rec_meta is None:
+            return
+
+        # Favourite Heart (to the right of Flag in top-right; solid rose when active, outline on hover)
+        is_fav = bool(getattr(rec_meta, "is_favourite", 0))
+        if is_fav or is_hovered:
+            hr_rect = self.heart_rect(card_rect)
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            cx, cy = hr_rect.center().x(), hr_rect.center().y()
+            hpath = QPainterPath()
+            hpath.moveTo(cx, cy + 5.0)
+            hpath.cubicTo(cx - 5.8, cy + 1.4, cx - 6.2, cy - 3.6, cx - 3.3, cy - 4.9)
+            hpath.cubicTo(cx - 1.4, cy - 5.8, cx - 0.3, cy - 4.0, cx, cy - 2.5)
+            hpath.cubicTo(cx + 0.3, cy - 4.0, cx + 1.4, cy - 5.8, cx + 3.3, cy - 4.9)
+            hpath.cubicTo(cx + 6.2, cy - 3.6, cx + 5.8, cy + 1.4, cx, cy + 5.0)
+            if is_fav:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor("#F43F5E"))
+            else:
+                painter.setPen(QPen(QColor("#94A3B8"), 1.35))
+                painter.setBrush(Qt.NoBrush)
+            painter.drawPath(hpath)
+            painter.restore()
+
+        is_live = bool(getattr(rec_meta, "is_live_photo", 0))
+        is_offline = bool(getattr(rec_meta, "is_offline", 0))
+        stack_cnt = int(getattr(rec_meta, "stack_count", 1) or 1)
+        if is_live or is_offline or stack_cnt > 1:
+            painter.save()
+            painter.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+            if is_live:
+                live_rect = QRect(img_box.left() + 4, img_box.bottom() - 20, 36, 15)
+                painter.setPen(QPen(QColor(255, 255, 255, 160), 1))
+                painter.setBrush(QColor(15, 23, 42, 200))
+                painter.drawRoundedRect(live_rect, 3, 3)
+                painter.setPen(QColor("#FFFFFF"))
+                painter.drawText(live_rect, Qt.AlignCenter, "LIVE")
+            if is_offline:
+                off_rect = QRect(img_box.left() + 4, img_box.top() + 24, 52, 15)
+                painter.setPen(QPen(QColor("#FBBF24"), 1))
+                painter.setBrush(QColor(120, 53, 15, 215))
+                painter.drawRoundedRect(off_rect, 3, 3)
+                painter.setPen(QColor("#FEF3C7"))
+                painter.drawText(off_rect, Qt.AlignCenter, "OFFLINE")
+            if stack_cnt > 1:
+                st_rect = self.stack_badge_rect(card_rect)
+                painter.setPen(QPen(QColor("#38BDF8"), 1))
+                painter.setBrush(QColor(15, 23, 42, 215))
+                painter.drawRoundedRect(st_rect, 3, 3)
+                painter.setPen(QColor("#F8FAFC"))
+                painter.drawText(st_rect, Qt.AlignCenter, f"⧉ {stack_cnt}")
+            painter.restore()
 
     def stars_bar_rect(self, card_rect: QRect) -> QRect:
         if getattr(self, "is_horizontal_card", False):
@@ -915,95 +1017,7 @@ class MediaCardDelegate(QStyledItemDelegate):
                 painter.setPen(QPen(QColor("#60A5FA") if self.dark_mode else QColor("#7A9CC6"), 1.1))
                 painter.drawRoundedRect(cb_rect, 2, 2)
 
-        if flag == -1:
-            painter.fillRect(img_box, QColor(15, 23, 42, 110))
-
-        if "flag" in self._visible_details or "all" in self._visible_details:
-            if flag == -1:
-                fl_rect = self.flag_rect(card_rect)
-                pole_x = fl_rect.left() + 4
-                painter.save()
-                painter.setRenderHint(QPainter.Antialiasing, True)
-                painter.setPen(QPen(QColor("#EF4444"), 1.3))
-                painter.drawLine(pole_x, fl_rect.top() + 2, pole_x, fl_rect.bottom() - 2)
-                banner = QPolygonF([
-                    QPointF(pole_x, fl_rect.top() + 2),
-                    QPointF(fl_rect.right() - 2, fl_rect.top() + 5),
-                    QPointF(pole_x, fl_rect.top() + 9),
-                ])
-                painter.setBrush(QColor(239, 68, 68, 80))
-                painter.drawPolygon(banner)
-                painter.setPen(QPen(QColor("#EF4444"), 1.8, Qt.SolidLine, Qt.RoundCap))
-                painter.drawLine(fl_rect.left() + 2, fl_rect.bottom() - 2, fl_rect.right() - 2, fl_rect.top() + 2)
-                painter.restore()
-            elif flag == 1 or is_hovered:
-                fl_rect = self.flag_rect(card_rect)
-                pole_x = fl_rect.left() + 4
-                painter.setPen(QPen(QColor("#D83B01") if flag == 1 else QColor("#8A9AB0"), 1.3))
-                painter.drawLine(pole_x, fl_rect.top() + 2, pole_x, fl_rect.bottom() - 2)
-                banner = QPolygonF([
-                    QPointF(pole_x, fl_rect.top() + 2),
-                    QPointF(fl_rect.right() - 2, fl_rect.top() + 5),
-                    QPointF(pole_x, fl_rect.top() + 9),
-                ])
-                painter.setBrush(QColor("#E81123") if flag == 1 else (QColor(45, 55, 72, 190) if self.dark_mode else QColor(255, 255, 255, 190)))
-                painter.drawPolygon(banner)
-
-        # Live Photo / Offline Drive / Image Stack / Favourite Badges
-        rec_meta = index.data(CatalogRoles.RecordRole)
-        if rec_meta is not None:
-            is_fav = bool(getattr(rec_meta, "is_favourite", 0))
-            if is_fav or is_hovered:
-                hr_rect = self.heart_rect(card_rect)
-                painter.save()
-                painter.setRenderHint(QPainter.Antialiasing, True)
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(QColor(15, 23, 42, 185))
-                painter.drawRoundedRect(hr_rect, 4, 4)
-                cx, cy = hr_rect.center().x(), hr_rect.center().y()
-                hpath = QPainterPath()
-                hpath.moveTo(cx, cy + 4.5)
-                hpath.cubicTo(cx - 5.2, cy + 1.2, cx - 5.6, cy - 3.2, cx - 3.0, cy - 4.4)
-                hpath.cubicTo(cx - 1.3, cy - 5.2, cx - 0.3, cy - 3.6, cx, cy - 2.3)
-                hpath.cubicTo(cx + 0.3, cy - 3.6, cx + 1.3, cy - 5.2, cx + 3.0, cy - 4.4)
-                hpath.cubicTo(cx + 5.6, cy - 3.2, cx + 5.2, cy + 1.2, cx, cy + 4.5)
-                if is_fav:
-                    painter.setPen(Qt.NoPen)
-                    painter.setBrush(QColor("#F43F5E"))
-                else:
-                    painter.setPen(QPen(QColor("#CBD5E1"), 1.2))
-                    painter.setBrush(Qt.NoBrush)
-                painter.drawPath(hpath)
-                painter.restore()
-            is_live = bool(getattr(rec_meta, "is_live_photo", 0))
-            is_offline = bool(getattr(rec_meta, "is_offline", 0))
-            stack_cnt = int(getattr(rec_meta, "stack_count", 1) or 1)
-            if is_live or is_offline or stack_cnt > 1:
-                painter.save()
-                badge_font = QFont("Segoe UI", 7, QFont.Weight.Bold)
-                painter.setFont(badge_font)
-                if is_live:
-                    live_rect = QRect(img_box.left() + 4, img_box.bottom() - 20, 36, 15)
-                    painter.setPen(QPen(QColor(255, 255, 255, 160), 1))
-                    painter.setBrush(QColor(15, 23, 42, 200))
-                    painter.drawRoundedRect(live_rect, 3, 3)
-                    painter.setPen(QColor("#FFFFFF"))
-                    painter.drawText(live_rect, Qt.AlignCenter, "LIVE")
-                if is_offline:
-                    off_rect = QRect(img_box.left() + 4, img_box.top() + 24, 52, 15)
-                    painter.setPen(QPen(QColor("#FBBF24"), 1))
-                    painter.setBrush(QColor(120, 53, 15, 215))
-                    painter.drawRoundedRect(off_rect, 3, 3)
-                    painter.setPen(QColor("#FEF3C7"))
-                    painter.drawText(off_rect, Qt.AlignCenter, "OFFLINE")
-                if stack_cnt > 1:
-                    st_rect = self.stack_badge_rect(card_rect)
-                    painter.setPen(QPen(QColor("#38BDF8"), 1))
-                    painter.setBrush(QColor(15, 23, 42, 215))
-                    painter.drawRoundedRect(st_rect, 3, 3)
-                    painter.setPen(QColor("#F8FAFC"))
-                    painter.drawText(st_rect, Qt.AlignCenter, f"⧉ {stack_cnt}")
-                painter.restore()
+        self._paint_cull_and_status_badges(painter, card_rect, img_box, flag, is_hovered, index)
 
         # 3. Text details on the right
         text_left = img_box.right() + 10
@@ -1336,26 +1350,8 @@ class MediaCardDelegate(QStyledItemDelegate):
                 painter.setPen(QPen(QColor("#60A5FA") if self.dark_mode else QColor("#7A9CC6"), 1.1))
                 painter.drawRoundedRect(cb_rect, 2, 2)
 
-        # 5. Top-Right Flag Pin Icon (shown only if 'flag' in visible details)
-        if "flag" in self._visible_details or "all" in self._visible_details:
-            if flag == 1 or is_hovered:
-                fl_rect = self.flag_rect(card_rect)
-                pole_x = fl_rect.left() + 4
-                painter.setPen(
-                    QPen(QColor("#D83B01") if flag == 1 else QColor("#8A9AB0"), 1.3)
-                )
-                painter.drawLine(pole_x, fl_rect.top() + 2, pole_x, fl_rect.bottom() - 2)
-                banner = QPolygonF(
-                    [
-                        QPointF(pole_x, fl_rect.top() + 2),
-                        QPointF(fl_rect.right() - 2, fl_rect.top() + 5),
-                        QPointF(pole_x, fl_rect.top() + 9),
-                    ]
-                )
-                painter.setBrush(
-                    QColor("#E81123") if flag == 1 else (QColor(45, 55, 72, 190) if self.dark_mode else QColor(255, 255, 255, 190))
-                )
-                painter.drawPolygon(banner)
+        # 5. Top-Right Flag (Pick/Reject) + Heart (Favourite) + Live/Offline/Stack Badges
+        self._paint_cull_and_status_badges(painter, card_rect, img_box, flag, is_hovered, index)
 
         # 6. Extra detail lines (Filename, Size, Date, etc.)
         y_text = img_box.bottom() + 2
@@ -2886,6 +2882,42 @@ class ThumbnailGridView(QListView):
                     main_win.rename_selection()
                     event.accept()
                     return
+            if event.key() == Qt.Key_F:
+                main_win = getattr(self, "main_window", None) or self.window()
+                if hasattr(main_win, "toggle_favourite_selection"):
+                    main_win.toggle_favourite_selection(advance=shift_held)
+                    event.accept()
+                    return
+            if event.key() == Qt.Key_P:
+                main_win = getattr(self, "main_window", None) or self.window()
+                if hasattr(main_win, "apply_flag_to_selection"):
+                    sel_ids = self.selected_media_ids()
+                    if sel_ids and self.catalog_model is not None:
+                        has_non_picked = any(
+                            int(getattr(self.catalog_model.record_by_id(mid), "flag", 0) or 0) != 1
+                            for mid in sel_ids
+                        )
+                        main_win.apply_flag_to_selection(1 if has_non_picked else 0, advance=shift_held)
+                        event.accept()
+                        return
+            if event.key() == Qt.Key_X:
+                main_win = getattr(self, "main_window", None) or self.window()
+                if hasattr(main_win, "apply_flag_to_selection"):
+                    sel_ids = self.selected_media_ids()
+                    if sel_ids and self.catalog_model is not None:
+                        has_non_rejected = any(
+                            int(getattr(self.catalog_model.record_by_id(mid), "flag", 0) or 0) != -1
+                            for mid in sel_ids
+                        )
+                        main_win.apply_flag_to_selection(-1 if has_non_rejected else 0, advance=shift_held)
+                        event.accept()
+                        return
+            if event.key() == Qt.Key_U:
+                main_win = getattr(self, "main_window", None) or self.window()
+                if hasattr(main_win, "apply_flag_to_selection") and self.selected_media_ids():
+                    main_win.apply_flag_to_selection(0, advance=shift_held)
+                    event.accept()
+                    return
             if event.key() == Qt.Key_C:
                 sel_ids = self.selected_media_ids()
                 if sel_ids:
@@ -2962,6 +2994,28 @@ class ThumbnailGridView(QListView):
                     return
                 mid = self.catalog_model.media_id_at(idx)
                 if mid is not None:
+                    # Do not open Single Image View when rapidly clicking card badges (Flag, Heart, Checkbox, Stars, Stack)
+                    if self.card_delegate is not None:
+                        card_rect = self.visualRect(idx).adjusted(2, 2, -2, -2)
+                        if self.card_delegate.flag_rect(card_rect).contains(pos):
+                            curr_flag = int(idx.data(CatalogRoles.FlagRole) or 0)
+                            new_flag = 1 if curr_flag == 0 else (-1 if curr_flag == 1 else 0)
+                            self.card_delegate.flag_toggled.emit(int(mid), new_flag)
+                            event.accept()
+                            return
+                        if self.card_delegate.heart_rect(card_rect).contains(pos):
+                            rec_fav = idx.data(CatalogRoles.RecordRole)
+                            cur_fav = bool(getattr(rec_fav, "is_favourite", 0)) if rec_fav is not None else False
+                            self.card_delegate.favourite_toggled.emit(int(mid), not cur_fav)
+                            event.accept()
+                            return
+                        if (
+                            self.card_delegate.checkbox_rect(card_rect).contains(pos)
+                            or self.card_delegate.stars_bar_rect(card_rect).contains(pos)
+                            or self.card_delegate.stack_badge_rect(card_rect).contains(pos)
+                        ):
+                            event.accept()
+                            return
                     self.media_activated.emit(mid)
                     event.accept()
                     return

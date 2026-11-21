@@ -454,10 +454,55 @@ class BottomFilmstripDock(QDockWidget):
             return
         w, h = host.width(), host.height()
         cy = max(4, (h - self.btn_scroll_right.height()) // 2)
-        self.btn_scroll_left.move(8, 10)
+        self.btn_scroll_left.move(8, cy)
         self.btn_scroll_right.move(max(8, w - self.btn_scroll_right.width() - 8), cy)
         self.btn_scroll_left.raise_()
         self.btn_scroll_right.raise_()
+
+    def animate_visible(self, show: bool) -> None:
+        """Smoothly and quickly slide the filmstrip dock up or down."""
+        from PySide6.QtCore import QEasingCurve, QPropertyAnimation
+
+        old_anim = getattr(self, "_slide_anim", None)
+        if old_anim is not None:
+            try:
+                old_anim.stop()
+            except Exception:
+                pass
+
+        target_h = 100
+        self.setMinimumHeight(0)
+        anim = QPropertyAnimation(self, b"maximumHeight", self)
+        anim.setDuration(140)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        if show:
+            if not self.isVisible():
+                self.setMaximumHeight(0)
+                self.show()
+            anim.setStartValue(self.height() if self.height() > 0 else 0)
+            anim.setEndValue(target_h)
+
+            def _on_shown() -> None:
+                self.setMinimumHeight(92)
+                self.setMaximumHeight(112)
+                self._position_scroll_buttons()
+
+            anim.finished.connect(_on_shown)
+        else:
+            if not self.isVisible():
+                return
+            anim.setStartValue(self.height())
+            anim.setEndValue(0)
+
+            def _on_hidden() -> None:
+                self.hide()
+                self.setMinimumHeight(92)
+                self.setMaximumHeight(112)
+
+            anim.finished.connect(_on_hidden)
+
+        self._slide_anim = anim
+        anim.start()
 
     def eventFilter(self, watched: Any, event: QEvent) -> bool:
         if watched is self.page_filmstrip and event.type() == QEvent.Type.Resize:

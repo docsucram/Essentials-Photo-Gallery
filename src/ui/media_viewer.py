@@ -2988,10 +2988,9 @@ class SingleMediaViewer(QWidget):
             return
         enabled = bool(getattr(mw, "_filmstrip_viewer_enabled", False))
 
-        # Keep anchored on the main window so opening/closing the bottom filmstrip dock never shifts its Y position
-        host = mw if (mw is not None and mw is not self) else vp
-        if btn.parentWidget() is not host:
-            btn.setParent(host)
+        # Keep anchored to bottom-left of graphics_view viewport so it rides smoothly atop the filmstrip's top-left edge
+        if btn.parentWidget() is not vp:
+            btn.setParent(vp)
 
         pm = QPixmap(32, 32)
         pm.fill(Qt.transparent)
@@ -3014,12 +3013,7 @@ class SingleMediaViewer(QWidget):
         btn.setIcon(QIcon(pm))
         btn.setToolTip("Hide Filmstrip" if enabled else "Show Filmstrip")
         btn.blockSignals(False)
-
-        if host is mw and hasattr(mw, "statusBar") and mw.statusBar() is not None and mw.statusBar().isVisible():
-            bottom_y = mw.statusBar().y()
-        else:
-            bottom_y = host.height()
-        btn.move(8, max(8, bottom_y - btn.height() - 10))
+        btn.move(8, max(8, vp.height() - btn.height() - 8))
         btn.show()
         btn.raise_()
 
