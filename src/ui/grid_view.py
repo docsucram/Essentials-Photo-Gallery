@@ -2791,6 +2791,18 @@ class ThumbnailGridView(QListView):
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                sel_ids = self.selected_media_ids()
+                if sel_ids:
+                    self.media_activated.emit(int(sel_ids[-1]))
+                    event.accept()
+                    return
+                if self.catalog_model is not None and self.currentIndex().isValid():
+                    mid = self.catalog_model.media_id_at(self.currentIndex())
+                    if mid is not None:
+                        self.media_activated.emit(int(mid))
+                        event.accept()
+                        return
             if event.key() in (
                 Qt.Key_Left,
                 Qt.Key_Right,
@@ -2924,11 +2936,14 @@ class ThumbnailGridView(QListView):
                     gkey = str(idx.data(CatalogRoles.GroupKeyRole) or "")
                     if gkey:
                         self.catalog_model.toggle_group_collapsed(gkey)
+                        event.accept()
                     return
                 mid = self.catalog_model.media_id_at(idx)
                 if mid is not None:
                     self.media_activated.emit(mid)
+                    event.accept()
                     return
+        super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         if self.catalog_model is None:

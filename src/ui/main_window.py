@@ -6164,9 +6164,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         if returning_viewer_mid is not None:
             self.grid_view.select_media_id(int(returning_viewer_mid))
             self._selected_ids = [int(returning_viewer_mid)]
+            self._lead_selected_id = int(returning_viewer_mid)
 
         # Rebind selection from grid to right dock
         sel = self.grid_view.selected_media_ids() or list(self._selected_ids)
+        if sel and self._lead_selected_id not in sel:
+            self._lead_selected_id = int(sel[-1])
         summary = self.catalog_repo.get_selection_summary(sel)
         self.right_tag_dock.bind_selection(sel, summary)
         self.grid_view.setFocus()
@@ -10905,7 +10908,12 @@ class PhotoGalleryMainWindow(QMainWindow):
             # Enter / Return: Grid -> Open Single Viewer; Viewer -> Return to Grid
             if event.key() in (Qt.Key_Return, Qt.Key_Enter):
                 if self.central_stack.currentWidget() == self.grid_view:
-                    target_id = self._lead_selected_id or (self._selected_ids[0] if self._selected_ids else None)
+                    grid_sel = self.grid_view.selected_media_ids()
+                    target_id = (
+                        self._lead_selected_id
+                        if self._lead_selected_id in grid_sel
+                        else (grid_sel[-1] if grid_sel else (self._selected_ids[0] if self._selected_ids else None))
+                    )
                     if target_id is not None:
                         self.open_single_viewer(target_id)
                         event.accept()
@@ -10915,12 +10923,17 @@ class PhotoGalleryMainWindow(QMainWindow):
                     event.accept()
                     return
 
-            # Space: Grid -> Open Single Viewer; Viewer -> Next slide
+            # Space: Grid -> Quick Preview; Viewer -> Next slide
             if event.key() == Qt.Key_Space:
                 if self.central_stack.currentWidget() == self.grid_view:
-                    target_id = self._lead_selected_id or (self._selected_ids[0] if self._selected_ids else None)
+                    grid_sel = self.grid_view.selected_media_ids()
+                    target_id = (
+                        self._lead_selected_id
+                        if self._lead_selected_id in grid_sel
+                        else (grid_sel[-1] if grid_sel else (self._selected_ids[0] if self._selected_ids else None))
+                    )
                     if target_id is not None:
-                        self.open_single_viewer(target_id)
+                        self.show_quick_preview(target_id)
                         event.accept()
                         return
                 elif self.central_stack.currentWidget() == self.media_viewer:

@@ -1861,24 +1861,25 @@ class SingleMediaViewer(QWidget):
 
         self.cull_hud = QFrame(self.graphics_view.viewport())
         self.cull_hud.setStyleSheet(
-            "QFrame { background-color: rgba(15, 23, 42, 200); border: 1px solid rgba(148, 163, 184, 100); "
-            "border-radius: 14px; }"
+            "QFrame { background-color: rgba(15, 23, 42, 210); border: 1px solid rgba(148, 163, 184, 110); "
+            "border-radius: 16px; }"
         )
         hud_lay = QHBoxLayout(self.cull_hud)
         hud_lay.setContentsMargins(6, 3, 6, 3)
         hud_lay.setSpacing(4)
-        self.btn_hud_fav = QPushButton("♡", self.cull_hud)
+        self.btn_hud_fav = QPushButton(self.cull_hud)
         self.btn_hud_fav.setToolTip("Favourite (F / Shift+F)")
-        self.btn_hud_pick = QPushButton("⚑", self.cull_hud)
+        self.btn_hud_pick = QPushButton(self.cull_hud)
         self.btn_hud_pick.setToolTip("Pick / Flag (P / Shift+P)")
-        self.btn_hud_reject = QPushButton("✕", self.cull_hud)
+        self.btn_hud_reject = QPushButton(self.cull_hud)
         self.btn_hud_reject.setToolTip("Reject (X / Shift+X)")
         for b in (self.btn_hud_fav, self.btn_hud_pick, self.btn_hud_reject):
-            b.setFixedSize(24, 24)
+            b.setFixedSize(28, 28)
+            b.setIconSize(QSize(16, 16))
             b.setCursor(Qt.PointingHandCursor)
             b.setStyleSheet(
-                "QPushButton { background: transparent; color: #CBD5E1; border: none; font-size: 11pt; font-weight: 700; }"
-                "QPushButton:hover { color: #FFFFFF; background: rgba(255,255,255,28); border-radius: 12px; }"
+                "QPushButton { background: transparent; border: none; border-radius: 14px; }"
+                "QPushButton:hover { background: rgba(255, 255, 255, 32); }"
             )
             hud_lay.addWidget(b)
         self.cull_hud.adjustSize()
@@ -2897,22 +2898,48 @@ class SingleMediaViewer(QWidget):
         meta = (getattr(mw, "_media_meta_lookup", None) or {}).get(int(self.current_media_id)) or {}
         is_fav = bool(meta.get("is_favourite", 0))
         flag = int(meta.get("flag", 0) or 0)
-        self.btn_hud_fav.setText("♥" if is_fav else "♡")
-        self.btn_hud_fav.setStyleSheet(
-            f"QPushButton {{ background: transparent; color: {'#F43F5E' if is_fav else '#CBD5E1'}; "
-            "border: none; font-size: 11pt; font-weight: 700; }"
-            "QPushButton:hover { background: rgba(255,255,255,28); border-radius: 12px; }"
-        )
-        self.btn_hud_pick.setStyleSheet(
-            f"QPushButton {{ background: transparent; color: {'#22C55E' if flag == 1 else '#CBD5E1'}; "
-            "border: none; font-size: 11pt; font-weight: 700; }"
-            "QPushButton:hover { background: rgba(255,255,255,28); border-radius: 12px; }"
-        )
-        self.btn_hud_reject.setStyleSheet(
-            f"QPushButton {{ background: transparent; color: {'#EF4444' if flag == -1 else '#CBD5E1'}; "
-            "border: none; font-size: 11pt; font-weight: 700; }"
-            "QPushButton:hover { background: rgba(255,255,255,28); border-radius: 12px; }"
-        )
+
+        def _make_hud_icon(kind: str, color_hex: str, filled: bool = False) -> QIcon:
+            pm = QPixmap(32, 32)
+            pm.fill(Qt.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.Antialiasing, True)
+            col = QColor(color_hex)
+            pen = QPen(col, 2.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            p.setPen(pen)
+            p.setBrush(QBrush(col) if filled else Qt.NoBrush)
+            if kind == "heart":
+                path = QPainterPath()
+                path.moveTo(16.0, 26.0)
+                path.cubicTo(6.0, 19.5, 4.5, 11.5, 9.0, 7.5)
+                path.cubicTo(12.2, 4.8, 15.0, 6.8, 16.0, 9.2)
+                path.cubicTo(17.0, 6.8, 19.8, 4.8, 23.0, 7.5)
+                path.cubicTo(27.5, 11.5, 26.0, 19.5, 16.0, 26.0)
+                p.drawPath(path)
+            elif kind == "flag":
+                p.drawLine(8, 5, 8, 27)
+                poly = QPolygonF([QPointF(8, 6), QPointF(25, 10.5), QPointF(8, 16)])
+                p.drawPolygon(poly)
+            elif kind == "reject":
+                p.drawLine(8, 8, 24, 24)
+                p.drawLine(24, 8, 8, 24)
+            p.end()
+            pm.setDevicePixelRatio(2.0)
+            return QIcon(pm)
+
+        self.btn_hud_fav.setIcon(_make_hud_icon("heart", "#F43F5E" if is_fav else "#CBD5E1", filled=is_fav))
+        self.btn_hud_pick.setIcon(_make_hud_icon("flag", "#22C55E" if flag == 1 else "#CBD5E1", filled=(flag == 1)))
+        self.btn_hud_reject.setIcon(_make_hud_icon("reject", "#EF4444" if flag == -1 else "#CBD5E1", filled=False))
+
+        for btn, active_bg in (
+            (self.btn_hud_fav, "rgba(244, 63, 94, 48)" if is_fav else "transparent"),
+            (self.btn_hud_pick, "rgba(34, 197, 94, 48)" if flag == 1 else "transparent"),
+            (self.btn_hud_reject, "rgba(239, 68, 68, 48)" if flag == -1 else "transparent"),
+        ):
+            btn.setStyleSheet(
+                f"QPushButton {{ background: {active_bg}; border: none; border-radius: 14px; }}"
+                "QPushButton:hover { background: rgba(255, 255, 255, 36); }"
+            )
         hud.adjustSize()
         hud.move(max(14, vp.width() - hud.width() - 14), 14)
         hud.show()
