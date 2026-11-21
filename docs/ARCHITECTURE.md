@@ -39,12 +39,14 @@ Gallery/
 │   └── schema.sql                               # Complete SQLite DDL: WAL, R*Tree, closure tables, albums, indexes, triggers
 ├── assets/ & resources/
 │   ├── icons/ & resources/icons/                # High-DPI UI icons, SVG vectors, app icon
+│   ├── leaflet/                                 # Bundled Leaflet 1.9.4 + map_clusters_worker.js (zero-CDN offline map)
 │   └── themes/                                  # wlpg_aero.qss, dark.qss, modern.qss
 ├── src/
 │   ├── __init__.py
 │   ├── core/
 │   │   ├── __init__.py
-│   │   ├── duplicate_finder.py                  # Exact hashing, perceptual pHash/dHash, 24-byte LAB Haar Find Similar, burst sharpness
+│   │   ├── af_area_parser.py                    # On-demand, LRU-cached EXIF SubjectArea & MakerNote AF box parser
+│   │   ├── duplicate_finder.py                  # Exact hashing, perceptual pHash/dHash, LAB Haar Find Similar, Preferred Folder keep rules
 │   │   ├── face_engine.py                       # InsightFace SCRFD + ArcFace ONNX wrapper (session-cached, detection+recognition) & OpenCV fallback
 │   │   ├── face_matcher.py                      # NumPy N×512 BLAS cosine similarity & incremental cluster centroids
 │   │   ├── gazetteer_data.py                    # Built-in offline gazetteer (3,500+ world cities & UK settlements)
@@ -54,37 +56,41 @@ Gallery/
 │   ├── db/
 │   │   ├── __init__.py
 │   │   ├── connection.py                        # DualDatabaseEngine: WAL connections, schema migrations, online backups
-│   │   └── repository.py                        # CatalogRepository & ThumbnailRepository: faceted queries, 17-dim Smart Album compiler
+│   │   └── repository.py                        # CatalogRepository & ThumbnailRepository: faceted queries, Smart Albums, map cells, stacks
 │   ├── imaging/
 │   │   ├── __init__.py
 │   │   ├── image_loader.py                      # Next-gen codecs (HEIC/HEIF/AVIF/JXL) & LittleCMS2 Display P3 -> sRGB conversion
+│   │   ├── live_photo.py                        # Samsung/Pixel Motion Photo EOI/XMP tail detector & Apple Live Photo .MOV pairing
 │   │   ├── opencv_engine.py                     # 32-bit float/LUT tone engine, U-Point, auto-straighten, frequency separation
+│   │   ├── raw_fast_thumb.py                    # Pure-Python Tier-0 bounded TIFF/IFD embedded JPEG extractor (bypasses rawpy)
 │   │   ├── create_tools.py                      # Panorama stitcher (ICE crop), Collages, Then & Now, Photo Fuse
 │   │   └── creative_effects.py                  # Depth & Light (bokeh, relight, haze), Color Pop, 3D Cinematic Motion MP4
 │   ├── ui/
 │   │   ├── __init__.py
 │   │   ├── albums_view.py                       # AlbumsView: Stack preview cards for static & smart albums
 │   │   ├── batch_people_view.py                 # Virtualised face confirmation grid & Spacebar full-photo preview popover
-│   │   ├── compare_view.py                      # CompareMediaView: Multi-photo Light Table (2-Up, 3-Up, Quad, Wipe slider, Sync zoom)
+│   │   ├── batch_rename_dialog.py               # Token-driven Batch Rename dialog with Windows validation, XMP sync & atomic rollback
+│   │   ├── compare_view.py                      # CompareMediaView: Multi-photo Light Table (2-Up, 3-Up, Quad, Wipe slider, Sync zoom, Minimap)
 │   │   ├── create_studio_dialogs.py             # Interactive Panorama, Collage, Photo Fuse, Colour Pop & 3D Motion studios
 │   │   ├── crop_tool.py                         # Interactive Rule-of-Thirds CropOverlayItem with aspect-ratio & Uncrop support
 │   │   ├── dialogs.py                           # Relative Δt Time Shift, File Properties, Merge People & maintenance dialogs
-│   │   ├── duplicate_finder_dialog.py           # Side-by-side comparison workspace, auto-select rules, safe Recycle Bin delete
+│   │   ├── duplicate_finder_dialog.py           # Side-by-side comparison workspace, auto-select & preferred-folder rules, Recycle Bin delete
 │   │   ├── folder_manager_dialog.py             # Picasa-style Folder Manager (Scan Always/Once/Exclude, Faces/OCR, Private PIN)
 │   │   ├── gps_match_dialog.py                  # Companion Phone & GPX Track GPS Matching dialog
 │   │   ├── grid_model.py                        # CatalogListModel (O(log G) binary-searched collapsible section headers)
-│   │   ├── grid_view.py                         # ThumbnailGridView (QListView IconMode), EmptyStateWidget & Polaroid MediaCardDelegate
+│   │   ├── grid_view.py                         # ThumbnailGridView (QListView IconMode), MediaCardDelegate ([LIVE]/[OFFLINE]/[⧉ N] badges)
 │   │   ├── icon_provider.py                     # Multi-theme vector/raster icon provider (Aero, Fluent, Minimalist)
 │   │   ├── import_dialog.py                     # MTP/PTP WPD device + drive/DCIM scanning, folder presets, progress monitor
 │   │   ├── left_nav_dock.py                     # LeftNavigationDock: Albums, Folders, Dates, Places, Tags (AND/OR/NOT), People, Ratings
 │   │   ├── main_window.py                       # PhotoGalleryMainWindow: Central coordinator, thread pools, status bar & shortcuts
-│   │   ├── map_view.py                          # WorldMapView: QWebEngineView + Leaflet + R*Tree clustering + drag-zoom + vector fallback
+│   │   ├── map_view.py                          # WorldMapView: QWebEngineView + bundled Leaflet + gallerythumb:// + Web Worker Supercluster
 │   │   ├── markup_overlay.py                    # MarkupOverlayView: Vector arrows, shapes, text pills, 2.5x loupe & privacy redactions
-│   │   ├── media_viewer.py                      # SingleMediaViewer: Async full-res proxy/master studio, video player, face overlay
+│   │   ├── media_viewer.py                      # SingleMediaViewer: Async proxy/master studio, Live/Motion playback, AF overlay, Minimap
 │   │   ├── options_dialog.py                    # AppSettingsDialog: General, People/AI, Backups, Save/Edit options
 │   │   ├── people_directory_view.py             # PeopleDirectoryView: Immich-style 130px circular cards & unnamed clusters
 │   │   ├── person_header_bar.py                 # Timeline strip with 1-click [Confirm all] verification
 │   │   ├── print_dialog.py                      # Photo print layout & contact sheet dialog
+│   │   ├── quick_preview_dialog.py              # Spacebar QuickLook preview popover for rapid Grid View culling
 │   │   ├── ribbon_toolbar.py                    # RibbonToolbar: Integrated Title Bar, QAT, Home/Edit/Find/Create/View & contextual Map tab
 │   │   ├── right_tag_dock.py                    # TagAndCaptionDock: Info (Ctrl+I), Fine Tune (Ctrl+F), Depth & Light
 │   │   ├── search_scope_bar.py                  # Breadcrumb path/album/map chip bar, Find Similar threshold slider & search box
@@ -92,20 +98,22 @@ Gallery/
 │   │   ├── smart_album_dialog.py                # SmartAlbumDialog: Interactive Boolean rule builder with live match preview
 │   │   ├── tag_hierarchy_dialog.py              # Interactive tag tree editor & Duplicate Root Tags merger
 │   │   ├── tag_someone_dialog.py                # Autocomplete face-tagging dialog with fade-out & click-outside dismissal
-│   │   └── win32_frame.py                       # Windows 11 DWM frameless window & custom title bar integration
+│   │   ├── win32_frame.py                       # Windows 11 DWM frameless window & custom title bar integration
+│   │   └── zoom_minimap.py                      # ZoomMinimapOverlay + 16×12 Laplacian sharpness heatmap grid
 │   ├── utils/
 │   │   ├── __init__.py
 │   │   ├── geotag_resolver.py                   # Compatibility bridge to src.core.geotag_resolver
-│   │   ├── paths.py                             # AppData, user libraries, temp caches & frozen bundle resource resolver
-│   │   ├── scan_logger.py                       # Persistent scan & crash diagnostics logger
+│   │   ├── paths.py                             # AppData, cloud-only OneDrive & offline-volume detection, frozen bundle resolver
+│   │   ├── scan_logger.py                       # Persistent scan & native crash breadcrumb (`ScanCrashTrace`) logger
 │   │   └── wpd_mtp.py                           # Native Windows Portable Devices (WPD) COM MTP/PTP camera & smartphone I/O
 │   └── workers/
 │       ├── __init__.py
 │       ├── face_worker.py                       # 3-stage ONNX face detector, 96x96 WebP crop extractor & backfill
 │       ├── folder_watcher.py                    # QFileSystemWatcher & startup delta reconciliation
 │       ├── ocr_worker.py                        # Background OCR FTS5 indexing worker respecting per-folder policies
-│       ├── scanner_thumb_worker.py              # FolderSyncWorker & ThumbnailDecodeWorker (QImageReader, RAW, Next-Gen, OpenCV)
-│       └── xmp_sync_worker.py                   # MetadataSyncDaemon: Safe-mode-aware XMP/EXIF write-back & mtime preservation
+│       ├── scanner_thumb_worker.py              # FolderSyncWorker & ThumbnailDecodeWorker (QImageReader, Tier-0 RAW, Next-Gen, OpenCV)
+│       ├── thumb_scheduler.py                   # Two-tier viewport-center priority scheduler & ThumbnailWriteCoalescer
+│       └── xmp_sync_worker.py                   # MetadataSyncDaemon: Non-destructive XML-patching XMP/EXIF write-back & mtime preservation
 └── tests/                                       # Automated pytest regression suites (70+ suites) & scale benchmark harness
 ```
 
@@ -278,3 +286,8 @@ flowchart TB
 4. **Adaptive Low-Spec CPU Throttling & Face Model Caching:** Background ONNX workers (`FaceDetectionWorker`, `OcrScanWorker`) dynamically scale ONNX `intra_op_num_threads` (`1` thread on $\le 4$-core laptops, `2` threads on larger CPUs), run background face scans at `QThread.LowPriority`, and adjust inter-photo yield intervals (`75 ms` in Gallery browsing vs. `120 ms` while interactive editing in Single Image View). `FaceEngine.get_shared()` caches the loaded InsightFace session with `allowed_modules=["detection", "recognition"]` (skipping unused 2D/3D landmark and gender/age models) so subsequent scans do not reload ONNX weights.
 5. **Online SQLite Backups & Maintenance:** Uses `sqlite3.Connection.backup()` for zero-lock snapshots, `ANALYZE;` after bulk scans, and `PRAGMA optimize;` on exit.
 6. **Verified 500,000-Item Scale:** Benchmarked in [`BENCHMARKS.md`](BENCHMARKS.md) (`set_records()` `25.7 ms`, `notify_pixmap_ready()` `1.02 ms`, `60+ FPS` continuous scroll with `0` frame hitches).
+7. **Offline-First GPU World Map (`src/ui/map_view.py`, `resources/leaflet/`):** Bundles Leaflet `1.9.4` + `map_clusters_worker.js` locally, serves thumbnails directly over `gallerythumb://media/<id>` (`QWebEngineUrlSchemeHandler`), queries lightweight ~1 km overview cells once off-thread (`query_map_overview_cells`), runs clustering in a JS Web Worker with incremental marker diffing, supports `Current View` vs `Entire Library` scoping, and pre-warms `QWebEngineView` 3s after startup idle.
+8. **Two-Tier Thumbnail Pipeline & Tier-0 RAW Extraction (`src/workers/thumb_scheduler.py`, `src/imaging/raw_fast_thumb.py`):** Splits fast batched `thumbnails.db` reads (`BatchThumbCacheWorker`) from disk decodes (`thumbnail_pool` with a viewport-center priority window), batches WebP commits via `ThumbnailWriteCoalescer`, and extracts embedded JPEG previews from TIFF-based RAWs in `~0.29 ms/file` without calling `rawpy.imread()`.
+9. **Cloud-Only, Offline Volume & Crash Safety (`src/utils/paths.py`, `src/utils/scan_logger.py`):** Guards all scanners/decoders with `is_cloud_only_stat()` (never hydrates OneDrive Files On-Demand), flags unplugged external drives/NAS shares as `folders.volume_offline = 1` (keeping cached thumbnails browsable with `[OFFLINE]` badges), patches existing XMP XML DOMs non-destructively (`xmp_sync_worker.py`), and records `ScanCrashTrace` breadcrumbs around native C/C++ codec calls.
+10. **Photographer Culling Toolkit (`src/ui/zoom_minimap.py`, `src/ui/batch_rename_dialog.py`, `src/ui/quick_preview_dialog.py`, `src/core/af_area_parser.py`):** Provides a corner Zoom Minimap + `16×12` Laplacian Sharpness Heatmap when zoomed `> 100%`, template-driven Batch Rename (`F2`) with Windows reserved-name checks and atomic rollback, Spacebar Quick Preview + `Shift + Rating/Flag` auto-advance culling, and on-demand Camera AF Point Overlays (`A`).
+11. **Live/Motion Photos & Image Stacking (`src/imaging/live_photo.py`, `src/db/repository.py`):** Detects Samsung/Pixel Motion Photo JPEG EOI/XMP tails and Apple `.HEIC`/`.JPG` + `.MOV` pairs (`[LIVE]` badge + `L` in-viewer playback), and groups bursts & RAW+JPEG pairs via `media.stack_parent_id` with collapsible `[⧉ N]` cards.
