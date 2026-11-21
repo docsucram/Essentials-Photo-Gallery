@@ -180,7 +180,8 @@ def resolve_gallery_scheme_payload(
 
 
 def _create_gallery_scheme_handler(parent: QObject | None = None) -> Any:
-    """Factory creating a QWebEngineUrlSchemeHandler subclass when QtWebEngineCore is present."""
+    """Factory creating a QWebEngineUrlSchemeHandler subclass with RAM LRU cache for instant pin loads."""
+    from collections import OrderedDict
     from PySide6.QtWebEngineCore import QWebEngineUrlRequestJob, QWebEngineUrlSchemeHandler
 
     class _GalleryThumbSchemeHandler(QWebEngineUrlSchemeHandler):
@@ -188,28 +189,66 @@ def _create_gallery_scheme_handler(parent: QObject | None = None) -> Any:
             super().__init__(p)
             self.thumb_repo: Any = None
             self.on_cache_miss: Any = None
+            self._static_cache: dict[str, tuple[bytes, bytes]] = {}
+            self._thumb_cache: OrderedDict[int, bytes] = OrderedDict()
+            self._max_thumb_cache: int = 512
+
+        def invalidate_media(self, media_id: int) -> None:
+            self._thumb_cache.pop(int(media_id), None)
 
         def requestStarted(self, job: QWebEngineUrlRequestJob) -> None:
             url = job.requestUrl()
-            host = url.host()
+            host = url.host().lower()
             path = url.path()
-            resolved = resolve_gallery_scheme_payload(host, path, self.thumb_repo)
-            if resolved is None:
-                if host.lower() == "media" and callable(self.on_cache_miss):
-                    try:
-                        mid = int(path.lstrip("/").split("/", 1)[0])
-                        if mid > 0:
-                            self.on_cache_miss(mid)
-                    except Exception:
-                        pass
-                job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+
+            if host == "leaflet":
+                cached_static = self._static_cache.get(path)
+                if cached_static is None:
+                    cached_static = resolve_gallery_scheme_payload(host, path, None)
+                    if cached_static is not None:
+                        self._static_cache[path] = cached_static
+                if cached_static is None:
+                    job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+                    return
+                mime_bytes, payload = cached_static
+                buf = QBuffer(job)
+                buf.setData(QByteArray(payload))
+                buf.open(QIODevice.OpenModeFlag.ReadOnly)
+                job.reply(mime_bytes, buf)
                 return
 
-            mime_bytes, payload = resolved
-            buf = QBuffer(job)
-            buf.setData(QByteArray(payload))
-            buf.open(QIODevice.OpenModeFlag.ReadOnly)
-            job.reply(mime_bytes, buf)
+            if host == "media":
+                id_str = path.lstrip("/").split("/", 1)[0]
+                try:
+                    mid = int(id_str)
+                except (TypeError, ValueError):
+                    job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+                    return
+                blob = self._thumb_cache.get(mid)
+                if blob is not None:
+                    self._thumb_cache.move_to_end(mid)
+                else:
+                    resolved = resolve_gallery_scheme_payload(host, path, self.thumb_repo)
+                    if resolved is not None:
+                        blob = resolved[1]
+                        self._thumb_cache[mid] = blob
+                        if len(self._thumb_cache) > self._max_thumb_cache:
+                            self._thumb_cache.popitem(last=False)
+                if blob is None:
+                    if mid > 0 and callable(self.on_cache_miss):
+                        try:
+                            self.on_cache_miss(mid)
+                        except Exception:
+                            pass
+                    job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+                    return
+                buf = QBuffer(job)
+                buf.setData(QByteArray(blob))
+                buf.open(QIODevice.OpenModeFlag.ReadOnly)
+                job.reply(b"image/webp", buf)
+                return
+
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
 
     return _GalleryThumbSchemeHandler(parent)
 
@@ -367,28 +406,13 @@ def generate_leaflet_html(
     backface-visibility: hidden;
     -webkit-backface-visibility: hidden;
   }}
-  .leaflet-fade-anim .leaflet-tile {{
-    will-change: opacity, transform;
-  }}
   .leaflet-cluster-pin {{
     background: transparent;
     border: none;
   }}
-  .map-cluster-pin-container {{
-    opacity: 0;
-    transition: opacity 160ms ease-out, transform 160ms ease-out;
-    will-change: opacity;
-  }}
-  .map-cluster-pin-container.pin-visible {{
-    opacity: 1;
-  }}
-  .map-cluster-pin-container.pin-retiring {{
-    opacity: 0;
-    pointer-events: none;
-  }}
   .map-cluster-pin-container.pin-selected .map-pin-ring {{
     border-color: #0078D7 !important;
-    box-shadow: 0 0 0 2px #FFFFFF, 0 4px 12px rgba(0,120,215,0.55) !important;
+    box-shadow: 0 0 0 2px #FFFFFF !important;
   }}
   .leaflet-popup-content-wrapper {{
     border-radius: 6px;
@@ -477,10 +501,10 @@ def generate_leaflet_html(
   let clusterWorker = null;
   let overviewPoints = null;
   let overviewVersion = 0;
+  let workerSyncedVersion = -1;
   let workerRequestId = 0;
   let workerFrame = null;
   let renderedMarkers = new Map();
-  let retiringTimers = new Map();
   let selectedRepId = null;
   window.pendingClusters = {markers_json};
   window.pendingOverview = null;
@@ -489,33 +513,33 @@ def generate_leaflet_html(
     'clean': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{{z}}/{{y}}/{{x}}', {{
       maxZoom: 19,
       maxNativeZoom: 17,
-      keepBuffer: 4,
+      keepBuffer: 2,
       updateWhenZooming: false,
-      updateWhenIdle: false,
+      updateWhenIdle: true,
       attribution: 'Tiles &copy; Esri &mdash; Sources: Esri, DeLorme, NAVTEQ, USGS, Intermap, iPC, NRCAN, Esri Japan, METI, Esri China (Hong Kong), Esri (Thailand), TomTom'
     }}),
     'street': L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
       maxZoom: 19,
       maxNativeZoom: 19,
-      keepBuffer: 4,
+      keepBuffer: 2,
       updateWhenZooming: false,
-      updateWhenIdle: false,
+      updateWhenIdle: true,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
     }}),
     'satellite': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}', {{
       maxZoom: 19,
       maxNativeZoom: 17,
-      keepBuffer: 4,
+      keepBuffer: 2,
       updateWhenZooming: false,
-      updateWhenIdle: false,
+      updateWhenIdle: true,
       attribution: 'Tiles &copy; Esri'
     }}),
     'terrain': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{{z}}/{{y}}/{{x}}', {{
       maxZoom: 19,
       maxNativeZoom: 17,
-      keepBuffer: 4,
+      keepBuffer: 2,
       updateWhenZooming: false,
-      updateWhenIdle: false,
+      updateWhenIdle: true,
       attribution: 'Tiles &copy; Esri &mdash; Sources: USGS, Esri, TCI, DeLorme, METI, NRCAN, GEBCO, NOAA, increment P Corp.'
     }})
   }};
@@ -585,13 +609,13 @@ def generate_leaflet_html(
       boxZoom: true,
       minZoom: 2,
       maxZoom: 19,
-      zoomSnap: 0.25,
-      zoomDelta: 0.5,
+      zoomSnap: 1,
+      zoomDelta: 1,
       zoomAnimation: true,
-      fadeAnimation: true,
-      markerZoomAnimation: true,
-      wheelDebounceTime: 60,
-      wheelPxPerZoomLevel: 80
+      fadeAnimation: false,
+      markerZoomAnimation: false,
+      wheelDebounceTime: 40,
+      wheelPxPerZoomLevel: 60
     }}).setView([25.0, 0.0], 2);
 
     switchBaseLayer('clean');
@@ -648,12 +672,6 @@ def generate_leaflet_html(
       }}, 200);
     }});
 
-    map.on('zoomend', function() {{
-      if (overviewPoints && clusterWorker) {{
-        scheduleWorkerClusters();
-      }}
-    }});
-
     try {{
       clusterWorker = new Worker('gallerythumb://leaflet/map_clusters_worker.js');
       clusterWorker.onmessage = function(ev) {{
@@ -685,13 +703,13 @@ def generate_leaflet_html(
     overviewPoints = Array.isArray(pts) ? pts : [];
     overviewVersion = version || (overviewVersion + 1);
     if (clusterWorker) {{
-      scheduleWorkerClusters(true);
+      scheduleWorkerClusters();
     }} else {{
       applyRenderedClusters(overviewPoints, true);
     }}
   }}
 
-  function scheduleWorkerClusters(sendPoints) {{
+  function scheduleWorkerClusters() {{
     if (!map || !clusterWorker || !overviewPoints) return;
     workerRequestId++;
     const reqId = workerRequestId;
@@ -700,10 +718,14 @@ def generate_leaflet_html(
       workerFrame = null;
       if (!map || !clusterWorker) return;
       const pb = map.getPixelBounds();
+      const needsSync = (workerSyncedVersion !== overviewVersion);
+      if (needsSync) {{
+        workerSyncedVersion = overviewVersion;
+      }}
       clusterWorker.postMessage({{
         requestId: reqId,
         version: overviewVersion,
-        points: sendPoints ? overviewPoints : undefined,
+        points: needsSync ? overviewPoints : undefined,
         maxZoom: 18,
         zoom: map.getZoom(),
         spacing: 52,
@@ -830,23 +852,6 @@ def generate_leaflet_html(
     }});
     marker._repMediaId = repId;
     marker.addTo(clusterLayer);
-
-    const el = marker.getElement();
-    if (el) {{
-      const box = el.querySelector('.map-cluster-pin-container');
-      const img = el.querySelector('img');
-      const reveal = function() {{
-        requestAnimationFrame(function() {{
-          if (box) box.classList.add('pin-visible');
-        }});
-      }};
-      if (!img || img.complete) {{
-        reveal();
-      }} else {{
-        img.addEventListener('load', reveal, {{ once: true }});
-        img.addEventListener('error', reveal, {{ once: true }});
-      }}
-    }}
     return marker;
   }}
 
@@ -859,16 +864,6 @@ def generate_leaflet_html(
         const key = _clusterMarkerKey(c);
         const existing = renderedMarkers.get(key);
         if (existing) {{
-          if (retiringTimers.has(existing)) {{
-            clearTimeout(retiringTimers.get(existing));
-            retiringTimers.delete(existing);
-            const el = existing.getElement();
-            const box = el && el.querySelector('.map-cluster-pin-container');
-            if (box) {{
-              box.classList.remove('pin-retiring');
-              box.classList.add('pin-visible');
-            }}
-          }}
           nextMap.set(key, existing);
         }} else {{
           nextMap.set(key, _buildClusterMarker(c, lazyBoxMode));
@@ -877,16 +872,9 @@ def generate_leaflet_html(
     }}
     renderedMarkers.forEach(function(marker, key) {{
       if (nextMap.has(key)) return;
-      const el = marker.getElement();
-      const box = el && el.querySelector('.map-cluster-pin-container');
-      if (box) box.classList.add('pin-retiring');
-      const t = setTimeout(function() {{
-        retiringTimers.delete(marker);
-        if (clusterLayer && clusterLayer.hasLayer(marker)) {{
-          clusterLayer.removeLayer(marker);
-        }}
-      }}, 160);
-      retiringTimers.set(marker, t);
+      if (clusterLayer && clusterLayer.hasLayer(marker)) {{
+        clusterLayer.removeLayer(marker);
+      }}
     }});
     renderedMarkers = nextMap;
   }}
@@ -1705,15 +1693,8 @@ class WorldMapView(QWidget):
         if total_items is not None:
             self._cached_total_items = int(total_items)
 
-        # Keep offline vector canvas & stats in sync
-        if not self._web_loaded or self.web_view is None:
-            if getattr(self, "_pending_overview_fit", False):
-                self._pending_overview_fit = False
-                self.fit_to_photos()
-            else:
-                self.refresh_current_viewport()
-            return
-
+        # Compute bounds from overview cells directly (zero extra SQLite query!)
+        computed_bounds = None
         if getattr(self, "_pending_overview_fit", False):
             self._pending_overview_fit = False
             if self._overview_cells:
@@ -1723,14 +1704,32 @@ class WorldMapView(QWidget):
                 max_lo = max(c["max_lon"] for c in self._overview_cells)
                 lat_pad = max(0.015, (max_la - min_la) * 0.02)
                 lon_pad = max(0.015, (max_lo - min_lo) * 0.02)
-                min_la = max(-85.0, min_la - lat_pad)
-                max_la = min(85.0, max_la + lat_pad)
-                min_lo = max(-180.0, min_lo - lon_pad)
-                max_lo = min(180.0, max_lo + lon_pad)
-                self._min_lat, self._max_lat, self._min_lon, self._max_lon = (
-                    min_la, max_la, min_lo, max_lo
+                computed_bounds = (
+                    max(-85.0, min_la - lat_pad),
+                    min(85.0, max_la + lat_pad),
+                    max(-180.0, min_lo - lon_pad),
+                    min(180.0, max_lo + lon_pad),
                 )
-                self._run_web_js(f"fitMapBounds({min_la}, {max_la}, {min_lo}, {max_lo});")
+                self._min_lat, self._max_lat, self._min_lon, self._max_lon = computed_bounds
+
+        # Offline vector canvas only (no WebEngine available)
+        if self.web_view is None:
+            if computed_bounds is not None:
+                self.set_viewport_bbox(*computed_bounds)
+            else:
+                self.refresh_current_viewport()
+            return
+
+        # If WebEngine is still finishing its initial load, stash bounds and let
+        # _on_web_load_finished push fitMapBounds + setOverviewPoints ONCE (zero double work).
+        if not self._web_loaded:
+            if computed_bounds is not None:
+                self._pending_fit_bounds = computed_bounds
+            return
+
+        if computed_bounds is not None:
+            min_la, max_la, min_lo, max_lo = computed_bounds
+            self._run_web_js(f"fitMapBounds({min_la}, {max_la}, {min_lo}, {max_lo});")
 
         payload_json = json.dumps(self._overview_cells)
         self._run_web_js(f"setOverviewPoints({payload_json}, {self._overview_version});")
@@ -1954,6 +1953,8 @@ class WorldMapView(QWidget):
                 updated = True
 
         # If WebEngine is serving thumbnails via gallerythumb://media/<id>, refresh img tag directly
+        if self._scheme_handler is not None and hasattr(self._scheme_handler, "invalidate_media"):
+            self._scheme_handler.invalidate_media(mid_int)
         if self._web_loaded and self.web_view is not None:
             self._run_web_js(f"refreshThumbnail({mid_int});")
 
@@ -2103,6 +2104,10 @@ class WorldMapView(QWidget):
                 self.web_view.page().runJavaScript(
                     f"setOverviewPoints({payload_json}, {self._overview_version});"
                 )
+                geotagged_count = sum(int(c.get("count", 0)) for c in self._overview_cells)
+                cluster_count = len(self._overview_cells)
+                tot = self._cached_total_items if self._cached_total_items is not None else geotagged_count
+                self.map_stats_Changed.emit(geotagged_count, cluster_count, tot)
             elif self._current_clusters:
                 self.web_view.page().runJavaScript(
                     f"updateClusters({_clusters_to_json(self._current_clusters)});"
