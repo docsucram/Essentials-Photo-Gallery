@@ -5745,7 +5745,9 @@ class TagAndCaptionDock(QDockWidget):
         # Row 4: Color + Swatches + Auto K
         col_row = QHBoxLayout()
         col_row.setSpacing(4)
-        col_row.addWidget(QLabel("Color", self.dl_light_editor_box))
+        lbl_dl_color = QLabel("Colour", self.dl_light_editor_box)
+        lbl_dl_color.setObjectName("SliderHeaderLabel")
+        col_row.addWidget(lbl_dl_color)
         self.btn_dl_light_color = QPushButton("", self.dl_light_editor_box)
         self.btn_dl_light_color.setFixedSize(26, 20)
         self.btn_dl_light_color.setToolTip("Pick custom light color")
@@ -7723,6 +7725,10 @@ class TagAndCaptionDock(QDockWidget):
                     background: #22262E;
                     border: 1px solid #2D323B;
                     border-radius: 4px;
+                }
+                QFrame#FineTuneGroup QLabel {
+                    color: #E2E8F0;
+                    background: transparent;
                 }
                 QPushButton#FineTuneGroupTitle {
                     color: #60A5FA;

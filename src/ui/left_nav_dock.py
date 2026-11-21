@@ -789,10 +789,17 @@ class LeftNavigationDock(QDockWidget):
     def _sync_tree_item_colors(self) -> None:
         is_dark = getattr(self, "_dark_mode", False)
         sec_brush = QBrush(QColor("#93C5FD" if is_dark else "#1E395B"))
-        for i in range(self.tree.topLevelItemCount()):
-            top = self.tree.topLevelItem(i)
-            if top is not None:
-                top.setForeground(0, sec_brush)
+        prev_updating = self._updating_tree
+        self._updating_tree = True
+        self.tree.blockSignals(True)
+        try:
+            for i in range(self.tree.topLevelItemCount()):
+                top = self.tree.topLevelItem(i)
+                if top is not None:
+                    top.setForeground(0, sec_brush)
+        finally:
+            self.tree.blockSignals(False)
+            self._updating_tree = prev_updating
 
     def refresh_icons(self) -> None:
         """Updates all tree item icons in-place when the icon theme changes in Options."""
