@@ -2896,10 +2896,7 @@ class SingleMediaViewer(QWidget):
         ):
             hud.hide()
             return
-        mw = getattr(self, "main_window", None) or self.window()
-        meta = (getattr(mw, "_media_meta_lookup", None) or {}).get(int(self.current_media_id)) or {}
-        is_fav = bool(meta.get("is_favourite", 0))
-        flag = int(meta.get("flag", 0) or 0)
+        is_fav, flag = self._get_current_cull_state()
 
         def _make_hud_icon(kind: str, color_hex: str, filled: bool = False) -> QIcon:
             pm = QPixmap(32, 32)
@@ -2947,6 +2944,28 @@ class SingleMediaViewer(QWidget):
         hud.show()
         hud.raise_()
 
+    def _get_current_cull_state(self) -> tuple[bool, int]:
+        if self.current_media_id is None:
+            return (False, 0)
+        mid = int(self.current_media_id)
+        mw = getattr(self, "main_window", None) or self.window()
+        cm = getattr(mw, "catalog_model", None)
+        if cm is not None and hasattr(cm, "record_by_id"):
+            rec = cm.record_by_id(mid)
+            if rec is not None:
+                return (bool(getattr(rec, "is_favourite", 0)), int(getattr(rec, "flag", 0) or 0))
+        repo = getattr(mw, "catalog_repo", None)
+        if repo is not None:
+            try:
+                det = repo.get_media_detail(mid)
+                if det:
+                    rej = int(det.get("is_rejected") or 0)
+                    flg = -1 if rej else int(det.get("flag") or 0)
+                    return (bool(det.get("is_favourite", 0)), flg)
+            except Exception:
+                pass
+        return (False, 0)
+
     def _on_hud_fav_clicked(self) -> None:
         mw = getattr(self, "main_window", None) or self.window()
         if self.current_media_id is not None and hasattr(mw, "toggle_favourite_selection"):
@@ -2956,16 +2975,14 @@ class SingleMediaViewer(QWidget):
     def _on_hud_pick_clicked(self) -> None:
         mw = getattr(self, "main_window", None) or self.window()
         if self.current_media_id is not None and hasattr(mw, "apply_flag_to_selection"):
-            meta = (getattr(mw, "_media_meta_lookup", None) or {}).get(int(self.current_media_id)) or {}
-            cur_flag = int(meta.get("flag", 0) or 0)
+            _, cur_flag = self._get_current_cull_state()
             mw.apply_flag_to_selection(0 if cur_flag == 1 else 1)
             self._update_cull_hud()
 
     def _on_hud_reject_clicked(self) -> None:
         mw = getattr(self, "main_window", None) or self.window()
         if self.current_media_id is not None and hasattr(mw, "apply_flag_to_selection"):
-            meta = (getattr(mw, "_media_meta_lookup", None) or {}).get(int(self.current_media_id)) or {}
-            cur_flag = int(meta.get("flag", 0) or 0)
+            _, cur_flag = self._get_current_cull_state()
             mw.apply_flag_to_selection(0 if cur_flag == -1 else -1)
             self._update_cull_hud()
 
@@ -8975,6 +8992,10 @@ class SingleMediaViewer(QWidget):
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         # Intercept graphics_view viewport mouse events for Retouch and Red Eye
         if watched in (self.graphics_view, self.graphics_view.viewport()):
+            if watched is self.graphics_view.viewport() and event.type() == QEvent.Resize:
+                self._update_cull_hud()
+                self._update_zoom_minimap()
+                self._update_live_badge()
             if event.type() == QEvent.Wheel:
                 if getattr(self, "is_markup_mode", False):
                     tool = getattr(self.markup_toolbar, "active_tool", "pen")

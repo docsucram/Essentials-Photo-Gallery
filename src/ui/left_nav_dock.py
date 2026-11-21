@@ -1172,14 +1172,25 @@ class LeftNavigationDock(QDockWidget):
                 item.setToolTip(0, f"{fpath_str} (Private)" if is_priv else fpath_str)
                 self._folder_items[fid] = item
 
+            path_to_fid = {
+                os.path.normcase(str(f["path"]).rstrip("\\/")): int(f["id"])
+                for f in folders
+                if f.get("path")
+            }
+
             for f in folders:
                 fid = int(f["id"])
                 pid = f["parent_id"]
                 item = self._folder_items[fid]
-                if pid is not None and int(pid) in self._folder_items:
+                if pid is not None and int(pid) in self._folder_items and int(pid) != fid:
                     self._folder_items[int(pid)].addChild(item)
                 else:
-                    self.root_all.addChild(item)
+                    parent_path = os.path.normcase(str(Path(str(f["path"])).parent).rstrip("\\/"))
+                    inferred_pid = path_to_fid.get(parent_path)
+                    if inferred_pid is not None and inferred_pid != fid and inferred_pid in self._folder_items:
+                        self._folder_items[inferred_pid].addChild(item)
+                    else:
+                        self.root_all.addChild(item)
 
             for fid, item in self._folder_items.items():
                 if fid in expanded_folder_ids:

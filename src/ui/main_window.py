@@ -221,10 +221,6 @@ class _FavouriteUndoCommand(QUndoCommand):
         self.old_favs = {mid: int(field_map.get(mid) or 0) for mid in self.target_ids}
 
     def _apply_lookup_and_refresh(self, fav_map: dict[int, int]) -> None:
-        for mid, val in fav_map.items():
-            meta = self.main_win._media_meta_lookup.get(mid)
-            if meta is not None:
-                meta["is_favourite"] = int(val)
         if hasattr(self.main_win, "catalog_model"):
             self.main_win.catalog_model.update_items_metadata(list(fav_map.keys()), is_favourite=self.new_fav)
         if hasattr(self.main_win, "grid_view") and self.main_win.grid_view.viewport():
@@ -241,10 +237,6 @@ class _FavouriteUndoCommand(QUndoCommand):
         for old_v, mids in ((0, [m for m, v in self.old_favs.items() if not v]), (1, [m for m, v in self.old_favs.items() if v])):
             if mids:
                 self.main_win.catalog_model.update_items_metadata(mids, is_favourite=old_v)
-                for m in mids:
-                    meta = self.main_win._media_meta_lookup.get(m)
-                    if meta is not None:
-                        meta["is_favourite"] = old_v
         if hasattr(self.main_win, "grid_view") and self.main_win.grid_view.viewport():
             self.main_win.grid_view.viewport().update()
         if hasattr(self.main_win, "media_viewer") and getattr(self.main_win.media_viewer, "_update_cull_hud", None):
@@ -4452,10 +4444,6 @@ class PhotoGalleryMainWindow(QMainWindow):
             return
         cmd = _FlagUndoCommand(self, target_ids, flag)
         self.undo_stack.push(cmd)
-        for mid in target_ids:
-            meta = self._media_meta_lookup.get(mid)
-            if meta is not None:
-                meta["flag"] = int(flag)
         if hasattr(self, "media_viewer") and getattr(self.media_viewer, "_update_cull_hud", None):
             self.media_viewer._update_cull_hud()
         if flag == 1:
@@ -10773,7 +10761,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 target_ids = self.get_active_target_ids()
                 if target_ids:
                     has_non_picked = any(
-                        int((self._media_meta_lookup.get(mid) or {}).get("flag", 0)) != 1
+                        int(getattr(self.catalog_model.record_by_id(mid), "flag", 0) or 0) != 1
                         for mid in target_ids
                     )
                     self.apply_flag_to_selection(1 if has_non_picked else 0, advance=shift_held)
@@ -10783,7 +10771,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 target_ids = self.get_active_target_ids()
                 if target_ids:
                     has_non_rejected = any(
-                        int((self._media_meta_lookup.get(mid) or {}).get("flag", 0)) != -1
+                        int(getattr(self.catalog_model.record_by_id(mid), "flag", 0) or 0) != -1
                         for mid in target_ids
                     )
                     self.apply_flag_to_selection(-1 if has_non_rejected else 0, advance=shift_held)
