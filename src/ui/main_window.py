@@ -1525,7 +1525,10 @@ class PhotoGalleryMainWindow(QMainWindow):
         )
         self.scope_bar.rating_clear_requested.connect(self.left_nav_dock.clear_rating_filters)
         self.scope_bar.flagged_clear_requested.connect(
-            lambda: self.left_nav_dock.set_flagged_only(False)
+            lambda: (self.left_nav_dock.set_flag_filter(None), self.left_nav_dock.set_flagged_only(False))
+        )
+        self.scope_bar.favourites_clear_requested.connect(
+            lambda: self._on_favourite_filter_selected(False)
         )
         self.scope_bar.date_clear_requested.connect(self._clear_date_filter)
         self.scope_bar.media_type_clear_requested.connect(
@@ -2909,6 +2912,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             or state.get("include_tag_ids")
             or state.get("ratings")
             or state.get("flagged_only")
+            or state.get("flag_filter") is not None
+            or getattr(self, "_favourites_only", False)
             or has_media_filter
             or has_orientation_filter
             or state.get("date_year") is not None
@@ -2953,7 +2958,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         return None
 
     def _update_scope_bar_visibility(self) -> None:
-        state = self.left_nav_dock.current_filter_state()
+        state = dict(self.left_nav_dock.current_filter_state())
+        state["favourites_only"] = bool(getattr(self, "_favourites_only", False))
         self.scope_bar.set_scope_label(self._active_scope_label(state))
 
         self.scope_bar.update_active_filter_chips(
@@ -3300,6 +3306,8 @@ class PhotoGalleryMainWindow(QMainWindow):
 
     def _on_nav_filter_changed(self) -> None:
         self._active_bbox = None
+        if not getattr(self, "_preserving_favourites_on_nav_change", False):
+            self._favourites_only = False
         if not self._is_navigating_history:
             if not getattr(self, "_preserving_similar_on_nav_change", False):
                 self._active_map_media_ids = None
@@ -4557,6 +4565,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.left_nav_dock._smart_album_rules = None
             self.left_nav_dock._flag_filter = None
             self.left_nav_dock._flagged_only = False
+        self._update_scope_bar_visibility()
         self.rebuild_and_run_query()
 
     def _on_nav_smart_flag_selected(self, flag_val: object) -> None:

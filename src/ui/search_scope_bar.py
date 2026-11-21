@@ -192,6 +192,7 @@ class SearchScopeBar(QFrame):
     tag_remove_requested = Signal(int)          # tag_id
     rating_clear_requested = Signal()
     flagged_clear_requested = Signal()
+    favourites_clear_requested = Signal()
     date_clear_requested = Signal()
     location_clear_requested = Signal()
     special_people_clear_requested = Signal()
@@ -636,9 +637,23 @@ class SearchScopeBar(QFrame):
             chip.remove_clicked.connect(self.rating_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 
-        # 4. Active Flagged Chip: "Flagged only"
-        if filter_state.get("flagged_only"):
-            chip = FilterChip("Flagged only", self.chips_widget)
+        # 4. Active Favourites & Flagged Chips
+        if filter_state.get("favourites_only"):
+            chip = FilterChip("♥ Favourites", self.chips_widget)
+            chip.remove_clicked.connect(self.favourites_clear_requested.emit)
+            self.chips_layout.addWidget(chip)
+
+        flag_flt = filter_state.get("flag_filter")
+        if flag_flt == 1 or (flag_flt is None and filter_state.get("flagged_only")):
+            chip = FilterChip("Flagged / Picked", self.chips_widget)
+            chip.remove_clicked.connect(self.flagged_clear_requested.emit)
+            self.chips_layout.addWidget(chip)
+        elif flag_flt == -1:
+            chip = FilterChip("Rejected", self.chips_widget)
+            chip.remove_clicked.connect(self.flagged_clear_requested.emit)
+            self.chips_layout.addWidget(chip)
+        elif flag_flt == 0:
+            chip = FilterChip("Unflagged", self.chips_widget)
             chip.remove_clicked.connect(self.flagged_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 
