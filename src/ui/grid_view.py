@@ -627,16 +627,16 @@ class MediaCardDelegate(QStyledItemDelegate):
             thumb_side = max(70, min(int(card_rect.height() - 12), 120))
             img_x = card_rect.left() + 8
             img_y = card_rect.top() + (card_rect.height() - thumb_side) // 2
-            return QRect(img_x + thumb_side - 20, img_y + 4, 18, 18)
-        return QRect(card_rect.right() - 23, card_rect.top() + 5, 18, 18)
+            return QRect(img_x + thumb_side - 26, img_y + 4, 24, 24)
+        return QRect(card_rect.right() - 28, card_rect.top() + 4, 24, 24)
 
     def flag_rect(self, card_rect: QRect) -> QRect:
         hr = self.heart_rect(card_rect)
-        return QRect(hr.left() - 21, hr.top(), 18, 18)
+        return QRect(hr.left() - 26, hr.top(), 24, 24)
 
     def stack_badge_rect(self, card_rect: QRect) -> QRect:
         fl = self.flag_rect(card_rect)
-        return QRect(fl.left() - 44, fl.top(), 40, 16)
+        return QRect(fl.left() - 44, fl.top() + 3, 40, 17)
 
     def _paint_cull_and_status_badges(
         self,
@@ -650,38 +650,38 @@ class MediaCardDelegate(QStyledItemDelegate):
         if flag == -1:
             painter.fillRect(img_box, QColor(15, 23, 42, 115))
 
-        # Flag (Pick = 1 / Reject = -1 crossed-out / Unreviewed = 0 on hover)
+        # Flag (Pick = 1 solid red / Reject = -1 hollow with red strike / Unreviewed = 0 on hover)
         if "flag" in self._visible_details or "all" in self._visible_details:
             if flag == -1:
                 fl_rect = self.flag_rect(card_rect)
-                pole_x = fl_rect.left() + 4
+                pole_x = fl_rect.left() + 6
                 painter.save()
                 painter.setRenderHint(QPainter.Antialiasing, True)
-                painter.setPen(QPen(QColor("#EF4444"), 1.4))
-                painter.drawLine(pole_x, fl_rect.top() + 3, pole_x, fl_rect.bottom() - 2)
+                painter.setPen(QPen(QColor("#CBD5E1") if self.dark_mode else QColor("#64748B"), 1.6))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawLine(pole_x, fl_rect.top() + 3, pole_x, fl_rect.bottom() - 3)
                 banner = QPolygonF([
                     QPointF(pole_x, fl_rect.top() + 3),
-                    QPointF(fl_rect.right() - 2, fl_rect.top() + 6.5),
-                    QPointF(pole_x, fl_rect.top() + 10),
+                    QPointF(fl_rect.right() - 3, fl_rect.top() + 8.0),
+                    QPointF(pole_x, fl_rect.top() + 13),
                 ])
-                painter.setBrush(QColor(239, 68, 68, 85))
                 painter.drawPolygon(banner)
-                painter.setPen(QPen(QColor("#EF4444"), 1.9, Qt.SolidLine, Qt.RoundCap))
-                painter.drawLine(fl_rect.left() + 2, fl_rect.bottom() - 2, fl_rect.right() - 2, fl_rect.top() + 2)
+                painter.setPen(QPen(QColor("#EF4444"), 2.2, Qt.SolidLine, Qt.RoundCap))
+                painter.drawLine(fl_rect.left() + 3, fl_rect.bottom() - 3, fl_rect.right() - 3, fl_rect.top() + 3)
                 painter.restore()
             elif flag == 1 or is_hovered:
                 fl_rect = self.flag_rect(card_rect)
-                pole_x = fl_rect.left() + 4
+                pole_x = fl_rect.left() + 6
                 painter.save()
                 painter.setRenderHint(QPainter.Antialiasing, True)
-                painter.setPen(QPen(QColor("#22C55E") if flag == 1 else QColor("#94A3B8"), 1.4))
-                painter.drawLine(pole_x, fl_rect.top() + 3, pole_x, fl_rect.bottom() - 2)
+                painter.setPen(QPen(QColor("#E81123") if flag == 1 else QColor("#94A3B8"), 1.6))
+                painter.drawLine(pole_x, fl_rect.top() + 3, pole_x, fl_rect.bottom() - 3)
                 banner = QPolygonF([
                     QPointF(pole_x, fl_rect.top() + 3),
-                    QPointF(fl_rect.right() - 2, fl_rect.top() + 6.5),
-                    QPointF(pole_x, fl_rect.top() + 10),
+                    QPointF(fl_rect.right() - 3, fl_rect.top() + 8.0),
+                    QPointF(pole_x, fl_rect.top() + 13),
                 ])
-                painter.setBrush(QColor("#22C55E") if flag == 1 else Qt.NoBrush)
+                painter.setBrush(QColor("#E81123") if flag == 1 else Qt.NoBrush)
                 painter.drawPolygon(banner)
                 painter.restore()
 
@@ -697,16 +697,16 @@ class MediaCardDelegate(QStyledItemDelegate):
             painter.setRenderHint(QPainter.Antialiasing, True)
             cx, cy = hr_rect.center().x(), hr_rect.center().y()
             hpath = QPainterPath()
-            hpath.moveTo(cx, cy + 5.0)
-            hpath.cubicTo(cx - 5.8, cy + 1.4, cx - 6.2, cy - 3.6, cx - 3.3, cy - 4.9)
-            hpath.cubicTo(cx - 1.4, cy - 5.8, cx - 0.3, cy - 4.0, cx, cy - 2.5)
-            hpath.cubicTo(cx + 0.3, cy - 4.0, cx + 1.4, cy - 5.8, cx + 3.3, cy - 4.9)
-            hpath.cubicTo(cx + 6.2, cy - 3.6, cx + 5.8, cy + 1.4, cx, cy + 5.0)
+            hpath.moveTo(cx, cy + 6.8)
+            hpath.cubicTo(cx - 7.8, cy + 1.8, cx - 8.2, cy - 4.8, cx - 4.4, cy - 6.5)
+            hpath.cubicTo(cx - 1.9, cy - 7.7, cx - 0.4, cy - 5.3, cx, cy - 3.3)
+            hpath.cubicTo(cx + 0.4, cy - 5.3, cx + 1.9, cy - 7.7, cx + 4.4, cy - 6.5)
+            hpath.cubicTo(cx + 8.2, cy - 4.8, cx + 7.8, cy + 1.8, cx, cy + 6.8)
             if is_fav:
                 painter.setPen(Qt.NoPen)
                 painter.setBrush(QColor("#F43F5E"))
             else:
-                painter.setPen(QPen(QColor("#94A3B8"), 1.35))
+                painter.setPen(QPen(QColor("#94A3B8"), 1.6))
                 painter.setBrush(Qt.NoBrush)
             painter.drawPath(hpath)
             painter.restore()
@@ -2994,23 +2994,14 @@ class ThumbnailGridView(QListView):
                     return
                 mid = self.catalog_model.media_id_at(idx)
                 if mid is not None:
-                    # Do not open Single Image View when rapidly clicking card badges (Flag, Heart, Checkbox, Stars, Stack)
+                    # Do not open Single Image View when rapidly clicking card badges;
+                    # let the accompanying mouseReleaseEvent -> editorEvent perform the single toggle/cycle step.
                     if self.card_delegate is not None:
                         card_rect = self.visualRect(idx).adjusted(2, 2, -2, -2)
-                        if self.card_delegate.flag_rect(card_rect).contains(pos):
-                            curr_flag = int(idx.data(CatalogRoles.FlagRole) or 0)
-                            new_flag = 1 if curr_flag == 0 else (-1 if curr_flag == 1 else 0)
-                            self.card_delegate.flag_toggled.emit(int(mid), new_flag)
-                            event.accept()
-                            return
-                        if self.card_delegate.heart_rect(card_rect).contains(pos):
-                            rec_fav = idx.data(CatalogRoles.RecordRole)
-                            cur_fav = bool(getattr(rec_fav, "is_favourite", 0)) if rec_fav is not None else False
-                            self.card_delegate.favourite_toggled.emit(int(mid), not cur_fav)
-                            event.accept()
-                            return
                         if (
-                            self.card_delegate.checkbox_rect(card_rect).contains(pos)
+                            self.card_delegate.flag_rect(card_rect).contains(pos)
+                            or self.card_delegate.heart_rect(card_rect).contains(pos)
+                            or self.card_delegate.checkbox_rect(card_rect).contains(pos)
                             or self.card_delegate.stars_bar_rect(card_rect).contains(pos)
                             or self.card_delegate.stack_badge_rect(card_rect).contains(pos)
                         ):
@@ -3366,7 +3357,22 @@ class ThumbnailGridView(QListView):
 
             # 3. Organize & AI
             if is_mw and hasattr(main_win, "toggle_favourite_selection"):
-                act_fav = menu.addAction("♥ Toggle Favourite")
+                hpm = QPixmap(32, 32)
+                hpm.fill(Qt.transparent)
+                hp = QPainter(hpm)
+                hp.setRenderHint(QPainter.Antialiasing, True)
+                hp.setPen(Qt.NoPen)
+                hp.setBrush(QColor("#F43F5E"))
+                hpath = QPainterPath()
+                hpath.moveTo(16.0, 26.5)
+                hpath.cubicTo(5.5, 19.8, 4.0, 11.5, 8.8, 7.2)
+                hpath.cubicTo(12.2, 4.4, 15.0, 6.6, 16.0, 9.2)
+                hpath.cubicTo(17.0, 6.6, 19.8, 4.4, 23.2, 7.2)
+                hpath.cubicTo(28.0, 11.5, 26.5, 19.8, 16.0, 26.5)
+                hp.drawPath(hpath)
+                hp.end()
+                hpm.setDevicePixelRatio(2.0)
+                act_fav = menu.addAction(QIcon(hpm), "Toggle Favourite")
                 act_fav.setShortcut("F")
                 act_fav.triggered.connect(lambda: main_win.toggle_favourite_selection())
 

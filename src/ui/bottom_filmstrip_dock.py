@@ -252,13 +252,13 @@ class _FilmstripItemDelegate(QStyledItemDelegate):
             painter.setBrush(QColor(15, 23, 42, 195))
             painter.drawRoundedRect(fr, 3, 3)
             px = fr.left() + 4
-            painter.setPen(QPen(QColor("#22C55E" if flag_val == 1 else "#EF4444"), 1.2))
+            painter.setPen(QPen(QColor("#E81123" if flag_val == 1 else "#CBD5E1"), 1.2))
             painter.drawLine(px, fr.top() + 2, px, fr.bottom() - 2)
             poly = QPolygonF([QPointF(px, fr.top() + 2), QPointF(fr.right() - 2, fr.top() + 5), QPointF(px, fr.top() + 8)])
-            painter.setBrush(QColor("#22C55E") if flag_val == 1 else QColor(239, 68, 68, 90))
+            painter.setBrush(QColor("#E81123") if flag_val == 1 else Qt.BrushStyle.NoBrush)
             painter.drawPolygon(poly)
             if flag_val == -1:
-                painter.setPen(QPen(QColor("#EF4444"), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                painter.setPen(QPen(QColor("#EF4444"), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
                 painter.drawLine(fr.left() + 2, fr.bottom() - 2, fr.right() - 2, fr.top() + 2)
 
         # Bottom-left: Rating pill

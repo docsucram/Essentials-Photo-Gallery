@@ -2933,6 +2933,8 @@ class SingleMediaViewer(QWidget):
                 poly = QPolygonF([QPointF(8, 6), QPointF(25, 10.5), QPointF(8, 16)])
                 p.drawPolygon(poly)
             elif kind == "flag_rejected":
+                p.setPen(QPen(QColor("#CBD5E1"), 2.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                p.setBrush(Qt.NoBrush)
                 p.drawLine(8, 5, 8, 27)
                 poly = QPolygonF([QPointF(8, 6), QPointF(25, 10.5), QPointF(8, 16)])
                 p.drawPolygon(poly)
@@ -2945,11 +2947,11 @@ class SingleMediaViewer(QWidget):
 
         self.btn_hud_fav.setIcon(_make_hud_icon("heart", "#F43F5E" if is_fav else "#CBD5E1", filled=is_fav))
         if flag == 1:
-            self.btn_hud_flag.setIcon(_make_hud_icon("flag", "#22C55E", filled=True))
-            flag_bg = "rgba(34, 197, 94, 48)"
+            self.btn_hud_flag.setIcon(_make_hud_icon("flag", "#E81123", filled=True))
+            flag_bg = "rgba(232, 17, 35, 48)"
         elif flag == -1:
-            self.btn_hud_flag.setIcon(_make_hud_icon("flag_rejected", "#EF4444", filled=False))
-            flag_bg = "rgba(239, 68, 68, 48)"
+            self.btn_hud_flag.setIcon(_make_hud_icon("flag_rejected", "#CBD5E1", filled=False))
+            flag_bg = "rgba(239, 68, 68, 42)"
         else:
             self.btn_hud_flag.setIcon(_make_hud_icon("flag", "#CBD5E1", filled=False))
             flag_bg = "transparent"

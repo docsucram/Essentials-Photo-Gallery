@@ -7291,13 +7291,45 @@ class RibbonToolbar(QWidget):
         self.set_slideshow_theme(theme_id)
         self.action_triggered.emit("slide_show")
 
+    @staticmethod
+    def _make_cull_menu_icon(kind: str) -> QIcon:
+        pm = QPixmap(32, 32)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        if kind == "heart":
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#F43F5E"))
+            path = QPainterPath()
+            path.moveTo(16.0, 26.5)
+            path.cubicTo(5.5, 19.8, 4.0, 11.5, 8.8, 7.2)
+            path.cubicTo(12.2, 4.4, 15.0, 6.6, 16.0, 9.2)
+            path.cubicTo(17.0, 6.6, 19.8, 4.4, 23.2, 7.2)
+            path.cubicTo(28.0, 11.5, 26.5, 19.8, 16.0, 26.5)
+            p.drawPath(path)
+        elif kind == "flag_picked":
+            p.setPen(QPen(QColor("#E81123"), 2.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(QColor("#E81123"))
+            p.drawLine(8, 5, 8, 27)
+            p.drawPolygon(QPolygonF([QPointF(8, 6), QPointF(25, 10.5), QPointF(8, 16)]))
+        elif kind == "flag_rejected":
+            p.setPen(QPen(QColor("#94A3B8"), 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(Qt.NoBrush)
+            p.drawLine(8, 5, 8, 27)
+            p.drawPolygon(QPolygonF([QPointF(8, 6), QPointF(25, 10.5), QPointF(8, 16)]))
+            p.setPen(QPen(QColor("#EF4444"), 3.0, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(5, 25, 27, 6)
+        p.end()
+        pm.setDevicePixelRatio(2.0)
+        return QIcon(pm)
+
     def _build_flagged_menu(self, btn: QToolButton) -> None:
         menu = QMenu(btn)
         menu.setFont(QFont("Segoe UI", 9))
         act_all = menu.addAction("All items")
-        act_fav = menu.addAction("♥ Favourites")
-        act_flagged = menu.addAction("⚑ Picked / Flagged")
-        act_rejected = menu.addAction("✕ Rejected")
+        act_fav = menu.addAction(self._make_cull_menu_icon("heart"), "Favourites")
+        act_flagged = menu.addAction(self._make_cull_menu_icon("flag_picked"), "Picked / Flagged")
+        act_rejected = menu.addAction(self._make_cull_menu_icon("flag_rejected"), "Rejected")
         act_unflagged = menu.addAction("Not flagged")
 
         def _on_all():
@@ -7522,11 +7554,11 @@ class RibbonToolbar(QWidget):
         self.btn_home_flag.clicked.connect(lambda: self.action_triggered.emit("toggle_flag"))
         flag_menu = QMenu(self.btn_home_flag)
         flag_menu.setFont(QFont("Segoe UI", 9))
-        flag_menu.addAction("⚑ Pick (P)", lambda: self.action_triggered.emit("flag_pick"))
-        flag_menu.addAction("✕ Reject (X)", lambda: self.action_triggered.emit("flag_reject"))
+        flag_menu.addAction(self._make_cull_menu_icon("flag_picked"), "Pick (P)", lambda: self.action_triggered.emit("flag_pick"))
+        flag_menu.addAction(self._make_cull_menu_icon("flag_rejected"), "Reject (X)", lambda: self.action_triggered.emit("flag_reject"))
         flag_menu.addAction("Unflag (U)", lambda: self.action_triggered.emit("flag_unflag"))
         flag_menu.addSeparator()
-        flag_menu.addAction("♥ Toggle Favourite (F)", lambda: self.action_triggered.emit("toggle_favourite"))
+        flag_menu.addAction(self._make_cull_menu_icon("heart"), "Toggle Favourite (F)", lambda: self.action_triggered.emit("toggle_favourite"))
         flag_menu.addSeparator()
         flag_menu.addAction("Select All Rejected", lambda: self.action_triggered.emit("select_rejected"))
         flag_menu.addAction("Delete All Rejected...", lambda: self.action_triggered.emit("delete_rejected"))
