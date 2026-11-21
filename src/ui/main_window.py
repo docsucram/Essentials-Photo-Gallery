@@ -2242,6 +2242,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._scanner_cancel.set()
         self._scanner_cancel = CancellationFlag()
         self._scanner_status_text = "Scanning: Active"
+        self._last_scanned_root = root_p
         self._update_worker_monitor()
         worker = FolderSyncWorker(
             self.engine,
@@ -2489,6 +2490,10 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.rebuild_and_run_query()
         if hasattr(self, "folder_watcher"):
             self.folder_watcher.update_watched_paths()
+        if was_completed and getattr(self, "_last_scanned_root", None) is not None:
+            _rp = self._last_scanned_root
+            self._last_scanned_root = None
+            QTimer.singleShot(250, lambda p=_rp: self._maybe_prompt_picasa_import(p))
         if (
             was_completed
             and upserted_count > 0
@@ -2518,6 +2523,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                 parts.append(f"{folders_changed} folder(s)")
             summary = ", ".join(parts) if parts else "updated"
             self.statusBar().showMessage(f"✓ Synced '{fname}': {summary}", 4000)
+            if added > 0 or folders_changed > 0:
+                QTimer.singleShot(250, lambda p=folder_path: self._maybe_prompt_picasa_import(p))
             if (
                 added > 0
                 and getattr(self, "find_people_enabled", True)
@@ -4621,13 +4628,85 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.grid_view.set_selected_media_ids(rejected)
         return self.delete_selection_to_recycle_bin()
 
-    def open_picasa_import_dialog(self) -> None:
+    def _maybe_prompt_picasa_import(self, root_path: str | Path) -> None:
+        """Auto-detect .picasa.ini files in newly scanned/added folders and offer 1-click import."""
+        if "PYTEST_CURRENT_TEST" in os.environ or getattr(self, "_is_shutting_down", False):
+            return
+        try:
+            rp = Path(root_path)
+            if not rp.is_dir():
+                return
+            norm = os.path.normcase(os.path.normpath(str(rp)))
+            settings = QSettings("PhotoGallery64", "PhotoGallery64")
+            raw_seen = settings.value("picasa_prompted_roots", [])
+            seen: list[str] = list(raw_seen) if isinstance(raw_seen, (list, tuple)) else ([str(raw_seen)] if raw_seen else [])
+            if norm in seen:
+                return
+
+            from src.core.picasa_importer import apply_picasa_import, scan_picasa_tree
+            from src.ui.theme_tokens import get_theme_tokens
+
+            plan = scan_picasa_tree(rp)
+            if plan.ini_files == 0 or not plan.entries:
+                return
+
+            seen.append(norm)
+            settings.setValue("picasa_prompted_roots", seen)
+
+            parts: list[str] = []
+            if plan.stars_count:
+                parts.append(f"{plan.stars_count} starred")
+            if plan.captions_count:
+                parts.append(f"{plan.captions_count} captions")
+            if plan.tags_count:
+                parts.append(f"{plan.tags_count} tags")
+            if plan.faces_count:
+                parts.append(f"{plan.faces_count} face regions")
+            if plan.albums:
+                parts.append(f"{len(plan.albums)} album(s)")
+            detail_line = ", ".join(parts) if parts else "metadata entries"
+
+            tok = get_theme_tokens(getattr(self, "current_theme", "wlpg_aero"))
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Google Picasa Metadata Found")
+            msg.setIcon(QMessageBox.Information)
+            msg.setText(f"Found Google Picasa metadata for {len(plan.entries)} photo(s) in '{rp.name}'.")
+            msg.setInformativeText(f"Includes: {detail_line}.\n\nImport into your library now?")
+            msg.setStyleSheet(
+                f"QMessageBox {{ background-color: {tok.bg_surface}; color: {tok.text_primary}; }} "
+                f"QMessageBox QLabel {{ color: {tok.text_primary}; background: transparent; }} "
+                f"QMessageBox QPushButton {{ background-color: {tok.bg_elevated}; color: {tok.text_primary}; "
+                f"border: 1px solid {tok.border_subtle}; border-radius: 4px; padding: 5px 14px; min-width: 76px; }} "
+                f"QMessageBox QPushButton:hover {{ background-color: {tok.bg_hover}; border-color: {tok.accent}; }}"
+            )
+            btn_import = msg.addButton("Import Now", QMessageBox.AcceptRole)
+            btn_custom = msg.addButton("Customize...", QMessageBox.ActionRole)
+            msg.addButton("Not Now", QMessageBox.RejectRole)
+            msg.exec()
+
+            clicked = msg.clickedButton()
+            if clicked == btn_import:
+                stats = apply_picasa_import(self.catalog_repo, plan)
+                self.refresh_navigation_and_autocomplete()
+                self.rebuild_and_run_query()
+                self.show_status_message(
+                    f"✓ Picasa import: {stats['matched']} matched "
+                    f"({stats['stars']} ♥, {stats['tags']} tags, {stats['faces']} faces, {stats['albums']} albums)",
+                    6000,
+                )
+            elif clicked == btn_custom:
+                self.open_picasa_import_dialog(initial_dir=str(rp))
+        except Exception:
+            logger.debug("Picasa auto-detect check failed for %s", root_path, exc_info=True)
+
+    def open_picasa_import_dialog(self, initial_dir: str = "") -> None:
         from src.ui.picasa_import_dialog import PicasaImportDialog
 
-        initial = ""
-        folders = self.catalog_repo.get_folders()
-        if folders:
-            initial = str(folders[0]["path"])
+        initial = initial_dir
+        if not initial:
+            folders = self.catalog_repo.get_folders()
+            if folders:
+                initial = str(folders[0]["path"])
         dlg = PicasaImportDialog(self.catalog_repo, initial_dir=initial, parent=self)
         if dlg.exec() == QDialog.Accepted and dlg.import_stats:
             st = dlg.import_stats
