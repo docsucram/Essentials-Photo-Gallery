@@ -26,27 +26,21 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 
 - **Zoom Minimap Navigator + Sharpness Heatmap Grid:** Floating bottom-right minimap in Single Image View and Compare Mode whenever zoomed beyond fit (`> 100%`), with click/drag panning, quick zoom controls, and an optional **Sharpness** (`16×12` Laplacian variance heatmap) overlay to judge focus across the frame.
 - **Batch Rename Dialog (`F2` on Multi-Selection):** Template-driven batch renaming (`{name}`, `{date}`, `{seq}`, `{camera}`, etc.) with live preview table, Windows reserved-name & collision validation, two-phase atomic staging with rollback (supporting swap renames), and automatic `.xmp` / `.OriginalFiles` companion syncing.
-- **Spacebar Quick Preview & `Shift + Rating/Flag` Auto-Advance:** Press `Space` in Grid View for an instant lightweight Quick Preview popover (`Enter` to open full view, `Left`/`Right` to browse, `1–5` to rate, `P` to flag, `Space`/`Esc` to dismiss), and hold `Shift` with `0–5` or `P` in Grid or Single Image View to apply the rating/flag and automatically advance to the next photo.
+- **Borderless Fullscreen Spacebar Quick Preview & `Shift + Rating/Flag/Fav` Auto-Advance:** Press `Space` in Grid View for an instant borderless full-screen lightbox over a dimmed backdrop with floating filename, star rating, and vector Pick/Reject/Favourite icons (`Enter` to open full view, `←`/`→` to browse, `0–5` to rate, `P` Pick, `X` Reject, `U` Unflag, `F` Favourite, `Space`/`Esc` or backdrop click to dismiss; auto-repeat `Space` ignored). Hold `Shift` with `0–5`, `P`, `X`, `U`, or `F` in Grid or Single Image View to apply and auto-advance.
 - **Camera Autofocus (AF) Area Overlay (`A`):** On-demand, LRU-cached parser (`src/core/af_area_parser.py`) supporting EXIF `SubjectArea`/`SubjectLocation` and Nikon/Canon/Sony/Fujifilm MakerNotes (skipping cloud-only placeholders), toggled via `A` or the viewer's `AI & Scan → Show AF Focus Points` menu.
-
-### Apple Live Photos & Android Motion Photos
-
-- **Fast Motion Photo Tail Detection & Live Photo `.MOV` Pairing:** Added `src/imaging/live_photo.py` (`detect_motion_photo_offset()` using XMP `MicroVideoOffset` + bounded JPEG EOI `\xff\xd9` / `ftyp` tail scan, and `find_paired_live_video()` for iPhone `.HEIC`/`.JPG` + `.MOV` pairs, hiding companion `.MOV` clutter from the grid).
-- **`[LIVE]` Grid Badge & In-Viewer Motion Playback (`L`):** Displays a `[LIVE]` pill on Live/Motion Photo cards and a floating `▶ LIVE` toggle (`L`) in `SingleMediaViewer` that plays the paired `.MOV` or extracted MP4 via `QMediaPlayer` and returns to the still frame on completion.
-
-### Offline External Drive / NAS Browsing & Duplicate Keep Rules
-
-- **Offline Drive / NAS Preservation (`volume_offline`):** Added `is_volume_offline()` in `src/utils/paths.py` so unplugged external drives and unreachable NAS shares are flagged `volume_offline = 1` instead of purging catalog rows, keeping archives browsable via cached thumbnails with an `[OFFLINE]` card badge.
-- **Preferred Folder Priority & Reclaimable-Space Summary:** Added `Keep Preferred Folder Priority` (`preferred_folders`) and `compute_reclaimable_summary()` to `DuplicateFinder` / `DuplicateFinderDialog`, plus live selected-vs-total reclaimable space reporting.
-
-### Thumbnail Grid Image Stacking (`stack_parent_id`) & RAW+JPEG Pairs
-
-- **Collapsible `[⧉ N]` Stack Cards & Auto-Stacking:** Added `stack_parent_id` schema migration and repository helpers (`create_stack`, `unstack_media`, `auto_stack_raw_jpeg_pairs`, `auto_stack_bursts`), `[⧉ N]` badge rendering/clicking in `MediaCardDelegate`, Grid context menu **Stacks** actions, and unified collapsed-stack scope prompts for delete operations.
+- **Redesigned Animated Filmstrip & Attached Pull-Tab:** Headerless, larger-thumbnail `BottomFilmstripDock` with smooth slide-up/down animation, translucent squircle left/right edge scroll overlays, and a welded bottom-left viewer pull-tab (`⌄` / `⌃`) that collapses/expands the filmstrip cleanly without breaking `Esc`.
 
 ### Favourites, Tri-State Culling Flags & Picasa Heritage Importer
 
-- **Photo Favourites (`is_favourite`) & Tri-State Pick/Reject Flags:** Separated permanent **Favourites** (`♥` badge on Grid cards + `F` / `Shift+F`) from **Pick / Neutral / Reject** culling flags (`P` = Pick, `X` = Reject with dim overlay + `✕` badge, `U` = Unflag, `Shift` to auto-advance), added an undoable `_FavouriteUndoCommand`, a top-right `[♡ ⚑ ✕]` HUD pill in `SingleMediaViewer`, and Ribbon filter/sweep actions (`Select All Rejected` / `Delete All Rejected...`).
-- **Google Picasa `.picasa.ini` & `contacts.xml` Heritage Importer (`src/core/picasa_importer.py`, `src/ui/picasa_import_dialog.py`):** Added `File → Import Picasa Metadata (.picasa.ini)...` with dry-run preview counts and selective import for Picasa stars (`star=yes` → `♥ Favourites`), captions, keywords/tags, `rect64(...)` face boxes + `[Contacts2]`/`contacts.xml` people names, and `[.album:...]` virtual albums.
+- **Optional Photo Favourites (`is_favourite`) & Tri-State Pick/Reject Flags:** Separated permanent **Favourites** (bottom-right photo-corner translucent heart pill + `F` / `Shift+F`) from **Pick / Neutral / Reject** culling flags (top-right shaded WLPG red pennant + silver pole, hollow red-strike Reject with dim overlay, `P`/`X`/`U`, `Shift` to auto-advance). Includes an **Options → General → Enable Favourites** toggle that cleanly hides all Favourites UI elements when disabled, **Group by → Favourites** (and tri-state **Group by → Flag**), context-aware **`Favourite` / `Unfavourite`** right-click actions, tri-state Flag + Favourite controls in the Right Pane Information panel, and a top-right cull HUD in `SingleMediaViewer`.
+- **Permanent Built-In Smart Albums (`Favourites`, `Picked / Flagged`, `Rejected`, `Unflagged`):** Added live-counted built-in Smart Albums with dedicated vector icons under **Smart Albums** in the Navigation Pane, plus right-click Show/Hide toggles persisted across restarts and Dark Theme support in `SmartAlbumDialog`.
+- **Auto-Detecting Google Picasa `.picasa.ini` & `contacts.xml` Importer (`src/core/picasa_importer.py`, `src/ui/picasa_import_dialog.py`):** Automatically detects `.picasa.ini` files when folders finish scanning or change and offers a 1-click import prompt (with a collapsible **Customize...** flow also available in **Options → Import**) for Picasa stars (`star=yes` → Favourites), captions, keywords/tags, `rect64(...)` face boxes + `[Contacts2]`/`contacts.xml` people names, and `[.album:...]` virtual albums.
+
+### HiDPI Panorama Thumbnails, Welcome Canvas & Update Checker
+
+- **Panorama-Aware HiDPI Thumbnail Pipeline + Rebuild Cache:** Raised `THUMB_MAX_DIM` from `256` → `384` with a `240px` short-edge floor (up to `768px` long edge) for panoramas, 2× pre-decode `SmoothTransformation`, WebP quality `85`, and a one-click **Rebuild Thumbnail Cache (HiDPI & Panoramas)** action in **Options → Database**.
+- **Empty-Library Welcome Canvas & Ribbon Settings Cog:** Added a theme-aware 3-card `WelcomeEmptyOverlay` (`src/ui/welcome_overlay.py`) shown directly in the main workspace on first launch or after Fresh Start, plus a transparent high-contrast Settings cog button (`⚙`) next to the ribbon collapse chevron.
+- **Auto-Closing Update Installer & Dark Theme Dialog Polish:** Upgraded `AboutDialog`'s GitHub Releases update checker with release notes preview, live MB download progress, Dark Theme contrast fixes, and automatic clean app shutdown when launching the downloaded installer.
 
 ---
 

@@ -2,34 +2,13 @@
 
 This document tracks **genuinely unbuilt future enhancements** for **Essentials Photo Gallery**, maintaining the classic Windows Live Photo Gallery (WLPG) ease-of-use and speed while expanding optional local AI, heritage migration, and enthusiast editing capabilities.
 
-> **Graduated Features:** Completed initiatives—including **v0.16.0 World Map View Speed Overhaul (Bundled Leaflet + `gallerythumb://` + Web Worker Supercluster + Map Scope + 3s Pre-Warm), P2 Grid/RAW/Background Perf (Two-Tier Cache, Batched Commits, Tier-0 RAW Embedded JPEG, `ScanCrashTrace`), Photographer Culling Toolkit (Zoom Minimap + Sharpness Heatmap, Batch Rename `F2`, Spacebar Quick Preview + `Shift+Rating/Flag` Auto-Advance, Camera AF Area Overlay), Apple Live Photos & Android Motion Photos, Offline Drive/NAS Browsing (`volume_offline`) & Duplicate Preferred Folder Priority, and Thumbnail Grid Image Stacking (`stack_parent_id`) + RAW/JPEG Pairs**, **Depth & Light 2.0 (3D Surface-Normal Relighting & Virtual Light Studio with Joint-Guided Depth Refinement, Hemispherical Volume Normals, Albedo-Preserving Ambient Dimming, 3 Interactive On-Canvas Point/Spot/Rim Lights, Blinn-Phong Gloss, Gobo Projections & 6 Relight Look Presets)**, **UI Theme Architecture Consolidation (`ThemeTokens`, semantic `uiRole` QSS properties, and automated headless contrast auditing)**, **Visual Similarity Search (`Find Similar` with 24-byte LAB Haar + pHash/dHash, `81%` default & `70%–98%` Scope Bar slider)**, **Database Fresh Start Reset & Empty-Library Prompt**, **Session-Cached `FaceEngine` & Folder Manager Performance Optimizations**, **Companion Phone GPS Matching & GPX Interpolation**, **Fine Tune Two-Tier `Basic | Advanced` Mode** (`Smart Enhance`, `Whites`/`Blacks`, content-aware `Structure`, `Tone Curve`, `WB Eyedropper`, `8-Band Color Mixer (HSL)`, `Sharpen Radius/Masking`, `Split Denoise`, `Orton Glow`/`Golden Hour`, `Film Grain`), **Phase 1 Regional Masking (`Whole | Subject | Bg | Sky`) with Interactive Paint/Erase Mask Brush & Live Masked Histogram**, **Home Ribbon `People` & `Geotag` Split Buttons**, SQLite FTS5 RapidOCR search, Per-Folder Scan & Privacy Controls with PBKDF2 PIN lock, Unified `LaMa` ONNX Generative Inpainting, Embedded JPEG Fast-Path for Camera RAW, AgX Highlight Chroma Roll-Off, Focus-Aware Sliders, and Interactive Map Pin Adjustment—have been graduated into [`docs/ARCHITECTURE.md`](ARCHITECTURE.md), [`RELEASES.md`](../RELEASES.md), and [`docs/editing_engine.md`](editing_engine.md).
+> **Graduated Features:** Completed initiatives—including **v0.16.0 World Map View Speed Overhaul (Bundled Leaflet + `gallerythumb://` + Web Worker Supercluster + Map Scope + 3s Pre-Warm), P2 Grid/RAW/Background Perf (Two-Tier Cache, Batched Commits, Tier-0 RAW Embedded JPEG, `ScanCrashTrace`, Panorama-Aware HiDPI Thumbnails + Rebuild Cache), Photographer Culling Toolkit (Zoom Minimap + Sharpness Heatmap, Batch Rename `F2`, Borderless Fullscreen Spacebar Quick Preview + `Shift+Rating/Flag/Fav` Auto-Advance, Camera AF Area Overlay, Animated Filmstrip with Attached Pull-Tab), Optional Photo Favourites (`is_favourite`) & Tri-State Pick/Reject Flags + Permanent Built-In Flagged Smart Albums + Group by Favourites, Auto-Detecting Google Picasa `.picasa.ini` & `contacts.xml` Heritage Importer, `Lap`-Style Empty-Library Welcome Canvas, Apple Live Photos & Android Motion Photos, Offline Drive/NAS Browsing (`volume_offline`) & Duplicate Preferred Folder Priority, and Thumbnail Grid Image Stacking (`stack_parent_id`) + RAW/JPEG Pairs**, **Depth & Light 2.0 (3D Surface-Normal Relighting & Virtual Light Studio with Joint-Guided Depth Refinement, Hemispherical Volume Normals, Albedo-Preserving Ambient Dimming, 3 Interactive On-Canvas Point/Spot/Rim Lights, Blinn-Phong Gloss, Gobo Projections & 6 Relight Look Presets)**, **UI Theme Architecture Consolidation (`ThemeTokens`, semantic `uiRole` QSS properties, and automated headless contrast auditing)**, **Visual Similarity Search (`Find Similar` with 24-byte LAB Haar + pHash/dHash, `81%` default & `70%–98%` Scope Bar slider)**, **Database Fresh Start Reset & Empty-Library Prompt**, **Session-Cached `FaceEngine` & Folder Manager Performance Optimizations**, **Companion Phone GPS Matching & GPX Interpolation**, **Fine Tune Two-Tier `Basic | Advanced` Mode** (`Smart Enhance`, `Whites`/`Blacks`, content-aware `Structure`, `Tone Curve`, `WB Eyedropper`, `8-Band Color Mixer (HSL)`, `Sharpen Radius/Masking`, `Split Denoise`, `Orton Glow`/`Golden Hour`, `Film Grain`), **Phase 1 Regional Masking (`Whole | Subject | Bg | Sky`) with Interactive Paint/Erase Mask Brush & Live Masked Histogram**, **Home Ribbon `People` & `Geotag` Split Buttons**, SQLite FTS5 RapidOCR search, Per-Folder Scan & Privacy Controls with PBKDF2 PIN lock, Unified `LaMa` ONNX Generative Inpainting, Embedded JPEG Fast-Path for Camera RAW, AgX Highlight Chroma Roll-Off, Focus-Aware Sliders, and Interactive Map Pin Adjustment—have been graduated into [`docs/ARCHITECTURE.md`](ARCHITECTURE.md), [`RELEASES.md`](../RELEASES.md), and [`docs/editing_engine.md`](editing_engine.md).
 
 ---
 
-## 1. Picasa Heritage Migration & Sidecar Support (`.picasa.ini` & `contacts.xml`)
+## 1. Contextual Markup & Social Post Design Studio ("Canva-Lite" Workflow)
 
-### 1.1 Non-Destructive Picasa Sidecar & Contact Importer
-* **User Value:** Allow longtime Google Picasa 3 users to migrate decades of organization—face tags, named people, starred photos, captions, albums, and non-destructive crops—directly into Essentials Photo Gallery without losing metadata trapped in `.picasa.ini` files.
-* **What We Parse & Map:**
-  * **Face Regions (`faces=rect64(...),contact_id`):** Decode Picasa's 64-bit hex rectangle format (four 16-bit unsigned integers `0..65535` representing `[left, top, right, bottom]`) directly into our normalized `[0.0 .. 1.0]` `media_people` face boxes.
-  * **People Identity Mapping (`[Contacts2]` & `contacts.xml`):** Resolve Picasa 16-char hex contact IDs against local `[Contacts2]` sections and `%LOCALAPPDATA%\Google\Picasa2\contacts\contacts.xml`, matching or creating named people in `people` (`state = 1`).
-  * **Starred Photos (`star=yes`) & Captions (`description=...`):** Map Picasa stars to Flagged (`flag = 1`) and/or a configurable Star Rating (`4★` or `5★`), and import file captions.
-  * **Picasa Albums (`.pal` & `[.album:...]`):** Reconstruct Picasa virtual albums as Static Albums (`My Albums`) in `catalog.db`.
-  * **Non-Destructive Crops (`crop64`) & `.picasaoriginals` / `.OriginalFiles`:** Recognize existing `.picasaoriginals` backup folders alongside `.OriginalFiles/` and map `crop64` / `tilt` parameters into `PhotoAdjustmentRecipe`.
-* **UX Workflow:**
-  * Accessible via **`File → Import → Import Picasa Metadata (.picasa.ini)...`** (or an opt-in checkbox in **Folder Manager**) with a fast dry-run summary dialog before committing to `catalog.db`.
-
-### 1.2 Photo Favourites (`is_favourite`) & Tri-State Pick/Reject Culling Flags (from `lap`)
-* **User Value:** Currently `media.flag` is binary (`0 = Unflagged`, `1 = Flagged`). Separating permanent **Favourites** (`media.is_favourite`, Heart toggle) from workflow **Culling Flags** (`flag = 1` Pick, `0` Neutral, `-1` Reject) avoids overloading one flag for two jobs:
-  * **Picasa Import Clarity:** Picasa's `star=yes` maps cleanly to `is_favourite = 1` (permanent keepsake) without colliding with temporary culling Picks/Rejects.
-  * **Rapid Culling Sweep:** Photographers can press `P` (Pick), `X` (Reject), `U` (Unflag) — with `Shift` to auto-advance — and run a single **"Select / Delete All Rejected"** sweep at the end of a shoot.
-  * **Left Nav & Search Filter:** Add a top-level **Favourites** quick-filter alongside **Flagged (Picked)** and **Rejected** in the Left Navigation Dock and Smart Album rules.
-
----
-
-## 2. Contextual Markup & Social Post Design Studio ("Canva-Lite" Workflow)
-
-### 2.1 Promote Markup to a Dedicated Contextual `Markup & Design` Ribbon Tab
+### 1.1 Promote Markup to a Dedicated Contextual `Markup & Design` Ribbon Tab
 * **User Value:** Replace the cramped floating Markup toolbar with a full contextual **`Markup`** Ribbon tab (whilst keeping **`Spot Fix`** strictly focused on `Blemish` | `Object Eraser` | `Red Eye` healing), unlocking rich Canva-style vector graphics, typography, and social media framing right inside Single Image View.
 * **Architecture:**
   * **Contextual `Markup` Ribbon Tab Groups:**
@@ -45,19 +24,6 @@ This document tracks **genuinely unbuilt future enhancements** for **Essentials 
 * **Quick Social Export & Carousel Slicer:**
   * **`Copy Social Post to Clipboard` (`Ctrl+Shift+C`) + Quick Launch** to paste straight into Instagram, Facebook, WhatsApp Web, or Discord.
   * **Seamless Panorama Carousel Slicer:** Slice a wide panorama or collage into 2–5 swipeable `1080×1350` (`4:5`) Instagram carousel frames automatically.
-
----
-
-## 3. Thumbnail Grid Image Stacking (Bursts, RAW+JPEG Pairs & Edited Copies)
-
-### 3.1 Zero-Overhead Catalog Stacking (`stack_parent_id`)
-* **User Value:** Declutter the Thumbnail Grid by grouping high-speed camera bursts, `.RAF`/`.CR3` + `.JPG` camera pairs, or `{stem}_edited` copies into a single collapsible stack card with a top-right **`[⧉ N]`** stack counter badge.
-* **High-Performance SQLite Architecture (`< 1 ms` Overhead at 500k Scale):**
-  * **Schema:** Add `stack_parent_id INTEGER DEFAULT NULL` and `stack_count INTEGER NOT NULL DEFAULT 1` to `media`, backed by a partial index `CREATE INDEX idx_media_stack_parent ON media(stack_parent_id) WHERE stack_parent_id IS NOT NULL;`.
-  * **Query Speed:** Never run dynamic clustering in Python during grid loads. When `Collapse Stacks` is enabled in the `View` ribbon, `CatalogRepository.query_media_records()` appends `AND m.stack_parent_id IS NULL`. Because stack children are filtered out by an indexed `IS NULL` check, 500,000-photo queries execute with zero `GROUP BY` penalty.
-  * **UX & Controls:**
-    * Clicking the **`[⧉ N]`** badge on a thumbnail (or pressing **`S`**) expands/collapses that stack inline in the grid (or opens all stack members directly in **Compare Mode (`C`)**).
-    * Right-click context menu: **`Stack ▸`** (`Group Selected into Stack`, `Unstack`, `Set Selected as Top of Stack`, `Open Stack in Compare View`).
     * Auto-stacking helpers: **`Auto-Stack RAW + JPEG Pairs`** and **`Auto-Stack Rapid Bursts (< 2s)`** (picking the highest Laplacian sharpness shot as the stack parent).
     * **Unified RAW + JPEG/HEIC Lifecycle & Preview Controls:** Keep paired RAW + JPEG/HEIC files together during move, rename, copy, and Duplicate Finder scans; prompt with a deletion-scope choice (*Delete Both / RAW Only / JPEG Only*); and add a configurable RAW display preference (*Embedded Preview* vs. *Full Demosaic* vs. *Paired JPEG*).
 

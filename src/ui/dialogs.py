@@ -2904,15 +2904,23 @@ class AboutDialog(QDialog):
             self.lbl_update_status.setText(f"Update available: v{latest_ver} (current: {APP_VERSION}).")
             installer_url = str(info.get("installer_url") or "")
             html_url = str(info.get("html_url") or "")
+            release_body = str(info.get("body") or "").strip()
             tok = self._theme_tokens
             msg = QMessageBox(self)
             msg.setWindowTitle("Update Available")
             msg.setIcon(QMessageBox.Information)
             msg.setText(f"A new version of Essentials Photo Gallery (v{latest_ver}) is available.")
-            msg.setInformativeText(f"You are currently running version {APP_VERSION}.")
+            info_text = f"You are currently running version {APP_VERSION}."
+            if installer_url:
+                info_text += "\n\nThe app will close automatically once the installer is downloaded and ready to run."
+            msg.setInformativeText(info_text)
+            if release_body:
+                msg.setDetailedText(release_body[:3000])
             msg.setStyleSheet(
                 f"QMessageBox {{ background-color: {tok.bg_surface}; color: {tok.text_primary}; }} "
                 f"QMessageBox QLabel {{ color: {tok.text_primary}; background: transparent; }} "
+                f"QMessageBox QTextEdit {{ background-color: {tok.bg_card}; color: {tok.text_primary}; "
+                f"border: 1px solid {tok.border_subtle}; border-radius: 4px; }} "
                 f"QMessageBox QPushButton {{ background-color: {tok.bg_elevated}; color: {tok.text_primary}; "
                 f"border: 1px solid {tok.border_subtle}; border-radius: 4px; padding: 5px 14px; min-width: 76px; }} "
                 f"QMessageBox QPushButton:hover {{ background-color: {tok.bg_hover}; border-color: {tok.accent}; }}"
@@ -2923,10 +2931,13 @@ class AboutDialog(QDialog):
             msg.exec()
             clicked = msg.clickedButton()
             if btn_dl is not None and clicked == btn_dl:
-                from PySide6.QtWidgets import QProgressDialog
-                prog = QProgressDialog("Downloading installer...", "Cancel", 0, 100, self)
+                from PySide6.QtCore import QTimer
+                from PySide6.QtWidgets import QApplication, QProgressDialog
+
+                prog = QProgressDialog(f"Downloading v{latest_ver} installer...", "Cancel", 0, 100, self)
                 prog.setWindowTitle("Updating Essentials Photo Gallery")
                 prog.setWindowModality(Qt.WindowModal)
+                prog.setMinimumWidth(380)
                 prog.setStyleSheet(
                     f"QProgressDialog {{ background-color: {tok.bg_surface}; color: {tok.text_primary}; }} "
                     f"QProgressDialog QLabel {{ color: {tok.text_primary}; background: transparent; }}"
@@ -2949,14 +2960,52 @@ class AboutDialog(QDialog):
                         self.done.emit(p)
 
                 dl_w = _InstallerDlWorker(self)
-                dl_w.progress.connect(lambda d, t: prog.setValue(int((d * 100) // t)) if t > 0 else None)
+
+                def _on_dl_progress(done_b: int, total_b: int) -> None:
+                    if total_b > 0:
+                        pct = int((done_b * 100) // total_b)
+                        prog.setValue(pct)
+                        prog.setLabelText(
+                            f"Downloading v{latest_ver} installer... "
+                            f"{done_b / (1024 * 1024):.1f} / {total_b / (1024 * 1024):.1f} MB ({pct}%)"
+                        )
+                    else:
+                        prog.setLabelText(
+                            f"Downloading v{latest_ver} installer... {done_b / (1024 * 1024):.1f} MB"
+                        )
+
+                dl_w.progress.connect(_on_dl_progress)
 
                 def _on_dl_done(path_obj: object) -> None:
+                    self._update_thread = None
                     prog.close()
                     if path_obj:
-                        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path_obj)))
+                        self.lbl_update_status.setText("Launching installer and closing app...")
+                        launched = False
+                        try:
+                            if hasattr(os, "startfile"):
+                                os.startfile(str(path_obj))
+                                launched = True
+                        except Exception:
+                            launched = False
+                        if not launched:
+                            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path_obj)))
+                        # Cleanly close AboutDialog & MainWindow so Inno Setup never hits file/mutex locks
+                        parent_win = self.parentWidget()
+                        self.accept()
+                        if parent_win is not None:
+                            QTimer.singleShot(120, parent_win.close)
+                        app = QApplication.instance()
+                        if app is not None:
+                            QTimer.singleShot(350, app.quit)
                     elif not cancelled["v"]:
-                        QMessageBox.warning(self, "Download Failed", "Could not download the installer.")
+                        warn = QMessageBox(self)
+                        warn.setWindowTitle("Download Failed")
+                        warn.setIcon(QMessageBox.Warning)
+                        warn.setText("Could not download the installer.")
+                        warn.setInformativeText("You can download the update manually from the GitHub Releases page.")
+                        warn.setStyleSheet(msg.styleSheet())
+                        warn.exec()
 
                 dl_w.done.connect(_on_dl_done)
                 self._update_thread = dl_w

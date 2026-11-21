@@ -260,7 +260,7 @@ flowchart TB
         FDW["FaceDetectionWorker (SCRFD + ArcFace ONNX)"]
         OSW["OcrScanWorker (RapidOCR ONNX -> FTS5)"]
         MSD["MetadataSyncDaemon (Safe-Mode XMP/EXIF)"]
-        T_DB["thumbnails.db (256px & 96px WebP)"]
+        T_DB["thumbnails.db (384px HiDPI / Panorama & 96px WebP)"]
     end
 
     MW -->|"Query / Smart Album (<10ms)"| CAT_DB
@@ -291,3 +291,4 @@ flowchart TB
 9. **Cloud-Only, Offline Volume & Crash Safety (`src/utils/paths.py`, `src/utils/scan_logger.py`):** Guards all scanners/decoders with `is_cloud_only_stat()` (never hydrates OneDrive Files On-Demand), flags unplugged external drives/NAS shares as `folders.volume_offline = 1` (keeping cached thumbnails browsable with `[OFFLINE]` badges), patches existing XMP XML DOMs non-destructively (`xmp_sync_worker.py`), and records `ScanCrashTrace` breadcrumbs around native C/C++ codec calls.
 10. **Photographer Culling Toolkit (`src/ui/zoom_minimap.py`, `src/ui/batch_rename_dialog.py`, `src/ui/quick_preview_dialog.py`, `src/core/af_area_parser.py`):** Provides a corner Zoom Minimap + `16×12` Laplacian Sharpness Heatmap when zoomed `> 100%`, template-driven Batch Rename (`F2`) with Windows reserved-name checks and atomic rollback, Spacebar Quick Preview + `Shift + Rating/Flag` auto-advance culling, and on-demand Camera AF Point Overlays (`A`).
 11. **Live/Motion Photos & Image Stacking (`src/imaging/live_photo.py`, `src/db/repository.py`):** Detects Samsung/Pixel Motion Photo JPEG EOI/XMP tails and Apple `.HEIC`/`.JPG` + `.MOV` pairs (`[LIVE]` badge + `L` in-viewer playback), and groups bursts & RAW+JPEG pairs via `media.stack_parent_id` with collapsible `[⧉ N]` cards.
+12. **HiDPI Panorama Thumbnails, Optional Favourites, Tri-State Flags, Picasa Auto-Import & Welcome Canvas (`src/workers/scanner_thumb_worker.py`, `src/core/picasa_importer.py`, `src/ui/welcome_overlay.py`, `src/ui/dialogs.py`):** `compute_thumb_target_size()` generates `384px` HiDPI thumbnails with a `240px` short-edge floor (up to `768px` long edge) for panoramas at WebP quality `85` (with one-click cache rebuild in *Options → Database*); separates optional `is_favourite` (photo-corner pill, *Options → General* toggle, *Group by → Favourites*) from tri-state Pick/Reject/Unflagged culling flags (`flag` / `is_rejected`, permanent show/hideable Smart Albums, Right Pane Information controls); auto-detects `.picasa.ini` metadata on folder scan/watch for 1-click import; presents a theme-aware 3-card `WelcomeEmptyOverlay` when the library is empty; and closes the app cleanly when launching a downloaded update installer.
