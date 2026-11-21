@@ -775,13 +775,6 @@ class MediaCardDelegate(QStyledItemDelegate):
             key = (int(media_id), int(self.face_crop_person_id))
             if key in self._face_crop_cache:
                 pixmap = self._face_crop_cache[key]
-            elif self.thumb_repo is not None:
-                blob = self.thumb_repo.get_face_thumbnail_for_media_person(media_id, self.face_crop_person_id)
-                if blob:
-                    pm = QPixmap()
-                    if pm.loadFromData(blob) and not pm.isNull():
-                        self._face_crop_cache[key] = pm
-                        pixmap = pm
 
             if pixmap is None and key in self._person_face_rects:
                 full_pm = self.pixmap_cache.get(media_id)
@@ -1120,21 +1113,14 @@ class MediaCardDelegate(QStyledItemDelegate):
         else:
             img_box = card_rect.adjusted(10, 10, -10, -bottom_reserve)
 
-        # 3. Draw Thumbnail Pixmap (from LruCache or face crop) with WLPG Drop Shadow
+        # 3. Draw Thumbnail Pixmap (from LruCache or non-blocking prefetched face crop) with WLPG Drop Shadow
         pixmap: QPixmap | None = None
         if self.face_crop_person_id is not None and media_id is not None:
             key = (int(media_id), int(self.face_crop_person_id))
             if key in self._face_crop_cache:
                 pixmap = self._face_crop_cache[key]
-            elif self.thumb_repo is not None:
-                blob = self.thumb_repo.get_face_thumbnail_for_media_person(media_id, self.face_crop_person_id)
-                if blob:
-                    pm = QPixmap()
-                    if pm.loadFromData(blob) and not pm.isNull():
-                        self._face_crop_cache[key] = pm
-                        pixmap = pm
 
-            # If dedicated crop is not in database yet, dynamically extract face crop from cached photo thumbnail!
+            # If dedicated crop is not in memory cache yet, dynamically extract face crop from cached photo thumbnail!
             if pixmap is None and key in self._person_face_rects:
                 full_pm = self.pixmap_cache.get(media_id)
                 if full_pm is not None and not full_pm.isNull() and full_pm.width() > 10 and full_pm.height() > 10:

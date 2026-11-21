@@ -5488,6 +5488,117 @@ class CatalogRepository:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def query_map_overview_cells(
+        self,
+        year: int | None = None,
+        person_id: int | None = None,
+        min_rating: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        High-speed overview query for World Map View (zero GROUP_CONCAT).
+        Aggregates all geotagged items into ~1 km cells (ROUND(lat, 2), ROUND(lon, 2))
+        returning lightweight dicts with a single representative media ID and exact cell bounds.
+        Member media_ids are resolved lazily via `query_map_cluster_media_ids()` only on click.
+        """
+        conn = self.engine.catalog_conn()
+        extra_clauses, extra_params = self.build_map_filter_clauses(
+            year=year, person_id=person_id, min_rating=min_rating, alias="m"
+        )
+        if not self.include_private:
+            extra_clauses.append(
+                "NOT EXISTS (SELECT 1 FROM folders f_priv WHERE f_priv.id = m.folder_id AND COALESCE(f_priv.is_private, 0) = 1)"
+            )
+        extra_clauses.append("COALESCE(m.is_missing, 0) = 0")
+        extra_clauses.append("NOT (ABS(r.min_lat) < 0.0001 AND ABS(r.min_lon) < 0.0001)")
+        extra_sql = (" AND " + " AND ".join(extra_clauses)) if extra_clauses else ""
+
+        rows = conn.execute(
+            f"""
+            SELECT
+                COUNT(*) AS count,
+                AVG(r.min_lat) AS lat,
+                AVG(r.min_lon) AS lon,
+                MIN(r.min_lat) AS min_lat,
+                MAX(r.max_lat) AS max_lat,
+                MIN(r.min_lon) AS min_lon,
+                MAX(r.max_lon) AS max_lon,
+                MIN(m.id) AS rep_media_id,
+                MAX(m.mtime) AS rep_mtime,
+                MAX(m.location_name) AS location_name
+            FROM media_rtree r
+            JOIN media m ON m.id = r.id
+            WHERE r.min_lat BETWEEN -85.0 AND 85.0
+              AND r.min_lon BETWEEN -180.0 AND 180.0{extra_sql}
+            GROUP BY ROUND(r.min_lat, 2), ROUND(r.min_lon, 2);
+            """,
+            extra_params,
+        ).fetchall()
+
+        results: list[dict[str, Any]] = []
+        for r in rows:
+            lat = float(r["lat"])
+            lon = float(r["lon"])
+            loc = str(r["location_name"] or "").strip()
+            results.append(
+                {
+                    "lat": lat,
+                    "lon": lon,
+                    "count": int(r["count"]),
+                    "rep_media_id": int(r["rep_media_id"]),
+                    "rep_mtime": int(r["rep_mtime"] or 0),
+                    "min_lat": float(r["min_lat"]),
+                    "max_lat": float(r["max_lat"]),
+                    "min_lon": float(r["min_lon"]),
+                    "max_lon": float(r["max_lon"]),
+                    "label": loc if loc else f"{lat:.2f}°, {lon:.2f}°",
+                }
+            )
+        results.sort(key=lambda c: c["count"], reverse=True)
+        return results
+
+    def query_map_cluster_media_ids(
+        self,
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+        year: int | None = None,
+        person_id: int | None = None,
+        min_rating: int | None = None,
+    ) -> list[int]:
+        """Lazily resolves all media IDs inside a clicked cluster's bounding box via media_rtree."""
+        conn = self.engine.catalog_conn()
+        extra_clauses, extra_params = self.build_map_filter_clauses(
+            year=year, person_id=person_id, min_rating=min_rating, alias="m"
+        )
+        if not self.include_private:
+            extra_clauses.append(
+                "NOT EXISTS (SELECT 1 FROM folders f_priv WHERE f_priv.id = m.folder_id AND COALESCE(f_priv.is_private, 0) = 1)"
+            )
+        extra_clauses.append("COALESCE(m.is_missing, 0) = 0")
+        extra_sql = (" AND " + " AND ".join(extra_clauses)) if extra_clauses else ""
+
+        pad = 1e-4
+        sql_params: list[Any] = [
+            float(min_lat) - pad,
+            float(max_lat) + pad,
+            float(min_lon) - pad,
+            float(max_lon) + pad,
+        ]
+        sql_params.extend(extra_params)
+        rows = conn.execute(
+            f"""
+            SELECT m.id
+            FROM media_rtree r
+            JOIN media m ON m.id = r.id
+            WHERE r.max_lat >= ? AND r.min_lat <= ?
+              AND r.max_lon >= ? AND r.min_lon <= ?{extra_sql}
+            ORDER BY COALESCE(m.date_taken, m.mtime, 0) DESC, m.id ASC;
+            """,
+            sql_params,
+        ).fetchall()
+        return [int(r[0]) for r in rows]
+
     def get_media_decode_info_batch(self, media_ids: Sequence[int]) -> list[dict[str, Any]]:
         """Returns minimal file path and decode metadata for the requested media IDs."""
         if not media_ids:
@@ -6586,6 +6697,43 @@ class ThumbnailRepository:
         if not row:
             return None
         return self.get_face_thumbnail(int(row["id"]))
+
+    def get_face_thumbnails_for_media_person_batch(
+        self, media_ids: Sequence[int], person_id: int
+    ) -> dict[int, bytes]:
+        """Batched lookup returning {media_id: webp_bytes} for person_id's confirmed face crops."""
+        if not media_ids:
+            return {}
+        cat_conn = self.engine.catalog_conn()
+        media_to_face_id: dict[int, int] = {}
+        pid = int(person_id)
+        for chunk in _iter_id_chunks(media_ids, 900):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = cat_conn.execute(
+                f"""
+                SELECT id, media_id
+                FROM media_people
+                WHERE media_id IN ({placeholders})
+                  AND person_id = ? AND state = 1
+                  AND rect_w > 0.005 AND rect_h > 0.005
+                ORDER BY is_manual DESC, id DESC;
+                """,
+                list(chunk) + [pid],
+            ).fetchall()
+            for r in rows:
+                mid = int(r["media_id"])
+                if mid not in media_to_face_id:
+                    media_to_face_id[mid] = int(r["id"])
+
+        if not media_to_face_id:
+            return {}
+
+        face_blobs = self.get_face_thumbnails_batch(list(media_to_face_id.values()))
+        return {
+            mid: face_blobs[fid]
+            for mid, fid in media_to_face_id.items()
+            if fid in face_blobs
+        }
 
     def purge_mismatched_orientation_thumbnails(self) -> int:
         """Purges any cached thumbnails whose aspect ratio conflicts with catalog orientation."""

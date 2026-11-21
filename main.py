@@ -43,6 +43,11 @@ def create_app(argv: list[str] | None = None) -> QApplication:
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+    try:
+        from src.ui.map_view import register_gallery_map_scheme
+        register_gallery_map_scheme()
+    except Exception:
+        pass
     register_nextgen_codecs()
     app = QApplication(argv if argv is not None else sys.argv)
     from src.version import APP_MUTEX_NAME, APP_NAME, APP_VERSION

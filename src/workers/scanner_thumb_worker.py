@@ -1556,6 +1556,8 @@ class ThumbnailDecodeWorker(QRunnable):
         orientation: int = 1,
         cancel_flag: CancellationFlag | None = None,
         metadata_dirty: int = 0,
+        write_coalescer: Any | None = None,
+        skip_cache_lookup: bool = False,
     ) -> None:
         super().__init__()
         self.engine = engine
@@ -1566,6 +1568,8 @@ class ThumbnailDecodeWorker(QRunnable):
         self.orientation = int(orientation or 1)
         self.cancel_flag = cancel_flag or CancellationFlag()
         self.metadata_dirty = int(metadata_dirty or 0)
+        self.write_coalescer = write_coalescer
+        self.skip_cache_lookup = bool(skip_cache_lookup)
         self.signals = ThumbnailDecodeWorkerSignals()
 
     @Slot()
@@ -1573,15 +1577,18 @@ class ThumbnailDecodeWorker(QRunnable):
         if self.cancel_flag.is_set:
             return
         thumb_repo = ThumbnailRepository(self.engine)
+        from src.utils.scan_logger import clear_active_decode, record_active_decode
+        decoded_from_disk = False
         try:
-            # 1. Check thumbnails.db for an up-to-date WebP blob
-            cached_blob = thumb_repo.get_webp_blob(self.media_id, expected_mtime=self.mtime)
-            if cached_blob is not None:
-                qimg = QImage.fromData(cached_blob, "WEBP")
-                if not qimg.isNull():
-                    if not self.cancel_flag.is_set:
-                        self.signals.thumbnail_ready.emit(self.media_id, qimg)
-                    return
+            # 1. Check thumbnails.db for an up-to-date WebP blob (unless caller already batch-checked)
+            if not self.skip_cache_lookup:
+                cached_blob = thumb_repo.get_webp_blob(self.media_id, expected_mtime=self.mtime)
+                if cached_blob is not None:
+                    qimg = QImage.fromData(cached_blob, "WEBP")
+                    if not qimg.isNull():
+                        if not self.cancel_flag.is_set:
+                            self.signals.thumbnail_ready.emit(self.media_id, qimg)
+                        return
 
             if self.cancel_flag.is_set:
                 return
@@ -1595,12 +1602,16 @@ class ThumbnailDecodeWorker(QRunnable):
                     )
                 return
 
-            # 2. Decode from disk
+            # 2. Decode from disk (guarded with crash-recovery trace for native C/C++ codecs)
+            record_active_decode("ThumbnailDecodeWorker", self.file_path)
+            decoded_from_disk = True
             qimg = (
                 self._decode_video_thumbnail()
                 if self.is_video
                 else self._decode_image_thumbnail()
             )
+            clear_active_decode()
+            decoded_from_disk = False
             if qimg is None or qimg.isNull():
                 from src.utils.scan_logger import log_scan_error
                 log_scan_error("ThumbnailDecodeWorker", self.file_path, "Null image decoded (corrupted file)")
@@ -1624,7 +1635,7 @@ class ThumbnailDecodeWorker(QRunnable):
             # without waiting for WebP compression or SQLite write lock/commit!
             self.signals.thumbnail_ready.emit(self.media_id, qimg)
 
-            # 4. Compress to WebP BLOB (~8-12 KB) and store in thumbnails.db in the background
+            # 4. Compress to WebP BLOB (~8-12 KB) and store in thumbnails.db (batched when coalescer is bound)
             byte_array = QByteArray()
             buffer = QBuffer(byte_array)
             buffer.open(QIODevice.WriteOnly)
@@ -1633,13 +1644,22 @@ class ThumbnailDecodeWorker(QRunnable):
             webp_bytes = bytes(byte_array.data())
 
             if webp_bytes:
-                thumb_repo.put_webp_blob(
-                    self.media_id,
-                    webp_bytes,
-                    self.mtime,
-                    width=qimg.width(),
-                    height=qimg.height(),
-                )
+                if self.write_coalescer is not None:
+                    self.write_coalescer.enqueue(
+                        self.media_id,
+                        webp_bytes,
+                        self.mtime,
+                        width=qimg.width(),
+                        height=qimg.height(),
+                    )
+                else:
+                    thumb_repo.put_webp_blob(
+                        self.media_id,
+                        webp_bytes,
+                        self.mtime,
+                        width=qimg.width(),
+                        height=qimg.height(),
+                    )
 
         except Exception as exc:
             from src.utils.scan_logger import log_scan_error
@@ -1653,6 +1673,9 @@ class ThumbnailDecodeWorker(QRunnable):
                 pass
             if not self.cancel_flag.is_set:
                 self.signals.error.emit(self.media_id, str(exc))
+        finally:
+            if decoded_from_disk:
+                clear_active_decode()
 
     def _decode_nextgen_thumbnail(self) -> QImage | None:
         """Decodes next-generation formats (HEIC, HEIF, HIF, AVIF, JXL) via Pillow + LittleCMS2."""
@@ -1736,6 +1759,45 @@ class ThumbnailDecodeWorker(QRunnable):
         if ext in NEXTGEN_EXT_SET:
             return self._decode_nextgen_thumbnail()
         if ext in RAW_EXT_SET:
+            # Tier-0 ultra-fast path: bounded TIFF IFD embedded JPEG seek without invoking LibRaw
+            try:
+                from src.imaging.raw_fast_thumb import extract_tiff_embedded_jpeg
+
+                fast_res = extract_tiff_embedded_jpeg(self.file_path, target_size=THUMB_MAX_DIM)
+                if fast_res is not None:
+                    jpg_bytes, tiff_orient = fast_res
+                    ba = QByteArray(jpg_bytes)
+                    buf = QBuffer(ba)
+                    buf.open(QIODevice.ReadOnly)
+                    t_reader = QImageReader(buf)
+                    t_reader.setAutoTransform(True)
+                    orig_sz = t_reader.size()
+                    if orig_sz.isValid() and (
+                        orig_sz.width() > THUMB_MAX_DIM or orig_sz.height() > THUMB_MAX_DIM
+                    ):
+                        t_reader.setScaledSize(
+                            orig_sz.scaled(QSize(THUMB_MAX_DIM, THUMB_MAX_DIM), Qt.KeepAspectRatio)
+                        )
+                    qimg_fast = t_reader.read()
+                    jpg_trans = t_reader.transformation()
+                    buf.close()
+                    if qimg_fast is not None and not qimg_fast.isNull():
+                        if jpg_trans == QImageIOHandler.Transformation.TransformationNone and tiff_orient in (3, 6, 8):
+                            angle_map = {6: 90, 3: 180, 8: 270}
+                            qimg_fast = qimg_fast.transformed(
+                                QTransform().rotate(angle_map[tiff_orient]), Qt.SmoothTransformation
+                            )
+                        if qimg_fast.width() > THUMB_MAX_DIM or qimg_fast.height() > THUMB_MAX_DIM:
+                            qimg_fast = qimg_fast.scaled(
+                                THUMB_MAX_DIM,
+                                THUMB_MAX_DIM,
+                                Qt.KeepAspectRatio,
+                                Qt.SmoothTransformation,
+                            )
+                        return qimg_fast
+            except Exception:
+                pass
+
             try:
                 import rawpy
                 with rawpy.imread(str(self.file_path)) as raw:

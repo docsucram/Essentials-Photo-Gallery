@@ -858,10 +858,19 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         self.thumbnail_pool = QThreadPool(self)
         self.thumbnail_pool.setMaxThreadCount(min(4, max(2, (os.cpu_count() or 4) // 2)))
+        self.thumb_cache_pool = QThreadPool(self)
+        self.thumb_cache_pool.setMaxThreadCount(1)
+        from src.workers.thumb_scheduler import ThumbnailWriteCoalescer
+        self.thumb_write_coalescer = ThumbnailWriteCoalescer(
+            self.engine, batch_size=16, flush_ms=150, parent=self
+        )
         self._active_thumb_flags: dict[int, CancellationFlag] = {}
         self._media_meta_lookup: dict[int, tuple[str, int, bool, int]] = {}
         self._failed_thumb_ids: set[int] = set()
         self._pending_visible_media_ids: list[int] = []
+        self._pending_disk_decode_ids: list[int] = []
+        self._thumb_cache_token: int = 0
+        self._face_crop_token: int = 0
 
         self.face_pool = QThreadPool(self)
         self.face_pool.setMaxThreadCount(1)
@@ -1063,8 +1072,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._restore_app_state()
 
         # 8. Stagger background startup tasks so initial UI, thumbnails, and scrolling stay responsive
+        QTimer.singleShot(400, self._check_stale_scan_crash_trace)
         QTimer.singleShot(1000, self._start_async_avatar_backfill)
         QTimer.singleShot(1200, self.folder_watcher.start_startup_reconciliation)
+
+        from src.utils.scan_logger import mark_startup_stage
+        mark_startup_stage("main-window-ready")
 
         # 9. Start live status bar worker monitor timer (production safeguard 2)
         self._monitor_timer = QTimer(self)
@@ -2740,6 +2753,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             pass
 
     def refresh_navigation_and_autocomplete(self) -> None:
+        if getattr(self, "_map_view", None) is not None and hasattr(self._map_view, "mark_data_dirty"):
+            self._map_view.mark_data_dirty()
         self._update_private_menu_visibility()
         people = self.catalog_repo.get_people_list()
         tags = self.catalog_repo.get_tag_tree()
@@ -3936,44 +3951,142 @@ class PhotoGalleryMainWindow(QMainWindow):
 
     def enqueue_visible_thumbnails(self, media_ids: list[int]) -> None:
         """
-        Cancels out-of-view pending thumbnail workers and schedules ThumbnailDecodeWorker
-        tasks for all visible media_ids not yet in LruCache.
+        Two-tier viewport thumbnail scheduler:
+        1. Cancels out-of-view pending disk-decode workers.
+        2. Prefetches visible cached WebP blobs in ONE batched SQLite query on `thumb_cache_pool`
+           (zero head-of-line blocking behind slow RAW/video decodes).
+        3. Prefetches visible face-crop thumbnails off-thread when in Person Face-Crop mode.
+        4. Dispatches only confirmed cache misses into `thumbnail_pool` ordered from viewport center.
         """
         if self._is_shutting_down or not media_ids:
             return
 
-        self._pending_visible_media_ids = list(media_ids)
-        visible_set = set(media_ids)
+        from src.workers.thumb_scheduler import (
+            BatchFaceCropWorker,
+            BatchThumbCacheWorker,
+            order_ids_by_viewport_center,
+        )
+
+        ordered = order_ids_by_viewport_center(media_ids)
+        self._pending_visible_media_ids = ordered
+        visible_set = set(ordered)
         for mid, flag in list(self._active_thumb_flags.items()):
             if mid not in visible_set:
                 flag.set()
                 self._active_thumb_flags.pop(mid, None)
 
+        # Async batched face-crop prefetch (eliminates synchronous SQLite reads in MediaCardDelegate.paint)
+        if hasattr(self, "card_delegate") and self.card_delegate.face_crop_person_id is not None:
+            pid = int(self.card_delegate.face_crop_person_id)
+            missing_crops = [
+                mid for mid in ordered
+                if (int(mid), pid) not in self.card_delegate._face_crop_cache
+            ]
+            if missing_crops:
+                self._face_crop_token += 1
+                fc_worker = BatchFaceCropWorker(
+                    self.engine, self._face_crop_token, pid, missing_crops[:256]
+                )
+                fc_worker.signals.crops_ready.connect(self._on_face_crop_batch_ready)
+                self._active_face_crop_worker = fc_worker
+                self.thumb_cache_pool.start(fc_worker)
+
+        failed = getattr(self, "_failed_thumb_ids", set())
+        uncached = [
+            mid for mid in ordered
+            if mid not in self.pixmap_cache and mid not in self._active_thumb_flags and mid not in failed
+        ]
+        if not uncached:
+            self._pending_disk_decode_ids = []
+            return
+
+        check_batch = uncached[:256]
+        self._ensure_media_path_lookup(check_batch)
+        expected_mtimes: dict[int, int] = {}
+        for mid in check_batch:
+            meta = self._media_meta_lookup.get(mid)
+            if meta is not None:
+                expected_mtimes[mid] = int(meta[1])
+
+        self._thumb_cache_token += 1
+        cache_worker = BatchThumbCacheWorker(
+            self.engine,
+            self._thumb_cache_token,
+            check_batch,
+            expected_mtimes=expected_mtimes,
+        )
+        cache_worker.signals.batch_ready.connect(self._on_thumb_cache_batch_ready)
+        self._active_thumb_cache_worker = cache_worker
+        self.thumb_cache_pool.start(cache_worker)
+
+    @Slot(int, int, list)
+    def _on_face_crop_batch_ready(
+        self, token: int, person_id: int, decoded_items: list[tuple[int, QImage]]
+    ) -> None:
+        if self._is_shutting_down or token != self._face_crop_token:
+            return
+        if not hasattr(self, "card_delegate") or self.card_delegate.face_crop_person_id != person_id:
+            return
+        for mid, qimg in decoded_items:
+            if not qimg.isNull():
+                self.card_delegate._face_crop_cache[(int(mid), int(person_id))] = QPixmap.fromImage(qimg)
+                self.catalog_model.notify_pixmap_ready(int(mid))
+
+    @Slot(int, list, list)
+    def _on_thumb_cache_batch_ready(
+        self,
+        token: int,
+        decoded_items: list[tuple[int, QImage]],
+        missing_ids: list[int],
+    ) -> None:
+        if self._is_shutting_down:
+            return
+        for mid, qimg in decoded_items:
+            if not qimg.isNull():
+                self.pixmap_cache.put(int(mid), QPixmap.fromImage(qimg))
+                self.catalog_model.notify_pixmap_ready(int(mid))
+        if token != self._thumb_cache_token:
+            return
+        failed = getattr(self, "_failed_thumb_ids", set())
+        self._pending_disk_decode_ids = [
+            int(mid) for mid in missing_ids
+            if mid not in self.pixmap_cache and mid not in failed
+        ]
         self._pump_visible_thumbnail_queue()
 
     def _pump_visible_thumbnail_queue(self) -> None:
         """
-        Dispatches pending uncached visible thumbnails into thumbnail_pool,
-        maintaining up to 512 concurrent tasks so large viewports and small
-        thumbnails are never capped at an arbitrary batch limit with blank cards at the end.
+        Dispatches confirmed cache-miss visible thumbnails into `thumbnail_pool` using a
+        compact viewport-center priority window (max 12 in-flight decodes) so scrolling
+        re-prioritizes instantly without flooding QThreadPool with hundreds of queued runnables.
         """
-        if self._is_shutting_down or not getattr(self, "_pending_visible_media_ids", None):
+        if self._is_shutting_down:
+            return
+        source_queue = (
+            self._pending_disk_decode_ids
+            if getattr(self, "_pending_disk_decode_ids", None)
+            else getattr(self, "_pending_visible_media_ids", [])
+        )
+        if not source_queue:
             return
 
         failed = getattr(self, "_failed_thumb_ids", set())
         uncached = [
-            mid for mid in self._pending_visible_media_ids
+            mid for mid in source_queue
             if mid not in self.pixmap_cache and mid not in self._active_thumb_flags and mid not in failed
         ]
         if not uncached:
             return
 
-        available_slots = max(0, 512 - len(self._active_thumb_flags))
+        max_in_flight = 12
+        available_slots = max(0, max_in_flight - len(self._active_thumb_flags))
         if available_slots <= 0:
             return
 
         batch_ids = uncached[:available_slots]
         self._ensure_media_path_lookup(batch_ids)
+        coalescer = getattr(self, "thumb_write_coalescer", None)
+        using_miss_queue = bool(getattr(self, "_pending_disk_decode_ids", None))
         for mid in batch_ids:
             if mid in self._active_thumb_flags:
                 continue
@@ -3993,6 +4106,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                 orientation=orientation,
                 cancel_flag=cflag,
                 metadata_dirty=meta_dirty,
+                write_coalescer=coalescer,
+                skip_cache_lookup=using_miss_queue,
             )
             worker.signals.thumbnail_ready.connect(self.on_thumbnail_decoded)
             worker.signals.error.connect(self.on_thumbnail_decode_error)
@@ -4020,6 +4135,49 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         # Continually pump next batch so no visible thumbnails at the bottom stay blank
         self._pump_visible_thumbnail_queue()
+
+    def _check_stale_scan_crash_trace(self) -> None:
+        """
+        Detects if a previous run died mid-decode inside a native C/C++ codec
+        (recorded in active_scan_trace.json) and offers to reveal or skip the culprit file.
+        """
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            return
+        from src.utils.scan_logger import clear_stale_crash_trace, read_stale_crash_trace
+
+        trace = read_stale_crash_trace()
+        if not trace:
+            return
+        culprit = str(trace.get("file_path") or "")
+        stage = str(trace.get("stage") or "Scanner")
+        clear_stale_crash_trace()
+        if not culprit:
+            return
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Scan Recovery")
+        box.setText(f"The previous session ended unexpectedly while decoding:\n\n{culprit}")
+        box.setInformativeText(f"Stage: {stage}\n\nYou can reveal this file in Explorer or skip it during future scans.")
+        btn_skip = box.addButton("Skip This File", QMessageBox.AcceptRole)
+        btn_reveal = box.addButton("Reveal in Explorer", QMessageBox.ActionRole)
+        box.addButton("Dismiss", QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == btn_reveal:
+            try:
+                import subprocess
+                subprocess.Popen(["explorer", "/select,", str(Path(culprit))])
+            except Exception:
+                pass
+        elif clicked == btn_skip:
+            try:
+                mid = self.catalog_repo.get_media_id_by_file_path(culprit)
+                if mid is not None:
+                    self.catalog_repo.mark_face_scan_failed([mid])
+                    self._failed_thumb_ids.add(int(mid))
+            except Exception:
+                pass
 
     def _start_async_avatar_backfill(self) -> None:
         """Launches background QRunnable to generate avatar crops for people without blocking startup."""
@@ -5804,22 +5962,30 @@ class PhotoGalleryMainWindow(QMainWindow):
         if hasattr(self.ribbon, "sync_map_style_button"):
             self.ribbon.sync_map_style_button(mv.map_style)
         if hasattr(self.ribbon, "populate_map_filters") and hasattr(self, "catalog_repo"):
-            try:
-                years = self.catalog_repo.get_geotagged_years()
-            except Exception:
-                years = []
-            try:
-                people = self.catalog_repo.get_people_list()
-            except Exception:
-                people = []
-            self.ribbon.populate_map_filters(years, people)
+            if mv.is_data_dirty() or not getattr(self, "_map_filters_populated", False):
+                try:
+                    years = mv.get_cached_geotagged_years() if hasattr(mv, "get_cached_geotagged_years") else self.catalog_repo.get_geotagged_years()
+                except Exception:
+                    years = []
+                try:
+                    people = self.catalog_repo.get_people_list()
+                except Exception:
+                    people = []
+                self.ribbon.populate_map_filters(years, people)
+                self._map_filters_populated = True
         if hasattr(self.ribbon, "set_map_filter_ui"):
             self.ribbon.set_map_filter_ui(*mv.active_map_filters)
         if not getattr(self, "_map_view_initialized", False):
             self._map_view_initialized = True
-            mv.fit_to_photos()
-        else:
-            mv.refresh_current_viewport()
+            if getattr(mv, "web_view", None) is not None and hasattr(mv, "refresh_overview_async"):
+                mv.refresh_overview_async(fit=True)
+            else:
+                mv.fit_to_photos()
+        elif mv.is_data_dirty():
+            if getattr(mv, "web_view", None) is not None and hasattr(mv, "refresh_overview_async"):
+                mv.refresh_overview_async(fit=False)
+            else:
+                mv.refresh_current_viewport()
         if getattr(mv, "_web_loaded", False) and getattr(mv, "web_view", None) is not None:
             QTimer.singleShot(60, mv.safe_invalidate_map_size)
         total = sum(c.get("count", 0) for c in mv.current_clusters)
@@ -8674,7 +8840,12 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.xmp_daemon.set_paused(True)
             except Exception:
                 pass
-        for pool_name in ("scanner_pool", "thumbnail_pool", "face_pool", "priority_face_pool", "ocr_pool"):
+        if hasattr(self, "thumb_write_coalescer"):
+            try:
+                self.thumb_write_coalescer.flush()
+            except Exception:
+                pass
+        for pool_name in ("scanner_pool", "thumb_cache_pool", "thumbnail_pool", "face_pool", "priority_face_pool", "ocr_pool"):
             pool = getattr(self, pool_name, None)
             if pool is not None:
                 try:
@@ -8689,6 +8860,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._failed_thumb_ids.clear()
         if hasattr(self, "_pending_visible_media_ids"):
             self._pending_visible_media_ids.clear()
+        if hasattr(self, "_pending_disk_decode_ids"):
+            self._pending_disk_decode_ids.clear()
         self._selected_ids = []
         self._lead_selected_id = None
         self._active_map_media_ids = None
@@ -10630,14 +10803,23 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         # 2. Drop any queued (not-yet-started) runnables from all pools
         self.scanner_pool.clear()
+        if hasattr(self, "thumb_cache_pool"):
+            self.thumb_cache_pool.clear()
         self.thumbnail_pool.clear()
         self.face_pool.clear()
         self.priority_face_pool.clear()
         QThreadPool.globalInstance().clear()
 
-        # 3. Wait briefly for active tasks to unwind
+        # 3. Wait briefly for active tasks to unwind and flush buffered WebP writes
         self.scanner_pool.waitForDone(800)
+        if hasattr(self, "thumb_cache_pool"):
+            self.thumb_cache_pool.waitForDone(500)
         self.thumbnail_pool.waitForDone(800)
+        if hasattr(self, "thumb_write_coalescer"):
+            try:
+                self.thumb_write_coalescer.flush()
+            except Exception:
+                pass
         self.face_pool.waitForDone(1000)
         self.priority_face_pool.waitForDone(500)
         if hasattr(self, "xmp_daemon"):

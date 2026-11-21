@@ -20,7 +20,23 @@ import urllib.request
 from collections.abc import Sequence
 from typing import Any
 
-from PySide6.QtCore import QFile, QModelIndex, QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import (
+    QBuffer,
+    QByteArray,
+    QFile,
+    QIODevice,
+    QModelIndex,
+    QObject,
+    QPointF,
+    QRectF,
+    QRunnable,
+    QSize,
+    Qt,
+    QTimer,
+    QUrl,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -66,6 +82,201 @@ if os.environ.get("GALLERY_NO_WEBENGINE") != "1" and os.environ.get("QT_QPA_PLAT
         HAS_WEBENGINE = True
     except Exception:
         HAS_WEBENGINE = False
+
+GALLERY_MAP_SCHEME = b"gallerythumb"
+_SCHEME_REGISTERED = False
+_INSTALLED_SCHEME_HANDLERS: dict[int, Any] = {}
+
+
+def register_gallery_map_scheme() -> bool:
+    """
+    Registers the local `gallerythumb://` QWebEngineUrlScheme before QApplication creation.
+    Enables zero-CDN local Leaflet assets, Web Worker execution, and zero-Base64 WebP map pins.
+    """
+    global _SCHEME_REGISTERED
+    if _SCHEME_REGISTERED:
+        return True
+    if os.environ.get("GALLERY_NO_WEBENGINE") == "1" or os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+        return False
+    try:
+        from PySide6.QtWebEngineCore import QWebEngineUrlScheme
+
+        scheme = QWebEngineUrlScheme(GALLERY_MAP_SCHEME)
+        scheme.setSyntax(QWebEngineUrlScheme.Syntax.Host)
+        scheme.setFlags(
+            QWebEngineUrlScheme.Flag.SecureScheme
+            | QWebEngineUrlScheme.Flag.LocalAccessAllowed
+            | QWebEngineUrlScheme.Flag.CorsEnabled
+            | QWebEngineUrlScheme.Flag.FetchApiAllowed
+        )
+        QWebEngineUrlScheme.registerScheme(scheme)
+        _SCHEME_REGISTERED = True
+        return True
+    except Exception:
+        return False
+
+
+def _leaflet_asset_mime(rel_path: str) -> bytes:
+    ext = os.path.splitext(rel_path)[1].lower()
+    if ext == ".js":
+        return b"application/javascript; charset=utf-8"
+    if ext == ".css":
+        return b"text/css; charset=utf-8"
+    if ext == ".png":
+        return b"image/png"
+    if ext == ".svg":
+        return b"image/svg+xml"
+    return b"application/octet-stream"
+
+
+def resolve_gallery_scheme_payload(
+    host: str,
+    path: str,
+    thumb_repo: Any = None,
+) -> tuple[bytes, bytes] | None:
+    """
+    Resolves a `gallerythumb://{host}{path}` request into `(mime_type_bytes, payload_bytes)`.
+    - `gallerythumb://leaflet/<file>` serves bundled Leaflet & Web Worker assets from `resources/leaflet/`.
+    - `gallerythumb://media/<id>` serves WebP thumbnail bytes directly from `thumbnails.db`.
+    Returns None if not found or invalid.
+    """
+    from pathlib import Path
+    from src.utils.paths import get_resource_path
+
+    clean_host = (host or "").strip().lower()
+    clean_path = (path or "").lstrip("/")
+
+    if clean_host == "leaflet":
+        if not clean_path or ".." in clean_path.split("/"):
+            return None
+        base_dir = get_resource_path("resources/leaflet").resolve()
+        target = (base_dir / clean_path).resolve()
+        try:
+            target.relative_to(base_dir)
+        except ValueError:
+            return None
+        if not target.is_file():
+            return None
+        try:
+            return _leaflet_asset_mime(clean_path), target.read_bytes()
+        except OSError:
+            return None
+
+    if clean_host == "media" and thumb_repo is not None:
+        id_str = clean_path.split("/", 1)[0]
+        try:
+            media_id = int(id_str)
+        except (TypeError, ValueError):
+            return None
+        if media_id <= 0:
+            return None
+        try:
+            blob = thumb_repo.get_webp_blob(media_id)
+        except Exception:
+            blob = None
+        if blob:
+            return b"image/webp", bytes(blob)
+    return None
+
+
+def _create_gallery_scheme_handler(parent: QObject | None = None) -> Any:
+    """Factory creating a QWebEngineUrlSchemeHandler subclass when QtWebEngineCore is present."""
+    from PySide6.QtWebEngineCore import QWebEngineUrlRequestJob, QWebEngineUrlSchemeHandler
+
+    class _GalleryThumbSchemeHandler(QWebEngineUrlSchemeHandler):
+        def __init__(self, p: QObject | None = None) -> None:
+            super().__init__(p)
+            self.thumb_repo: Any = None
+            self.on_cache_miss: Any = None
+
+        def requestStarted(self, job: QWebEngineUrlRequestJob) -> None:
+            url = job.requestUrl()
+            host = url.host()
+            path = url.path()
+            resolved = resolve_gallery_scheme_payload(host, path, self.thumb_repo)
+            if resolved is None:
+                if host.lower() == "media" and callable(self.on_cache_miss):
+                    try:
+                        mid = int(path.lstrip("/").split("/", 1)[0])
+                        if mid > 0:
+                            self.on_cache_miss(mid)
+                    except Exception:
+                        pass
+                job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+                return
+
+            mime_bytes, payload = resolved
+            buf = QBuffer(job)
+            buf.setData(QByteArray(payload))
+            buf.open(QIODevice.OpenModeFlag.ReadOnly)
+            job.reply(mime_bytes, buf)
+
+    return _GalleryThumbSchemeHandler(parent)
+
+
+def _install_gallery_scheme_handler(profile: Any, thumb_repo: Any = None, on_cache_miss: Any = None) -> Any:
+    """Installs (or updates) the singleton `gallerythumb://` handler on the given QWebEngineProfile."""
+    key = id(profile)
+    handler = _INSTALLED_SCHEME_HANDLERS.get(key)
+    if handler is None:
+        handler = _create_gallery_scheme_handler(profile)
+        profile.installUrlSchemeHandler(GALLERY_MAP_SCHEME, handler)
+        _INSTALLED_SCHEME_HANDLERS[key] = handler
+    if thumb_repo is not None:
+        handler.thumb_repo = thumb_repo
+    if on_cache_miss is not None:
+        handler.on_cache_miss = on_cache_miss
+    return handler
+
+
+class _OverviewLoadSignals(QObject):
+    loaded = Signal(int, list, object)  # token, overview_cells, total_media_count
+
+
+class _OverviewLoadWorker(QRunnable):
+    """Background worker fetching lightweight ~1 km map overview cells without blocking the UI thread."""
+
+    def __init__(
+        self,
+        engine: Any,
+        token: int,
+        include_private: bool,
+        year: int | None,
+        person_id: int | None,
+        min_rating: int | None,
+    ) -> None:
+        super().__init__()
+        self.engine = engine
+        self.token = int(token)
+        self.include_private = bool(include_private)
+        self.year = year
+        self.person_id = person_id
+        self.min_rating = min_rating
+        self.signals = _OverviewLoadSignals()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            repo = CatalogRepository(self.engine)
+            repo.set_include_private(self.include_private)
+            cells = repo.query_map_overview_cells(
+                year=self.year,
+                person_id=self.person_id,
+                min_rating=self.min_rating,
+            )
+            row = self.engine.catalog_conn().execute(
+                "SELECT COUNT(*) FROM media WHERE COALESCE(is_missing, 0) = 0;"
+            ).fetchone()
+            total_items = int(row[0]) if row is not None else 0
+            self.signals.loaded.emit(self.token, cells, total_items)
+        except Exception:
+            self.signals.loaded.emit(self.token, [], None)
+        finally:
+            try:
+                if threading.current_thread() is not threading.main_thread():
+                    self.engine.close_thread_connections()
+            except Exception:
+                pass
 
 
 def get_qwebchannel_js() -> str:
@@ -148,8 +359,8 @@ def generate_leaflet_html(
 <meta charset="utf-8"/>
 <title>PhotoGallery64 World Map</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="gallerythumb://leaflet/leaflet.css"/>
+<script src="gallerythumb://leaflet/leaflet.js"></script>
 <style>
   html, body, #map {{ margin: 0; padding: 0; width: 100%; height: 100%; background: #EBF3FA; font-family: 'Segoe UI', -apple-system, sans-serif; }}
   .leaflet-tile-container img {{
@@ -162,6 +373,22 @@ def generate_leaflet_html(
   .leaflet-cluster-pin {{
     background: transparent;
     border: none;
+  }}
+  .map-cluster-pin-container {{
+    opacity: 0;
+    transition: opacity 160ms ease-out, transform 160ms ease-out;
+    will-change: opacity;
+  }}
+  .map-cluster-pin-container.pin-visible {{
+    opacity: 1;
+  }}
+  .map-cluster-pin-container.pin-retiring {{
+    opacity: 0;
+    pointer-events: none;
+  }}
+  .map-cluster-pin-container.pin-selected .map-pin-ring {{
+    border-color: #0078D7 !important;
+    box-shadow: 0 0 0 2px #FFFFFF, 0 4px 12px rgba(0,120,215,0.55) !important;
   }}
   .leaflet-popup-content-wrapper {{
     border-radius: 6px;
@@ -247,7 +474,16 @@ def generate_leaflet_html(
   let clusterLayer = null;
   let isInternalMove = false;
   let currentBaseLayer = null;
+  let clusterWorker = null;
+  let overviewPoints = null;
+  let overviewVersion = 0;
+  let workerRequestId = 0;
+  let workerFrame = null;
+  let renderedMarkers = new Map();
+  let retiringTimers = new Map();
+  let selectedRepId = null;
   window.pendingClusters = {markers_json};
+  window.pendingOverview = null;
 
   const tileLayers = {{
     'clean': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{{z}}/{{y}}/{{x}}', {{
@@ -394,6 +630,13 @@ def generate_leaflet_html(
     map.on('moveend', function() {{
       if (isInternalMove) {{
         isInternalMove = false;
+        if (overviewPoints && clusterWorker) {{
+          scheduleWorkerClusters();
+        }}
+        return;
+      }}
+      if (overviewPoints && clusterWorker) {{
+        scheduleWorkerClusters();
         return;
       }}
       if (boundsTimer) clearTimeout(boundsTimer);
@@ -405,10 +648,247 @@ def generate_leaflet_html(
       }}, 200);
     }});
 
-    if (window.pendingClusters) {{
+    map.on('zoomend', function() {{
+      if (overviewPoints && clusterWorker) {{
+        scheduleWorkerClusters();
+      }}
+    }});
+
+    try {{
+      clusterWorker = new Worker('gallerythumb://leaflet/map_clusters_worker.js');
+      clusterWorker.onmessage = function(ev) {{
+        const data = ev.data || {{}};
+        if (!map || data.requestId !== workerRequestId) return;
+        if (data.error) return;
+        applyRenderedClusters(data.clusters || [], true);
+      }};
+    }} catch (_e) {{
+      clusterWorker = null;
+    }}
+
+    if (window.pendingOverview) {{
+      const po = window.pendingOverview;
+      window.pendingOverview = null;
+      setOverviewPoints(po.points, po.version);
+    }} else if (window.pendingClusters) {{
       updateClusters(window.pendingClusters);
       window.pendingClusters = null;
     }}
+  }}
+
+  function setOverviewPoints(pointsData, version) {{
+    const pts = (typeof pointsData === 'string') ? JSON.parse(pointsData) : pointsData;
+    if (!map) {{
+      window.pendingOverview = {{ points: pts, version: version }};
+      return;
+    }}
+    overviewPoints = Array.isArray(pts) ? pts : [];
+    overviewVersion = version || (overviewVersion + 1);
+    if (clusterWorker) {{
+      scheduleWorkerClusters(true);
+    }} else {{
+      applyRenderedClusters(overviewPoints, true);
+    }}
+  }}
+
+  function scheduleWorkerClusters(sendPoints) {{
+    if (!map || !clusterWorker || !overviewPoints) return;
+    workerRequestId++;
+    const reqId = workerRequestId;
+    if (workerFrame !== null) cancelAnimationFrame(workerFrame);
+    workerFrame = requestAnimationFrame(function() {{
+      workerFrame = null;
+      if (!map || !clusterWorker) return;
+      const pb = map.getPixelBounds();
+      clusterWorker.postMessage({{
+        requestId: reqId,
+        version: overviewVersion,
+        points: sendPoints ? overviewPoints : undefined,
+        maxZoom: 18,
+        zoom: map.getZoom(),
+        spacing: 52,
+        bounds: {{
+          minX: pb.min.x,
+          minY: pb.min.y,
+          maxX: pb.max.x,
+          maxY: pb.max.y
+        }}
+      }});
+    }});
+  }}
+
+  function refreshThumbnail(mediaId) {{
+    const imgs = document.querySelectorAll('img[data-mid="' + mediaId + '"]');
+    const bust = Date.now();
+    imgs.forEach(function(img) {{
+      img.style.display = 'block';
+      img.src = 'gallerythumb://media/' + mediaId + '?r=' + bust;
+    }});
+  }}
+
+  function _resolveThumbSrc(c) {{
+    if (c.thumb_url) return c.thumb_url;
+    if (c.rep_media_id) {{
+      return 'gallerythumb://media/' + c.rep_media_id + '?m=' + (c.rep_mtime || 0);
+    }}
+    return '';
+  }}
+
+  function _clusterMarkerKey(c) {{
+    const rep = c.rep_media_id || (c.media_ids && c.media_ids[0]) || 0;
+    return [c.lat.toFixed(5), c.lon.toFixed(5), c.count || 1, rep].join('|');
+  }}
+
+  function _buildClusterMarker(c, lazyBoxMode) {{
+    const count = c.count || 1;
+    const thumbSrc = _resolveThumbSrc(c);
+    const hasThumb = Boolean(thumbSrc);
+    const repId = c.rep_media_id || (c.media_ids && c.media_ids[0]) || 0;
+    const radius = Math.min(32, Math.max(16, 15 + Math.pow(count, 0.35) * 2.5));
+    const size = radius * 2;
+    let innerHtml = '';
+    if (hasThumb) {{
+      innerHtml = `<div class="map-cluster-pin-container" style="position:relative;width:${{size}}px;height:${{size}}px;cursor:pointer;">` +
+        `<div class="map-pin-ring" style="width:${{size}}px;height:${{size}}px;border-radius:50%;overflow:hidden;border:2.5px solid #ffffff;box-shadow:0 3px 8px rgba(0,0,0,0.45);background:#0066CC;">` +
+          `<img data-mid="${{repId}}" src="${{thumbSrc}}" style="width:100%;height:100%;object-fit:cover;display:block;" onerror="this.style.display='none'"/>` +
+        `</div>` +
+        (count > 1 ? `<div class="map-pin-badge">${{count > 999 ? '999+' : count}}</div>` : '') +
+      `</div>`;
+    }} else {{
+      innerHtml = `<div class="map-cluster-pin-container pin-visible" style="width:${{size}}px;height:${{size}}px;line-height:${{size}}px;border-radius:50%;background:#0066CC;color:#ffffff;border:2px solid #ffffff;text-align:center;font-weight:bold;font-size:11px;box-shadow:0 2px 6px rgba(0,0,0,0.35);cursor:pointer;">${{count}}</div>`;
+    }}
+    const icon = L.divIcon({{
+      className: 'leaflet-cluster-pin',
+      html: innerHtml,
+      iconSize: [size, size],
+      iconAnchor: [radius, radius]
+    }});
+    const marker = L.marker([c.lat, c.lon], {{ icon: icon }});
+    const label = c.label || `${{c.lat.toFixed(2)}}°, ${{c.lon.toFixed(2)}}°`;
+    const clusterPayload = lazyBoxMode
+      ? JSON.stringify({{
+          min_lat: c.min_lat,
+          max_lat: c.max_lat,
+          min_lon: c.min_lon,
+          max_lon: c.max_lon,
+          rep_media_id: repId,
+          label: label,
+          count: count
+        }})
+      : JSON.stringify({{ media_ids: c.media_ids || [], label: label, count: count }});
+
+    const imgTag = hasThumb ? `<img data-mid="${{repId}}" src="${{thumbSrc}}" class="cluster-popup-thumb"/>` : '';
+    const actionText = (count === 1) ? 'View Photo' : `Show all ${{count}} photos in gallery`;
+    const popupHtml = `<div class="cluster-popup-card">` +
+      imgTag +
+      `<div class="cluster-popup-body">` +
+        `<div class="cluster-popup-title">📍 ${{label}}</div>` +
+        `<div class="cluster-popup-count">${{count}} ${{count === 1 ? 'item' : 'items'}}</div>` +
+        `<button id="btn-cluster-open" class="cluster-popup-btn">${{actionText}}</button>` +
+      `</div>` +
+    `</div>`;
+
+    marker.bindPopup(popupHtml, {{ maxWidth: 240, minWidth: 180 }});
+    marker.on('popupopen', function() {{
+      const btn = document.getElementById('btn-cluster-open');
+      if (btn) {{
+        btn.onclick = function() {{
+          if (window.qtBridge) {{
+            if (lazyBoxMode && typeof window.qtBridge.onClusterBoxOpenRequested === 'function') {{
+              window.qtBridge.onClusterBoxOpenRequested(clusterPayload);
+            }} else {{
+              window.qtBridge.onClusterOpenRequested(clusterPayload);
+            }}
+          }}
+        }};
+      }}
+    }});
+    marker.on('click', () => {{
+      selectedRepId = repId;
+      renderedMarkers.forEach(function(m) {{
+        const el = m.getElement();
+        if (el) {{
+          const box = el.querySelector('.map-cluster-pin-container');
+          const isSel = m._repMediaId === selectedRepId;
+          if (box) box.classList.toggle('pin-selected', isSel);
+          m.setZIndexOffset(isSel ? 1000 : 0);
+        }}
+      }});
+      if (window.qtBridge) {{
+        if (lazyBoxMode && typeof window.qtBridge.onClusterBoxSelected === 'function') {{
+          window.qtBridge.onClusterBoxSelected(clusterPayload);
+        }} else {{
+          window.qtBridge.onClusterSelected(clusterPayload);
+        }}
+      }}
+    }});
+    marker.on('dblclick', function(e) {{
+      L.DomEvent.stopPropagation(e);
+      if (map) {{
+        map.setView([c.lat, c.lon], Math.min(18, map.getZoom() + 3));
+      }}
+    }});
+    marker._repMediaId = repId;
+    marker.addTo(clusterLayer);
+
+    const el = marker.getElement();
+    if (el) {{
+      const box = el.querySelector('.map-cluster-pin-container');
+      const img = el.querySelector('img');
+      const reveal = function() {{
+        requestAnimationFrame(function() {{
+          if (box) box.classList.add('pin-visible');
+        }});
+      }};
+      if (!img || img.complete) {{
+        reveal();
+      }} else {{
+        img.addEventListener('load', reveal, {{ once: true }});
+        img.addEventListener('error', reveal, {{ once: true }});
+      }}
+    }}
+    return marker;
+  }}
+
+  function applyRenderedClusters(clusters, lazyBoxMode) {{
+    if (!map || !clusterLayer) return;
+    const nextMap = new Map();
+    if (clusters && clusters.length) {{
+      for (let i = 0; i < clusters.length; i++) {{
+        const c = clusters[i];
+        const key = _clusterMarkerKey(c);
+        const existing = renderedMarkers.get(key);
+        if (existing) {{
+          if (retiringTimers.has(existing)) {{
+            clearTimeout(retiringTimers.get(existing));
+            retiringTimers.delete(existing);
+            const el = existing.getElement();
+            const box = el && el.querySelector('.map-cluster-pin-container');
+            if (box) {{
+              box.classList.remove('pin-retiring');
+              box.classList.add('pin-visible');
+            }}
+          }}
+          nextMap.set(key, existing);
+        }} else {{
+          nextMap.set(key, _buildClusterMarker(c, lazyBoxMode));
+        }}
+      }}
+    }}
+    renderedMarkers.forEach(function(marker, key) {{
+      if (nextMap.has(key)) return;
+      const el = marker.getElement();
+      const box = el && el.querySelector('.map-cluster-pin-container');
+      if (box) box.classList.add('pin-retiring');
+      const t = setTimeout(function() {{
+        retiringTimers.delete(marker);
+        if (clusterLayer && clusterLayer.hasLayer(marker)) {{
+          clusterLayer.removeLayer(marker);
+        }}
+      }}, 160);
+      retiringTimers.set(marker, t);
+    }});
+    renderedMarkers = nextMap;
   }}
 
   function updateClusters(clustersData) {{
@@ -417,75 +897,7 @@ def generate_leaflet_html(
       return;
     }}
     const clusters = (typeof clustersData === 'string') ? JSON.parse(clustersData) : clustersData;
-    const newLayer = L.layerGroup();
-    if (clusters && clusters.length) {{
-      clusters.forEach(c => {{
-        const count = c.count || 1;
-        const hasThumb = Boolean(c.thumb_url);
-        const radius = Math.min(32, Math.max(16, 15 + Math.pow(count, 0.35) * 2.5));
-        const size = radius * 2;
-        let innerHtml = '';
-        if (hasThumb) {{
-          innerHtml = `<div class="map-cluster-pin-container" style="position:relative;width:${{size}}px;height:${{size}}px;cursor:pointer;">` +
-            `<div style="width:${{size}}px;height:${{size}}px;border-radius:50%;overflow:hidden;border:2.5px solid #ffffff;box-shadow:0 3px 8px rgba(0,0,0,0.45);background:#0066CC;">` +
-              `<img src="${{c.thumb_url}}" style="width:100%;height:100%;object-fit:cover;display:block;" onerror="this.style.display='none'"/>` +
-            `</div>` +
-            (count > 1 ? `<div class="map-pin-badge">${{count}}</div>` : '') +
-          `</div>`;
-        }} else {{
-          innerHtml = `<div style="width:${{size}}px;height:${{size}}px;line-height:${{size}}px;border-radius:50%;background:#0066CC;color:#ffffff;border:2px solid #ffffff;text-align:center;font-weight:bold;font-size:11px;box-shadow:0 2px 6px rgba(0,0,0,0.35);cursor:pointer;">${{count}}</div>`;
-        }}
-        const icon = L.divIcon({{
-          className: 'leaflet-cluster-pin',
-          html: innerHtml,
-          iconSize: [size, size],
-          iconAnchor: [radius, radius]
-        }});
-        const marker = L.marker([c.lat, c.lon], {{ icon: icon }});
-        const label = c.label || `${{c.lat.toFixed(2)}}°, ${{c.lon.toFixed(2)}}°`;
-        const clusterPayload = JSON.stringify({{ media_ids: c.media_ids || [], label: label, count: count }});
-
-        const imgTag = hasThumb ? `<img src="${{c.thumb_url}}" class="cluster-popup-thumb"/>` : '';
-        const actionText = (count === 1) ? 'View Photo' : `Show all ${{count}} photos in gallery`;
-        const popupHtml = `<div class="cluster-popup-card">` +
-          imgTag +
-          `<div class="cluster-popup-body">` +
-            `<div class="cluster-popup-title">📍 ${{label}}</div>` +
-            `<div class="cluster-popup-count">${{count}} ${{count === 1 ? 'item' : 'items'}}</div>` +
-            `<button id="btn-cluster-open" class="cluster-popup-btn">${{actionText}}</button>` +
-          `</div>` +
-        `</div>`;
-
-        marker.bindPopup(popupHtml, {{ maxWidth: 240, minWidth: 180 }});
-        marker.on('popupopen', function() {{
-          const btn = document.getElementById('btn-cluster-open');
-          if (btn) {{
-            btn.onclick = function() {{
-              if (window.qtBridge) {{
-                window.qtBridge.onClusterOpenRequested(clusterPayload);
-              }}
-            }};
-          }}
-        }});
-        marker.on('click', () => {{
-          if (window.qtBridge) {{
-            window.qtBridge.onClusterSelected(clusterPayload);
-          }}
-        }});
-        marker.on('dblclick', function(e) {{
-          L.DomEvent.stopPropagation(e);
-          if (map) {{
-            map.setView([c.lat, c.lon], Math.min(18, map.getZoom() + 3));
-          }}
-        }});
-        newLayer.addLayer(marker);
-      }});
-    }}
-    newLayer.addTo(map);
-    if (clusterLayer && map.hasLayer(clusterLayer)) {{
-      map.removeLayer(clusterLayer);
-    }}
-    clusterLayer = newLayer;
+    applyRenderedClusters(clusters || [], false);
   }}
 
   document.addEventListener('DOMContentLoaded', function() {{
@@ -508,8 +920,28 @@ class MapBridge(QObject):
     cluster_open_requested = Signal(list, str)
     cluster_clicked = Signal(list)
     cluster_clicked_data = Signal(list, str)
+    cluster_box_selected = Signal(dict)
+    cluster_box_open_requested = Signal(dict)
     bounds_changed = Signal(float, float, float, float)
     map_background_clicked = Signal()
+
+    @Slot(str)
+    def onClusterBoxSelected(self, payload_json: str) -> None:
+        try:
+            data = json.loads(payload_json)
+            if isinstance(data, dict):
+                self.cluster_box_selected.emit(data)
+        except Exception:
+            pass
+
+    @Slot(str)
+    def onClusterBoxOpenRequested(self, payload_json: str) -> None:
+        try:
+            data = json.loads(payload_json)
+            if isinstance(data, dict):
+                self.cluster_box_open_requested.emit(data)
+        except Exception:
+            pass
 
     @Slot(str)
     def onClusterSelected(self, cluster_json: str) -> None:
@@ -1088,6 +1520,13 @@ class WorldMapView(QWidget):
         self._active_thumb_flags: dict[int, Any] = {}
         self._thumb_pool: Any = None
         self._is_paused_fn: Any = None
+        self._scheme_handler: Any = None
+        self._map_data_dirty: bool = True
+        self._overview_version: int = 0
+        self._overview_request_token: int = 0
+        self._overview_cells: list[dict[str, Any]] = []
+        self._cached_total_items: int | None = None
+        self._cached_geotagged_years: list[int] | None = None
         self._thumb_refresh_timer = QTimer(self)
         self._thumb_refresh_timer.setSingleShot(True)
         self._thumb_refresh_timer.setInterval(80)
@@ -1126,6 +1565,11 @@ class WorldMapView(QWidget):
                 profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.DiskHttpCache)
                 profile.setCachePath(str(cache_dir))
                 profile.setPersistentStoragePath(str(cache_dir))
+                self._scheme_handler = _install_gallery_scheme_handler(
+                    profile,
+                    thumb_repo=self._thumb_repo,
+                    on_cache_miss=self._on_scheme_thumb_miss,
+                )
 
                 self.bridge = MapBridge(self)
                 self.bridge.cluster_selected.connect(self.cluster_selected.emit)
@@ -1134,6 +1578,8 @@ class WorldMapView(QWidget):
                 )
                 self.bridge.cluster_clicked.connect(self.cluster_clicked.emit)
                 self.bridge.cluster_clicked_data.connect(self.cluster_clicked_data.emit)
+                self.bridge.cluster_box_selected.connect(self._on_cluster_box_selected)
+                self.bridge.cluster_box_open_requested.connect(self._on_cluster_box_open_requested)
                 self.bridge.map_background_clicked.connect(
                     self.map_background_clicked.emit
                 )
@@ -1148,7 +1594,7 @@ class WorldMapView(QWidget):
                 self.web_view.loadFinished.connect(self._on_web_load_finished)
 
                 html = generate_leaflet_html([])
-                self.web_view.setHtml(html)
+                self.web_view.setHtml(html, QUrl("gallerythumb://leaflet/"))
 
                 self.map_stack.addWidget(self.web_view)
                 self.map_stack.addWidget(self.canvas)
@@ -1178,7 +1624,157 @@ class WorldMapView(QWidget):
         self._repo = repo
         if thumb_repo is not None:
             self._thumb_repo = thumb_repo
+            if self._scheme_handler is not None:
+                self._scheme_handler.thumb_repo = thumb_repo
+        self._map_data_dirty = True
+        self._cached_total_items = None
+        self._cached_geotagged_years = None
         self._emit_map_stats()
+
+    def mark_data_dirty(self) -> None:
+        """Marks map overview cells & stats stale so the next Map View switch reloads cleanly."""
+        self._map_data_dirty = True
+        self._cached_total_items = None
+        self._cached_geotagged_years = None
+
+    def is_data_dirty(self) -> bool:
+        return bool(self._map_data_dirty)
+
+    def get_cached_geotagged_years(self) -> list[int]:
+        if self._cached_geotagged_years is not None:
+            return list(self._cached_geotagged_years)
+        if self._repo is None:
+            return []
+        try:
+            years = list(self._repo.get_geotagged_years())
+        except Exception:
+            years = []
+        self._cached_geotagged_years = years
+        return list(years)
+
+    def _on_scheme_thumb_miss(self, media_id: int) -> None:
+        """Triggered by gallerythumb://media/<id> when thumbnails.db lacks a cached blob."""
+        if media_id <= 0 or media_id in self._pending_thumb_ids or media_id in self._failed_thumb_ids:
+            return
+        self._schedule_cluster_thumbnail_decode([int(media_id)])
+
+    def refresh_overview_async(self, *, fit: bool = False) -> None:
+        """
+        Loads ~1 km overview cells off the UI thread and pushes them to the Leaflet Web Worker
+        pyramid so switching to Map View and panning/zooming never block the GUI thread.
+        """
+        if self._repo is None:
+            return
+        engine = getattr(self._repo, "engine", None)
+        if engine is None:
+            if fit:
+                self.fit_to_photos()
+            else:
+                self.refresh_current_viewport()
+            return
+
+        self._overview_request_token += 1
+        token = self._overview_request_token
+        self._pending_overview_fit = bool(fit)
+        include_private = bool(getattr(self._repo, "include_private", False))
+
+        worker = _OverviewLoadWorker(
+            engine=engine,
+            token=token,
+            include_private=include_private,
+            year=self._filter_year,
+            person_id=self._filter_person_id,
+            min_rating=self._filter_min_rating,
+        )
+        worker.signals.loaded.connect(self._on_overview_loaded)
+        self._active_overview_worker = worker
+        pool = self._thumb_pool if self._thumb_pool is not None else None
+        if pool is not None:
+            pool.start(worker)
+        else:
+            from PySide6.QtCore import QThreadPool
+            QThreadPool.globalInstance().start(worker)
+
+    @Slot(int, list, object)
+    def _on_overview_loaded(self, token: int, cells: list[dict[str, Any]], total_items: Any) -> None:
+        if token != self._overview_request_token:
+            return
+        self._overview_cells = list(cells)
+        self._overview_version += 1
+        self._map_data_dirty = False
+        if total_items is not None:
+            self._cached_total_items = int(total_items)
+
+        # Keep offline vector canvas & stats in sync
+        if not self._web_loaded or self.web_view is None:
+            if getattr(self, "_pending_overview_fit", False):
+                self._pending_overview_fit = False
+                self.fit_to_photos()
+            else:
+                self.refresh_current_viewport()
+            return
+
+        if getattr(self, "_pending_overview_fit", False):
+            self._pending_overview_fit = False
+            if self._overview_cells:
+                min_la = min(c["min_lat"] for c in self._overview_cells)
+                max_la = max(c["max_lat"] for c in self._overview_cells)
+                min_lo = min(c["min_lon"] for c in self._overview_cells)
+                max_lo = max(c["max_lon"] for c in self._overview_cells)
+                lat_pad = max(0.015, (max_la - min_la) * 0.02)
+                lon_pad = max(0.015, (max_lo - min_lo) * 0.02)
+                min_la = max(-85.0, min_la - lat_pad)
+                max_la = min(85.0, max_la + lat_pad)
+                min_lo = max(-180.0, min_lo - lon_pad)
+                max_lo = min(180.0, max_lo + lon_pad)
+                self._min_lat, self._max_lat, self._min_lon, self._max_lon = (
+                    min_la, max_la, min_lo, max_lo
+                )
+                self._run_web_js(f"fitMapBounds({min_la}, {max_la}, {min_lo}, {max_lo});")
+
+        payload_json = json.dumps(self._overview_cells)
+        self._run_web_js(f"setOverviewPoints({payload_json}, {self._overview_version});")
+        geotagged_count = sum(int(c.get("count", 0)) for c in self._overview_cells)
+        cluster_count = len(self._overview_cells)
+        tot = self._cached_total_items if self._cached_total_items is not None else geotagged_count
+        self.map_stats_Changed.emit(geotagged_count, cluster_count, tot)
+
+    def _resolve_box_payload_media_ids(self, payload: dict[str, Any]) -> tuple[list[int], str]:
+        label = str(payload.get("label") or "")
+        if self._repo is None:
+            rep = int(payload.get("rep_media_id") or 0)
+            return ([rep] if rep > 0 else []), label
+        try:
+            mids = self._repo.query_map_cluster_media_ids(
+                float(payload["min_lat"]),
+                float(payload["max_lat"]),
+                float(payload["min_lon"]),
+                float(payload["max_lon"]),
+                year=self._filter_year,
+                person_id=self._filter_person_id,
+                min_rating=self._filter_min_rating,
+            )
+            rep = int(payload.get("rep_media_id") or 0)
+            if rep > 0 and rep not in mids:
+                mids.insert(0, rep)
+            return mids, label
+        except Exception:
+            rep = int(payload.get("rep_media_id") or 0)
+            return ([rep] if rep > 0 else []), label
+
+    @Slot(dict)
+    def _on_cluster_box_selected(self, payload: dict[str, Any]) -> None:
+        mids, label = self._resolve_box_payload_media_ids(payload)
+        if mids:
+            self.cluster_selected.emit(mids, label)
+
+    @Slot(dict)
+    def _on_cluster_box_open_requested(self, payload: dict[str, Any]) -> None:
+        mids, label = self._resolve_box_payload_media_ids(payload)
+        if mids:
+            self.cluster_open_requested.emit(mids, label)
+            self.cluster_clicked.emit(mids)
+            self.cluster_clicked_data.emit(mids, label)
 
     def bind_thumbnail_pool(self, pool: Any, is_paused_fn: Any = None) -> None:
         """Binds the application's managed thumbnail QThreadPool and global pause predicate."""
@@ -1357,6 +1953,10 @@ class WorldMapView(QWidget):
                     c["pixmap"] = pix
                 updated = True
 
+        # If WebEngine is serving thumbnails via gallerythumb://media/<id>, refresh img tag directly
+        if self._web_loaded and self.web_view is not None:
+            self._run_web_js(f"refreshThumbnail({mid_int});")
+
         if updated and not self._thumb_refresh_timer.isActive():
             self._thumb_refresh_timer.start()
 
@@ -1406,10 +2006,13 @@ class WorldMapView(QWidget):
         self._filter_year = int(year) if year is not None else None
         self._filter_person_id = int(person_id) if person_id is not None else None
         self._filter_min_rating = int(min_rating) if min_rating is not None else None
+        self._map_data_dirty = True
         self.map_filters_changed.emit(
             self._filter_year, self._filter_person_id, self._filter_min_rating
         )
-        if fit:
+        if self._web_loaded and self.web_view is not None:
+            self.refresh_overview_async(fit=fit)
+        elif fit:
             self.fit_to_photos()
         else:
             self.refresh_current_viewport()
@@ -1495,7 +2098,12 @@ class WorldMapView(QWidget):
                 self.web_view.page().runJavaScript(
                     f"fitMapBounds({min_la}, {max_la}, {min_lo}, {max_lo});"
                 )
-            if self._current_clusters:
+            if self._overview_cells:
+                payload_json = json.dumps(self._overview_cells)
+                self.web_view.page().runJavaScript(
+                    f"setOverviewPoints({payload_json}, {self._overview_version});"
+                )
+            elif self._current_clusters:
                 self.web_view.page().runJavaScript(
                     f"updateClusters({_clusters_to_json(self._current_clusters)});"
                 )
@@ -1503,12 +2111,13 @@ class WorldMapView(QWidget):
     def _emit_map_stats(self) -> tuple[int, int, int]:
         geotagged_count = sum(int(c.get("count", 0)) for c in self._current_clusters)
         cluster_count = len(self._current_clusters)
-        total_items = geotagged_count
-        if self._repo is not None:
+        total_items = self._cached_total_items if self._cached_total_items is not None else geotagged_count
+        if self._cached_total_items is None and self._repo is not None:
             try:
                 row = self._repo.conn.execute("SELECT COUNT(*) FROM media;").fetchone()
                 if row is not None:
                     total_items = int(row[0])
+                    self._cached_total_items = total_items
             except Exception:
                 total_items = geotagged_count
         self.map_stats_Changed.emit(geotagged_count, cluster_count, total_items)
@@ -1566,6 +2175,7 @@ class WorldMapView(QWidget):
             )
             item.setData(Qt.UserRole, (c["media_ids"], c["label"]))
 
+        self._map_data_dirty = False
         self._emit_map_stats()
         self.bbox_changed.emit(self._min_lat, self._max_lat, self._min_lon, self._max_lon)
         return self._current_clusters
@@ -1615,18 +2225,31 @@ class WorldMapView(QWidget):
         )
         extra_sql = (" AND " + " AND ".join(filter_clauses)) if filter_clauses else ""
         conn = engine.catalog_conn()
-        row = conn.execute(
-            f"""
-            SELECT MIN(m.lat) AS min_lat, MAX(m.lat) AS max_lat,
-                   MIN(m.lon) AS min_lon, MAX(m.lon) AS max_lon
-            FROM media m
-            WHERE m.lat IS NOT NULL AND m.lon IS NOT NULL
-              AND m.lat BETWEEN -85.0 AND 85.0
-              AND m.lon BETWEEN -180.0 AND 180.0
-              AND NOT (ABS(m.lat) < 0.0001 AND ABS(m.lon) < 0.0001){extra_sql};
-            """,
-            filter_params,
-        ).fetchone()
+        if not filter_clauses and getattr(self._repo, "include_private", False):
+            # Ultra-fast R*Tree index-only bounds query
+            row = conn.execute(
+                """
+                SELECT MIN(r.min_lat) AS min_lat, MAX(r.max_lat) AS max_lat,
+                       MIN(r.min_lon) AS min_lon, MAX(r.max_lon) AS max_lon
+                FROM media_rtree r
+                WHERE r.min_lat BETWEEN -85.0 AND 85.0
+                  AND r.min_lon BETWEEN -180.0 AND 180.0
+                  AND NOT (ABS(r.min_lat) < 0.0001 AND ABS(r.min_lon) < 0.0001);
+                """
+            ).fetchone()
+        else:
+            row = conn.execute(
+                f"""
+                SELECT MIN(r.min_lat) AS min_lat, MAX(r.max_lat) AS max_lat,
+                       MIN(r.min_lon) AS min_lon, MAX(r.max_lon) AS max_lon
+                FROM media_rtree r
+                JOIN media m ON m.id = r.id
+                WHERE r.min_lat BETWEEN -85.0 AND 85.0
+                  AND r.min_lon BETWEEN -180.0 AND 180.0
+                  AND NOT (ABS(r.min_lat) < 0.0001 AND ABS(r.min_lon) < 0.0001){extra_sql};
+                """,
+                filter_params,
+            ).fetchone()
         if (
             row
             and row["min_lat"] is not None
@@ -1713,8 +2336,8 @@ def _generate_adjust_pin_leaflet_html(
 <meta charset="utf-8"/>
 <title>Adjust Location</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="gallerythumb://leaflet/leaflet.css"/>
+<script src="gallerythumb://leaflet/leaflet.js"></script>
 <style>
   html, body, #map {{
     margin: 0;
@@ -1991,8 +2614,10 @@ class AdjustLocationDialog(QDialog):
             self.web_view.page().setWebChannel(self._channel)
             init_zoom = 12 if self._has_initial_coords else 2
             html = _generate_adjust_pin_leaflet_html(self._lat, self._lon, init_zoom)
+            from PySide6.QtWebEngineCore import QWebEngineProfile
+            _install_gallery_scheme_handler(QWebEngineProfile.defaultProfile())
             self.web_view.loadFinished.connect(self._on_web_loaded)
-            self.web_view.setHtml(html)
+            self.web_view.setHtml(html, QUrl("gallerythumb://leaflet/"))
             self.map_stack.addWidget(self.web_view)
             self.map_stack.addWidget(self.canvas)
             self.map_stack.setCurrentWidget(self.web_view)

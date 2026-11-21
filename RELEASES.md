@@ -4,6 +4,21 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 
 ---
 
+## Essentials Photo Gallery v0.16.0 (Pre-Release)
+
+### P1: World Map View Speed Overhaul
+
+- **Zero-CDN Bundled Leaflet & Local `gallerythumb://` Scheme Handler:** Bundled Leaflet `1.9.4` + Web Worker clustering assets into `resources/leaflet/` and registered a `QWebEngineUrlSchemeHandler` (`gallerythumb://leaflet/...` & `gallerythumb://media/<id>`) so World Map View and Adjust Location open instantaneously offline without hitting `unpkg.com` or Base64-encoding thumbnails over `runJavaScript()`.
+- **Web Worker Supercluster Pyramid & Incremental Marker Diffing:** Replaced per-pan `GROUP_CONCAT(m.id)` SQLite queries with a lightweight ~1 km overview query (`CatalogRepository.query_map_overview_cells`) fed once off the UI thread into `map_clusters_worker.js` for zero-SQL panning/zooming, lazy on-click cluster member lookup (`query_map_cluster_media_ids`), incremental marker diffing with `img.onload` fade-in, `media_rtree`-backed bounds, and `_map_data_dirty` caching for instant return to Map View.
+
+### P2: Grid, RAW & Background Worker Performance
+
+- **Two-Tier Fast Cache & Viewport-Center Priority Scheduler:** Split fast batched `thumbnails.db` reads (`BatchThumbCacheWorker` on a dedicated `thumb_cache_pool`) from disk decodes (`thumbnail_pool`, compact viewport-center priority window of 12 in-flight workers), eliminating head-of-line blocking behind slow RAW/video decodes.
+- **Batched Thumbnail DB Commits & Zero-SQL Paint:** Added `ThumbnailWriteCoalescer` to commit decoded WebP thumbnails in batches of 16 via `put_webp_blobs_batch()`, and removed synchronous `get_face_thumbnail_for_media_person()` SQLite queries from `MediaCardDelegate.paint()` in favor of off-thread `BatchFaceCropWorker` prefetching.
+- **Tier-0 Bounded TIFF/IFD RAW Preview Fast-Path & Native Crash Recovery:** Added `extract_tiff_embedded_jpeg()` to seek directly to embedded JPEG previews in TIFF-based camera RAWs without invoking `rawpy.imread()`, plus `ScanCrashTrace` (`active_scan_trace.json`) and post-startup recovery prompting if a corrupt media file hard-crashes a native C/C++ codec.
+
+---
+
 ## Essentials Photo Gallery v0.15.0
 
 **Essentials Photo Gallery 0.15.0** brings **Depth & Light 2.0** (3D surface-normal relighting & virtual light studio), a **unified Crop & Straighten bar**, an upgraded **Resize & Export** dialog, consolidated **ThemeTokens** contrast auditing, and key **reliability & data-safety hardening** for OneDrive libraries and third-party XMP sidecars.
