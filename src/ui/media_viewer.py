@@ -1889,17 +1889,16 @@ class SingleMediaViewer(QWidget):
 
         self.btn_filmstrip_toggle = QPushButton(self.graphics_view.viewport())
         self.btn_filmstrip_toggle.setCheckable(True)
+        self.btn_filmstrip_toggle.setFocusPolicy(Qt.NoFocus)
         self.btn_filmstrip_toggle.setFixedSize(32, 32)
         self.btn_filmstrip_toggle.setIconSize(QSize(16, 16))
         self.btn_filmstrip_toggle.setCursor(Qt.PointingHandCursor)
         self.btn_filmstrip_toggle.setToolTip("Show / Hide Filmstrip")
         self.btn_filmstrip_toggle.setStyleSheet(
-            "QPushButton { background-color: rgba(15, 23, 42, 145); "
-            "border: 1px solid rgba(148, 163, 184, 90); border-radius: 9px; }"
+            "QPushButton { background-color: rgba(15, 23, 42, 135); "
+            "border: 1px solid rgba(148, 163, 184, 85); border-radius: 9px; }"
             "QPushButton:hover { background-color: rgba(15, 23, 42, 230); "
-            "border: 1px solid rgba(248, 250, 252, 150); }"
-            "QPushButton:checked { background-color: rgba(15, 23, 42, 215); "
-            "border: 1px solid #38BDF8; }"
+            "border: 1px solid rgba(248, 250, 252, 155); }"
         )
         self.btn_filmstrip_toggle.clicked.connect(self._on_filmstrip_toggle_clicked)
         self.btn_filmstrip_toggle.hide()
@@ -2974,24 +2973,31 @@ class SingleMediaViewer(QWidget):
         if btn is None:
             return
         vp = self.graphics_view.viewport()
-        if (
-            self.current_media_id is None
-            or self.is_in_edit_mode()
-            or self.media_stack.currentWidget() != self.graphics_view
-            or vp is None
-            or vp.width() < 160
-            or vp.height() < 120
-        ):
+        mw = getattr(self, "main_window", None) or self.window()
+        in_viewer = (
+            self.isVisible()
+            and self.current_media_id is not None
+            and not self.is_in_edit_mode()
+            and self.media_stack.currentWidget() == self.graphics_view
+            and vp is not None
+            and vp.width() >= 160
+            and vp.height() >= 120
+        )
+        if not in_viewer:
             btn.hide()
             return
-        mw = getattr(self, "main_window", None) or self.window()
         enabled = bool(getattr(mw, "_filmstrip_viewer_enabled", False))
+
+        # Keep anchored on the main window so opening/closing the bottom filmstrip dock never shifts its Y position
+        host = mw if (mw is not None and mw is not self) else vp
+        if btn.parentWidget() is not host:
+            btn.setParent(host)
 
         pm = QPixmap(32, 32)
         pm.fill(Qt.transparent)
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing, True)
-        col = QColor("#38BDF8" if enabled else "#E2E8F0")
+        col = QColor("#E2E8F0")
         p.setPen(QPen(col, 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         p.setBrush(Qt.NoBrush)
         # Main frame + bottom strip of 3 mini filmstrip frames
@@ -3008,9 +3014,20 @@ class SingleMediaViewer(QWidget):
         btn.setIcon(QIcon(pm))
         btn.setToolTip("Hide Filmstrip" if enabled else "Show Filmstrip")
         btn.blockSignals(False)
-        btn.move(14, max(14, vp.height() - btn.height() - 14))
+
+        if host is mw and hasattr(mw, "statusBar") and mw.statusBar() is not None and mw.statusBar().isVisible():
+            bottom_y = mw.statusBar().y()
+        else:
+            bottom_y = host.height()
+        btn.move(8, max(8, bottom_y - btn.height() - 10))
         btn.show()
         btn.raise_()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        btn = getattr(self, "btn_filmstrip_toggle", None)
+        if btn is not None:
+            btn.hide()
 
     def _on_filmstrip_toggle_clicked(self) -> None:
         mw = getattr(self, "main_window", None) or self.window()

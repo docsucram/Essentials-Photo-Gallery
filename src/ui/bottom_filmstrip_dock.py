@@ -377,6 +377,7 @@ class BottomFilmstripDock(QDockWidget):
         self.filmstrip_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.filmstrip_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.filmstrip_view.setFrameShape(QFrame.Shape.NoFrame)
+        self.filmstrip_view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.filmstrip_view.setModel(self.filmstrip_model)
         self.filmstrip_view.setItemDelegate(self.filmstrip_delegate)
         self.filmstrip_view.viewport().installEventFilter(self)
@@ -411,6 +412,7 @@ class BottomFilmstripDock(QDockWidget):
         )
         self.btn_scroll_left = QPushButton(self.page_filmstrip)
         self.btn_scroll_left.setObjectName("FilmstripOverlayScrollBtn")
+        self.btn_scroll_left.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_scroll_left.setIcon(_make_chevron_icon("left"))
         self.btn_scroll_left.setIconSize(QSize(16, 16))
         self.btn_scroll_left.setFixedSize(32, 32)
@@ -421,6 +423,7 @@ class BottomFilmstripDock(QDockWidget):
 
         self.btn_scroll_right = QPushButton(self.page_filmstrip)
         self.btn_scroll_right.setObjectName("FilmstripOverlayScrollBtn")
+        self.btn_scroll_right.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_scroll_right.setIcon(_make_chevron_icon("right"))
         self.btn_scroll_right.setIconSize(QSize(16, 16))
         self.btn_scroll_right.setFixedSize(32, 32)
@@ -450,8 +453,8 @@ class BottomFilmstripDock(QDockWidget):
         if host is None:
             return
         w, h = host.width(), host.height()
-        cy = max(4, (h - self.btn_scroll_left.height()) // 2)
-        self.btn_scroll_left.move(8, cy)
+        cy = max(4, (h - self.btn_scroll_right.height()) // 2)
+        self.btn_scroll_left.move(8, 10)
         self.btn_scroll_right.move(max(8, w - self.btn_scroll_right.width() - 8), cy)
         self.btn_scroll_left.raise_()
         self.btn_scroll_right.raise_()

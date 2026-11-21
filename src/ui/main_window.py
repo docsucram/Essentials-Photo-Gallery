@@ -5901,6 +5901,9 @@ class PhotoGalleryMainWindow(QMainWindow):
                     self._nav_dock_was_visible = True
                 self.left_nav_dock.hide()
             self.central_stack.setCurrentWidget(self.media_viewer)
+            if hasattr(self.media_viewer, "_update_filmstrip_toggle"):
+                self.media_viewer._update_filmstrip_toggle()
+            self.media_viewer.setFocus()
             if self.centralWidget() is not None and self.centralWidget().layout() is not None:
                 self.centralWidget().layout().activate()
             if not bool(detail["is_video"]):
@@ -8101,6 +8104,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.bottom_dock.setVisible(new_fs)
                 if hasattr(self.media_viewer, "_update_filmstrip_toggle"):
                     self.media_viewer._update_filmstrip_toggle()
+                self.media_viewer.setFocus()
         elif action_id == "create_ws_save":
             ws = getattr(self, "_active_create_workspace", None)
             if ws is not None:
