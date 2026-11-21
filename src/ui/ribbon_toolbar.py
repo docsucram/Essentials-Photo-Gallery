@@ -5494,6 +5494,7 @@ class RibbonToolbar(QWidget):
     map_location_chosen = Signal(float, float, str)         # (lat, lon, label)
     map_location_search_requested = Signal(str)             # fallback text search
     map_filters_changed = Signal(object, object, object)    # (year, person_id, min_rating)
+    map_scope_changed = Signal(bool)                        # True = Current View, False = Entire Library
     auto_color_selected = Signal()
 
     exposure_menu_about_to_show = Signal()
@@ -9912,6 +9913,15 @@ class RibbonToolbar(QWidget):
 
         self.grp_map_filter.content_layout.addLayout(map_filter_col)
 
+        self.btn_map_scope = self._make_btn(
+            "Entire\nlibrary", "world_map", self.grp_map_filter, large=True, checkable=True
+        )
+        self.btn_map_scope.setToolTip(
+            "Toggle between mapping only the active Grid view (Folder / Album / Search) or the Entire Library"
+        )
+        self.btn_map_scope.toggled.connect(self._on_map_scope_toggled)
+        self.grp_map_filter.content_layout.addWidget(self.btn_map_scope)
+
         self.btn_map_clear_filters = self._make_btn(
             "Clear\nfilters", "cancel", self.grp_map_filter, large=True
         )
@@ -10061,6 +10071,29 @@ class RibbonToolbar(QWidget):
         self.map_filters_changed.emit(
             self._map_filter_year, self._map_filter_person_id, self._map_filter_min_rating
         )
+
+    def _on_map_scope_toggled(self, checked: bool) -> None:
+        self._update_map_scope_label(bool(checked), getattr(self, "_map_scope_count", 0))
+        self.map_scope_changed.emit(bool(checked))
+
+    def _update_map_scope_label(self, current_view: bool, count: int) -> None:
+        if not hasattr(self, "btn_map_scope"):
+            return
+        if current_view:
+            cnt_txt = f" ({count:,})" if count > 0 else ""
+            self.btn_map_scope.setText(f"Current\nview{cnt_txt}")
+        else:
+            self.btn_map_scope.setText("Entire\nlibrary")
+
+    def set_map_scope_ui(self, current_view: bool, count: int = 0) -> None:
+        """Synchronize the Map Scope toggle button without emitting map_scope_changed."""
+        self._map_scope_count = int(count or 0)
+        if not hasattr(self, "btn_map_scope"):
+            return
+        self.btn_map_scope.blockSignals(True)
+        self.btn_map_scope.setChecked(bool(current_view))
+        self._update_map_scope_label(bool(current_view), self._map_scope_count)
+        self.btn_map_scope.blockSignals(False)
 
     def clear_map_filters(self) -> None:
         """Reset all Map ribbon filters and emit map_filters_changed."""

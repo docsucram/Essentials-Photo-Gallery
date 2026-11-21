@@ -1075,6 +1075,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         QTimer.singleShot(400, self._check_stale_scan_crash_trace)
         QTimer.singleShot(1000, self._start_async_avatar_backfill)
         QTimer.singleShot(1200, self.folder_watcher.start_startup_reconciliation)
+        QTimer.singleShot(3000, self._prewarm_map_view_idle)
 
         from src.utils.scan_logger import mark_startup_stage
         mark_startup_stage("main-window-ready")
@@ -1481,6 +1482,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.ribbon.map_location_chosen.connect(self._on_ribbon_map_location_chosen)
         if hasattr(self.ribbon, "map_location_search_requested"):
             self.ribbon.map_location_search_requested.connect(self._on_ribbon_map_location_search)
+        if hasattr(self.ribbon, "map_scope_changed"):
+            self.ribbon.map_scope_changed.connect(self._on_ribbon_map_scope_changed)
         if hasattr(self.ribbon, "map_filters_changed"):
             self.ribbon.map_filters_changed.connect(self._on_ribbon_map_filters_changed)
         self.ribbon.filter_month_selected.connect(
@@ -4374,7 +4377,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 return [int(mid)]
         return list(self._selected_ids)
 
-    def apply_rating_to_selection(self, rating: int) -> None:
+    def apply_rating_to_selection(self, rating: int, *, advance: bool = False) -> None:
         target_ids = self.get_active_target_ids()
         if not target_ids:
             return
@@ -4382,14 +4385,84 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.undo_stack.push(cmd)
         lbl = f"{rating} star{'s' if rating != 1 else ''}" if rating > 0 else "Unrated"
         self.show_status_message(f"✓ Rated {len(target_ids)} item(s): {lbl}", 3000)
+        if advance:
+            self._advance_after_cull()
 
-    def apply_flag_to_selection(self, flag: int) -> None:
+    def apply_flag_to_selection(self, flag: int, *, advance: bool = False) -> None:
         target_ids = self.get_active_target_ids()
         if not target_ids:
             return
         cmd = _FlagUndoCommand(self, target_ids, flag)
         self.undo_stack.push(cmd)
         self.show_status_message(f"✓ {'Flagged' if flag else 'Unflagged'} {len(target_ids)} item(s)", 3000)
+        if advance:
+            self._advance_after_cull()
+
+    def _advance_after_cull(self) -> None:
+        """Advance to the next photo after a Shift+Rating/Flag culling action."""
+        if self.central_stack.currentWidget() == self.media_viewer:
+            self.navigate_single_viewer(1)
+        elif self.central_stack.currentWidget() == self.grid_view and hasattr(self.grid_view, "advance_selection"):
+            self.grid_view.advance_selection(1)
+
+    def show_quick_preview(self, media_id: int | None = None) -> None:
+        """Open or update the Spacebar Quick Preview dialog for the selected media item."""
+        if media_id is None:
+            target_ids = self.get_active_target_ids()
+            if not target_ids:
+                return
+            media_id = int(target_ids[-1])
+        try:
+            detail = self.catalog_repo.get_media_detail(int(media_id))
+        except Exception:
+            detail = None
+        if not detail:
+            return
+        folder_p = Path(str(detail.get("folder_path") or ""))
+        filename = str(detail.get("filename") or "")
+        file_path = folder_p / filename
+        rating = int(detail.get("rating") or 0)
+        flag = int(detail.get("flag") or 0)
+
+        dlg = getattr(self, "_quick_preview_dialog", None)
+        if dlg is None:
+            from src.ui.quick_preview_dialog import QuickPreviewDialog
+
+            dlg = QuickPreviewDialog(parent=self)
+            dlg.open_full_requested.connect(self._on_quick_preview_open_full)
+            dlg.rate_requested.connect(self._on_quick_preview_rate)
+            dlg.flag_requested.connect(self._on_quick_preview_flag)
+            dlg.navigate_requested.connect(self._on_quick_preview_navigate)
+            self._quick_preview_dialog = dlg
+
+        dlg.show_media(int(media_id), file_path, filename, rating=rating, flag=flag)
+        if not dlg.isVisible():
+            dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _on_quick_preview_open_full(self, media_id: int) -> None:
+        dlg = getattr(self, "_quick_preview_dialog", None)
+        if dlg is not None and dlg.isVisible():
+            dlg.close()
+        self.open_single_viewer(int(media_id))
+
+    def _on_quick_preview_rate(self, media_id: int, rating: int) -> None:
+        cmd = _RatingUndoCommand(self, [int(media_id)], int(rating))
+        self.undo_stack.push(cmd)
+
+    def _on_quick_preview_flag(self, media_id: int) -> None:
+        detail = self.catalog_repo.get_media_detail(int(media_id))
+        cur_flag = int(detail.get("flag") or 0) if detail else 0
+        new_flag = 0 if cur_flag else 1
+        cmd = _FlagUndoCommand(self, [int(media_id)], new_flag)
+        self.undo_stack.push(cmd)
+
+    def _on_quick_preview_navigate(self, delta: int) -> None:
+        if hasattr(self.grid_view, "advance_selection") and self.grid_view.advance_selection(delta):
+            sel_ids = self.grid_view.selected_media_ids()
+            if sel_ids:
+                self.show_quick_preview(int(sel_ids[-1]))
 
     def apply_caption_to_selection(self, caption: str) -> None:
         target_ids = self.get_active_target_ids()
@@ -5947,6 +6020,65 @@ class PhotoGalleryMainWindow(QMainWindow):
         mv = self._ensure_map_view()
         mv.fly_to_place(query, zoom=13)
 
+    def _prewarm_map_view_idle(self) -> None:
+        """Silently initializes WorldMapView QWebEngineView 3s after launch so first Map click is instant."""
+        if getattr(self, "_is_shutting_down", False):
+            return
+        if "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("GALLERY_NO_WEBENGINE") == "1":
+            return
+        if self._map_view is None:
+            try:
+                self._ensure_map_view()
+            except Exception:
+                pass
+
+    def _has_active_grid_scope_filter(self) -> bool:
+        """Returns True if the current Grid view is narrowed by a Folder, Album, Tag, Place, Date, Person, Rating, or Search."""
+        if getattr(self, "_active_bbox", None) is not None:
+            return False
+        if getattr(self, "_active_similar_order", None) is not None:
+            return True
+        if getattr(self, "_active_date_range", None) is not None:
+            return True
+        if hasattr(self, "scope_bar") and (self.scope_bar.search_text() or "").strip():
+            return True
+        if hasattr(self, "left_nav_dock"):
+            st = self.left_nav_dock.current_filter_state()
+            if any(
+                (
+                    st.get("folder_id") is not None,
+                    st.get("album_id") is not None,
+                    st.get("smart_album_id") is not None,
+                    st.get("include_tags"),
+                    st.get("exclude_tags"),
+                    st.get("person_ids"),
+                    st.get("special_people_mode"),
+                    st.get("place_filter"),
+                    st.get("rating_filters"),
+                    st.get("flagged_only"),
+                    st.get("media_type"),
+                    st.get("orientation_filter") not in (None, "all"),
+                )
+            ):
+                return True
+        return False
+
+    def _get_current_view_scope_ids(self) -> list[int]:
+        return [int(r.id) for r in getattr(self.catalog_model, "_records", [])]
+
+    def _on_ribbon_map_scope_changed(self, use_current_view: bool) -> None:
+        self._map_scope_override = bool(use_current_view)
+        mv = self._ensure_map_view()
+        if use_current_view:
+            ids = self._get_current_view_scope_ids()
+            if hasattr(self.ribbon, "set_map_scope_ui"):
+                self.ribbon.set_map_scope_ui(True, len(ids))
+            mv.set_scope_media_ids(ids, fit=True)
+        else:
+            if hasattr(self.ribbon, "set_map_scope_ui"):
+                self.ribbon.set_map_scope_ui(False, 0)
+            mv.set_scope_media_ids(None, fit=True)
+
     def show_map_view(self) -> None:
         mv = self._ensure_map_view()
         self.central_stack.setCurrentWidget(mv)
@@ -5975,13 +6107,25 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self._map_filters_populated = True
         if hasattr(self.ribbon, "set_map_filter_ui"):
             self.ribbon.set_map_filter_ui(*mv.active_map_filters)
+
+        # Scope World Map automatically to active Folder / Album / Smart Album / Search when filtered,
+        # unless user explicitly toggled Entire Library via the Map Scope button.
+        override = getattr(self, "_map_scope_override", None)
+        use_current_view = self._has_active_grid_scope_filter() if override is None else bool(override)
+        scope_ids = self._get_current_view_scope_ids() if use_current_view else None
+        if hasattr(self.ribbon, "set_map_scope_ui"):
+            self.ribbon.set_map_scope_ui(use_current_view, len(scope_ids or []))
+        if scope_ids is not None or mv._scope_media_ids is not None:
+            mv.set_scope_media_ids(scope_ids, fit=True)
+
         if not getattr(self, "_map_view_initialized", False):
             self._map_view_initialized = True
-            if getattr(mv, "web_view", None) is not None and hasattr(mv, "refresh_overview_async"):
-                mv.refresh_overview_async(fit=True)
-            else:
-                mv.fit_to_photos()
-        elif mv.is_data_dirty():
+            if scope_ids is None:
+                if getattr(mv, "web_view", None) is not None and hasattr(mv, "refresh_overview_async"):
+                    mv.refresh_overview_async(fit=True)
+                else:
+                    mv.fit_to_photos()
+        elif mv.is_data_dirty() and scope_ids is None:
             if getattr(mv, "web_view", None) is not None and hasattr(mv, "refresh_overview_async"):
                 mv.refresh_overview_async(fit=False)
             else:
@@ -7174,31 +7318,59 @@ class PhotoGalleryMainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, "Rename Error", f"Could not rename file: {e}")
         else:
-            base_name, ok = QInputDialog.getText(
-                self, "Batch Rename", "Enter a base name for the selected files:"
+            from src.ui.batch_rename_dialog import (
+                BatchRenameDialog,
+                execute_batch_rename_plan,
             )
-            if not ok or not base_name.strip():
-                return
-            base_name = base_name.strip()
-            renamed = 0
-            for i, mid in enumerate(target_ids, start=1):
+
+            items: list[dict] = []
+            for mid in target_ids:
                 try:
                     detail = self.catalog_repo.get_media_detail(mid)
-                    old_fname = str(detail["filename"])
-                    folder_p = Path(detail["folder_path"])
-                    old_path = folder_p / old_fname
-                    ext = Path(old_fname).suffix
-                    new_fname = f"{base_name} ({i}){ext}"
-                    new_path = folder_p / new_fname
-                    if old_path.exists() and not new_path.exists():
-                        old_path.rename(new_path)
-                        self.catalog_repo.rename_media(mid, new_fname)
-                        self._media_meta_lookup.pop(mid, None)
-                        renamed += 1
                 except Exception:
-                    pass
+                    detail = None
+                if not detail:
+                    continue
+                items.append(
+                    {
+                        "id": int(mid),
+                        "folder_path": str(detail.get("folder_path") or ""),
+                        "filename": str(detail.get("filename") or ""),
+                        "date_taken": detail.get("date_taken"),
+                        "mtime": detail.get("mtime"),
+                        "camera_model": detail.get("camera_model") or detail.get("model") or "",
+                    }
+                )
+            if not items:
+                return
+            dlg = BatchRenameDialog(items, parent=self)
+            if dlg.exec() != QDialog.Accepted:
+                return
+            plan = dlg.rename_plan()
+            if not plan:
+                return
+            renamed, errors = execute_batch_rename_plan(
+                plan,
+                self.catalog_repo,
+                media_meta_lookup=self._media_meta_lookup,
+            )
+            if getattr(self.media_viewer, "current_media_id", None) is not None:
+                cur_id = int(self.media_viewer.current_media_id)
+                for row in plan:
+                    if int(row["media_id"]) == cur_id and row["new_path"].exists():
+                        self.media_viewer.current_file_path = row["new_path"]
+                        if self.central_stack.currentWidget() == self.media_viewer:
+                            self.setWindowTitle(f"{row['new_name']} - Essentials Photo Gallery")
+                        break
             self.rebuild_and_run_query()
-            self.show_status_message(f"✓ Renamed {renamed} file(s)", 4000)
+            if errors:
+                QMessageBox.warning(
+                    self,
+                    "Batch Rename Warning",
+                    f"Renamed {renamed} file(s), but encountered errors:\n" + "\n".join(errors[:8]),
+                )
+            else:
+                self.show_status_message(f"✓ Renamed {renamed} file(s)", 4000)
 
     def open_resize_dialog(self) -> ResizePhotoDialog | None:
         """Opens authentic WLPG Resize dialog for selected image photos."""
@@ -10334,13 +10506,41 @@ class PhotoGalleryMainWindow(QMainWindow):
             if event.isAccepted():
                 return
 
-        # Star ratings: 0, 1, 2, 3, 4, 5 (when not focused on a text entry and no Ctrl/Alt modifier)
-        if not is_text_entry and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier):
+        # Star ratings: 0..5 (or Shift+0..5 to auto-advance) and Flag: P / Shift+P (when not focused on a text entry)
+        if not is_text_entry and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
+            shift_held = bool(event.modifiers() & Qt.ShiftModifier)
+            _SHIFT_DIGIT_KEYS = {
+                Qt.Key_ParenRight: 0,
+                Qt.Key_Exclam: 1,
+                Qt.Key_At: 2,
+                Qt.Key_NumberSign: 3,
+                Qt.Key_Dollar: 4,
+                Qt.Key_Percent: 5,
+            }
             if Qt.Key_0 <= event.key() <= Qt.Key_5:
                 rating_val = event.key() - Qt.Key_0
-                self.apply_rating_to_selection(rating_val)
+                self.apply_rating_to_selection(rating_val, advance=shift_held)
                 event.accept()
                 return
+            if shift_held and event.key() in _SHIFT_DIGIT_KEYS:
+                self.apply_rating_to_selection(_SHIFT_DIGIT_KEYS[event.key()], advance=True)
+                event.accept()
+                return
+            if event.key() == Qt.Key_P:
+                target_ids = self.get_active_target_ids()
+                if target_ids:
+                    has_unflagged = any(
+                        int((self._media_meta_lookup.get(mid) or {}).get("flag", 0)) == 0
+                        for mid in target_ids
+                    )
+                    self.apply_flag_to_selection(1 if has_unflagged else 0, advance=shift_held)
+                    event.accept()
+                    return
+            if event.key() == Qt.Key_F2 and not shift_held:
+                if self.central_stack.currentWidget() in (self.grid_view, self.media_viewer):
+                    self.rename_selection()
+                    event.accept()
+                    return
 
         # Single Media Viewer: Left and Right arrow navigation
         if self.central_stack.currentWidget() == self.media_viewer:

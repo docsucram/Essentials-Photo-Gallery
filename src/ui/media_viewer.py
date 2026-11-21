@@ -1813,6 +1813,7 @@ class SingleMediaViewer(QWidget):
         self.graphics_view.zoomChanged.connect(self.zoom_percent_changed.emit)
         self.graphics_view.zoomChanged.connect(lambda _: self._position_tag_someone_popup())
         self.graphics_view.zoomChanged.connect(lambda _: self._position_adjust_toolbar())
+        self.graphics_view.zoomChanged.connect(lambda _: self._update_zoom_minimap())
         self.graphics_view.zoomModeSetToCustom.connect(self._on_custom_zoom_set)
         if self.graphics_view.horizontalScrollBar():
             self.graphics_view.horizontalScrollBar().valueChanged.connect(
@@ -1821,6 +1822,9 @@ class SingleMediaViewer(QWidget):
             self.graphics_view.horizontalScrollBar().valueChanged.connect(
                 lambda _: self._position_adjust_toolbar()
             )
+            self.graphics_view.horizontalScrollBar().valueChanged.connect(
+                lambda _: self._update_zoom_minimap()
+            )
         if self.graphics_view.verticalScrollBar():
             self.graphics_view.verticalScrollBar().valueChanged.connect(
                 lambda _: self._position_tag_someone_popup()
@@ -1828,6 +1832,19 @@ class SingleMediaViewer(QWidget):
             self.graphics_view.verticalScrollBar().valueChanged.connect(
                 lambda _: self._position_adjust_toolbar()
             )
+            self.graphics_view.verticalScrollBar().valueChanged.connect(
+                lambda _: self._update_zoom_minimap()
+            )
+
+        from src.ui.zoom_minimap import ZoomMinimapOverlay
+
+        self._show_af_overlay: bool = False
+        self._af_overlay_items: list[Any] = []
+        self.zoom_minimap = ZoomMinimapOverlay(self.graphics_view.viewport())
+        self.zoom_minimap.navigate_requested.connect(self._on_minimap_navigate)
+        self.zoom_minimap.zoom_requested.connect(self._on_minimap_zoom)
+        self.zoom_minimap.hide()
+
         self.media_stack.addWidget(self.graphics_view)
 
         # Page 1: Video Player (Authentic WLPG White Background & Transport Bar)
@@ -2815,6 +2832,135 @@ class SingleMediaViewer(QWidget):
         if hasattr(self, "_alpha_backdrop_item") and self._alpha_backdrop_item is not None:
             self._alpha_backdrop_item.setRect(QRectF(0.0, 0.0, float(w), float(h)))
             self._alpha_backdrop_item.setVisible(bool(visible))
+        self._update_zoom_minimap()
+        self._refresh_af_overlay()
+
+    def _update_zoom_minimap(self) -> None:
+        """Update ZoomMinimapOverlay visibility, thumbnail, and viewport rectangle."""
+        mm = getattr(self, "zoom_minimap", None)
+        if mm is None:
+            return
+        if (
+            getattr(self, "current_is_video", False)
+            or self.is_in_edit_mode()
+            or self.media_stack.currentWidget() != self.graphics_view
+            or self.pixmap_item is None
+        ):
+            mm.hide()
+            return
+        pix = self.pixmap_item.pixmap()
+        if pix.isNull() or pix.width() <= 0 or pix.height() <= 0:
+            mm.hide()
+            return
+        vp = self.graphics_view.viewport()
+        if vp is None or vp.width() < 240 or vp.height() < 180:
+            mm.hide()
+            return
+        scene_vis = self.graphics_view.mapToScene(vp.rect()).boundingRect()
+        img_rect = self.pixmap_item.sceneBoundingRect()
+        if img_rect.width() <= 0 or img_rect.height() <= 0:
+            mm.hide()
+            return
+        x0 = max(0.0, (scene_vis.left() - img_rect.left()) / img_rect.width())
+        y0 = max(0.0, (scene_vis.top() - img_rect.top()) / img_rect.height())
+        x1 = min(1.0, (scene_vis.right() - img_rect.left()) / img_rect.width())
+        y1 = min(1.0, (scene_vis.bottom() - img_rect.top()) / img_rect.height())
+        is_zoomed = (x0 > 0.01 or y0 > 0.01 or x1 < 0.99 or y1 < 0.99)
+        if not is_zoomed:
+            mm.hide()
+            return
+        mm.set_image(pix, source_key=(self.current_media_id, pix.width(), pix.height()))
+        mm.set_viewport_norm(x0, y0, x1, y1)
+        margin = 14
+        mm.move(max(margin, vp.width() - mm.width() - margin), max(margin, vp.height() - mm.height() - margin))
+        mm.show()
+        mm.raise_()
+
+    def _on_minimap_navigate(self, nx: float, ny: float) -> None:
+        if self.pixmap_item is None or self.pixmap_item.pixmap().isNull():
+            return
+        img_rect = self.pixmap_item.sceneBoundingRect()
+        self.graphics_view.centerOn(
+            img_rect.left() + nx * img_rect.width(),
+            img_rect.top() + ny * img_rect.height(),
+        )
+        self._update_zoom_minimap()
+
+    def _on_minimap_zoom(self, factor: float) -> None:
+        if factor == 0.0:
+            self.set_zoom_mode("fit")
+        else:
+            self.current_zoom_mode = "custom"
+            self.graphics_view.zoom(factor)
+        self._update_zoom_minimap()
+
+    def toggle_af_overlay(self) -> bool:
+        """Toggle the on-demand Camera Autofocus (AF) area overlay."""
+        self._show_af_overlay = not bool(getattr(self, "_show_af_overlay", False))
+        self._refresh_af_overlay()
+        count = len(getattr(self, "_af_overlay_items", [])) // 2 if self._show_af_overlay else 0
+        if self._show_af_overlay:
+            msg = (
+                f"AF Focus Overlay: ON ({count} point{'s' if count != 1 else ''})"
+                if count > 0
+                else "AF Focus Overlay: ON (no AF point metadata in this file)"
+            )
+        else:
+            msg = "AF Focus Overlay: OFF"
+        self.status_message_requested.emit(msg, 3000)
+        return self._show_af_overlay
+
+    def _clear_af_overlay(self) -> None:
+        for item in getattr(self, "_af_overlay_items", []):
+            try:
+                if item.scene() is self.scene:
+                    self.scene.removeItem(item)
+            except Exception:
+                pass
+        self._af_overlay_items = []
+
+    def _refresh_af_overlay(self) -> None:
+        self._clear_af_overlay()
+        if (
+            not getattr(self, "_show_af_overlay", False)
+            or getattr(self, "current_is_video", False)
+            or self.is_in_edit_mode()
+            or not self.current_file_path
+            or self.pixmap_item is None
+            or self.pixmap_item.pixmap().isNull()
+        ):
+            return
+        from src.core.af_area_parser import get_af_areas
+
+        areas = get_af_areas(self.current_file_path)
+        if not areas:
+            return
+        img_rect = self.pixmap_item.sceneBoundingRect()
+        if img_rect.width() <= 0 or img_rect.height() <= 0:
+            return
+        for area in areas:
+            w = max(0.018, float(area.width)) * img_rect.width()
+            h = max(0.018, float(area.height)) * img_rect.height()
+            ax = img_rect.left() + float(area.x) * img_rect.width()
+            ay = img_rect.top() + float(area.y) * img_rect.height()
+            rect_item = self.scene.addRect(
+                QRectF(ax, ay, w, h),
+                QPen(QColor("#22C55E" if area.focused else "#F59E0B"), 2.0),
+                QBrush(QColor(34, 197, 94, 38) if area.focused else QColor(245, 158, 11, 20)),
+            )
+            pen = rect_item.pen()
+            pen.setCosmetic(True)
+            rect_item.setPen(pen)
+            rect_item.setZValue(950.0)
+            self._af_overlay_items.append(rect_item)
+
+            if area.focused:
+                badge = self.scene.addSimpleText("AF")
+                badge.setBrush(QBrush(QColor("#22C55E")))
+                badge.setFlag(badge.GraphicsItemFlag.ItemIgnoresTransformations, True)
+                badge.setPos(ax, max(img_rect.top(), ay - 16.0))
+                badge.setZValue(951.0)
+                self._af_overlay_items.append(badge)
 
     def _should_play_animation(self) -> bool:
         try:
@@ -9098,13 +9244,35 @@ class SingleMediaViewer(QWidget):
                     event.accept()
                     return True
 
-            # Star ratings: 0, 1, 2, 3, 4, 5
-            if not self.is_crop_mode and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier):
+            # Toggle Camera AF Focus Overlay: A
+            if not self.is_crop_mode and not self.is_in_edit_mode() and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier):
+                if event.key() == Qt.Key_A:
+                    self.toggle_af_overlay()
+                    event.accept()
+                    return True
+
+            # Star ratings: 0..5 (or Shift+0..5 to auto-advance)
+            if not self.is_crop_mode and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
+                shift_held = bool(event.modifiers() & Qt.ShiftModifier)
+                _SHIFT_DIGIT_KEYS = {
+                    Qt.Key_ParenRight: 0,
+                    Qt.Key_Exclam: 1,
+                    Qt.Key_At: 2,
+                    Qt.Key_NumberSign: 3,
+                    Qt.Key_Dollar: 4,
+                    Qt.Key_Percent: 5,
+                }
                 if Qt.Key_0 <= event.key() <= Qt.Key_5:
                     r_val = event.key() - Qt.Key_0
                     mw = getattr(self, "main_window", None) or self.window()
                     if hasattr(mw, "apply_rating_to_selection"):
-                        mw.apply_rating_to_selection(r_val)
+                        mw.apply_rating_to_selection(r_val, advance=shift_held)
+                    event.accept()
+                    return True
+                if shift_held and event.key() in _SHIFT_DIGIT_KEYS:
+                    mw = getattr(self, "main_window", None) or self.window()
+                    if hasattr(mw, "apply_rating_to_selection"):
+                        mw.apply_rating_to_selection(_SHIFT_DIGIT_KEYS[event.key()], advance=True)
                     event.accept()
                     return True
 
@@ -9306,6 +9474,12 @@ class SingleMediaViewer(QWidget):
 
             act_rm_bg = ai_menu.addAction("Remove background")
             act_rm_bg.triggered.connect(self.remove_background_cutout)
+
+            act_af = ai_menu.addAction("Show AF Focus Points")
+            act_af.setShortcut("A")
+            act_af.setCheckable(True)
+            act_af.setChecked(bool(getattr(self, "_show_af_overlay", False)))
+            act_af.triggered.connect(self.toggle_af_overlay)
 
         act_rescan = ai_menu.addAction("Rescan for faces")
         if is_mw and mid is not None:

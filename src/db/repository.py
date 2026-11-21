@@ -5488,16 +5488,35 @@ class CatalogRepository:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def _apply_map_scope_ids(
+        self, conn: Any, scope_media_ids: Sequence[int] | None
+    ) -> str:
+        """Populates a connection-local temp table when scope_media_ids is active and returns an AND clause."""
+        if scope_media_ids is None:
+            return ""
+        ids = [int(x) for x in scope_media_ids]
+        if not ids:
+            return " AND 1 = 0"
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS _map_scope_ids (id INTEGER PRIMARY KEY);")
+        conn.execute("DELETE FROM _map_scope_ids;")
+        conn.executemany(
+            "INSERT OR IGNORE INTO _map_scope_ids (id) VALUES (?);",
+            [(mid,) for mid in ids],
+        )
+        return " AND m.id IN (SELECT id FROM _map_scope_ids)"
+
     def query_map_overview_cells(
         self,
         year: int | None = None,
         person_id: int | None = None,
         min_rating: int | None = None,
+        scope_media_ids: Sequence[int] | None = None,
     ) -> list[dict[str, Any]]:
         """
         High-speed overview query for World Map View (zero GROUP_CONCAT).
-        Aggregates all geotagged items into ~1 km cells (ROUND(lat, 2), ROUND(lon, 2))
-        returning lightweight dicts with a single representative media ID and exact cell bounds.
+        Aggregates all geotagged items (optionally scoped to `scope_media_ids`) into ~1 km
+        cells (ROUND(lat, 2), ROUND(lon, 2)) returning lightweight dicts with a single
+        representative media ID and exact cell bounds.
         Member media_ids are resolved lazily via `query_map_cluster_media_ids()` only on click.
         """
         conn = self.engine.catalog_conn()
@@ -5510,7 +5529,9 @@ class CatalogRepository:
             )
         extra_clauses.append("COALESCE(m.is_missing, 0) = 0")
         extra_clauses.append("NOT (ABS(r.min_lat) < 0.0001 AND ABS(r.min_lon) < 0.0001)")
+        scope_sql = self._apply_map_scope_ids(conn, scope_media_ids)
         extra_sql = (" AND " + " AND ".join(extra_clauses)) if extra_clauses else ""
+        extra_sql += scope_sql
 
         rows = conn.execute(
             f"""
@@ -5565,6 +5586,7 @@ class CatalogRepository:
         year: int | None = None,
         person_id: int | None = None,
         min_rating: int | None = None,
+        scope_media_ids: Sequence[int] | None = None,
     ) -> list[int]:
         """Lazily resolves all media IDs inside a clicked cluster's bounding box via media_rtree."""
         conn = self.engine.catalog_conn()
@@ -5576,7 +5598,9 @@ class CatalogRepository:
                 "NOT EXISTS (SELECT 1 FROM folders f_priv WHERE f_priv.id = m.folder_id AND COALESCE(f_priv.is_private, 0) = 1)"
             )
         extra_clauses.append("COALESCE(m.is_missing, 0) = 0")
+        scope_sql = self._apply_map_scope_ids(conn, scope_media_ids)
         extra_sql = (" AND " + " AND ".join(extra_clauses)) if extra_clauses else ""
+        extra_sql += scope_sql
 
         pad = 1e-4
         sql_params: list[Any] = [

@@ -283,6 +283,7 @@ class _OverviewLoadWorker(QRunnable):
         year: int | None,
         person_id: int | None,
         min_rating: int | None,
+        scope_media_ids: list[int] | None = None,
     ) -> None:
         super().__init__()
         self.engine = engine
@@ -291,6 +292,7 @@ class _OverviewLoadWorker(QRunnable):
         self.year = year
         self.person_id = person_id
         self.min_rating = min_rating
+        self.scope_media_ids = list(scope_media_ids) if scope_media_ids is not None else None
         self.signals = _OverviewLoadSignals()
 
     @Slot()
@@ -302,6 +304,7 @@ class _OverviewLoadWorker(QRunnable):
                 year=self.year,
                 person_id=self.person_id,
                 min_rating=self.min_rating,
+                scope_media_ids=self.scope_media_ids,
             )
             row = self.engine.catalog_conn().execute(
                 "SELECT COUNT(*) FROM media WHERE COALESCE(is_missing, 0) = 0;"
@@ -1502,6 +1505,7 @@ class WorldMapView(QWidget):
         self._filter_year: int | None = None
         self._filter_person_id: int | None = None
         self._filter_min_rating: int | None = None
+        self._scope_media_ids: list[int] | None = None
         self._pending_thumb_ids: set[int] = set()
         self._failed_thumb_ids: set[int] = set()
         self._active_thumb_workers: dict[int, Any] = {}
@@ -1673,6 +1677,7 @@ class WorldMapView(QWidget):
             year=self._filter_year,
             person_id=self._filter_person_id,
             min_rating=self._filter_min_rating,
+            scope_media_ids=self._scope_media_ids,
         )
         worker.signals.loaded.connect(self._on_overview_loaded)
         self._active_overview_worker = worker
@@ -1752,6 +1757,7 @@ class WorldMapView(QWidget):
                 year=self._filter_year,
                 person_id=self._filter_person_id,
                 min_rating=self._filter_min_rating,
+                scope_media_ids=self._scope_media_ids,
             )
             rep = int(payload.get("rep_media_id") or 0)
             if rep > 0 and rep not in mids:
@@ -1993,7 +1999,29 @@ class WorldMapView(QWidget):
             self._filter_year is not None
             or self._filter_person_id is not None
             or self._filter_min_rating is not None
+            or self._scope_media_ids is not None
         )
+
+    def set_scope_media_ids(
+        self,
+        media_ids: Sequence[int] | None,
+        *,
+        fit: bool = True,
+    ) -> None:
+        """Restricts the map to `media_ids` (Current View) or clears scope when `None` (Entire Library)."""
+        new_scope = [int(x) for x in media_ids] if media_ids is not None else None
+        if new_scope == self._scope_media_ids and not self._map_data_dirty:
+            return
+        self._scope_media_ids = new_scope
+        self._map_data_dirty = True
+        if self._web_loaded and self.web_view is not None:
+            self.refresh_overview_async(fit=fit)
+        elif self.web_view is not None:
+            self.refresh_overview_async(fit=fit)
+        elif fit:
+            self.fit_to_photos()
+        else:
+            self.refresh_current_viewport()
 
     def set_map_filters(
         self,
@@ -2163,6 +2191,17 @@ class WorldMapView(QWidget):
                 )
 
         self._current_clusters = cluster_gps_points(raw_points, grid_degrees=grid_deg)
+        if self._scope_media_ids is not None:
+            scope_set = set(self._scope_media_ids)
+            filtered_clusters: list[dict[str, Any]] = []
+            for c in self._current_clusters:
+                kept = [mid for mid in (c.get("media_ids") or []) if int(mid) in scope_set]
+                if kept:
+                    c_copy = dict(c)
+                    c_copy["media_ids"] = kept
+                    c_copy["count"] = len(kept)
+                    filtered_clusters.append(c_copy)
+            self._current_clusters = filtered_clusters
         self._attach_cluster_thumbnails(self._current_clusters)
         self.canvas.set_bounds_and_clusters(
             self._min_lat, self._max_lat, self._min_lon, self._max_lon, self._current_clusters

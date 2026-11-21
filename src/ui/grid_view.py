@@ -2698,6 +2698,11 @@ class ThumbnailGridView(QListView):
         self.viewport().update()
         return True
 
+    def advance_selection(self, delta: int = 1) -> bool:
+        """Move grid selection forward (+1) or backward (-1) by one item."""
+        key = Qt.Key_Right if delta >= 0 else Qt.Key_Left
+        return bool(self._navigate_by_key(key, Qt.NoModifier))
+
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
             if event.key() in (
@@ -2725,11 +2730,40 @@ class ThumbnailGridView(QListView):
                     main_win.dispatch_ribbon_action("zoom_out")
                 event.accept()
                 return
+            shift_held = bool(event.modifiers() & Qt.ShiftModifier)
+            _SHIFT_DIGIT_KEYS = {
+                Qt.Key_ParenRight: 0,
+                Qt.Key_Exclam: 1,
+                Qt.Key_At: 2,
+                Qt.Key_NumberSign: 3,
+                Qt.Key_Dollar: 4,
+                Qt.Key_Percent: 5,
+            }
             if Qt.Key_0 <= event.key() <= Qt.Key_5:
                 rating_val = event.key() - Qt.Key_0
                 main_win = getattr(self, "main_window", None) or self.window()
                 if hasattr(main_win, "apply_rating_to_selection"):
-                    main_win.apply_rating_to_selection(rating_val)
+                    main_win.apply_rating_to_selection(rating_val, advance=shift_held)
+                    event.accept()
+                    return
+            if shift_held and event.key() in _SHIFT_DIGIT_KEYS:
+                main_win = getattr(self, "main_window", None) or self.window()
+                if hasattr(main_win, "apply_rating_to_selection"):
+                    main_win.apply_rating_to_selection(_SHIFT_DIGIT_KEYS[event.key()], advance=True)
+                    event.accept()
+                    return
+            if event.key() == Qt.Key_Space and not shift_held:
+                sel_ids = self.selected_media_ids()
+                if sel_ids:
+                    main_win = getattr(self, "main_window", None) or self.window()
+                    if hasattr(main_win, "show_quick_preview"):
+                        main_win.show_quick_preview(int(sel_ids[-1]))
+                        event.accept()
+                        return
+            if event.key() == Qt.Key_F2 and not shift_held:
+                main_win = getattr(self, "main_window", None) or self.window()
+                if hasattr(main_win, "rename_selection"):
+                    main_win.rename_selection()
                     event.accept()
                     return
             if event.key() == Qt.Key_C:

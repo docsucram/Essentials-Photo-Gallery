@@ -400,6 +400,67 @@ class _CompareCanvas(QWidget):
         self.setMinimumSize(140, 120)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
 
+        from src.ui.zoom_minimap import ZoomMinimapOverlay
+
+        self._minimap = ZoomMinimapOverlay(self)
+        self._minimap.navigate_requested.connect(self._on_minimap_navigate)
+        self._minimap.zoom_requested.connect(self._on_minimap_zoom)
+        self._minimap.hide()
+
+    def _sync_minimap(self) -> None:
+        mm = getattr(self, "_minimap", None)
+        if mm is None:
+            return
+        if (
+            self._pixmap.isNull()
+            or self._fit_mode
+            or self._zoom_factor <= 1.05
+            or self.width() < 240
+            or self.height() < 180
+        ):
+            mm.hide()
+            return
+        rect = self._target_draw_rect()
+        if rect.width() <= 1.0 or rect.height() <= 1.0:
+            mm.hide()
+            return
+        x0 = max(0.0, (0.0 - rect.left()) / rect.width())
+        y0 = max(0.0, (0.0 - rect.top()) / rect.height())
+        x1 = min(1.0, (float(self.width()) - rect.left()) / rect.width())
+        y1 = min(1.0, (float(self.height()) - rect.top()) / rect.height())
+        if x0 <= 0.01 and y0 <= 0.01 and x1 >= 0.99 and y1 >= 0.99:
+            mm.hide()
+            return
+        mm.set_image(self._pixmap, source_key=(id(self._pixmap), self._pixmap.width(), self._pixmap.height()))
+        mm.set_viewport_norm(x0, y0, x1, y1)
+        margin = 10
+        mm.move(max(margin, self.width() - mm.width() - margin), max(margin, self.height() - mm.height() - margin))
+        mm.show()
+        mm.raise_()
+
+    def _on_minimap_navigate(self, nx: float, ny: float) -> None:
+        self._fit_mode = False
+        self._cx_norm = max(0.0, min(1.0, float(nx)))
+        self._cy_norm = max(0.0, min(1.0, float(ny)))
+        self.update()
+        self._sync_minimap()
+        self.viewport_changed.emit(self._cx_norm, self._cy_norm, self._zoom_factor)
+
+    def _on_minimap_zoom(self, factor: float) -> None:
+        if factor == 0.0:
+            cx, cy, z = self.zoom_fit()
+        else:
+            self._fit_mode = False
+            self._zoom_factor = max(0.25, min(24.0, self._zoom_factor * factor))
+            self.update()
+            self._sync_minimap()
+            cx, cy, z = (self._cx_norm, self._cy_norm, self._zoom_factor)
+        self.viewport_changed.emit(cx, cy, z)
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        self._sync_minimap()
+
     def set_dark_mode(self, is_dark: bool) -> None:
         self._is_dark = is_dark
         self.update()
@@ -416,6 +477,7 @@ class _CompareCanvas(QWidget):
         self._face_boxes = list(face_boxes)
         self._active_face_idx = -1
         self.update()
+        self._sync_minimap()
 
     def _rebuild_rotated_pixmap(self) -> None:
         if self._raw_qimg.isNull():
@@ -484,6 +546,7 @@ class _CompareCanvas(QWidget):
         else:
             self._fit_mode = self._zoom_factor <= 1.001 and abs(self._cx_norm - 0.5) < 1e-3 and abs(self._cy_norm - 0.5) < 1e-3
         self.update()
+        self._sync_minimap()
 
     def zoom_fit(self) -> tuple[float, float, float]:
         self._cx_norm = 0.5
@@ -492,6 +555,7 @@ class _CompareCanvas(QWidget):
         self._fit_mode = True
         self._active_face_idx = -1
         self.update()
+        self._sync_minimap()
         return (self._cx_norm, self._cy_norm, self._zoom_factor)
 
     def zoom_actual_1_to_1(self) -> tuple[float, float, float]:
@@ -502,6 +566,7 @@ class _CompareCanvas(QWidget):
         self._zoom_factor = min(24.0, target_zoom)
         self._fit_mode = False
         self.update()
+        self._sync_minimap()
         return (self._cx_norm, self._cy_norm, self._zoom_factor)
 
     def zoom_to_face_index(self, face_idx: int) -> bool:
@@ -604,6 +669,7 @@ class _CompareCanvas(QWidget):
                 self._cx_norm = max(0.0, min(1.0, self._cx_norm - dx / rect.width()))
                 self._cy_norm = max(0.0, min(1.0, self._cy_norm - dy / rect.height()))
                 self.update()
+                self._sync_minimap()
                 is_shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier) or self._drag_shift
                 if not is_shift:
                     self.viewport_changed.emit(self._cx_norm, self._cy_norm, self._zoom_factor)
@@ -629,6 +695,7 @@ class _CompareCanvas(QWidget):
         self._fit_mode = False
         self._zoom_factor = new_zoom
         self.update()
+        self._sync_minimap()
         if not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
             self.viewport_changed.emit(self._cx_norm, self._cy_norm, self._zoom_factor)
         event.accept()

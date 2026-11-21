@@ -17,6 +17,18 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 - **Batched Thumbnail DB Commits & Zero-SQL Paint:** Added `ThumbnailWriteCoalescer` to commit decoded WebP thumbnails in batches of 16 via `put_webp_blobs_batch()`, and removed synchronous `get_face_thumbnail_for_media_person()` SQLite queries from `MediaCardDelegate.paint()` in favor of off-thread `BatchFaceCropWorker` prefetching.
 - **Tier-0 Bounded TIFF/IFD RAW Preview Fast-Path & Native Crash Recovery:** Added `extract_tiff_embedded_jpeg()` to seek directly to embedded JPEG previews in TIFF-based camera RAWs without invoking `rawpy.imread()`, plus `ScanCrashTrace` (`active_scan_trace.json`) and post-startup recovery prompting if a corrupt media file hard-crashes a native C/C++ codec.
 
+### Map View Scope & Idle Pre-Warm
+
+- **"Current View vs. Entire Library" Map Scope:** Added a Ribbon toggle (`Scope: Current View (N)` / `Entire Library`) in World Map View (`CatalogRepository.query_map_overview_cells` / `query_map_cluster_media_ids` with `scope_media_ids`) so you can map just the active Folder, Album, Smart Album, Tag, Place, Date, Person, Rating, or Search results, or toggle back to the full library at any time.
+- **3s Post-Launch Idle Map Pre-Warm:** Pre-warms `QWebEngineView` and the bundled Leaflet shell 3 seconds after startup so even the very first switch into World Map View is instantaneous.
+
+### Photographer Culling Toolkit
+
+- **Zoom Minimap Navigator + Sharpness Heatmap Grid:** Floating bottom-right minimap in Single Image View and Compare Mode whenever zoomed beyond fit (`> 100%`), with click/drag panning, quick zoom controls, and an optional **Sharpness** (`16×12` Laplacian variance heatmap) overlay to judge focus across the frame.
+- **Batch Rename Dialog (`F2` on Multi-Selection):** Template-driven batch renaming (`{name}`, `{date}`, `{seq}`, `{camera}`, etc.) with live preview table, Windows reserved-name & collision validation, two-phase atomic staging with rollback (supporting swap renames), and automatic `.xmp` / `.OriginalFiles` companion syncing.
+- **Spacebar Quick Preview & `Shift + Rating/Flag` Auto-Advance:** Press `Space` in Grid View for an instant lightweight Quick Preview popover (`Enter` to open full view, `Left`/`Right` to browse, `1–5` to rate, `P` to flag, `Space`/`Esc` to dismiss), and hold `Shift` with `0–5` or `P` in Grid or Single Image View to apply the rating/flag and automatically advance to the next photo.
+- **Camera Autofocus (AF) Area Overlay (`A`):** On-demand, LRU-cached parser (`src/core/af_area_parser.py`) supporting EXIF `SubjectArea`/`SubjectLocation` and Nikon/Canon/Sony/Fujifilm MakerNotes (skipping cloud-only placeholders), toggled via `A` or the viewer's `AI & Scan → Show AF Focus Points` menu.
+
 ---
 
 ## Essentials Photo Gallery v0.15.0
