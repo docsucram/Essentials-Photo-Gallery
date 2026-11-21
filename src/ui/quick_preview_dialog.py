@@ -73,6 +73,23 @@ class QuickPreviewDialog(QDialog):
         self.lbl_meta.setStyleSheet("color: #FBBF24; font-size: 9.5pt; font-weight: 600; border: none; background: transparent;")
         top_lay.addWidget(self.lbl_meta)
 
+        self.lbl_flag_icon = QLabel(self._top_pill)
+        self.lbl_flag_icon.setFixedSize(16, 16)
+        self.lbl_flag_icon.setStyleSheet("border: none; background: transparent;")
+        self.lbl_flag_icon.hide()
+        top_lay.addWidget(self.lbl_flag_icon)
+
+        self.lbl_flag_text = QLabel("", self._top_pill)
+        self.lbl_flag_text.setStyleSheet("color: #F8FAFC; font-size: 9pt; font-weight: 600; border: none; background: transparent;")
+        self.lbl_flag_text.hide()
+        top_lay.addWidget(self.lbl_flag_text)
+
+        self.lbl_fav_icon = QLabel(self._top_pill)
+        self.lbl_fav_icon.setFixedSize(16, 16)
+        self.lbl_fav_icon.setStyleSheet("border: none; background: transparent;")
+        self.lbl_fav_icon.hide()
+        top_lay.addWidget(self.lbl_fav_icon)
+
         # Floating bottom-center hint pill
         self._hint_pill = QFrame(self)
         self._hint_pill.setStyleSheet(
@@ -88,12 +105,77 @@ class QuickPreviewDialog(QDialog):
         self.lbl_hint.setStyleSheet("color: #CBD5E1; font-size: 8.5pt; border: none; background: transparent;")
         hint_lay.addWidget(self.lbl_hint)
 
+    def _make_badge_pixmap(self, kind: str) -> QPixmap:
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QLinearGradient, QPainterPath, QPen, QPolygonF
+
+        pm = QPixmap(32, 32)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if kind == "picked":
+            banner = QPolygonF([QPointF(9.0, 5.5), QPointF(26.0, 11.0), QPointF(9.0, 17.0)])
+            grad = QLinearGradient(9.0, 5.5, 9.0, 17.5)
+            grad.setColorAt(0.0, QColor("#F87171"))
+            grad.setColorAt(0.5, QColor("#DC2626"))
+            grad.setColorAt(1.0, QColor("#991B1B"))
+            p.setPen(QPen(QColor("#7F1D1D"), 1.2))
+            p.setBrush(grad)
+            p.drawPolygon(banner)
+            p.setPen(QPen(QColor("#CBD5E1"), 2.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(8, 5, 8, 27)
+        elif kind == "rejected":
+            p.setPen(QPen(QColor("#CBD5E1"), 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawLine(8, 5, 8, 27)
+            banner = QPolygonF([QPointF(8.0, 5.5), QPointF(25.0, 11.0), QPointF(8.0, 17.0)])
+            p.drawPolygon(banner)
+            p.setPen(QPen(QColor("#EF4444"), 2.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(5, 26, 27, 5)
+        elif kind == "fav":
+            grad = QLinearGradient(16.0, 6.0, 16.0, 26.0)
+            grad.setColorAt(0.0, QColor("#FB7185"))
+            grad.setColorAt(1.0, QColor("#E11D48"))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(grad)
+            hpath = QPainterPath()
+            hpath.moveTo(16.0, 26.5)
+            hpath.cubicTo(5.5, 19.8, 4.0, 11.5, 8.8, 7.2)
+            hpath.cubicTo(12.2, 4.4, 15.0, 6.6, 16.0, 9.2)
+            hpath.cubicTo(17.0, 6.6, 19.8, 4.4, 23.2, 7.2)
+            hpath.cubicTo(28.0, 11.5, 26.5, 19.8, 16.0, 26.5)
+            p.drawPath(hpath)
+        p.end()
+        pm.setDevicePixelRatio(2.0)
+        return pm
+
     def _update_header(self) -> None:
         stars = "★" * int(self._rating or 0) + "☆" * max(0, 5 - int(self._rating or 0))
-        flag_str = "   ⚑ Picked" if self._flag == 1 else ("   ✕ Rejected" if self._flag == -1 else "")
-        fav_str = "   ♥" if (self._favourites_enabled and self._is_favourite) else ""
         self.lbl_title.setText(self._filename)
-        self.lbl_meta.setText(f"{stars}{flag_str}{fav_str}")
+        self.lbl_meta.setText(stars)
+
+        if self._flag == 1:
+            self.lbl_flag_icon.setPixmap(self._make_badge_pixmap("picked"))
+            self.lbl_flag_icon.show()
+            self.lbl_flag_text.setText("Picked")
+            self.lbl_flag_text.setStyleSheet("color: #FCA5A5; font-size: 9pt; font-weight: 600; border: none; background: transparent;")
+            self.lbl_flag_text.show()
+        elif self._flag == -1:
+            self.lbl_flag_icon.setPixmap(self._make_badge_pixmap("rejected"))
+            self.lbl_flag_icon.show()
+            self.lbl_flag_text.setText("Rejected")
+            self.lbl_flag_text.setStyleSheet("color: #CBD5E1; font-size: 9pt; font-weight: 600; border: none; background: transparent;")
+            self.lbl_flag_text.show()
+        else:
+            self.lbl_flag_icon.hide()
+            self.lbl_flag_text.hide()
+
+        if self._favourites_enabled and self._is_favourite:
+            self.lbl_fav_icon.setPixmap(self._make_badge_pixmap("fav"))
+            self.lbl_fav_icon.show()
+        else:
+            self.lbl_fav_icon.hide()
+
         if self._favourites_enabled:
             self.lbl_hint.setText(
                 "Space / Esc: Close   •   ← / →: Prev / Next   •   0–5: Rate   •   P: Pick   •   X: Reject   •   U: Unflag   •   F: Fav   •   Enter: Full View"
