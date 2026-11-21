@@ -5989,6 +5989,29 @@ class RibbonToolbar(QWidget):
         self.btn_collapse_ribbon.clicked.connect(self._toggle_ribbon_collapse)
         rc_layout.addWidget(self.btn_collapse_ribbon)
 
+        self.btn_ribbon_settings = QPushButton(right_corner)
+        self.btn_ribbon_settings.setFixedSize(22, 22)
+        self.btn_ribbon_settings.setFlat(True)
+        self.btn_ribbon_settings.setIcon(make_wlpg_icon("options", 15))
+        self.btn_ribbon_settings.setIconSize(QSize(15, 15))
+        self.btn_ribbon_settings.setToolTip("Options / Settings")
+        self.btn_ribbon_settings.setCursor(Qt.PointingHandCursor)
+        self.btn_ribbon_settings.setStyleSheet(
+            """
+            QPushButton {
+                border: 1px solid transparent;
+                border-radius: 2px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background: rgba(148, 163, 184, 55);
+                border: 1px solid rgba(148, 163, 184, 110);
+            }
+            """
+        )
+        self.btn_ribbon_settings.clicked.connect(lambda: self.action_triggered.emit("open_settings"))
+        rc_layout.addWidget(self.btn_ribbon_settings)
+
         self.tab_widget.setCornerWidget(right_corner, Qt.TopRightCorner)
 
         main_vbox.addWidget(self.tab_widget)

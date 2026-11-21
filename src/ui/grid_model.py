@@ -1053,6 +1053,13 @@ class CatalogListModel(QAbstractListModel):
         _, rec, _, _ = self._locate_vrow(index.row())
         return rec
 
+    def record_by_id(self, media_id: int) -> MediaItemRecord | None:
+        self._ensure_id_index()
+        rec_idx = self._id_to_rec_idx.get(int(media_id))
+        if rec_idx is not None and 0 <= rec_idx < len(self._records):
+            return self._records[rec_idx]
+        return None
+
     def vrow_for_media_id(self, media_id: int) -> int | None:
         idx = self.index_for_media_id(media_id)
         return idx.row() if idx.isValid() else None

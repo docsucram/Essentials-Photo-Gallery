@@ -4634,7 +4634,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         filename = str(detail.get("filename") or "")
         file_path = folder_p / filename
         rating = int(detail.get("rating") or 0)
-        flag = int(detail.get("flag") or 0)
+        flag = -1 if int(detail.get("is_rejected") or 0) else int(detail.get("flag") or 0)
+        is_fav = bool(detail.get("is_favourite") or 0)
 
         dlg = getattr(self, "_quick_preview_dialog", None)
         if dlg is None:
@@ -4643,15 +4644,25 @@ class PhotoGalleryMainWindow(QMainWindow):
             dlg = QuickPreviewDialog(parent=self)
             dlg.open_full_requested.connect(self._on_quick_preview_open_full)
             dlg.rate_requested.connect(self._on_quick_preview_rate)
-            dlg.flag_requested.connect(self._on_quick_preview_flag)
+            dlg.flag_set_requested.connect(self._on_quick_preview_flag_set)
+            dlg.favourite_requested.connect(self._on_quick_preview_favourite)
             dlg.navigate_requested.connect(self._on_quick_preview_navigate)
             self._quick_preview_dialog = dlg
 
-        dlg.show_media(int(media_id), file_path, filename, rating=rating, flag=flag)
+        dlg.show_media(
+            int(media_id),
+            file_path,
+            filename,
+            rating=rating,
+            flag=flag,
+            is_favourite=is_fav,
+            favourites_enabled=bool(getattr(self, "favourites_enabled", True)),
+        )
         if not dlg.isVisible():
             dlg.show()
         dlg.raise_()
         dlg.activateWindow()
+        dlg.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
     def _on_quick_preview_open_full(self, media_id: int) -> None:
         dlg = getattr(self, "_quick_preview_dialog", None)
@@ -4667,8 +4678,23 @@ class PhotoGalleryMainWindow(QMainWindow):
         detail = self.catalog_repo.get_media_detail(int(media_id))
         cur_flag = int(detail.get("flag") or 0) if detail else 0
         new_flag = 0 if cur_flag else 1
-        cmd = _FlagUndoCommand(self, [int(media_id)], new_flag)
+        self._on_quick_preview_flag_set(media_id, new_flag)
+
+    def _on_quick_preview_flag_set(self, media_id: int, new_flag: int) -> None:
+        cmd = _FlagUndoCommand(self, [int(media_id)], int(new_flag))
         self.undo_stack.push(cmd)
+        if hasattr(self, "left_nav_dock") and hasattr(self, "catalog_repo"):
+            try:
+                self.left_nav_dock.refresh_albums_only(self.catalog_repo)
+            except Exception:
+                pass
+
+    def _on_quick_preview_favourite(self, media_id: int) -> None:
+        if not getattr(self, "favourites_enabled", True):
+            return
+        fav_map = self.catalog_repo.get_field_map_for_ids([int(media_id)], "is_favourite")
+        cur_fav = bool(fav_map.get(int(media_id), 0))
+        self.apply_favourite_to_selection(not cur_fav, target_ids=[int(media_id)])
 
     def _on_quick_preview_navigate(self, delta: int) -> None:
         if hasattr(self.grid_view, "advance_selection") and self.grid_view.advance_selection(delta):

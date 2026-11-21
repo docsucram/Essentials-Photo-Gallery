@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QRect, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QImageReader, QKeyEvent, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QWidget
 
@@ -19,9 +19,11 @@ class QuickPreviewDialog(QDialog):
     """Borderless full-screen Spacebar QuickLook overlay for rapid culling from Grid View."""
 
     open_full_requested = Signal(int)
-    rate_requested = Signal(int, int)   # media_id, rating
-    flag_requested = Signal(int)        # media_id
-    navigate_requested = Signal(int)    # -1 or +1
+    rate_requested = Signal(int, int)      # media_id, rating
+    flag_requested = Signal(int)           # legacy toggle signal (media_id)
+    flag_set_requested = Signal(int, int)  # media_id, new_flag (1=Pick, -1=Reject, 0=Unflag)
+    favourite_requested = Signal(int)      # media_id
+    navigate_requested = Signal(int)       # -1 or +1
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -42,7 +44,10 @@ class QuickPreviewDialog(QDialog):
         self._filename: str = ""
         self._rating: int = 0
         self._flag: int = 0
+        self._is_favourite: bool = False
+        self._favourites_enabled: bool = True
         self._image_rect: QRect = QRect()
+        self._app_filter_installed: bool = False
 
         # Borderless image canvas
         self.lbl_image = QLabel(self)
@@ -77,7 +82,7 @@ class QuickPreviewDialog(QDialog):
         hint_lay = QHBoxLayout(self._hint_pill)
         hint_lay.setContentsMargins(14, 5, 14, 5)
         self.lbl_hint = QLabel(
-            "Space / Esc: Close   •   ← / →: Prev / Next   •   0–5: Rate   •   P: Flag   •   Enter: Full View",
+            "Space / Esc: Close   •   ← / →: Prev / Next   •   0–5: Rate   •   P: Pick   •   X: Reject   •   U: Unflag   •   F: Fav   •   Enter: Full View",
             self._hint_pill,
         )
         self.lbl_hint.setStyleSheet("color: #CBD5E1; font-size: 8.5pt; border: none; background: transparent;")
@@ -86,8 +91,17 @@ class QuickPreviewDialog(QDialog):
     def _update_header(self) -> None:
         stars = "★" * int(self._rating or 0) + "☆" * max(0, 5 - int(self._rating or 0))
         flag_str = "   ⚑ Picked" if self._flag == 1 else ("   ✕ Rejected" if self._flag == -1 else "")
+        fav_str = "   ♥" if (self._favourites_enabled and self._is_favourite) else ""
         self.lbl_title.setText(self._filename)
-        self.lbl_meta.setText(f"{stars}{flag_str}")
+        self.lbl_meta.setText(f"{stars}{flag_str}{fav_str}")
+        if self._favourites_enabled:
+            self.lbl_hint.setText(
+                "Space / Esc: Close   •   ← / →: Prev / Next   •   0–5: Rate   •   P: Pick   •   X: Reject   •   U: Unflag   •   F: Fav   •   Enter: Full View"
+            )
+        else:
+            self.lbl_hint.setText(
+                "Space / Esc: Close   •   ← / →: Prev / Next   •   0–5: Rate   •   P: Pick   •   X: Reject   •   U: Unflag   •   Enter: Full View"
+            )
         self._position_floating_overlays()
 
     def _position_floating_overlays(self) -> None:
@@ -111,11 +125,15 @@ class QuickPreviewDialog(QDialog):
         rating: int = 0,
         flag: int = 0,
         fallback_pixmap: QPixmap | None = None,
+        is_favourite: bool = False,
+        favourites_enabled: bool = True,
     ) -> None:
         self._current_media_id = int(media_id)
         self._filename = filename
         self._rating = int(rating or 0)
         self._flag = int(flag or 0)
+        self._is_favourite = bool(is_favourite)
+        self._favourites_enabled = bool(favourites_enabled)
 
         # Span the full screen containing the parent window
         screen = None
@@ -217,6 +235,31 @@ class QuickPreviewDialog(QDialog):
         self._position_floating_overlays()
         self._update_scaled_pixmap()
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        app = QApplication.instance()
+        if app is not None and not self._app_filter_installed:
+            app.installEventFilter(self)
+            self._app_filter_installed = True
+        self.raise_()
+        self.activateWindow()
+        self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+    def hideEvent(self, event) -> None:
+        app = QApplication.instance()
+        if app is not None and self._app_filter_installed:
+            app.removeEventFilter(self)
+            self._app_filter_installed = False
+        super().hideEvent(event)
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if self.isVisible() and event.type() == QEvent.Type.KeyPress and isinstance(event, QKeyEvent):
+            if obj is not self and not self.isAncestorOf(obj if isinstance(obj, QWidget) else None):
+                self.keyPressEvent(event)
+                if event.isAccepted():
+                    return True
+        return super().eventFilter(obj, event)
+
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
         if key == Qt.Key.Key_Space and event.isAutoRepeat():
@@ -249,7 +292,26 @@ class QuickPreviewDialog(QDialog):
         if key == Qt.Key.Key_P and self._current_media_id is not None:
             self._flag = 0 if self._flag == 1 else 1
             self._update_header()
+            self.flag_set_requested.emit(self._current_media_id, self._flag)
             self.flag_requested.emit(self._current_media_id)
+            event.accept()
+            return
+        if key == Qt.Key.Key_X and self._current_media_id is not None:
+            self._flag = 0 if self._flag == -1 else -1
+            self._update_header()
+            self.flag_set_requested.emit(self._current_media_id, self._flag)
+            event.accept()
+            return
+        if key == Qt.Key.Key_U and self._current_media_id is not None:
+            self._flag = 0
+            self._update_header()
+            self.flag_set_requested.emit(self._current_media_id, 0)
+            event.accept()
+            return
+        if key == Qt.Key.Key_F and self._favourites_enabled and self._current_media_id is not None:
+            self._is_favourite = not self._is_favourite
+            self._update_header()
+            self.favourite_requested.emit(self._current_media_id)
             event.accept()
             return
         super().keyPressEvent(event)
