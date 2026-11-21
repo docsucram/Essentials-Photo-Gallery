@@ -44,6 +44,7 @@ from PySide6.QtGui import (
     QCursor,
     QFont,
     QFontMetrics,
+    QIcon,
     QImage,
     QKeyEvent,
     QMouseEvent,
@@ -53,6 +54,7 @@ from PySide6.QtGui import (
     QPalette,
     QPen,
     QPixmap,
+    QPolygonF,
     QUndoCommand,
     QUndoStack,
 )
