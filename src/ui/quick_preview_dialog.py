@@ -99,7 +99,7 @@ class QuickPreviewDialog(QDialog):
         hint_lay = QHBoxLayout(self._hint_pill)
         hint_lay.setContentsMargins(14, 5, 14, 5)
         self.lbl_hint = QLabel(
-            "Space / Esc: Close   •   ← / →: Prev / Next   •   0–5: Rate   •   P: Pick   •   X: Reject   •   U: Unflag   •   F: Fav   •   Enter: Full View",
+            "Space / Esc: Close   •   ← / →: Prev / Next   •   0–5: Rate   •   P: Pick   •   X: Reject   •   F: Fav   •   Enter: Full View",
             self._hint_pill,
         )
         self.lbl_hint.setStyleSheet("color: #CBD5E1; font-size: 8.5pt; border: none; background: transparent;")
@@ -178,11 +178,11 @@ class QuickPreviewDialog(QDialog):
 
         if self._favourites_enabled:
             self.lbl_hint.setText(
-                "Space / Esc: Close   •   ← / →: Prev / Next   •   0–5: Rate   •   P: Pick   •   X: Reject   •   U: Unflag   •   F: Fav   •   Enter: Full View"
+                "Space / Esc: Close   •   ← / →: Prev / Next   •   0–5: Rate   •   P: Pick   •   X: Reject   •   F: Fav   •   Enter: Full View"
             )
         else:
             self.lbl_hint.setText(
-                "Space / Esc: Close   •   ← / →: Prev / Next   •   0–5: Rate   •   P: Pick   •   X: Reject   •   U: Unflag   •   Enter: Full View"
+                "Space / Esc: Close   •   ← / →: Prev / Next   •   0–5: Rate   •   P: Pick   •   X: Reject   •   Enter: Full View"
             )
         self._position_floating_overlays()
 
