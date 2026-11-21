@@ -1888,9 +1888,10 @@ def apply_virtual_3d_relighting(
 
     # Chroma-preserving luminance shoulder above 0.85
     y_out = 0.2126 * out_lin[:, :, 0] + 0.7152 * out_lin[:, :, 1] + 0.0722 * out_lin[:, :, 2]
+    excess = np.maximum(y_out - 0.85, 0.0)
     y_comp = np.where(
         y_out > 0.85,
-        0.85 + (y_out - 0.85) / (1.0 + (y_out - 0.85) * 1.45),
+        0.85 + excess / (1.0 + excess * 1.45),
         y_out,
     )
     chroma_scale = np.where(y_out > 1e-5, y_comp / np.maximum(y_out, 1e-5), 1.0)[:, :, None]

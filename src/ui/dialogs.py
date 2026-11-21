@@ -1873,6 +1873,52 @@ def _resolve_output_format_and_ext(src_ext: str, out_format: str) -> tuple[str, 
     return "JPEG", ".jpg"
 
 
+def _resolve_export_filename_stem(
+    src: Path,
+    *,
+    naming_pattern: str = "auto",
+    resize_enabled: bool = False,
+    mode: str = "long_edge",
+    out_w: int = 0,
+    out_h: int = 0,
+    ext: str = ".jpg",
+) -> str:
+    """Resolve the output filename stem for Export / Resize using friendly presets or custom tokens."""
+    import time as _time
+
+    stem = src.stem
+    pat = (naming_pattern or "auto").strip()
+    size_tag = (
+        f"{max(out_w, out_h)}px"
+        if (resize_enabled and mode == "long_edge")
+        else (f"{out_w}x{out_h}" if resize_enabled else "orig")
+    )
+    if pat in ("", "auto"):
+        if resize_enabled:
+            return f"{stem}_{size_tag}"
+        src_ext = (src.suffix or "").lower()
+        return stem if src_ext != ext.lower() else f"{stem}_export"
+
+    if "{stem}" not in pat and "{size}" not in pat and "{w}" not in pat and "{h}" not in pat and "{date}" not in pat:
+        # Plain suffix or exact stem
+        if pat.startswith("_") or pat.startswith("-"):
+            return f"{stem}{pat}"
+        return pat
+
+    date_str = _time.strftime("%Y%m%d")
+    resolved = (
+        pat.replace("{stem}", stem)
+        .replace("{size}", size_tag)
+        .replace("{w}", str(out_w))
+        .replace("{h}", str(out_h))
+        .replace("{date}", date_str)
+    )
+    # Sanitize Windows-invalid filename characters
+    for bad in '<>:"/\\|?*':
+        resolved = resolved.replace(bad, "_")
+    return resolved.strip() or f"{stem}_export"
+
+
 def _process_single_resize(
     src: Path,
     out_dir: Path,
@@ -1889,6 +1935,7 @@ def _process_single_resize(
     out_format: str = "same",
     quality: int = 88,
     strip_metadata: bool = False,
+    naming_pattern: str = "auto",
     in_memory_image: Image.Image | None = None,
 ) -> Path | None:
     """Resizes/exports one image (or in-memory rendered image) and writes a non-destructive copy."""
@@ -1936,19 +1983,15 @@ def _process_single_resize(
     if pil_fmt == "JPEG" and res_img.mode not in ("RGB", "L"):
         res_img = res_img.convert("RGB")
 
-    stem = src.stem
-    if resize_enabled:
-        if mode == "long_edge":
-            suffix_tag = f"_{max(out_w, out_h)}px"
-        else:
-            suffix_tag = f"_{out_w}x{out_h}"
-        base_target_stem = f"{stem}{suffix_tag}"
-    else:
-        src_ext = (src.suffix or "").lower()
-        if src_ext != ext.lower():
-            base_target_stem = stem
-        else:
-            base_target_stem = f"{stem}_export"
+    base_target_stem = _resolve_export_filename_stem(
+        src,
+        naming_pattern=naming_pattern,
+        resize_enabled=resize_enabled,
+        mode=mode,
+        out_w=out_w,
+        out_h=out_h,
+        ext=ext,
+    )
 
     target = out_dir / f"{base_target_stem}{ext}"
     if target.exists() or (src.exists() and target.resolve() == src.resolve()):
@@ -1992,6 +2035,7 @@ class _ResizeWorker(QThread):
         out_format: str = "same",
         quality: int = 88,
         strip_metadata: bool = False,
+        naming_pattern: str = "auto",
         in_memory_image: Image.Image | None = None,
     ) -> None:
         super().__init__(parent)
@@ -2009,6 +2053,7 @@ class _ResizeWorker(QThread):
         self.out_format = out_format
         self.quality = quality
         self.strip_metadata = strip_metadata
+        self.naming_pattern = naming_pattern
         self.in_memory_image = in_memory_image
 
     def run(self) -> None:
@@ -2036,6 +2081,7 @@ class _ResizeWorker(QThread):
                     out_format=self.out_format,
                     quality=self.quality,
                     strip_metadata=self.strip_metadata,
+                    naming_pattern=self.naming_pattern,
                     in_memory_image=mem_img,
                 )
                 if out_path is not None:
@@ -2057,6 +2103,7 @@ class ResizePhotoDialog(QDialog):
     """
 
     _SETTINGS_KEY = "resize/custom_presets"
+    _session_state: dict[str, Any] | None = None
 
     def __init__(
         self,
@@ -2129,7 +2176,7 @@ class ResizePhotoDialog(QDialog):
 
             def __init__(self, title: str, parent_w: QWidget | None = None) -> None:
                 super().__init__(title, parent_w)
-                self._checked_state: bool = True
+                self._checked_state: bool = False
 
             def isChecked(self) -> bool:
                 return self._checked_state
@@ -2146,7 +2193,7 @@ class ResizePhotoDialog(QDialog):
         mode_layout = QVBoxLayout(mode_group)
         mode_layout.setSpacing(8)
 
-        # Size Preset Row (now inside Photo Size so "Original size" vs "Resize" is one clear choice)
+        # Size Preset Row (Original size default; Delete button appears for saved custom presets)
         preset_row = QHBoxLayout()
         preset_row.setSpacing(6)
         lbl_preset = QLabel("Size:", mode_group)
@@ -2155,14 +2202,8 @@ class ResizePhotoDialog(QDialog):
 
         self.cmb_size = QComboBox(mode_group)
         self.cmb_size.setFont(QFont("Segoe UI", 9))
-        self._rebuild_presets_combo(select_index=2)  # Default: Medium — 1024 px
+        self._rebuild_presets_combo(select_index=0)  # Default: Original size (No resize)
         preset_row.addWidget(self.cmb_size, 1)
-
-        self.btn_save_preset = QPushButton("+ Save Preset", mode_group)
-        self.btn_save_preset.setFont(QFont("Segoe UI", 9))
-        self.btn_save_preset.setToolTip("Save current export & resize settings as a reusable preset")
-        self.btn_save_preset.clicked.connect(self._on_save_preset_clicked)
-        preset_row.addWidget(self.btn_save_preset)
 
         self.btn_delete_preset = QPushButton("✕", mode_group)
         self.btn_delete_preset.setFont(QFont("Segoe UI", 9, QFont.Bold))
@@ -2256,9 +2297,18 @@ class ResizePhotoDialog(QDialog):
         row_pct.addStretch(1)
         custom_lay.addLayout(row_pct)
 
+        no_up_row = QHBoxLayout()
         self.chk_no_upscale = QCheckBox("Do not enlarge smaller photos", self._custom_dims_box)
         self.chk_no_upscale.setChecked(True)
-        custom_lay.addWidget(self.chk_no_upscale)
+        no_up_row.addWidget(self.chk_no_upscale)
+        no_up_row.addStretch(1)
+
+        self.btn_save_preset = QPushButton("+ Save Preset", self._custom_dims_box)
+        self.btn_save_preset.setFont(QFont("Segoe UI", 8.5))
+        self.btn_save_preset.setToolTip("Save these custom dimensions & format settings as a reusable preset")
+        self.btn_save_preset.clicked.connect(self._on_save_preset_clicked)
+        no_up_row.addWidget(self.btn_save_preset)
+        custom_lay.addLayout(no_up_row)
 
         self._custom_dims_box.setVisible(False)
         mode_layout.addWidget(self._custom_dims_box)
@@ -2294,6 +2344,25 @@ class ResizePhotoDialog(QDialog):
         self.chk_strip_metadata = QCheckBox("Strip GPS && EXIF metadata", out_group)
         self.chk_strip_metadata.setChecked(False)
         out_grid.addWidget(self.chk_strip_metadata, 1, 0, 1, 4)
+
+        out_grid.addWidget(QLabel("File name:", out_group), 2, 0)
+        name_row = QHBoxLayout()
+        name_row.setSpacing(6)
+        self.cmb_naming = QComboBox(out_group)
+        self.cmb_naming.addItem("Auto (name + size / _export)", "auto")
+        self.cmb_naming.addItem("name_export", "{stem}_export")
+        self.cmb_naming.addItem("name_size (e.g. _1024px)", "{stem}_{size}")
+        self.cmb_naming.addItem("name_edited", "{stem}_edited")
+        self.cmb_naming.addItem("Keep original name", "{stem}")
+        self.cmb_naming.addItem("Custom...", "__custom__")
+        name_row.addWidget(self.cmb_naming, 1)
+
+        self.txt_naming_custom = QLineEdit(out_group)
+        self.txt_naming_custom.setPlaceholderText("{stem}_{size}")
+        self.txt_naming_custom.setToolTip("Tokens: {stem}, {size}, {w}, {h}, {date}")
+        self.txt_naming_custom.setVisible(False)
+        name_row.addWidget(self.txt_naming_custom, 1)
+        out_grid.addLayout(name_row, 2, 1, 1, 3)
 
         vbox.addWidget(out_group)
 
@@ -2379,10 +2448,14 @@ class ResizePhotoDialog(QDialog):
         self.chk_no_upscale.toggled.connect(self._update_preview_summary)
         self.cmb_format.currentIndexChanged.connect(self._on_format_or_quality_changed)
         self.slider_quality.valueChanged.connect(self._on_format_or_quality_changed)
+        self.cmb_naming.currentIndexChanged.connect(self._on_naming_combo_changed)
+        self.txt_naming_custom.textChanged.connect(self._update_preview_summary)
 
+        self._restore_session_state()
         self._sync_mode_enabled_states()
         self._on_format_or_quality_changed()
         self._update_preview_summary()
+        self.adjustSize()
 
     # ------------------------------------------------------------------
     # Preset Persistence
@@ -2647,6 +2720,88 @@ class ResizePhotoDialog(QDialog):
         self.slider_quality.setEnabled(pil_fmt != "PNG")
         self._update_preview_summary()
 
+    def _on_naming_combo_changed(self) -> None:
+        is_custom = str(self.cmb_naming.currentData() or "auto") == "__custom__"
+        self.txt_naming_custom.setVisible(is_custom)
+        if is_custom and not self.txt_naming_custom.text().strip():
+            self.txt_naming_custom.setText("{stem}_{size}")
+        self._update_preview_summary()
+
+    def _effective_naming_pattern(self) -> str:
+        val = str(self.cmb_naming.currentData() or "auto")
+        if val == "__custom__":
+            return self.txt_naming_custom.text().strip() or "{stem}_export"
+        return val
+
+    def _save_session_state(self) -> None:
+        cfg = self._current_resize_config()
+        ResizePhotoDialog._session_state = {
+            **cfg,
+            "size_text": self.cmb_size.currentText(),
+            "naming_data": str(self.cmb_naming.currentData() or "auto"),
+            "naming_custom": self.txt_naming_custom.text(),
+            "custom_dims_open": not self._custom_dims_box.isHidden(),
+        }
+
+    def _restore_session_state(self) -> None:
+        st = ResizePhotoDialog._session_state
+        if not isinstance(st, dict):
+            return
+        size_text = str(st.get("size_text") or "")
+        s_idx = self.cmb_size.findText(size_text) if size_text else -1
+        if s_idx >= 0:
+            self.cmb_size.blockSignals(True)
+            self.cmb_size.setCurrentIndex(s_idx)
+            self.cmb_size.blockSignals(False)
+            data = self.cmb_size.currentData()
+            self.btn_delete_preset.setVisible(isinstance(data, dict) and bool(data.get("custom")))
+
+        self.mode_group.blockSignals(True)
+        self.mode_group.setChecked(bool(st.get("resize_enabled", False)))
+        self.mode_group.blockSignals(False)
+
+        mode = str(st.get("mode") or "long_edge")
+        if mode == "exact":
+            self.rb_mode_exact.setChecked(True)
+        elif mode == "percent":
+            self.rb_mode_percent.setChecked(True)
+        else:
+            self.rb_mode_long_edge.setChecked(True)
+
+        self.txt_dim.blockSignals(True)
+        self.txt_dim.setText(str(int(st.get("max_dim", 1024))))
+        self.txt_dim.blockSignals(False)
+
+        self._updating_exact_inputs = True
+        try:
+            if "target_w" in st and len(self.file_paths) != 1:
+                self.txt_exact_w.setText(str(int(st["target_w"])))
+            if "target_h" in st and len(self.file_paths) != 1:
+                self.txt_exact_h.setText(str(int(st["target_h"])))
+        finally:
+            self._updating_exact_inputs = False
+
+        self.spin_percent.setValue(int(st.get("percent", 50)))
+        self.chk_lock_aspect.setChecked(bool(st.get("lock_aspect", True)))
+        self.chk_center_crop.setChecked(bool(st.get("center_crop", False)))
+        self.chk_no_upscale.setChecked(bool(st.get("no_upscale", True)))
+
+        fmt_idx = self.cmb_format.findData(str(st.get("out_format", "same")))
+        if fmt_idx >= 0:
+            self.cmb_format.setCurrentIndex(fmt_idx)
+        self.slider_quality.setValue(int(st.get("quality", 88)))
+        self.chk_strip_metadata.setChecked(bool(st.get("strip_metadata", False)))
+
+        n_idx = self.cmb_naming.findData(str(st.get("naming_data", "auto")))
+        if n_idx >= 0:
+            self.cmb_naming.setCurrentIndex(n_idx)
+        self.txt_naming_custom.setText(str(st.get("naming_custom") or ""))
+        self.txt_naming_custom.setVisible(str(st.get("naming_data")) == "__custom__")
+
+        if bool(st.get("custom_dims_open", False)) and self.mode_group.isChecked():
+            self._custom_dims_box.setVisible(True)
+            self.btn_toggle_custom_dims.setText("▾ Customize dimensions && scaling")
+
     def _current_resize_config(self) -> dict[str, Any]:
         dim_str = self.txt_dim.text().strip()
         w_str = self.txt_exact_w.text().strip()
@@ -2664,6 +2819,7 @@ class ResizePhotoDialog(QDialog):
             "out_format": str(self.cmb_format.currentData() or "same"),
             "quality": int(self.slider_quality.value()),
             "strip_metadata": self.chk_strip_metadata.isChecked(),
+            "naming_pattern": self._effective_naming_pattern(),
         }
 
     def _update_preview_summary(self) -> None:
@@ -2686,9 +2842,18 @@ class ResizePhotoDialog(QDialog):
             else:
                 ow, oh = sw, sh
             _, ext = _resolve_output_format_and_ext(self.file_paths[0].suffix or ".jpg", cfg["out_format"])
+            out_stem = _resolve_export_filename_stem(
+                self.file_paths[0],
+                naming_pattern=cfg["naming_pattern"],
+                resize_enabled=cfg["resize_enabled"],
+                mode=cfg["mode"],
+                out_w=ow,
+                out_h=oh,
+                ext=ext,
+            )
             est = _format_bytes_human(_estimate_resized_file_bytes(ow, oh, ext, cfg["quality"]))
             self.lbl_preview_summary.setText(
-                f"Original: {sw} × {sh} px  →  Output: {ow} × {oh} px ({est})"
+                f"File: {out_stem}{ext}   •   Original: {sw} × {sh} px  →  Output: {ow} × {oh} px ({est})"
             )
         else:
             count = len(self.file_paths)
@@ -2703,7 +2868,20 @@ class ResizePhotoDialog(QDialog):
                 detail = f"Target size: {cfg['target_w']} × {cfg['target_h']} px ({sub})"
             else:
                 detail = f"Scaled to {cfg['percent']}%"
-            self.lbl_preview_summary.setText(f"{count} photos selected • {detail}")
+            sample_line = ""
+            if self.file_paths:
+                _, s_ext = _resolve_output_format_and_ext(self.file_paths[0].suffix or ".jpg", cfg["out_format"])
+                s_stem = _resolve_export_filename_stem(
+                    self.file_paths[0],
+                    naming_pattern=cfg["naming_pattern"],
+                    resize_enabled=cfg["resize_enabled"],
+                    mode=cfg["mode"],
+                    out_w=cfg["max_dim"] if cfg["mode"] == "long_edge" else cfg["target_w"],
+                    out_h=cfg["max_dim"] if cfg["mode"] == "long_edge" else cfg["target_h"],
+                    ext=s_ext,
+                )
+                sample_line = f" • e.g. {s_stem}{s_ext}"
+            self.lbl_preview_summary.setText(f"{count} photos selected • {detail}{sample_line}")
 
     def _on_browse_clicked(self) -> None:
         curr = self.txt_save_path.text()
@@ -2712,6 +2890,7 @@ class ResizePhotoDialog(QDialog):
             self.txt_save_path.setText(chosen)
 
     def _on_resize_clicked(self) -> None:
+        self._save_session_state()
         cfg = self._current_resize_config()
         out_dir = Path(self.txt_save_path.text().strip() or ".")
         try:
@@ -2739,6 +2918,7 @@ class ResizePhotoDialog(QDialog):
             out_format=cfg["out_format"],
             quality=cfg["quality"],
             strip_metadata=cfg["strip_metadata"],
+            naming_pattern=cfg["naming_pattern"],
             in_memory_image=self._in_memory_image,
         )
         self._worker.progress.connect(self._on_resize_progress)
@@ -2755,6 +2935,7 @@ class ResizePhotoDialog(QDialog):
 
     def execute_resize(self) -> list[Path]:
         """Synchronously resizes all input photos using the current dialog configuration."""
+        self._save_session_state()
         cfg = self._current_resize_config()
         out_dir = Path(self.txt_save_path.text().strip() or ".")
         try:
@@ -2782,6 +2963,7 @@ class ResizePhotoDialog(QDialog):
                     out_format=cfg["out_format"],
                     quality=cfg["quality"],
                     strip_metadata=cfg["strip_metadata"],
+                    naming_pattern=cfg["naming_pattern"],
                     in_memory_image=mem_img,
                 )
                 if out_path is not None:
