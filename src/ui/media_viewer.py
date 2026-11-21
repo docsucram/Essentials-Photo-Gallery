@@ -2293,65 +2293,15 @@ class SingleMediaViewer(QWidget):
         self._saved_custom_ratios: list[dict[str, Any]] = self._load_saved_custom_ratios()
 
         self.combo_crop_ratio = CropRatioComboBox(self.crop_toolbar)
+        self.combo_crop_ratio.setObjectName("crop_ratio_combo")
         self._rebuild_crop_ratio_combo()
-        self.combo_crop_ratio.setStyleSheet("""
-            QComboBox {
-                border: 1px solid #CBD5E1;
-                border-radius: 4px;
-                padding: 2px 20px 2px 6px;
-                background: #FFFFFF;
-                color: #1E293B;
-                font-size: 11px;
-                min-width: 78px;
-            }
-            QComboBox:hover { border-color: #94A3B8; }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 18px;
-                border: none;
-                background: transparent;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                width: 0px;
-                height: 0px;
-            }
-        """)
         self.combo_crop_ratio.currentTextChanged.connect(self._on_crop_ratio_changed)
 
         self.btn_crop_delete_ratio = QPushButton("🗑", self.crop_toolbar)
         self.btn_crop_delete_ratio.setFixedSize(24, 24)
         self.btn_crop_delete_ratio.setToolTip("Delete selected saved custom aspect ratio")
-        self.btn_crop_delete_ratio.setStyleSheet("""
-            QPushButton {
-                border: 1px solid #CBD5E1;
-                border-radius: 4px;
-                background: #F8FAFC;
-                color: #B91C1C;
-                font-size: 11px;
-                padding: 0px;
-            }
-            QPushButton:hover { background: #FEE2E2; border-color: #EF4444; }
-        """)
         self.btn_crop_delete_ratio.clicked.connect(self._on_crop_delete_ratio_clicked)
         self.btn_crop_delete_ratio.hide()
-
-        input_style = """
-            QLineEdit {
-                border: 1px solid #CBD5E1;
-                border-radius: 4px;
-                padding: 2px 4px;
-                background: #FFFFFF;
-                color: #1E293B;
-                font-size: 11px;
-                font-weight: 600;
-            }
-            QLineEdit:focus {
-                border-color: #2563EB;
-                background: #FFFFFF;
-            }
-        """
 
         self.crop_custom_ratio_widget = QWidget(self.crop_toolbar)
         cr_layout = QHBoxLayout(self.crop_custom_ratio_widget)
@@ -2361,34 +2311,21 @@ class SingleMediaViewer(QWidget):
         self.txt_crop_w = QLineEdit(self.crop_custom_ratio_widget)
         self.txt_crop_w.setFixedSize(40, 24)
         self.txt_crop_w.setAlignment(Qt.AlignCenter)
-        self.txt_crop_w.setStyleSheet(input_style)
         self.txt_crop_w.setPlaceholderText("W")
         self.txt_crop_w.textEdited.connect(self._on_crop_custom_text_edited)
 
         lbl_colon = QLabel(":", self.crop_custom_ratio_widget)
-        lbl_colon.setStyleSheet("color: #475569; font-weight: bold; font-size: 11px; background: transparent;")
+        self._lbl_crop_colon = lbl_colon
 
         self.txt_crop_h = QLineEdit(self.crop_custom_ratio_widget)
         self.txt_crop_h.setFixedSize(40, 24)
         self.txt_crop_h.setAlignment(Qt.AlignCenter)
-        self.txt_crop_h.setStyleSheet(input_style)
         self.txt_crop_h.setPlaceholderText("H")
         self.txt_crop_h.textEdited.connect(self._on_crop_custom_text_edited)
 
         self.btn_crop_save_ratio = QPushButton("+ Save", self.crop_custom_ratio_widget)
         self.btn_crop_save_ratio.setFixedHeight(24)
         self.btn_crop_save_ratio.setToolTip("Save custom W:H aspect ratio to presets")
-        self.btn_crop_save_ratio.setStyleSheet("""
-            QPushButton {
-                border: 1px solid #CBD5E1;
-                border-radius: 4px;
-                background: #F8FAFC;
-                color: #1E293B;
-                font-size: 11px;
-                padding: 2px 6px;
-            }
-            QPushButton:hover { background: #E2E8F0; border-color: #94A3B8; }
-        """)
         self.btn_crop_save_ratio.clicked.connect(self._on_crop_save_ratio_clicked)
 
         cr_layout.addWidget(self.txt_crop_w)
@@ -2402,23 +2339,6 @@ class SingleMediaViewer(QWidget):
         self.btn_crop_swap.setIconSize(QSize(14, 14))
         self.btn_crop_swap.setFixedHeight(24)
         self.btn_crop_swap.setToolTip("Flip crop orientation: Portrait ↔ Landscape (X)")
-        self.btn_crop_swap.setStyleSheet("""
-            QPushButton {
-                border: 1px solid #CBD5E1;
-                border-radius: 4px;
-                background: #F8FAFC;
-                color: #334155;
-                font-size: 11px;
-                padding: 2px 7px;
-            }
-            QPushButton:hover {
-                background: #E2E8F0;
-                border-color: #94A3B8;
-            }
-            QPushButton:pressed {
-                background: #CBD5E1;
-            }
-        """)
         self.btn_crop_swap.clicked.connect(self._on_crop_swap_clicked)
 
         self.btn_crop_grid = QPushButton("Grid: 3×3 ▾", self.crop_toolbar)
@@ -2426,26 +2346,11 @@ class SingleMediaViewer(QWidget):
         self.btn_crop_grid.setIconSize(QSize(14, 14))
         self.btn_crop_grid.setFixedHeight(24)
         self.btn_crop_grid.setToolTip("Cycle composition grid: Rule of Thirds → Golden Ratio → Diagonals → Crosshair → None (G)")
-        self.btn_crop_grid.setStyleSheet("""
-            QPushButton {
-                border: 1px solid #CBD5E1;
-                border-radius: 4px;
-                background: #F8FAFC;
-                color: #334155;
-                font-size: 11px;
-                padding: 2px 7px;
-            }
-            QPushButton:hover {
-                background: #E2E8F0;
-                border-color: #94A3B8;
-            }
-        """)
         self.btn_crop_grid.clicked.connect(self._on_crop_grid_clicked)
 
         # Subtle vertical separator
         sep = QFrame(self.crop_toolbar)
         sep.setFrameShape(QFrame.VLine)
-        sep.setStyleSheet("color: #CBD5E1; margin: 2px 2px;")
 
         btn_crop_apply = QPushButton("Apply", self.crop_toolbar)
         btn_crop_apply.setIcon(make_symbol_icon("check", 14))
@@ -2472,25 +2377,12 @@ class SingleMediaViewer(QWidget):
         btn_crop_cancel.setIcon(make_symbol_icon("cross", 14))
         btn_crop_cancel.setIconSize(QSize(14, 14))
         btn_crop_cancel.setToolTip("Cancel Crop (Esc)")
-        btn_crop_cancel.setStyleSheet("""
-            QPushButton {
-                background: #F8F9FA;
-                border: 1px solid #CBD5E1;
-                border-radius: 3px;
-                padding: 3px 7px;
-                font-size: 11px;
-                color: #1E293B;
-            }
-            QPushButton:hover {
-                background: #EDF2F7;
-                border-color: #94A3B8;
-            }
-        """)
         btn_crop_cancel.clicked.connect(lambda: self.set_crop_mode(False))
+        self.btn_crop_toolbar_cancel = btn_crop_cancel
 
         sep_str = QFrame(self.crop_toolbar)
         sep_str.setFrameShape(QFrame.VLine)
-        sep_str.setStyleSheet("color: #CBD5E1; margin: 2px 2px;")
+        self._crop_seps = [sep, sep_str]
 
         self.btn_crop_straighten_line = QPushButton("Straighten", self.crop_toolbar)
         self.btn_crop_straighten_line.setCheckable(True)
@@ -2501,23 +2393,6 @@ class SingleMediaViewer(QWidget):
         self.btn_crop_straighten_line.setToolTip(
             "Straighten the image by drawing a line on it"
         )
-        self.btn_crop_straighten_line.setStyleSheet("""
-            QPushButton {
-                background: #F8FAFC;
-                border: 1px solid #CBD5E1;
-                border-radius: 4px;
-                padding: 2px 7px;
-                font-size: 11px;
-                color: #334155;
-            }
-            QPushButton:hover { background: #E2E8F0; border-color: #94A3B8; }
-            QPushButton:checked {
-                background: #DBEAFE;
-                border: 1px solid #2563EB;
-                color: #1D4ED8;
-                font-weight: bold;
-            }
-        """)
         self.btn_crop_straighten_line.toggled.connect(self._on_crop_straighten_line_toggled)
 
         self.btn_crop_auto_straighten = QPushButton("Auto", self.crop_toolbar)
@@ -2525,17 +2400,6 @@ class SingleMediaViewer(QWidget):
         self.btn_crop_auto_straighten.setIconSize(QSize(14, 14))
         self.btn_crop_auto_straighten.setFixedHeight(24)
         self.btn_crop_auto_straighten.setToolTip("Auto-detect horizon / vertical straighten angle")
-        self.btn_crop_auto_straighten.setStyleSheet("""
-            QPushButton {
-                border: 1px solid #CBD5E1;
-                border-radius: 4px;
-                background: #F8FAFC;
-                color: #334155;
-                font-size: 11px;
-                padding: 2px 7px;
-            }
-            QPushButton:hover { background: #E2E8F0; border-color: #94A3B8; }
-        """)
         self.btn_crop_auto_straighten.clicked.connect(self._on_crop_auto_straighten_clicked)
 
         self.slider_crop_straighten = QSlider(Qt.Horizontal, self.crop_toolbar)
@@ -2556,9 +2420,6 @@ class SingleMediaViewer(QWidget):
         self.lbl_crop_straighten.setFixedWidth(40)
         self.lbl_crop_straighten.setAlignment(Qt.AlignCenter)
         self.lbl_crop_straighten.setToolTip("Straighten angle (double-click to reset to 0.0°)")
-        self.lbl_crop_straighten.setStyleSheet(
-            "color: #1E293B; font-size: 11px; font-weight: 600; background: transparent;"
-        )
         self.lbl_crop_straighten.installEventFilter(self)
 
         self.btn_crop_ai_expand = QPushButton("AI Expand", self.crop_toolbar)
@@ -2570,26 +2431,6 @@ class SingleMediaViewer(QWidget):
         self.btn_crop_ai_expand.setToolTip(
             "Allow dragging outside image bounds or rotating without cropping; fills new margins with AI texture."
         )
-        self.btn_crop_ai_expand.setStyleSheet("""
-            QPushButton {
-                background: #F8F9FA;
-                border: 1px solid #CBD5E1;
-                border-radius: 3px;
-                padding: 2px 8px;
-                font-size: 11px;
-                color: #1E293B;
-            }
-            QPushButton:hover {
-                background: #EDF2F7;
-                border-color: #94A3B8;
-            }
-            QPushButton:checked {
-                background: #DBEAFE;
-                border: 1px solid #2563EB;
-                color: #1D4ED8;
-                font-weight: bold;
-            }
-        """)
         self.btn_crop_ai_expand.toggled.connect(self._on_crop_ai_expand_toggled)
 
         ct_layout.addWidget(self.combo_crop_ratio)
@@ -2761,6 +2602,8 @@ class SingleMediaViewer(QWidget):
         self._inline_name_popup.name_committed.connect(self._on_inline_name_committed)
         self._inline_name_popup.hide()
 
+        self._apply_floating_toolbar_theme(getattr(self, "_is_dark", False))
+
     def _show_status(self, msg: str, timeout: int = 4000) -> None:
         """Surfaces brief status bar feedback to MainWindow."""
         self.status_message_requested.emit(msg, timeout)
@@ -2861,6 +2704,7 @@ class SingleMediaViewer(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._position_floating_toolbars()
+        self._update_filmstrip_toggle()
 
     @staticmethod
     def _make_checkerboard_brush(dark_mode: bool) -> QBrush:
@@ -3860,10 +3704,16 @@ class SingleMediaViewer(QWidget):
     def _apply_floating_toolbar_theme(self, is_dark: bool) -> None:
         if is_dark:
             tb_style = """
-                QFrame {
+                _DraggableFloatingToolbar, #crop_toolbar {
                     background: #1E242C;
                     border: 1px solid #3B4252;
                     border-radius: 6px;
+                }
+                _DraggableGripHandle, #DraggableGripHandle {
+                    background: transparent;
+                    border: none;
+                    padding: 0px;
+                    margin: 0px;
                 }
                 QLabel {
                     color: #E2E8F0;
@@ -3879,17 +3729,47 @@ class SingleMediaViewer(QWidget):
                 QComboBox, QLineEdit {
                     background: #14171C;
                     border: 1px solid #3B4252;
-                    border-radius: 3px;
+                    border-radius: 4px;
                     padding: 2px 6px;
                     color: #E2E8F0;
                     font-size: 11px;
                 }
+                QLineEdit:focus {
+                    border-color: #60A5FA;
+                    background: #14171C;
+                }
+                QComboBox#crop_ratio_combo {
+                    padding: 2px 20px 2px 6px;
+                    min-width: 78px;
+                }
+                QComboBox#crop_ratio_combo:hover {
+                    border-color: #60A5FA;
+                }
+                QComboBox#crop_ratio_combo::drop-down {
+                    subcontrol-origin: padding;
+                    subcontrol-position: top right;
+                    width: 18px;
+                    border: none;
+                    background: transparent;
+                }
+                QComboBox#crop_ratio_combo::down-arrow {
+                    image: none;
+                    width: 0px;
+                    height: 0px;
+                }
+                QComboBox QAbstractItemView {
+                    background: #1E242C;
+                    color: #E2E8F0;
+                    border: 1px solid #3B4252;
+                    selection-background-color: #1E3A5F;
+                    selection-color: #FFFFFF;
+                }
                 QPushButton {
                     background: #262B34;
                     border: 1px solid #3B4252;
-                    border-radius: 3px;
+                    border-radius: 4px;
                     color: #E2E8F0;
-                    padding: 3px 10px;
+                    padding: 3px 8px;
                     font-size: 11px;
                     font-weight: 600;
                 }
@@ -3897,10 +3777,14 @@ class SingleMediaViewer(QWidget):
                     background: #2E3440;
                     border: 1px solid #60A5FA;
                 }
+                QPushButton:pressed {
+                    background: #1E242C;
+                }
                 QPushButton:checked {
                     background: #1E3A5F;
                     border: 1px solid #3B82F6;
                     color: #FFFFFF;
+                    font-weight: bold;
                 }
             """
             spot_btn_style = """
@@ -3923,12 +3807,31 @@ class SingleMediaViewer(QWidget):
                     color: #FFFFFF;
                 }
             """
+            delete_ratio_style = """
+                QPushButton {
+                    border: 1px solid #3B4252;
+                    border-radius: 4px;
+                    background: #262B34;
+                    color: #F87171;
+                    font-size: 11px;
+                    padding: 0px;
+                }
+                QPushButton:hover { background: #451A1A; border-color: #EF4444; }
+            """
+            sep_style = "color: #3B4252; margin: 2px 2px;"
+            combo_text_color = QColor("#E2E8F0")
         else:
             tb_style = """
-                QFrame {
+                _DraggableFloatingToolbar, #crop_toolbar {
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FBFDFF, stop:1 #E8F1FA);
                     border: 1px solid #7DA2CE;
                     border-radius: 6px;
+                }
+                _DraggableGripHandle, #DraggableGripHandle {
+                    background: transparent;
+                    border: none;
+                    padding: 0px;
+                    margin: 0px;
                 }
                 QLabel {
                     color: #1E395B;
@@ -3943,24 +3846,63 @@ class SingleMediaViewer(QWidget):
                 }
                 QComboBox, QLineEdit {
                     background: #FFFFFF;
-                    border: 1px solid #7DA2CE;
-                    border-radius: 3px;
+                    border: 1px solid #CBD5E1;
+                    border-radius: 4px;
                     padding: 2px 6px;
-                    color: #1E395B;
+                    color: #1E293B;
                     font-size: 11px;
                 }
+                QLineEdit:focus {
+                    border-color: #2563EB;
+                    background: #FFFFFF;
+                }
+                QComboBox#crop_ratio_combo {
+                    padding: 2px 20px 2px 6px;
+                    min-width: 78px;
+                }
+                QComboBox#crop_ratio_combo:hover {
+                    border-color: #94A3B8;
+                }
+                QComboBox#crop_ratio_combo::drop-down {
+                    subcontrol-origin: padding;
+                    subcontrol-position: top right;
+                    width: 18px;
+                    border: none;
+                    background: transparent;
+                }
+                QComboBox#crop_ratio_combo::down-arrow {
+                    image: none;
+                    width: 0px;
+                    height: 0px;
+                }
+                QComboBox QAbstractItemView {
+                    background: #FFFFFF;
+                    color: #1E293B;
+                    border: 1px solid #CBD5E1;
+                    selection-background-color: #DBEAFE;
+                    selection-color: #1D4ED8;
+                }
                 QPushButton {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FBFDFF, stop:1 #E0ECF8);
-                    border: 1px solid #7DA2CE;
-                    border-radius: 3px;
-                    color: #1E395B;
-                    padding: 3px 10px;
+                    background: #F8FAFC;
+                    border: 1px solid #CBD5E1;
+                    border-radius: 4px;
+                    color: #1E293B;
+                    padding: 3px 8px;
                     font-size: 11px;
                     font-weight: 600;
                 }
                 QPushButton:hover {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #EAF4FD, stop:1 #C6E0F8);
-                    border: 1px solid #3C7FB1;
+                    background: #E2E8F0;
+                    border: 1px solid #94A3B8;
+                }
+                QPushButton:pressed {
+                    background: #CBD5E1;
+                }
+                QPushButton:checked {
+                    background: #DBEAFE;
+                    border: 1px solid #2563EB;
+                    color: #1D4ED8;
+                    font-weight: bold;
                 }
             """
             spot_btn_style = """
@@ -3979,9 +3921,30 @@ class SingleMediaViewer(QWidget):
                     color: #0E294B;
                 }
             """
+            delete_ratio_style = """
+                QPushButton {
+                    border: 1px solid #CBD5E1;
+                    border-radius: 4px;
+                    background: #F8FAFC;
+                    color: #B91C1C;
+                    font-size: 11px;
+                    padding: 0px;
+                }
+                QPushButton:hover { background: #FEE2E2; border-color: #EF4444; }
+            """
+            sep_style = "color: #CBD5E1; margin: 2px 2px;"
+            combo_text_color = QColor("#1E293B")
 
         if hasattr(self, "crop_toolbar"):
             self.crop_toolbar.setStyleSheet(tb_style)
+        if hasattr(self, "combo_crop_ratio"):
+            pal = self.combo_crop_ratio.palette()
+            pal.setColor(QPalette.ColorRole.Text, combo_text_color)
+            self.combo_crop_ratio.setPalette(pal)
+        if hasattr(self, "btn_crop_delete_ratio"):
+            self.btn_crop_delete_ratio.setStyleSheet(delete_ratio_style)
+        for sep_w in getattr(self, "_crop_seps", ()):
+            sep_w.setStyleSheet(sep_style)
         if hasattr(self, "retouch_toolbar"):
             self.retouch_toolbar.setStyleSheet(tb_style)
         for b_name in ("btn_spot_retouch", "btn_spot_erase", "btn_spot_red_eye"):

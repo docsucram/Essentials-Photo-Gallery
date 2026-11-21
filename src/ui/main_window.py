@@ -1108,6 +1108,7 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         self.bottom_dock = BottomFilmstripDock(self)
         self.bottom_dock.bind_sources(self.catalog_model, self.pixmap_cache, self.thumb_repo)
+        self.bottom_dock.height_anim_tick.connect(self.media_viewer._update_filmstrip_toggle)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.bottom_dock)
         self.bottom_dock.hide()
         self._filmstrip_viewer_enabled: bool = False

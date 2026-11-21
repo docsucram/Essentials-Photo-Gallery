@@ -304,13 +304,16 @@ class BottomFilmstripDock(QDockWidget):
 
     media_selected = Signal(int)
     close_requested = Signal()
+    height_anim_tick = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("", parent)
         self.setObjectName("BottomFilmstripDock")
         self.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
         self.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
-        self.setTitleBarWidget(QWidget(self))  # Hide standard QDockWidget title bar
+        _empty_tb = QWidget(self)
+        _empty_tb.setFixedHeight(0)
+        self.setTitleBarWidget(_empty_tb)  # 0px hidden QDockWidget title bar
 
         self._theme_name: str = "wlpg_aero"
         self.favourites_enabled: bool = True
@@ -363,7 +366,7 @@ class BottomFilmstripDock(QDockWidget):
         self.page_filmstrip.setObjectName("FilmstripPage")
         self.page_filmstrip.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         p0_lay = QHBoxLayout(self.page_filmstrip)
-        p0_lay.setContentsMargins(2, 2, 2, 2)
+        p0_lay.setContentsMargins(2, 0, 2, 2)
         p0_lay.setSpacing(0)
 
         self.filmstrip_model = _FilmstripListModel(self.page_filmstrip)
@@ -472,11 +475,12 @@ class BottomFilmstripDock(QDockWidget):
             except Exception:
                 pass
 
-        target_h = 100
+        target_h = 90
         self.setMinimumHeight(0)
         anim = QPropertyAnimation(self, b"maximumHeight", self)
         anim.setDuration(140)
         anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.valueChanged.connect(lambda _v: self.height_anim_tick.emit() if hasattr(self, "height_anim_tick") else None)
         if show:
             if not self.isVisible():
                 self.setMaximumHeight(0)
