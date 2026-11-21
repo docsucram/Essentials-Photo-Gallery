@@ -380,27 +380,50 @@ class BottomFilmstripDock(QDockWidget):
         self.filmstrip_view.setModel(self.filmstrip_model)
         self.filmstrip_view.setItemDelegate(self.filmstrip_delegate)
         self.filmstrip_view.viewport().installEventFilter(self)
+        self.page_filmstrip.installEventFilter(self)
         self.filmstrip_view.selectionModel().currentChanged.connect(self._on_filmstrip_current_changed)
         self.filmstrip_view.clicked.connect(self._on_filmstrip_clicked)
         p0_lay.addWidget(self.filmstrip_view, 1)
 
+        from PySide6.QtGui import QIcon
+
+        def _make_chevron_icon(direction: str) -> QIcon:
+            pm = QPixmap(32, 32)
+            pm.fill(Qt.GlobalColor.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.setPen(QPen(QColor("#F8FAFC"), 2.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            if direction == "left":
+                p.drawLine(19, 9, 12, 16)
+                p.drawLine(12, 16, 19, 23)
+            else:
+                p.drawLine(13, 9, 20, 16)
+                p.drawLine(20, 16, 13, 23)
+            p.end()
+            pm.setDevicePixelRatio(2.0)
+            return QIcon(pm)
+
         _overlay_btn_qss = (
-            "QPushButton { background-color: rgba(15, 23, 42, 115); color: rgba(248, 250, 252, 220); "
-            "border: 1px solid rgba(148, 163, 184, 70); border-radius: 6px; font-size: 14pt; font-weight: 700; }"
-            "QPushButton:hover { background-color: rgba(15, 23, 42, 225); color: #FFFFFF; "
-            "border: 1px solid rgba(56, 189, 248, 170); }"
+            "QPushButton { background-color: rgba(15, 23, 42, 135); "
+            "border: 1px solid rgba(148, 163, 184, 85); border-radius: 9px; }"
+            "QPushButton:hover { background-color: rgba(15, 23, 42, 230); "
+            "border: 1px solid rgba(56, 189, 248, 190); }"
         )
-        self.btn_scroll_left = QPushButton("‹", self.filmstrip_view.viewport())
+        self.btn_scroll_left = QPushButton(self.page_filmstrip)
         self.btn_scroll_left.setObjectName("FilmstripOverlayScrollBtn")
-        self.btn_scroll_left.setFixedSize(26, 54)
+        self.btn_scroll_left.setIcon(_make_chevron_icon("left"))
+        self.btn_scroll_left.setIconSize(QSize(16, 16))
+        self.btn_scroll_left.setFixedSize(32, 32)
         self.btn_scroll_left.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_scroll_left.setToolTip("Scroll filmstrip left")
         self.btn_scroll_left.setStyleSheet(_overlay_btn_qss)
         self.btn_scroll_left.clicked.connect(lambda: self._scroll_filmstrip(-3))
 
-        self.btn_scroll_right = QPushButton("›", self.filmstrip_view.viewport())
+        self.btn_scroll_right = QPushButton(self.page_filmstrip)
         self.btn_scroll_right.setObjectName("FilmstripOverlayScrollBtn")
-        self.btn_scroll_right.setFixedSize(26, 54)
+        self.btn_scroll_right.setIcon(_make_chevron_icon("right"))
+        self.btn_scroll_right.setIconSize(QSize(16, 16))
+        self.btn_scroll_right.setFixedSize(32, 32)
         self.btn_scroll_right.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_scroll_right.setToolTip("Scroll filmstrip right")
         self.btn_scroll_right.setStyleSheet(_overlay_btn_qss)
@@ -423,17 +446,20 @@ class BottomFilmstripDock(QDockWidget):
         self.apply_theme_mode("wlpg_aero")
 
     def _position_scroll_buttons(self) -> None:
-        vp = self.filmstrip_view.viewport()
-        if vp is None:
+        host = getattr(self, "page_filmstrip", None)
+        if host is None:
             return
-        cy = max(2, (vp.height() - self.btn_scroll_left.height()) // 2)
-        self.btn_scroll_left.move(6, cy)
-        self.btn_scroll_right.move(max(6, vp.width() - self.btn_scroll_right.width() - 6), cy)
+        w, h = host.width(), host.height()
+        cy = max(4, (h - self.btn_scroll_left.height()) // 2)
+        self.btn_scroll_left.move(8, cy)
+        self.btn_scroll_right.move(max(8, w - self.btn_scroll_right.width() - 8), cy)
         self.btn_scroll_left.raise_()
         self.btn_scroll_right.raise_()
 
     def eventFilter(self, watched: Any, event: QEvent) -> bool:
-        if watched is self.filmstrip_view.viewport():
+        if watched is self.page_filmstrip and event.type() == QEvent.Type.Resize:
+            self._position_scroll_buttons()
+        elif watched is self.filmstrip_view.viewport():
             if event.type() == QEvent.Type.Resize:
                 self._position_scroll_buttons()
             elif event.type() == QEvent.Type.Wheel:

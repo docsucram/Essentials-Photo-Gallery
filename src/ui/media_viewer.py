@@ -1887,18 +1887,20 @@ class SingleMediaViewer(QWidget):
         self.btn_hud_flag.clicked.connect(self._on_hud_flag_clicked)
         self.cull_hud.hide()
 
-        self.btn_filmstrip_toggle = QPushButton("Filmstrip", self.graphics_view.viewport())
+        self.btn_filmstrip_toggle = QPushButton(self.graphics_view.viewport())
         self.btn_filmstrip_toggle.setCheckable(True)
+        self.btn_filmstrip_toggle.setFixedSize(32, 32)
+        self.btn_filmstrip_toggle.setIconSize(QSize(16, 16))
         self.btn_filmstrip_toggle.setCursor(Qt.PointingHandCursor)
         self.btn_filmstrip_toggle.setToolTip("Show / Hide Filmstrip")
         self.btn_filmstrip_toggle.setStyleSheet(
-            "QPushButton { background-color: rgba(15, 23, 42, 160); color: #E2E8F0; "
-            "border: 1px solid rgba(148, 163, 184, 95); border-radius: 13px; "
-            "padding: 4px 11px; font-size: 8.5pt; font-weight: 600; }"
-            "QPushButton:hover { background-color: rgba(15, 23, 42, 230); color: #FFFFFF; }"
-            "QPushButton:checked { border: 1px solid #38BDF8; color: #38BDF8; }"
+            "QPushButton { background-color: rgba(15, 23, 42, 145); "
+            "border: 1px solid rgba(148, 163, 184, 90); border-radius: 9px; }"
+            "QPushButton:hover { background-color: rgba(15, 23, 42, 230); "
+            "border: 1px solid rgba(248, 250, 252, 150); }"
+            "QPushButton:checked { background-color: rgba(15, 23, 42, 215); "
+            "border: 1px solid #38BDF8; }"
         )
-        self.btn_filmstrip_toggle.adjustSize()
         self.btn_filmstrip_toggle.clicked.connect(self._on_filmstrip_toggle_clicked)
         self.btn_filmstrip_toggle.hide()
 
@@ -2984,11 +2986,28 @@ class SingleMediaViewer(QWidget):
             return
         mw = getattr(self, "main_window", None) or self.window()
         enabled = bool(getattr(mw, "_filmstrip_viewer_enabled", False))
+
+        pm = QPixmap(32, 32)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        col = QColor("#38BDF8" if enabled else "#E2E8F0")
+        p.setPen(QPen(col, 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.NoBrush)
+        # Main frame + bottom strip of 3 mini filmstrip frames
+        p.drawRoundedRect(5, 6, 22, 13, 2.5, 2.5)
+        p.setBrush(QBrush(col) if enabled else Qt.NoBrush)
+        p.drawRoundedRect(5, 22, 6, 5, 1.2, 1.2)
+        p.drawRoundedRect(13, 22, 6, 5, 1.2, 1.2)
+        p.drawRoundedRect(21, 22, 6, 5, 1.2, 1.2)
+        p.end()
+        pm.setDevicePixelRatio(2.0)
+
         btn.blockSignals(True)
         btn.setChecked(enabled)
-        btn.setText("Hide Filmstrip" if enabled else "Filmstrip")
+        btn.setIcon(QIcon(pm))
+        btn.setToolTip("Hide Filmstrip" if enabled else "Show Filmstrip")
         btn.blockSignals(False)
-        btn.adjustSize()
         btn.move(14, max(14, vp.height() - btn.height() - 14))
         btn.show()
         btn.raise_()

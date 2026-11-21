@@ -10715,12 +10715,8 @@ class PhotoGalleryMainWindow(QMainWindow):
     def keyPressEvent(self, event: QKeyEvent) -> None:
         qp = getattr(self, "_quick_preview_dialog", None)
         if qp is not None and qp.isVisible():
-            if event.key() == Qt.Key_Escape or (event.key() == Qt.Key_Space and not event.isAutoRepeat()):
-                qp.hide()
-                event.accept()
-                return
-            if event.key() == Qt.Key_Space and event.isAutoRepeat():
-                event.accept()
+            qp.keyPressEvent(event)
+            if event.isAccepted():
                 return
         ws = getattr(self, "_active_create_workspace", None)
         if ws is not None:
