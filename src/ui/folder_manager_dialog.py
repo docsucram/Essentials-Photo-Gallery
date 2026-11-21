@@ -793,7 +793,10 @@ class FolderManagerDialog(QDialog):
             self.tree_folders.setUpdatesEnabled(True)
 
     def _on_add_folder_clicked(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Add Folder to Catalog")
+        from PySide6.QtCore import QStandardPaths
+        pic = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)
+        start_dir = pic if (pic and Path(pic).is_dir()) else str(Path.home() / "Pictures" if (Path.home() / "Pictures").is_dir() else Path.home())
+        folder = QFileDialog.getExistingDirectory(self, "Add Folder to Catalog", start_dir)
         if not folder:
             return
         if self.receivers(SIGNAL("folder_add_requested(QString)")) > 0:

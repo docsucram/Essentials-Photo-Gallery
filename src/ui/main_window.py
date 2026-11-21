@@ -1014,7 +1014,6 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         self.welcome_overlay = WelcomeEmptyOverlay(self.central_stack)
         self.welcome_overlay.add_folder_requested.connect(lambda: self.dispatch_ribbon_action("add_folder"))
-        self.welcome_overlay.import_picasa_requested.connect(self.open_picasa_import_dialog)
         self.welcome_overlay.open_settings_requested.connect(lambda: self.dispatch_ribbon_action("open_settings"))
         self.central_stack.addWidget(self.welcome_overlay)
 
@@ -1929,8 +1928,18 @@ class PhotoGalleryMainWindow(QMainWindow):
     # -------------------------------------------------------------------------
     # Folder Scanning & Progressive Sync
     # -------------------------------------------------------------------------
+    def _default_pictures_dir(self) -> str:
+        from PySide6.QtCore import QStandardPaths
+        pic = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)
+        if pic and Path(pic).is_dir():
+            return pic
+        fallback = Path.home() / "Pictures"
+        return str(fallback if fallback.is_dir() else Path.home())
+
     def _prompt_and_add_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Add Folder to Gallery")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Add Folder to Gallery", self._default_pictures_dir()
+        )
         if folder:
             self.scan_folder(folder, include_subfolders=True)
 

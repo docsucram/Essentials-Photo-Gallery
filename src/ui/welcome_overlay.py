@@ -24,7 +24,6 @@ class WelcomeEmptyOverlay(QWidget):
     """Centered 3-card onboarding canvas shown when the photo library is empty."""
 
     add_folder_requested = Signal()
-    import_picasa_requested = Signal()
     open_settings_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -86,17 +85,13 @@ class WelcomeEmptyOverlay(QWidget):
         c1.layout().addWidget(self.btn_add_folder, 0, Qt.AlignmentFlag.AlignLeft)
         cards_row.addWidget(c1)
 
-        # Card 2: Automatic metadata & Picasa import
+        # Card 2: Automatic metadata (WLPG / XMP & Picasa auto-prompt)
         c2 = self._make_card(
             "import",
             "Bring existing metadata",
-            "Ratings, tags, captions, and face tags from XMP or Windows Live Photo Gallery import automatically.",
+            "Ratings, tags, captions, and face tags from Windows Live Photo Gallery & XMP import automatically. "
+            "Google Picasa folders are detected on scan and prompted for 1-click import.",
         )
-        self.btn_import_picasa = QPushButton("Import from Picasa...", c2)
-        self.btn_import_picasa.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_import_picasa.setFixedHeight(30)
-        self.btn_import_picasa.clicked.connect(self.import_picasa_requested.emit)
-        c2.layout().addWidget(self.btn_import_picasa, 0, Qt.AlignmentFlag.AlignLeft)
         cards_row.addWidget(c2)
 
         # Card 3: Smart Albums & Local AI
@@ -186,5 +181,4 @@ class WelcomeEmptyOverlay(QWidget):
             f"border: 1px solid {tok.border_subtle}; border-radius: 6px; padding: 0 11px; font-size: 8.5pt; }}"
             f"QPushButton:hover {{ background-color: {tok.bg_hover}; border-color: {tok.accent}; }}"
         )
-        self.btn_import_picasa.setStyleSheet(sec_btn_qss)
         self.btn_open_settings.setStyleSheet(sec_btn_qss)

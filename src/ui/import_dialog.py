@@ -973,7 +973,10 @@ class ImportMediaDialog(QDialog):
         self._start_scan_source(src)
 
     def _browse_source_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Select Source Folder / Camera Stage")
+        from PySide6.QtCore import QStandardPaths
+        pic = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)
+        start_dir = pic if (pic and Path(pic).is_dir()) else str(Path.home() / "Pictures" if (Path.home() / "Pictures").is_dir() else Path.home())
+        folder = QFileDialog.getExistingDirectory(self, "Select Source Folder / Camera Stage", start_dir)
         if folder:
             self._set_source_path(Path(folder))
 
