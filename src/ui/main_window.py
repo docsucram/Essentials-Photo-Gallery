@@ -1010,6 +1010,14 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.ribbon.txt_search = self.scope_bar.txt_search
         self.central_stack.addWidget(self.grid_view)
 
+        from src.ui.welcome_overlay import WelcomeEmptyOverlay
+
+        self.welcome_overlay = WelcomeEmptyOverlay(self.central_stack)
+        self.welcome_overlay.add_folder_requested.connect(lambda: self.dispatch_ribbon_action("add_folder"))
+        self.welcome_overlay.import_picasa_requested.connect(self.open_picasa_import_dialog)
+        self.welcome_overlay.open_settings_requested.connect(lambda: self.dispatch_ribbon_action("open_settings"))
+        self.central_stack.addWidget(self.welcome_overlay)
+
         self.media_viewer = SingleMediaViewer(self.central_stack)
         self.media_viewer.main_window = self
         self.media_viewer.catalog_repo = self.catalog_repo
@@ -3950,6 +3958,11 @@ class PhotoGalleryMainWindow(QMainWindow):
             is_scoped=is_scoped,
             is_library_empty=is_library_empty,
         )
+        if hasattr(self, "welcome_overlay") and self.welcome_overlay is not None:
+            if is_library_empty and self.central_stack.currentWidget() in (self.grid_view, self.welcome_overlay):
+                self.central_stack.setCurrentWidget(self.welcome_overlay)
+            elif not is_library_empty and self.central_stack.currentWidget() == self.welcome_overlay:
+                self.central_stack.setCurrentWidget(self.grid_view)
 
         if preserve_selection and prev_ids:
             self.grid_view.set_selected_media_ids(prev_ids)
@@ -9291,12 +9304,16 @@ class PhotoGalleryMainWindow(QMainWindow):
             settings.setValue("unsaved_edits_action", dlg.unsaved_edits_action())
 
         dlg.settings_applied.connect(_apply_dlg_settings)
+        dlg.picasa_import_requested.connect(self.open_picasa_import_dialog)
         if dlg.exec() == AppSettingsDialog.Accepted:
             _apply_dlg_settings()
 
             if dlg.compact_requested:
                 self.catalog_repo.compact_database()
                 self.thumbnail_repo.compact_database()
+
+            if getattr(dlg, "rebuild_thumbs_requested", False):
+                self.rebuild_thumbnail_cache()
 
             if dlg.prune_backups_requested:
                 expired = self.catalog_repo.prune_expired_backups(self.retention_days)
@@ -10518,11 +10535,36 @@ class PhotoGalleryMainWindow(QMainWindow):
     # -------------------------------------------------------------------------
     # Theme Application, Keyboard Shortcuts & Clean Shutdown
     # -------------------------------------------------------------------------
+    def rebuild_thumbnail_cache(self) -> None:
+        """Clear cached thumbnail blobs and regenerate visible thumbnails at HiDPI/panorama quality."""
+        try:
+            with self.engine.thumb_transaction() as conn:
+                conn.execute("DELETE FROM thumbnails;")
+        except Exception:
+            try:
+                conn = self.engine.thumb_conn()
+                conn.execute("DELETE FROM thumbnails;")
+                conn.commit()
+            except Exception:
+                pass
+        try:
+            self.pixmap_cache.clear()
+        except Exception:
+            pass
+        if hasattr(self, "card_delegate") and hasattr(self.card_delegate, "_scaled_pixmap_cache"):
+            self.card_delegate._scaled_pixmap_cache.clear()
+        if hasattr(self, "grid_view") and self.grid_view is not None:
+            self.grid_view.viewport().update()
+            self.enqueue_visible_thumbnails(self.grid_view.visible_media_ids(buffer_rows=2))
+        self.show_status_message("✓ Thumbnail cache cleared — rebuilding visible thumbnails at HiDPI quality...", 4000)
+
     def apply_theme(self, theme_name: str) -> None:
         self.setUpdatesEnabled(False)
         try:
             self.current_theme = theme_name  # type: ignore[assignment]
             is_dark = (theme_name == "dark")
+            if hasattr(self, "welcome_overlay") and self.welcome_overlay is not None:
+                self.welcome_overlay.apply_theme(theme_name)
             if theme_name == "modern":
                 icon_provider.set_icon_theme("fluent")
                 self.current_icon_theme = "fluent"

@@ -5872,7 +5872,6 @@ class RibbonToolbar(QWidget):
         self.file_menu = file_menu
         self._apply_file_menu_stylesheet(False)
         file_menu.addAction(make_wlpg_icon("import", 16), "Import from camera or scanner...", lambda: self.action_triggered.emit("import_media"))
-        file_menu.addAction(make_wlpg_icon("import", 16), "Import Picasa Metadata (.picasa.ini)...", lambda: self.action_triggered.emit("import_picasa"))
         file_menu.addAction(make_wlpg_icon("folder_add", 16), "Include folder...", lambda: self.action_triggered.emit("add_folder"))
         file_menu.addAction(make_wlpg_icon("folder", 16), "Folder Manager...", lambda: self.action_triggered.emit("open_folder_manager"))
         from src.ui.folder_manager_dialog import _make_feature_icon
@@ -5966,51 +5965,24 @@ class RibbonToolbar(QWidget):
         self.btn_exit_immersive.hide()
         rc_layout.addWidget(self.btn_exit_immersive)
 
+        self.btn_ribbon_settings = QPushButton(right_corner)
+        self.btn_ribbon_settings.setFixedSize(22, 22)
+        self.btn_ribbon_settings.setFlat(True)
+        self.btn_ribbon_settings.setIconSize(QSize(15, 15))
+        self.btn_ribbon_settings.setToolTip("Options / Settings")
+        self.btn_ribbon_settings.setCursor(Qt.PointingHandCursor)
+        self.btn_ribbon_settings.clicked.connect(lambda: self.action_triggered.emit("open_settings"))
+        rc_layout.addWidget(self.btn_ribbon_settings)
+
         self.btn_collapse_ribbon = QPushButton("▲", right_corner)
         self.btn_collapse_ribbon.setFixedSize(22, 22)
         self.btn_collapse_ribbon.setFlat(True)
         self.btn_collapse_ribbon.setToolTip("Minimize the Ribbon (Ctrl+F1)")
         self.btn_collapse_ribbon.setCursor(Qt.PointingHandCursor)
-        self.btn_collapse_ribbon.setStyleSheet(
-            """
-            QPushButton {
-                border: 1px solid transparent;
-                color: #4B6B8B;
-                font-size: 8pt;
-                border-radius: 2px;
-                padding: 0px;
-            }
-            QPushButton:hover {
-                background: #D9E8F7;
-                border: 1px solid #AFC8E2;
-            }
-            """
-        )
         self.btn_collapse_ribbon.clicked.connect(self._toggle_ribbon_collapse)
         rc_layout.addWidget(self.btn_collapse_ribbon)
 
-        self.btn_ribbon_settings = QPushButton(right_corner)
-        self.btn_ribbon_settings.setFixedSize(22, 22)
-        self.btn_ribbon_settings.setFlat(True)
-        self.btn_ribbon_settings.setIcon(make_wlpg_icon("options", 15))
-        self.btn_ribbon_settings.setIconSize(QSize(15, 15))
-        self.btn_ribbon_settings.setToolTip("Options / Settings")
-        self.btn_ribbon_settings.setCursor(Qt.PointingHandCursor)
-        self.btn_ribbon_settings.setStyleSheet(
-            """
-            QPushButton {
-                border: 1px solid transparent;
-                border-radius: 2px;
-                padding: 0px;
-            }
-            QPushButton:hover {
-                background: rgba(148, 163, 184, 55);
-                border: 1px solid rgba(148, 163, 184, 110);
-            }
-            """
-        )
-        self.btn_ribbon_settings.clicked.connect(lambda: self.action_triggered.emit("open_settings"))
-        rc_layout.addWidget(self.btn_ribbon_settings)
+        self._apply_corner_buttons_theme(bool(getattr(self, "_dark_mode", False)))
 
         self.tab_widget.setCornerWidget(right_corner, Qt.TopRightCorner)
 
@@ -11109,7 +11081,47 @@ class RibbonToolbar(QWidget):
             btn.update()
         self._apply_file_menu_stylesheet(False)
 
+    def _apply_corner_buttons_theme(self, is_dark: bool) -> None:
+        """Keep ribbon corner buttons transparent at rest with crisp high-contrast cog & chevron."""
+        import math
+        from PySide6.QtCore import QPointF
+
+        fg_hex = "#E2E8F0" if is_dark else "#334155"
+        hover_bg = "rgba(148, 163, 184, 48)" if is_dark else "#D9E8F7"
+        hover_bd = "rgba(148, 163, 184, 110)" if is_dark else "#AFC8E2"
+        corner_qss = (
+            f"QPushButton {{ background: transparent; border: 1px solid transparent; "
+            f"color: {fg_hex}; font-size: 8pt; border-radius: 3px; padding: 0px; }} "
+            f"QPushButton:hover {{ background: {hover_bg}; border: 1px solid {hover_bd}; }}"
+        )
+        if hasattr(self, "btn_collapse_ribbon"):
+            self.btn_collapse_ribbon.setStyleSheet(corner_qss)
+        if hasattr(self, "btn_ribbon_settings"):
+            self.btn_ribbon_settings.setStyleSheet(corner_qss)
+            pm = QPixmap(30, 30)
+            pm.fill(Qt.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.Antialiasing, True)
+            cx, cy = 15.0, 15.0
+            pen = QPen(QColor(fg_hex), 2.3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            # 8 crisp gear teeth
+            for i in range(8):
+                ang = i * (math.pi / 4.0)
+                p.drawLine(
+                    QPointF(cx + math.cos(ang) * 7.8, cy + math.sin(ang) * 7.8),
+                    QPointF(cx + math.cos(ang) * 11.4, cy + math.sin(ang) * 11.4),
+                )
+            p.drawEllipse(QPointF(cx, cy), 7.6, 7.6)
+            p.setPen(QPen(QColor(fg_hex), 1.9))
+            p.drawEllipse(QPointF(cx, cy), 3.3, 3.3)
+            p.end()
+            pm.setDevicePixelRatio(2.0)
+            self.btn_ribbon_settings.setIcon(QIcon(pm))
+
     def _apply_arrange_box_theme(self, is_dark: bool) -> None:
+        self._apply_corner_buttons_theme(is_dark)
         arrange_box = getattr(self, "_arrange_box", None)
         if arrange_box is not None:
             if is_dark:

@@ -350,6 +350,7 @@ class AppSettingsDialog(QDialog):
     """
 
     settings_applied = Signal()
+    picasa_import_requested = Signal()
 
     def __init__(
         self,
@@ -388,6 +389,7 @@ class AppSettingsDialog(QDialog):
         self.setMinimumSize(560, 500)
 
         self.compact_requested: bool = False
+        self.rebuild_thumbs_requested: bool = False
         self.prune_backups_requested: bool = False
         self.backup_requested: bool = False
         self.fresh_start_requested: bool = False
@@ -666,6 +668,23 @@ class AppSettingsDialog(QDialog):
         self.btn_restore_import_defaults.setFixedWidth(110)
         self.btn_restore_import_defaults.clicked.connect(self._restore_import_defaults)
         v_imp.addWidget(self.btn_restore_import_defaults)
+
+        # Legacy Photo Manager Metadata Import (Google Picasa)
+        picasa_group = QGroupBox("Import from Other Photo Managers", tab_import)
+        picasa_lay = QVBoxLayout(picasa_group)
+        picasa_lay.setSpacing(6)
+        lbl_picasa = QLabel(
+            "Bring in starred photos, captions, tags, people, and albums from Google Picasa folders.",
+            picasa_group,
+        )
+        lbl_picasa.setWordWrap(True)
+        picasa_lay.addWidget(lbl_picasa)
+        self.btn_import_picasa = QPushButton("Import Picasa Metadata...", picasa_group)
+        self.btn_import_picasa.setFixedWidth(190)
+        self.btn_import_picasa.clicked.connect(self.picasa_import_requested.emit)
+        picasa_lay.addWidget(self.btn_import_picasa)
+        v_imp.addWidget(picasa_group)
+
         v_imp.addStretch(1)
 
         self.tab_widget.addTab(tab_import, "Import")
@@ -1093,6 +1112,12 @@ class AppSettingsDialog(QDialog):
         )
         self.btn_compact_db.clicked.connect(self._on_compact_clicked)
         maint_layout.addWidget(self.btn_compact_db)
+
+        self.btn_rebuild_thumbs = QPushButton(
+            "Rebuild Thumbnail Cache (HiDPI && Panoramas)", maint_frame
+        )
+        self.btn_rebuild_thumbs.clicked.connect(self._on_rebuild_thumbs_clicked)
+        maint_layout.addWidget(self.btn_rebuild_thumbs)
 
         self.btn_prune_backups = QPushButton(
             "Clean Up Expired Original Backups Now", maint_frame
@@ -1643,6 +1668,10 @@ class AppSettingsDialog(QDialog):
     def _on_compact_clicked(self) -> None:
         self.compact_requested = True
         self.lbl_maint_status.setText("✓ Database optimization queued on close.")
+
+    def _on_rebuild_thumbs_clicked(self) -> None:
+        self.rebuild_thumbs_requested = True
+        self.lbl_maint_status.setText("✓ Thumbnail cache rebuild queued on close (regenerates visible thumbnails at HiDPI quality).")
 
     def _on_prune_clicked(self) -> None:
         self.prune_backups_requested = True

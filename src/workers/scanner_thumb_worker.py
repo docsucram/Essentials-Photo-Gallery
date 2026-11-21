@@ -95,7 +95,33 @@ IGNORED_DIR_NAMES = {
     "system volume information",
 }
 
-THUMB_MAX_DIM = 256
+THUMB_MAX_DIM = 384
+THUMB_PANORAMA_MIN_SHORT = 240
+THUMB_PANORAMA_MAX_LONG = 768
+THUMB_WEBP_QUALITY = 85
+
+
+def compute_thumb_target_size(orig_w: int, orig_h: int) -> QSize:
+    """Compute HiDPI & panorama-aware thumbnail dimensions without upscaling."""
+    if orig_w <= 0 or orig_h <= 0:
+        return QSize(THUMB_MAX_DIM, THUMB_MAX_DIM)
+    long_side = max(orig_w, orig_h)
+    short_side = min(orig_w, orig_h)
+    if long_side <= THUMB_MAX_DIM:
+        return QSize(orig_w, orig_h)
+    aspect = long_side / float(max(1, short_side))
+    if aspect > 1.8:
+        scale = max(
+            THUMB_MAX_DIM / float(long_side),
+            min(
+                THUMB_PANORAMA_MIN_SHORT / float(short_side),
+                THUMB_PANORAMA_MAX_LONG / float(long_side),
+            ),
+        )
+        scale = min(1.0, scale)
+    else:
+        scale = THUMB_MAX_DIM / float(long_side)
+    return QSize(max(1, int(round(orig_w * scale))), max(1, int(round(orig_h * scale))))
 
 
 def create_filmstrip_for_qimage(
@@ -1687,7 +1713,7 @@ class ThumbnailDecodeWorker(QRunnable):
             byte_array = QByteArray()
             buffer = QBuffer(byte_array)
             buffer.open(QIODevice.WriteOnly)
-            qimg.save(buffer, "WEBP", 80)
+            qimg.save(buffer, "WEBP", THUMB_WEBP_QUALITY)
             buffer.close()
             webp_bytes = bytes(byte_array.data())
 
@@ -1901,18 +1927,26 @@ class ThumbnailDecodeWorker(QRunnable):
         reader = QImageReader(str(self.file_path))
         reader.setAutoTransform(True)
         orig_size = reader.size()
-        if orig_size.isValid() and (
-            orig_size.width() > THUMB_MAX_DIM or orig_size.height() > THUMB_MAX_DIM
-        ):
-            scaled_size = orig_size.scaled(
-                QSize(THUMB_MAX_DIM, THUMB_MAX_DIM), Qt.KeepAspectRatio
-            )
-            reader.setScaledSize(scaled_size)
+        target_size: QSize | None = None
+        if orig_size.isValid():
+            target_size = compute_thumb_target_size(orig_size.width(), orig_size.height())
+            if orig_size.width() > target_size.width() or orig_size.height() > target_size.height():
+                # Decode at 2x target (capped at original) for fast libjpeg DCT + crisp SmoothTransformation
+                decode_w = min(orig_size.width(), target_size.width() * 2)
+                decode_h = min(orig_size.height(), target_size.height() * 2)
+                reader.setScaledSize(QSize(decode_w, decode_h))
 
         qimg = reader.read()
         disk_trans = reader.transformation()
         del reader
         if not qimg.isNull():
+            if target_size is not None and (
+                qimg.width() > target_size.width() or qimg.height() > target_size.height()
+            ):
+                # Account for autoTransform swapping width/height on 90/270 rotations
+                final_target = compute_thumb_target_size(qimg.width(), qimg.height())
+                if qimg.width() > final_target.width() or qimg.height() > final_target.height():
+                    qimg = qimg.scaled(final_target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             # Convert wide-gamut embedded ICC profiles (Display P3, Adobe RGB, ProPhoto) to sRGB
             try:
                 if qimg.colorSpace().isValid():
