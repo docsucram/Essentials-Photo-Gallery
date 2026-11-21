@@ -11,9 +11,13 @@ import os
 import sys
 from pathlib import Path
 
-# Prevent NVIDIA Overlay / Optimus GPU popup on startup when Qt probes hardware OpenGL/GPU
+# Keep Qt OpenGL off discrete NVIDIA OpenGL drivers (avoids Optimus/Overlay popup)
+# while giving QtWebEngine hardware-accelerated Direct3D 11 (ANGLE) compositing like WebView2.
 os.environ.setdefault("QT_OPENGL", "software")
-os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --log-level=3")
+os.environ.setdefault(
+    "QTWEBENGINE_CHROMIUM_FLAGS",
+    "--use-angle=d3d11 --enable-gpu-rasterization --log-level=3",
+)
 
 from PySide6.QtCore import QEvent, QLoggingCategory, QObject, Qt
 from PySide6.QtGui import QColor, QPalette

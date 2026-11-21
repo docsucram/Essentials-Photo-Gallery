@@ -612,8 +612,8 @@ def generate_leaflet_html(
       zoomSnap: 1,
       zoomDelta: 1,
       zoomAnimation: true,
-      fadeAnimation: false,
-      markerZoomAnimation: false,
+      fadeAnimation: true,
+      markerZoomAnimation: true,
       wheelDebounceTime: 40,
       wheelPxPerZoomLevel: 60
     }}).setView([25.0, 0.0], 2);
