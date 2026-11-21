@@ -204,6 +204,53 @@ class _FlagUndoCommand(QUndoCommand):
                 self.main_win.ribbon.set_flag_state(bool(summary.get("flag", 0)))
 
 
+class _FavouriteUndoCommand(QUndoCommand):
+    """Reversible favourite (is_favourite) modification command for QUndoStack."""
+
+    def __init__(
+        self,
+        main_win: PhotoGalleryMainWindow,
+        target_ids: Sequence[int],
+        new_fav: int,
+    ) -> None:
+        super().__init__("Favourite" if new_fav else "Unfavourite")
+        self.main_win = main_win
+        self.target_ids = list(target_ids)
+        self.new_fav = 1 if new_fav else 0
+        field_map = self.main_win.catalog_repo.get_field_map_for_ids(self.target_ids, "is_favourite")
+        self.old_favs = {mid: int(field_map.get(mid) or 0) for mid in self.target_ids}
+
+    def _apply_lookup_and_refresh(self, fav_map: dict[int, int]) -> None:
+        for mid, val in fav_map.items():
+            meta = self.main_win._media_meta_lookup.get(mid)
+            if meta is not None:
+                meta["is_favourite"] = int(val)
+        if hasattr(self.main_win, "catalog_model"):
+            self.main_win.catalog_model.update_items_metadata(list(fav_map.keys()), is_favourite=self.new_fav)
+        if hasattr(self.main_win, "grid_view") and self.main_win.grid_view.viewport():
+            self.main_win.grid_view.viewport().update()
+        if hasattr(self.main_win, "media_viewer") and getattr(self.main_win.media_viewer, "_update_cull_hud", None):
+            self.main_win.media_viewer._update_cull_hud()
+
+    def redo(self) -> None:
+        self.main_win.catalog_repo.batch_update_favourite(self.target_ids, bool(self.new_fav))
+        self._apply_lookup_and_refresh({mid: self.new_fav for mid in self.target_ids})
+
+    def undo(self) -> None:
+        self.main_win.catalog_repo.restore_field_map(self.old_favs, "is_favourite")
+        for old_v, mids in ((0, [m for m, v in self.old_favs.items() if not v]), (1, [m for m, v in self.old_favs.items() if v])):
+            if mids:
+                self.main_win.catalog_model.update_items_metadata(mids, is_favourite=old_v)
+                for m in mids:
+                    meta = self.main_win._media_meta_lookup.get(m)
+                    if meta is not None:
+                        meta["is_favourite"] = old_v
+        if hasattr(self.main_win, "grid_view") and self.main_win.grid_view.viewport():
+            self.main_win.grid_view.viewport().update()
+        if hasattr(self.main_win, "media_viewer") and getattr(self.main_win.media_viewer, "_update_cull_hud", None):
+            self.main_win.media_viewer._update_cull_hud()
+
+
 class _CaptionUndoCommand(QUndoCommand):
     """Reversible caption modification command for QUndoStack."""
 
@@ -1032,8 +1079,11 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.compare_view.focused_media_changed.connect(self._on_compare_focused_media_changed)
         self.central_stack.addWidget(self.compare_view)
         self._expanded_stack_ids: set[int] = set()
+        self._favourites_only: bool = False
         self.grid_view.compare_requested.connect(self.open_compare_view)
         self.grid_view.stack_toggle_requested.connect(self.toggle_stack_expanded)
+        self.grid_view.favourite_toggled.connect(self._on_card_favourite_toggled)
+        self.ribbon.favourite_filter_selected.connect(self._on_favourite_filter_selected)
         self.grid_view.find_similar_requested.connect(self.open_find_similar_for_media)
 
         self.setCentralWidget(self.central_stack)
@@ -3850,10 +3900,11 @@ class PhotoGalleryMainWindow(QMainWindow):
                 search_text=spec.search_text,
             )
         exp_stack = tuple(sorted(getattr(self, "_expanded_stack_ids", set())))
-        if exp_stack:
+        fav_only = bool(getattr(self, "_favourites_only", False))
+        if exp_stack or fav_only:
             from dataclasses import replace as _dc_replace
 
-            spec = _dc_replace(spec, expanded_stack_ids=exp_stack)
+            spec = _dc_replace(spec, expanded_stack_ids=exp_stack, favourites_only=fav_only)
         records = self.catalog_repo.query_media_records(spec)
         if sim_order:
             rank_map = {int(mid): idx for idx, mid in enumerate(sim_order)}
@@ -4401,9 +4452,94 @@ class PhotoGalleryMainWindow(QMainWindow):
             return
         cmd = _FlagUndoCommand(self, target_ids, flag)
         self.undo_stack.push(cmd)
-        self.show_status_message(f"✓ {'Flagged' if flag else 'Unflagged'} {len(target_ids)} item(s)", 3000)
+        for mid in target_ids:
+            meta = self._media_meta_lookup.get(mid)
+            if meta is not None:
+                meta["flag"] = int(flag)
+        if hasattr(self, "media_viewer") and getattr(self.media_viewer, "_update_cull_hud", None):
+            self.media_viewer._update_cull_hud()
+        if flag == 1:
+            lbl = "Picked"
+        elif flag == -1:
+            lbl = "Rejected"
+        else:
+            lbl = "Unflagged"
+        self.show_status_message(f"✓ {lbl} {len(target_ids)} item(s)", 3000)
         if advance:
             self._advance_after_cull()
+
+    def apply_favourite_to_selection(
+        self, is_fav: bool, *, target_ids: Sequence[int] | None = None, advance: bool = False
+    ) -> None:
+        ids = list(target_ids) if target_ids is not None else self.get_active_target_ids()
+        if not ids:
+            return
+        cmd = _FavouriteUndoCommand(self, ids, 1 if is_fav else 0)
+        self.undo_stack.push(cmd)
+        self.show_status_message(
+            f"{'♥ Added' if is_fav else '♡ Removed'} {len(ids)} item(s) {'to' if is_fav else 'from'} Favourites",
+            3000,
+        )
+        if advance:
+            self._advance_after_cull()
+
+    def toggle_favourite_selection(self, *, advance: bool = False) -> None:
+        ids = self.get_active_target_ids()
+        if not ids:
+            return
+        fav_map = self.catalog_repo.get_field_map_for_ids(ids, "is_favourite")
+        any_unfav = any(int(fav_map.get(mid) or 0) == 0 for mid in ids)
+        self.apply_favourite_to_selection(any_unfav, target_ids=ids, advance=advance)
+
+    def _on_card_favourite_toggled(self, media_id: int, is_fav: bool) -> None:
+        self.apply_favourite_to_selection(is_fav, target_ids=[int(media_id)])
+
+    def _on_favourite_filter_selected(self, enabled: bool) -> None:
+        self._favourites_only = bool(enabled)
+        self.rebuild_and_run_query()
+
+    def select_all_rejected(self) -> list[int]:
+        rejected = self.catalog_repo.get_rejected_media_ids()
+        if not rejected:
+            self.show_status_message("No rejected items in catalog.", 2500)
+            return []
+        self.grid_view.set_selected_media_ids(rejected)
+        self.show_status_message(f"Selected {len(rejected)} rejected item(s).", 3000)
+        return rejected
+
+    def delete_all_rejected(self) -> int:
+        rejected = self.catalog_repo.get_rejected_media_ids()
+        if not rejected:
+            self.show_status_message("No rejected items to delete.", 2500)
+            return 0
+        reply = QMessageBox.question(
+            self,
+            "Delete Rejected Photos",
+            f"Move {len(rejected)} rejected item(s) to the Recycle Bin?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return 0
+        self.grid_view.set_selected_media_ids(rejected)
+        return self.delete_selection_to_recycle_bin()
+
+    def open_picasa_import_dialog(self) -> None:
+        from src.ui.picasa_import_dialog import PicasaImportDialog
+
+        initial = ""
+        folders = self.catalog_repo.get_folders()
+        if folders:
+            initial = str(folders[0]["path"])
+        dlg = PicasaImportDialog(self.catalog_repo, initial_dir=initial, parent=self)
+        if dlg.exec() == QDialog.Accepted and dlg.import_stats:
+            st = dlg.import_stats
+            self.refresh_navigation_and_autocomplete()
+            self.rebuild_and_run_query()
+            self.show_status_message(
+                f"✓ Picasa import: {st['matched']} matched ({st['stars']} ♥, {st['tags']} tags, {st['faces']} faces, {st['albums']} albums)",
+                5000,
+            )
 
     def _advance_after_cull(self) -> None:
         """Advance to the next photo after a Shift+Rating/Flag culling action."""
@@ -7889,8 +8025,22 @@ class PhotoGalleryMainWindow(QMainWindow):
             )
             if target_ids:
                 flags_map = self.catalog_repo.get_field_map_for_ids(target_ids, "flag")
-                has_unflagged = any(flags_map.get(mid, 0) == 0 for mid in target_ids)
+                has_unflagged = any(flags_map.get(mid, 0) != 1 for mid in target_ids)
                 self.apply_flag_to_selection(1 if has_unflagged else 0)
+        elif action_id == "flag_pick":
+            self.apply_flag_to_selection(1)
+        elif action_id == "flag_reject":
+            self.apply_flag_to_selection(-1)
+        elif action_id == "flag_unflag":
+            self.apply_flag_to_selection(0)
+        elif action_id == "toggle_favourite":
+            self.toggle_favourite_selection()
+        elif action_id == "select_rejected":
+            self.select_all_rejected()
+        elif action_id == "delete_rejected":
+            self.delete_all_rejected()
+        elif action_id == "import_picasa":
+            self.open_picasa_import_dialog()
         elif action_id.startswith("rate_"):
             try:
                 r_val = int(action_id.split("_")[1])
@@ -10619,11 +10769,31 @@ class PhotoGalleryMainWindow(QMainWindow):
             if event.key() == Qt.Key_P:
                 target_ids = self.get_active_target_ids()
                 if target_ids:
-                    has_unflagged = any(
-                        int((self._media_meta_lookup.get(mid) or {}).get("flag", 0)) == 0
+                    has_non_picked = any(
+                        int((self._media_meta_lookup.get(mid) or {}).get("flag", 0)) != 1
                         for mid in target_ids
                     )
-                    self.apply_flag_to_selection(1 if has_unflagged else 0, advance=shift_held)
+                    self.apply_flag_to_selection(1 if has_non_picked else 0, advance=shift_held)
+                    event.accept()
+                    return
+            if event.key() == Qt.Key_X:
+                target_ids = self.get_active_target_ids()
+                if target_ids:
+                    has_non_rejected = any(
+                        int((self._media_meta_lookup.get(mid) or {}).get("flag", 0)) != -1
+                        for mid in target_ids
+                    )
+                    self.apply_flag_to_selection(-1 if has_non_rejected else 0, advance=shift_held)
+                    event.accept()
+                    return
+            if event.key() == Qt.Key_U:
+                if self.get_active_target_ids():
+                    self.apply_flag_to_selection(0, advance=shift_held)
+                    event.accept()
+                    return
+            if event.key() == Qt.Key_F:
+                if self.get_active_target_ids():
+                    self.toggle_favourite_selection(advance=shift_held)
                     event.accept()
                     return
             if event.key() == Qt.Key_F2 and not shift_held:

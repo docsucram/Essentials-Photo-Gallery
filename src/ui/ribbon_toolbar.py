@@ -5460,7 +5460,8 @@ class RibbonToolbar(QWidget):
     tag_filter_selected = Signal(object, str)              # (tag_id, boolean_mode)
     untagged_filter_selected = Signal(bool)
     flagged_filter_selected = Signal(bool)
-    flag_filter_selected = Signal(object)                   # int | None: 1 = flagged, 0 = not flagged, None = all
+    flag_filter_selected = Signal(object)                   # int | None: 1 = picked, -1 = rejected, 0 = not flagged, None = all
+    favourite_filter_selected = Signal(bool)
     edited_filter_selected = Signal(bool)
     edited_filter_mode_selected = Signal(object)            # int | None: 1 = edited, 0 = not edited, None = all
     orientation_filter_selected = Signal(str)               # "all" | "landscape" | "portrait"
@@ -5871,6 +5872,7 @@ class RibbonToolbar(QWidget):
         self.file_menu = file_menu
         self._apply_file_menu_stylesheet(False)
         file_menu.addAction(make_wlpg_icon("import", 16), "Import from camera or scanner...", lambda: self.action_triggered.emit("import_media"))
+        file_menu.addAction(make_wlpg_icon("import", 16), "Import Picasa Metadata (.picasa.ini)...", lambda: self.action_triggered.emit("import_picasa"))
         file_menu.addAction(make_wlpg_icon("folder_add", 16), "Include folder...", lambda: self.action_triggered.emit("add_folder"))
         file_menu.addAction(make_wlpg_icon("folder", 16), "Folder Manager...", lambda: self.action_triggered.emit("open_folder_manager"))
         from src.ui.folder_manager_dialog import _make_feature_icon
@@ -7293,23 +7295,38 @@ class RibbonToolbar(QWidget):
         menu = QMenu(btn)
         menu.setFont(QFont("Segoe UI", 9))
         act_all = menu.addAction("All items")
-        act_flagged = menu.addAction("Flagged")
+        act_fav = menu.addAction("♥ Favourites")
+        act_flagged = menu.addAction("⚑ Picked / Flagged")
+        act_rejected = menu.addAction("✕ Rejected")
         act_unflagged = menu.addAction("Not flagged")
 
         def _on_all():
+            self.favourite_filter_selected.emit(False)
             self.flag_filter_selected.emit(None)
             self.flagged_filter_selected.emit(False)
 
+        def _on_fav():
+            self.favourite_filter_selected.emit(True)
+
         def _on_flagged():
+            self.favourite_filter_selected.emit(False)
             self.flag_filter_selected.emit(1)
             self.flagged_filter_selected.emit(True)
 
+        def _on_rejected():
+            self.favourite_filter_selected.emit(False)
+            self.flag_filter_selected.emit(-1)
+            self.flagged_filter_selected.emit(False)
+
         def _on_unflagged():
+            self.favourite_filter_selected.emit(False)
             self.flag_filter_selected.emit(0)
             self.flagged_filter_selected.emit(False)
 
         act_all.triggered.connect(_on_all)
+        act_fav.triggered.connect(_on_fav)
         act_flagged.triggered.connect(_on_flagged)
+        act_rejected.triggered.connect(_on_rejected)
         act_unflagged.triggered.connect(_on_unflagged)
         btn.setMenu(menu)
 
@@ -7499,9 +7516,21 @@ class RibbonToolbar(QWidget):
         self.btn_home_rate.setMenu(rate_menu)
 
         self.btn_home_flag = self._make_btn("Flag", "flag", grp_org, checkable=True)
-        self.btn_home_flag.setToolTip("Toggle flag (Insert / \\)")
-        self.btn_home_flag._tooltip_override = "Toggle flag (Insert / \\)"
+        self.btn_home_flag.setToolTip("Toggle Pick flag (P), Reject (X), Unflag (U)")
+        self.btn_home_flag._tooltip_override = "Toggle Pick flag (P), Reject (X), Unflag (U)"
+        self.btn_home_flag.setPopupMode(QToolButton.MenuButtonPopup)
         self.btn_home_flag.clicked.connect(lambda: self.action_triggered.emit("toggle_flag"))
+        flag_menu = QMenu(self.btn_home_flag)
+        flag_menu.setFont(QFont("Segoe UI", 9))
+        flag_menu.addAction("⚑ Pick (P)", lambda: self.action_triggered.emit("flag_pick"))
+        flag_menu.addAction("✕ Reject (X)", lambda: self.action_triggered.emit("flag_reject"))
+        flag_menu.addAction("Unflag (U)", lambda: self.action_triggered.emit("flag_unflag"))
+        flag_menu.addSeparator()
+        flag_menu.addAction("♥ Toggle Favourite (F)", lambda: self.action_triggered.emit("toggle_favourite"))
+        flag_menu.addSeparator()
+        flag_menu.addAction("Select All Rejected", lambda: self.action_triggered.emit("select_rejected"))
+        flag_menu.addAction("Delete All Rejected...", lambda: self.action_triggered.emit("delete_rejected"))
+        self.btn_home_flag.setMenu(flag_menu)
 
         o_right_col.addWidget(self.btn_geotag)
         o_right_col.addWidget(self.btn_home_rate)

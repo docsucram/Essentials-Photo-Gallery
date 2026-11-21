@@ -1859,6 +1859,34 @@ class SingleMediaViewer(QWidget):
         self.btn_live_play.clicked.connect(self.toggle_live_photo_playback)
         self.btn_live_play.hide()
 
+        self.cull_hud = QFrame(self.graphics_view.viewport())
+        self.cull_hud.setStyleSheet(
+            "QFrame { background-color: rgba(15, 23, 42, 200); border: 1px solid rgba(148, 163, 184, 100); "
+            "border-radius: 14px; }"
+        )
+        hud_lay = QHBoxLayout(self.cull_hud)
+        hud_lay.setContentsMargins(6, 3, 6, 3)
+        hud_lay.setSpacing(4)
+        self.btn_hud_fav = QPushButton("♡", self.cull_hud)
+        self.btn_hud_fav.setToolTip("Favourite (F / Shift+F)")
+        self.btn_hud_pick = QPushButton("⚑", self.cull_hud)
+        self.btn_hud_pick.setToolTip("Pick / Flag (P / Shift+P)")
+        self.btn_hud_reject = QPushButton("✕", self.cull_hud)
+        self.btn_hud_reject.setToolTip("Reject (X / Shift+X)")
+        for b in (self.btn_hud_fav, self.btn_hud_pick, self.btn_hud_reject):
+            b.setFixedSize(24, 24)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setStyleSheet(
+                "QPushButton { background: transparent; color: #CBD5E1; border: none; font-size: 11pt; font-weight: 700; }"
+                "QPushButton:hover { color: #FFFFFF; background: rgba(255,255,255,28); border-radius: 12px; }"
+            )
+            hud_lay.addWidget(b)
+        self.cull_hud.adjustSize()
+        self.btn_hud_fav.clicked.connect(self._on_hud_fav_clicked)
+        self.btn_hud_pick.clicked.connect(self._on_hud_pick_clicked)
+        self.btn_hud_reject.clicked.connect(self._on_hud_reject_clicked)
+        self.cull_hud.hide()
+
         self.media_stack.addWidget(self.graphics_view)
 
         # Page 1: Video Player (Authentic WLPG White Background & Transport Bar)
@@ -2849,6 +2877,68 @@ class SingleMediaViewer(QWidget):
         self._update_zoom_minimap()
         self._refresh_af_overlay()
         self._update_live_badge()
+        self._update_cull_hud()
+
+    def _update_cull_hud(self) -> None:
+        hud = getattr(self, "cull_hud", None)
+        if hud is None:
+            return
+        vp = self.graphics_view.viewport()
+        if (
+            self.current_media_id is None
+            or self.is_in_edit_mode()
+            or self.media_stack.currentWidget() != self.graphics_view
+            or vp is None
+            or vp.width() < 160
+        ):
+            hud.hide()
+            return
+        mw = getattr(self, "main_window", None) or self.window()
+        meta = (getattr(mw, "_media_meta_lookup", None) or {}).get(int(self.current_media_id)) or {}
+        is_fav = bool(meta.get("is_favourite", 0))
+        flag = int(meta.get("flag", 0) or 0)
+        self.btn_hud_fav.setText("♥" if is_fav else "♡")
+        self.btn_hud_fav.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {'#F43F5E' if is_fav else '#CBD5E1'}; "
+            "border: none; font-size: 11pt; font-weight: 700; }"
+            "QPushButton:hover { background: rgba(255,255,255,28); border-radius: 12px; }"
+        )
+        self.btn_hud_pick.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {'#22C55E' if flag == 1 else '#CBD5E1'}; "
+            "border: none; font-size: 11pt; font-weight: 700; }"
+            "QPushButton:hover { background: rgba(255,255,255,28); border-radius: 12px; }"
+        )
+        self.btn_hud_reject.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {'#EF4444' if flag == -1 else '#CBD5E1'}; "
+            "border: none; font-size: 11pt; font-weight: 700; }"
+            "QPushButton:hover { background: rgba(255,255,255,28); border-radius: 12px; }"
+        )
+        hud.adjustSize()
+        hud.move(max(14, vp.width() - hud.width() - 14), 14)
+        hud.show()
+        hud.raise_()
+
+    def _on_hud_fav_clicked(self) -> None:
+        mw = getattr(self, "main_window", None) or self.window()
+        if self.current_media_id is not None and hasattr(mw, "toggle_favourite_selection"):
+            mw.toggle_favourite_selection()
+            self._update_cull_hud()
+
+    def _on_hud_pick_clicked(self) -> None:
+        mw = getattr(self, "main_window", None) or self.window()
+        if self.current_media_id is not None and hasattr(mw, "apply_flag_to_selection"):
+            meta = (getattr(mw, "_media_meta_lookup", None) or {}).get(int(self.current_media_id)) or {}
+            cur_flag = int(meta.get("flag", 0) or 0)
+            mw.apply_flag_to_selection(0 if cur_flag == 1 else 1)
+            self._update_cull_hud()
+
+    def _on_hud_reject_clicked(self) -> None:
+        mw = getattr(self, "main_window", None) or self.window()
+        if self.current_media_id is not None and hasattr(mw, "apply_flag_to_selection"):
+            meta = (getattr(mw, "_media_meta_lookup", None) or {}).get(int(self.current_media_id)) or {}
+            cur_flag = int(meta.get("flag", 0) or 0)
+            mw.apply_flag_to_selection(0 if cur_flag == -1 else -1)
+            self._update_cull_hud()
 
     def _update_live_badge(self) -> None:
         btn = getattr(self, "btn_live_play", None)

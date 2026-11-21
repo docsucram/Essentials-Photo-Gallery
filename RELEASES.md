@@ -43,6 +43,11 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 
 - **Collapsible `[⧉ N]` Stack Cards & Auto-Stacking:** Added `stack_parent_id` schema migration and repository helpers (`create_stack`, `unstack_media`, `auto_stack_raw_jpeg_pairs`, `auto_stack_bursts`), `[⧉ N]` badge rendering/clicking in `MediaCardDelegate`, Grid context menu **Stacks** actions, and unified collapsed-stack scope prompts for delete operations.
 
+### Favourites, Tri-State Culling Flags & Picasa Heritage Importer
+
+- **Photo Favourites (`is_favourite`) & Tri-State Pick/Reject Flags:** Separated permanent **Favourites** (`♥` badge on Grid cards + `F` / `Shift+F`) from **Pick / Neutral / Reject** culling flags (`P` = Pick, `X` = Reject with dim overlay + `✕` badge, `U` = Unflag, `Shift` to auto-advance), added an undoable `_FavouriteUndoCommand`, a top-right `[♡ ⚑ ✕]` HUD pill in `SingleMediaViewer`, and Ribbon filter/sweep actions (`Select All Rejected` / `Delete All Rejected...`).
+- **Google Picasa `.picasa.ini` & `contacts.xml` Heritage Importer (`src/core/picasa_importer.py`, `src/ui/picasa_import_dialog.py`):** Added `File → Import Picasa Metadata (.picasa.ini)...` with dry-run preview counts and selective import for Picasa stars (`star=yes` → `♥ Favourites`), captions, keywords/tags, `rect64(...)` face boxes + `[Contacts2]`/`contacts.xml` people names, and `[.album:...]` virtual albums.
+
 ---
 
 ## Essentials Photo Gallery v0.15.0

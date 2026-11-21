@@ -518,6 +518,7 @@ class MediaCardDelegate(QStyledItemDelegate):
 
     rating_clicked = Signal(int, int)         # media_id, rating (1..5 or 0 to clear)
     flag_toggled = Signal(int, int)           # media_id, new_flag (0 or 1)
+    favourite_toggled = Signal(int, bool)     # media_id, is_favourite
     stack_badge_clicked = Signal(int)         # stack head media_id
     checkbox_toggled = Signal(int, bool)      # media_id, checked
     group_header_clicked = Signal(str)        # group_key
@@ -619,6 +620,10 @@ class MediaCardDelegate(QStyledItemDelegate):
             img_y = card_rect.top() + (card_rect.height() - thumb_side) // 2
             return QRect(img_x + 4, img_y + 4, 16, 16)
         return QRect(card_rect.left() + 6, card_rect.top() + 6, 16, 16)
+
+    def heart_rect(self, card_rect: QRect) -> QRect:
+        cb = self.checkbox_rect(card_rect)
+        return QRect(cb.right() + 4, cb.top(), 16, 16)
 
     def flag_rect(self, card_rect: QRect) -> QRect:
         if getattr(self, "is_horizontal_card", False):
@@ -909,8 +914,21 @@ class MediaCardDelegate(QStyledItemDelegate):
                 painter.setPen(QPen(QColor("#60A5FA") if self.dark_mode else QColor("#7A9CC6"), 1.1))
                 painter.drawRoundedRect(cb_rect, 2, 2)
 
+        if flag == -1:
+            painter.fillRect(img_box, QColor(15, 23, 42, 110))
+
         if "flag" in self._visible_details or "all" in self._visible_details:
-            if flag == 1 or is_hovered:
+            if flag == -1:
+                fl_rect = self.flag_rect(card_rect)
+                painter.save()
+                painter.setPen(QPen(QColor("#EF4444"), 1.2))
+                painter.setBrush(QColor(127, 29, 29, 220))
+                painter.drawRoundedRect(fl_rect, 3, 3)
+                painter.setPen(QPen(QColor("#FEE2E2"), 1.8))
+                painter.drawLine(fl_rect.left() + 4, fl_rect.top() + 4, fl_rect.right() - 4, fl_rect.bottom() - 4)
+                painter.drawLine(fl_rect.right() - 4, fl_rect.top() + 4, fl_rect.left() + 4, fl_rect.bottom() - 4)
+                painter.restore()
+            elif flag == 1 or is_hovered:
                 fl_rect = self.flag_rect(card_rect)
                 pole_x = fl_rect.left() + 4
                 painter.setPen(QPen(QColor("#D83B01") if flag == 1 else QColor("#8A9AB0"), 1.3))
@@ -923,9 +941,21 @@ class MediaCardDelegate(QStyledItemDelegate):
                 painter.setBrush(QColor("#E81123") if flag == 1 else (QColor(45, 55, 72, 190) if self.dark_mode else QColor(255, 255, 255, 190)))
                 painter.drawPolygon(banner)
 
-        # Live Photo / Offline Drive / Image Stack Badges
+        # Live Photo / Offline Drive / Image Stack / Favourite Badges
         rec_meta = index.data(CatalogRoles.RecordRole)
         if rec_meta is not None:
+            is_fav = bool(getattr(rec_meta, "is_favourite", 0))
+            if is_fav or is_hovered:
+                hr_rect = self.heart_rect(card_rect)
+                painter.save()
+                painter.setFont(QFont("Segoe UI Symbol", 10, QFont.Weight.Bold))
+                if is_fav:
+                    painter.setPen(QColor("#F43F5E"))
+                    painter.drawText(hr_rect, Qt.AlignCenter, "♥")
+                else:
+                    painter.setPen(QColor(148, 163, 184, 210) if self.dark_mode else QColor(100, 116, 139, 190))
+                    painter.drawText(hr_rect, Qt.AlignCenter, "♡")
+                painter.restore()
             is_live = bool(getattr(rec_meta, "is_live_photo", 0))
             is_offline = bool(getattr(rec_meta, "is_offline", 0))
             stack_cnt = int(getattr(rec_meta, "stack_count", 1) or 1)
@@ -1421,10 +1451,17 @@ class MediaCardDelegate(QStyledItemDelegate):
                     self.checkbox_toggled.emit(int(media_id), not is_sel)
                     return True
 
+                # 1b. Check top-left heart (favourite) hit
+                if self.heart_rect(card_rect).contains(pos):
+                    rec_fav = index.data(CatalogRoles.RecordRole)
+                    cur_fav = bool(getattr(rec_fav, "is_favourite", 0)) if rec_fav is not None else False
+                    self.favourite_toggled.emit(int(media_id), not cur_fav)
+                    return True
+
                 # 2. Check top-right flag pin hit
                 if self.flag_rect(card_rect).contains(pos):
                     curr_flag = int(index.data(CatalogRoles.FlagRole) or 0)
-                    new_flag = 0 if curr_flag == 1 else 1
+                    new_flag = 0 if curr_flag in (1, -1) else 1
                     self.flag_toggled.emit(int(media_id), new_flag)
                     return True
 
@@ -1666,6 +1703,7 @@ class ThumbnailGridView(QListView):
     compare_requested = Signal(list)              # list[int] selected media_ids on 'C' or context menu
     find_similar_requested = Signal(int)          # media_id for Spatial Haar Find Similar
     stack_toggle_requested = Signal(int)          # head_id to expand/collapse stack
+    favourite_toggled = Signal(int, bool)         # media_id, is_favourite
     try_search_all_requested = Signal()
     add_folder_requested = Signal()           # user clicked 'Try searching all photos and videos'
     thumbnail_size_changed = Signal(int)          # emitted when thumbnail size changes (e.g. Ctrl+wheel)
@@ -1753,6 +1791,7 @@ class ThumbnailGridView(QListView):
             self.catalog_model.toggle_group_collapsed
         )
         self.card_delegate.stack_badge_clicked.connect(self.stack_toggle_requested.emit)
+        self.card_delegate.favourite_toggled.connect(self.favourite_toggled.emit)
         self.card_delegate.checkbox_toggled.connect(self.on_card_checkbox_toggled)
         self.catalog_model.modelReset.connect(self._on_model_reset)
         self.catalog_model.view_repaint_requested.connect(self._on_view_repaint_requested)

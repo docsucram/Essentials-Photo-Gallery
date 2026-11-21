@@ -244,6 +244,7 @@ class FilterQuerySpec:
     smart_album_rules: str | None = None
     collapse_stacks: bool = True
     expanded_stack_ids: tuple[int, ...] = ()
+    favourites_only: bool = False
 
 
 @dataclass(slots=True)
@@ -268,6 +269,7 @@ class MediaItemRecord:
     is_offline: int = 0
     stack_count: int = 1
     stack_parent_id: int | None = None
+    is_favourite: int = 0
 
 
 _EPOCH_UTC = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
@@ -1182,8 +1184,13 @@ class CatalogRepository:
         flag_val = getattr(spec, "flag_filter", None)
         if flag_val == 1 or spec.flagged_only:
             where_clauses.append("m.flag = 1")
+        elif flag_val == -1:
+            where_clauses.append("m.is_rejected = 1")
         elif flag_val == 0:
-            where_clauses.append("m.flag = 0")
+            where_clauses.append("m.flag = 0 AND m.is_rejected = 0")
+
+        if getattr(spec, "favourites_only", False):
+            where_clauses.append("m.is_favourite = 1")
 
         edited_val = getattr(spec, "edited_filter", None)
         if edited_val == 1 or spec.edited_only:
@@ -1769,10 +1776,16 @@ class CatalogRepository:
         live_ids = {
             int(r[0]) for r in cur.execute("SELECT id FROM media WHERE is_live_photo = 1").fetchall()
         }
+        fav_ids = {
+            int(r[0]) for r in cur.execute("SELECT id FROM media WHERE is_favourite = 1").fetchall()
+        }
+        rej_ids = {
+            int(r[0]) for r in cur.execute("SELECT id FROM media WHERE is_rejected = 1").fetchall()
+        }
         stack_rows = cur.execute(
             "SELECT id, stack_parent_id FROM media WHERE stack_parent_id IS NOT NULL AND live_companion_for_id IS NULL"
         ).fetchall()
-        if not offline_folders and not live_ids and not stack_rows:
+        if not offline_folders and not live_ids and not fav_ids and not rej_ids and not stack_rows:
             return records
 
         stack_counts: dict[int, int] = {}
@@ -1788,12 +1801,58 @@ class CatalogRepository:
                 rec.is_offline = 1
             if rec.id in live_ids:
                 rec.is_live_photo = 1
+            if rec.id in fav_ids:
+                rec.is_favourite = 1
+            if rec.id in rej_ids:
+                rec.flag = -1
             sp = stack_parents.get(rec.id)
             if sp is not None:
                 rec.stack_parent_id = sp
                 if sp == rec.id:
                     rec.stack_count = max(1, stack_counts.get(rec.id, 1))
         return records
+
+    def batch_update_favourite(self, media_ids: Sequence[int], is_favourite: bool) -> int:
+        ids = [int(x) for x in dict.fromkeys(media_ids) if int(x) > 0]
+        if not ids:
+            return 0
+        val = 1 if is_favourite else 0
+        changed = 0
+        with self.engine.catalog_transaction() as conn:
+            cur = conn.cursor()
+            for chunk in _iter_id_chunks(ids, 900):
+                ph = ",".join("?" for _ in chunk)
+                cur.execute(
+                    f"UPDATE media SET is_favourite = ? WHERE id IN ({ph});",
+                    [val, *chunk],
+                )
+                changed += int(cur.rowcount or 0)
+        return changed
+
+    def get_rejected_media_ids(self) -> list[int]:
+        conn = self.engine.catalog_conn()
+        rows = conn.execute(
+            "SELECT id FROM media WHERE is_rejected = 1 AND live_companion_for_id IS NULL ORDER BY id ASC;"
+        ).fetchall()
+        return [int(r[0]) for r in rows]
+
+    def get_favourite_and_flag_counts(self) -> dict[str, int]:
+        conn = self.engine.catalog_conn()
+        row = conn.execute(
+            """
+            SELECT
+                SUM(CASE WHEN is_favourite = 1 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN flag = 1 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN is_rejected = 1 THEN 1 ELSE 0 END)
+            FROM media
+            WHERE live_companion_for_id IS NULL;
+            """
+        ).fetchone()
+        return {
+            "favourites": int((row[0] if row else 0) or 0),
+            "picked": int((row[1] if row else 0) or 0),
+            "rejected": int((row[2] if row else 0) or 0),
+        }
 
     # -------------------------------------------------------------------------
     # Offline Volumes, Live/Motion Photos & Image Stacking
@@ -1966,7 +2025,7 @@ class CatalogRepository:
     # -------------------------------------------------------------------------
     def get_field_map_for_ids(self, media_ids: Sequence[int], column: str) -> dict[int, Any]:
         """Fetches a specific column value for media_ids in batches of 900 without N+1 queries."""
-        allowed_cols = {"rating", "flag", "caption", "orientation", "date_taken", "author", "location_name"}
+        allowed_cols = {"rating", "flag", "is_favourite", "caption", "orientation", "date_taken", "author", "location_name"}
         if column not in allowed_cols:
             raise ValueError(f"Disallowed column for field map: {column}")
         if not media_ids:
@@ -1986,7 +2045,7 @@ class CatalogRepository:
 
     def restore_field_map(self, field_map: dict[int, Any], column: str) -> None:
         """Restores column values in bulk by grouping IDs with matching values into batched transactions."""
-        allowed_cols = {"rating", "flag", "caption", "orientation", "date_taken", "author", "location_name"}
+        allowed_cols = {"rating", "flag", "is_favourite", "caption", "orientation", "date_taken", "author", "location_name"}
         if column not in allowed_cols:
             raise ValueError(f"Disallowed column for field map: {column}")
         if not field_map:
@@ -2039,14 +2098,16 @@ class CatalogRepository:
     def set_flag(self, media_ids: Sequence[int], flag: int) -> None:
         if not media_ids:
             return
-        flag_val = 1 if flag else 0
+        ival = int(flag or 0)
+        db_flag = 1 if ival > 0 else 0
+        db_rej = 1 if ival < 0 else 0
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
             for chunk in _iter_id_chunks(media_ids, 900):
                 placeholders = ",".join("?" for _ in chunk)
                 conn.execute(
-                    f"UPDATE media SET flag = ?, metadata_dirty = 1 WHERE id IN ({placeholders});",
-                    [flag_val, *chunk],
+                    f"UPDATE media SET flag = ?, is_rejected = ?, metadata_dirty = 1 WHERE id IN ({placeholders});",
+                    [db_flag, db_rej, *chunk],
                 )
             conn.commit()
 

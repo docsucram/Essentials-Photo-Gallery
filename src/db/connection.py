@@ -959,9 +959,15 @@ class DualDatabaseEngine:
                 cur.execute("ALTER TABLE media ADD COLUMN live_companion_for_id INTEGER REFERENCES media(id) ON DELETE SET NULL;")
             if "stack_parent_id" not in media_cols:
                 cur.execute("ALTER TABLE media ADD COLUMN stack_parent_id INTEGER REFERENCES media(id) ON DELETE SET NULL;")
+            if "is_favourite" not in media_cols:
+                cur.execute("ALTER TABLE media ADD COLUMN is_favourite INTEGER NOT NULL DEFAULT 0;")
+            if "is_rejected" not in media_cols:
+                cur.execute("ALTER TABLE media ADD COLUMN is_rejected INTEGER NOT NULL DEFAULT 0;")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_media_ocr_pending ON media(is_video, ocr_scanned);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_media_stack_parent ON media(stack_parent_id);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_media_live_companion ON media(live_companion_for_id);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_media_favourite ON media(is_favourite);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_media_rejected ON media(is_rejected);")
 
             try:
                 cur.execute(
