@@ -2663,8 +2663,19 @@ class AboutDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("About Essentials Photo Gallery")
+        self.setObjectName("AboutDialog")
         self.setFixedSize(480, 310)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        from src.ui.theme_tokens import get_theme_tokens
+
+        theme_name = getattr(parent, "current_theme", None)
+        self._is_dark = bool(
+            (str(theme_name or "").strip().lower() == "dark")
+            or (self.palette().window().color().lightness() < 128)
+        )
+        self._theme_tokens = get_theme_tokens(theme_name, is_dark=self._is_dark)
+        tok = self._theme_tokens
 
         vbox = QVBoxLayout(self)
         vbox.setContentsMargins(24, 20, 24, 18)
@@ -2692,13 +2703,19 @@ class AboutDialog(QDialog):
         info_vbox.setSpacing(4)
 
         lbl_title = QLabel("Essentials Photo Gallery", self)
-        lbl_title.setStyleSheet("font-family: 'Segoe UI', sans-serif; font-size: 13pt; font-weight: bold; color: #1E395B;")
+        title_color = tok.text_primary if tok.is_dark else "#1E395B"
+        lbl_title.setStyleSheet(
+            f"font-family: 'Segoe UI', sans-serif; font-size: 13pt; font-weight: bold; color: {title_color}; background: transparent;"
+        )
         info_vbox.addWidget(lbl_title)
 
         from src.version import APP_VERSION
 
         lbl_ver = QLabel(f"Version {APP_VERSION} (64-bit)", self)
-        lbl_ver.setStyleSheet("font-family: 'Segoe UI', sans-serif; font-size: 8.5pt; color: #55687D;")
+        ver_color = tok.text_secondary if tok.is_dark else "#55687D"
+        lbl_ver.setStyleSheet(
+            f"font-family: 'Segoe UI', sans-serif; font-size: 8.5pt; color: {ver_color}; background: transparent;"
+        )
         info_vbox.addWidget(lbl_ver)
 
         lbl_desc = QLabel(
@@ -2708,7 +2725,10 @@ class AboutDialog(QDialog):
             self,
         )
         lbl_desc.setWordWrap(True)
-        lbl_desc.setStyleSheet("font-family: 'Segoe UI', sans-serif; font-size: 9pt; color: #333333; margin-top: 4px;")
+        desc_color = tok.text_primary if tok.is_dark else "#333333"
+        lbl_desc.setStyleSheet(
+            f"font-family: 'Segoe UI', sans-serif; font-size: 9pt; color: {desc_color}; margin-top: 4px; background: transparent;"
+        )
         info_vbox.addWidget(lbl_desc)
 
         header_hbox.addLayout(info_vbox, 1)
@@ -2718,7 +2738,7 @@ class AboutDialog(QDialog):
         sep = QFrame(self)
         sep.setFrameShape(QFrame.HLine)
         sep.setFrameShadow(QFrame.Sunken)
-        sep.setStyleSheet("color: #DDE5EE;")
+        sep.setStyleSheet(f"color: {tok.border_subtle if tok.is_dark else '#DDE5EE'};")
         vbox.addWidget(sep)
 
         # Technical details
@@ -2727,14 +2747,20 @@ class AboutDialog(QDialog):
             "and SQLite WAL.\n© 2026 Essentials Photo Gallery Contributors.",
             self,
         )
-        lbl_tech.setStyleSheet("font-family: 'Segoe UI', sans-serif; font-size: 8pt; color: #667788;")
+        tech_color = tok.text_secondary if tok.is_dark else "#667788"
+        lbl_tech.setStyleSheet(
+            f"font-family: 'Segoe UI', sans-serif; font-size: 8pt; color: {tech_color}; background: transparent;"
+        )
         vbox.addWidget(lbl_tech)
 
         vbox.addStretch(1)
 
         # Update status label + Check for Updates & OK buttons
         self.lbl_update_status = QLabel("", self)
-        self.lbl_update_status.setStyleSheet("font-family: 'Segoe UI', sans-serif; font-size: 8.5pt; color: #3A6EA5;")
+        status_color = "#60A5FA" if tok.is_dark else "#3A6EA5"
+        self.lbl_update_status.setStyleSheet(
+            f"font-family: 'Segoe UI', sans-serif; font-size: 8.5pt; color: {status_color}; background: transparent;"
+        )
         self.lbl_update_status.setWordWrap(True)
         vbox.addWidget(self.lbl_update_status)
 
@@ -2748,35 +2774,55 @@ class AboutDialog(QDialog):
         btn_ok = QPushButton("OK", self)
         btn_ok.setFixedSize(85, 26)
         btn_ok.setDefault(True)
-        btn_ok.setStyleSheet(
-            """
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FDFDFD, stop:1 #E5EBF2);
-                border: 1px solid #7DA2CE;
-                border-radius: 3px;
-                font-family: 'Segoe UI', sans-serif;
-                font-size: 9pt;
-                color: #1E395B;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F0F6FD, stop:1 #D9E8F8);
-                border: 1px solid #4888C8;
-            }
-            QPushButton:pressed {
-                background: #CCE0F4;
-                border: 1px solid #3377B8;
-            }
-            """
-        )
+        if tok.is_dark:
+            btn_ok.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background: {tok.accent};
+                    border: 1px solid {tok.accent_hover};
+                    border-radius: 3px;
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 9pt;
+                    color: {tok.text_on_accent};
+                }}
+                QPushButton:hover {{
+                    background: {tok.accent_hover};
+                }}
+                """
+            )
+        else:
+            btn_ok.setStyleSheet(
+                """
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FDFDFD, stop:1 #E5EBF2);
+                    border: 1px solid #7DA2CE;
+                    border-radius: 3px;
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 9pt;
+                    color: #1E395B;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F0F6FD, stop:1 #D9E8F8);
+                    border: 1px solid #4888C8;
+                }
+                QPushButton:pressed {
+                    background: #CCE0F4;
+                    border: 1px solid #3377B8;
+                }
+                """
+            )
         btn_ok.clicked.connect(self.accept)
         btn_box.addWidget(btn_ok)
         vbox.addLayout(btn_box)
 
+        # Scope strictly to #AboutDialog so child QMessageBox / QProgressDialog
+        # never inherit a forced white QDialog background on top of Dark Theme text.
+        bg_dlg = tok.bg_surface if tok.is_dark else "#FFFFFF"
         self.setStyleSheet(
-            """
-            QDialog {
-                background-color: #FFFFFF;
-            }
+            f"""
+            QDialog#AboutDialog {{
+                background-color: {bg_dlg};
+            }}
             """
         )
 
@@ -2818,11 +2864,19 @@ class AboutDialog(QDialog):
             self.lbl_update_status.setText(f"Update available: v{latest_ver} (current: {APP_VERSION}).")
             installer_url = str(info.get("installer_url") or "")
             html_url = str(info.get("html_url") or "")
+            tok = self._theme_tokens
             msg = QMessageBox(self)
             msg.setWindowTitle("Update Available")
             msg.setIcon(QMessageBox.Information)
             msg.setText(f"A new version of Essentials Photo Gallery (v{latest_ver}) is available.")
             msg.setInformativeText(f"You are currently running version {APP_VERSION}.")
+            msg.setStyleSheet(
+                f"QMessageBox {{ background-color: {tok.bg_surface}; color: {tok.text_primary}; }} "
+                f"QMessageBox QLabel {{ color: {tok.text_primary}; background: transparent; }} "
+                f"QMessageBox QPushButton {{ background-color: {tok.bg_elevated}; color: {tok.text_primary}; "
+                f"border: 1px solid {tok.border_subtle}; border-radius: 4px; padding: 5px 14px; min-width: 76px; }} "
+                f"QMessageBox QPushButton:hover {{ background-color: {tok.bg_hover}; border-color: {tok.accent}; }}"
+            )
             btn_dl = msg.addButton("Download && Install", QMessageBox.AcceptRole) if installer_url else None
             btn_web = msg.addButton("Open Release Page", QMessageBox.ActionRole)
             msg.addButton(QMessageBox.Close)
@@ -2833,6 +2887,10 @@ class AboutDialog(QDialog):
                 prog = QProgressDialog("Downloading installer...", "Cancel", 0, 100, self)
                 prog.setWindowTitle("Updating Essentials Photo Gallery")
                 prog.setWindowModality(Qt.WindowModal)
+                prog.setStyleSheet(
+                    f"QProgressDialog {{ background-color: {tok.bg_surface}; color: {tok.text_primary}; }} "
+                    f"QProgressDialog QLabel {{ color: {tok.text_primary}; background: transparent; }}"
+                )
                 prog.show()
                 cancelled = {"v": False}
                 prog.canceled.connect(lambda: cancelled.__setitem__("v", True))

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.db.repository import CatalogRepository
+from src.ui.theme_tokens import get_theme_tokens
 
 
 _UNARY_OPS = {
@@ -30,6 +31,10 @@ _UNARY_OPS = {
     "no_gps",
     "is_flagged",
     "is_unflagged",
+    "is_rejected",
+    "is_not_rejected",
+    "is_favourite",
+    "is_not_favourite",
 }
 
 
@@ -194,7 +199,8 @@ SMART_FIELD_SPECS: list[tuple[str, str, list[tuple[str, str]], str, Any]] = [
         "flag",
         "Flag",
         [
-            ("is_flagged", "is flagged"),
+            ("is_flagged", "is picked / flagged"),
+            ("is_rejected", "is rejected"),
             ("is_unflagged", "is unflagged"),
         ],
         "unary",
@@ -379,15 +385,28 @@ class SmartRuleRowWidget(QWidget):
 
         self._value_widget: QWidget | None = None
 
+        self._is_dark = bool(
+            getattr(parent, "_is_dark", False)
+            or (self.palette().window().color().lightness() < 128)
+        )
+        tok = get_theme_tokens(is_dark=self._is_dark)
+
         self.remove_btn = QPushButton("✕", self)
         self.remove_btn.setFixedSize(28, 28)
         self.remove_btn.setToolTip("Remove condition")
         self.remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.remove_btn.setStyleSheet(
-            "QPushButton { font-weight: bold; font-size: 11pt; color: #DC2626; border: 1px solid #D1D5DB; border-radius: 4px; background: #FFFFFF; } "
-            "QPushButton:hover { background: #FEE2E2; border-color: #EF4444; color: #B91C1C; } "
-            "QPushButton:disabled { color: #CBD5E1; border-color: #F1F5F9; background: #F8FAFC; }"
-        )
+        if tok.is_dark:
+            self.remove_btn.setStyleSheet(
+                f"QPushButton {{ font-weight: bold; font-size: 11pt; color: #F87171; border: 1px solid {tok.border_subtle}; border-radius: 4px; background: {tok.bg_elevated}; }} "
+                "QPushButton:hover { background: #451A1A; border-color: #EF4444; color: #FCA5A5; } "
+                f"QPushButton:disabled {{ color: #475569; border-color: #1E293B; background: {tok.bg_card}; }}"
+            )
+        else:
+            self.remove_btn.setStyleSheet(
+                "QPushButton { font-weight: bold; font-size: 11pt; color: #DC2626; border: 1px solid #D1D5DB; border-radius: 4px; background: #FFFFFF; } "
+                "QPushButton:hover { background: #FEE2E2; border-color: #EF4444; color: #B91C1C; } "
+                "QPushButton:disabled { color: #CBD5E1; border-color: #F1F5F9; background: #F8FAFC; }"
+            )
         layout.addWidget(self.remove_btn)
 
         self.field_combo.currentIndexChanged.connect(self._on_field_changed)
@@ -455,7 +474,10 @@ class SmartRuleRowWidget(QWidget):
 
         if kind == "unary" or op in _UNARY_OPS:
             lbl = QLabel("(no value needed)", self._value_container)
-            lbl.setStyleSheet("color: #6b7280; font-style: italic; padding-left: 4px;")
+            tok = get_theme_tokens(is_dark=self._is_dark)
+            lbl.setStyleSheet(
+                f"color: {tok.text_secondary}; background: transparent; font-style: italic; padding-left: 4px;"
+            )
             self._value_layout.addWidget(lbl)
             self._value_widget = lbl
             return
@@ -633,11 +655,26 @@ class SmartAlbumDialog(QDialog):
         mode_row.addWidget(self.match_mode_combo, 1)
         root.addLayout(mode_row)
 
+        theme_name = getattr(parent, "current_theme", None)
+        self._is_dark = bool(
+            (str(theme_name or "").strip().lower() == "dark")
+            or (self.palette().window().color().lightness() < 128)
+        )
+        tok = get_theme_tokens(theme_name, is_dark=self._is_dark)
+
         # Scrollable dynamic condition rows
         self._scroll = QScrollArea(self)
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.StyledPanel)
+        self._scroll.setObjectName("SmartAlbumRulesScroll")
         self._rows_host = QWidget(self._scroll)
+        self._rows_host.setObjectName("SmartAlbumRowsHost")
+        self._rows_host._is_dark = self._is_dark  # type: ignore[attr-defined]
+        self._scroll.setStyleSheet(
+            f"QScrollArea#SmartAlbumRulesScroll {{ background-color: {tok.bg_card}; border: 1px solid {tok.border_subtle}; border-radius: 4px; }}"
+            f"QScrollArea#SmartAlbumRulesScroll > QWidget > QWidget {{ background-color: {tok.bg_card}; }}"
+            f"QWidget#SmartAlbumRowsHost {{ background-color: {tok.bg_card}; }}"
+        )
         self._rows_layout = QVBoxLayout(self._rows_host)
         self._rows_layout.setContentsMargins(8, 8, 8, 8)
         self._rows_layout.setSpacing(4)
@@ -651,7 +688,8 @@ class SmartAlbumDialog(QDialog):
         ctrl_row.addWidget(self.add_condition_btn)
         ctrl_row.addStretch(1)
         self.live_preview_label = QLabel("Live Preview: 0 matching items", self)
-        self.live_preview_label.setStyleSheet("font-weight: 600; color: #1d4ed8;")
+        preview_color = "#60A5FA" if tok.is_dark else "#1d4ed8"
+        self.live_preview_label.setStyleSheet(f"font-weight: 600; color: {preview_color};")
         ctrl_row.addWidget(self.live_preview_label)
         root.addLayout(ctrl_row)
 

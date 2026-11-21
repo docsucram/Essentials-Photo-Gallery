@@ -7344,8 +7344,10 @@ def _compile_single_smart_rule(
 
     # 11. Flag
     if raw_field in ("flag", "flagged"):
+        if op == "is_rejected" or (op in ("eq", "is") and val_str.lower() in ("-1", "rejected")):
+            return f"COALESCE({alias}.is_rejected, 0) = 1", []
         if op == "is_unflagged" or (op in ("eq", "is") and val_str.lower() in ("0", "false", "unflagged", "no")):
-            return f"COALESCE({alias}.flag, 0) = 0", []
+            return f"(COALESCE({alias}.flag, 0) = 0 AND COALESCE({alias}.is_rejected, 0) = 0)", []
         return f"COALESCE({alias}.flag, 0) = 1", []
 
     # 12. Media Type
