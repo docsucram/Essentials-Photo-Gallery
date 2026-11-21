@@ -1343,7 +1343,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.btn_status_filmstrip.setToolTip("Show / hide filmstrip (Ctrl+Shift+F)")
         self.btn_status_filmstrip.clicked.connect(lambda: self.dispatch_ribbon_action("toggle_filmstrip_pane"))
         self.btn_status_filmstrip.setVisible(False)
-        r_hbox.addWidget(self.btn_status_filmstrip)
+        self.btn_status_filmstrip.hide()
 
         self.btn_status_fit = QPushButton(right_ctrl)
         self.btn_status_fit.setIcon(make_wlpg_icon("actual_size", 18))
@@ -5916,7 +5916,6 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.scope_bar.hide()
             self.btn_status_prev.setVisible(True)
             self.btn_status_next.setVisible(True)
-            self.btn_status_filmstrip.setVisible(True)
             self.btn_status_fit.setVisible(True)
             self._update_status_zoom_toggle_button()
             self._update_status_grid_button()
@@ -7872,6 +7871,10 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.ribbon.btn_exit_immersive.hide()
             self._is_immersive_mode = False
 
+    def toggle_filmstrip_dock(self) -> None:
+        """Toggle visibility of the bottom filmstrip dock in Single Image View."""
+        self.dispatch_ribbon_action("toggle_filmstrip_pane")
+
     def dispatch_ribbon_action(self, action_id: str) -> None:
         if action_id in ("toggle_immersive", "exit_immersive"):
             self.toggle_immersive_viewer_mode()
@@ -8096,6 +8099,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.bottom_dock.set_filmstrip_mode()
                 self.bottom_dock.set_active_media_id(getattr(self.media_viewer, "current_media_id", None))
                 self.bottom_dock.setVisible(new_fs)
+                if hasattr(self.media_viewer, "_update_filmstrip_toggle"):
+                    self.media_viewer._update_filmstrip_toggle()
         elif action_id == "create_ws_save":
             ws = getattr(self, "_active_create_workspace", None)
             if ws is not None:

@@ -98,8 +98,8 @@ class _FilmstripListModel(QAbstractListModel):
 class _FilmstripItemDelegate(QStyledItemDelegate):
     """Crisp rounded thumbnail item delegate for Single Image View Filmstrip."""
 
-    ITEM_W = 96
-    ITEM_H = 68
+    ITEM_W = 112
+    ITEM_H = 84
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -324,8 +324,9 @@ class BottomFilmstripDock(QDockWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # Compact Header Bar
+        # Compact Header Bar (shown in Create Workspace Tray mode; hidden in Filmstrip mode)
         header = QWidget(self.container)
+        self._header = header
         header.setObjectName("BottomDockHeader")
         header.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         header.setFixedHeight(22)
@@ -355,21 +356,13 @@ class BottomFilmstripDock(QDockWidget):
         self.stack = QStackedWidget(self.container)
         outer.addWidget(self.stack, 1)
 
-        # Page 0: Filmstrip with crisp ‹ / › edge scroll chevrons
+        # Page 0: Filmstrip with edge-overlay ‹ / › scroll pills
         self.page_filmstrip = QWidget(self.stack)
         self.page_filmstrip.setObjectName("FilmstripPage")
         self.page_filmstrip.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         p0_lay = QHBoxLayout(self.page_filmstrip)
-        p0_lay.setContentsMargins(4, 2, 4, 4)
-        p0_lay.setSpacing(4)
-
-        self.btn_scroll_left = QPushButton("‹", self.page_filmstrip)
-        self.btn_scroll_left.setObjectName("FilmstripScrollBtn")
-        self.btn_scroll_left.setFixedWidth(20)
-        self.btn_scroll_left.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_scroll_left.setToolTip("Scroll filmstrip left")
-        self.btn_scroll_left.clicked.connect(lambda: self._scroll_filmstrip(-3))
-        p0_lay.addWidget(self.btn_scroll_left)
+        p0_lay.setContentsMargins(2, 2, 2, 2)
+        p0_lay.setSpacing(0)
 
         self.filmstrip_model = _FilmstripListModel(self.page_filmstrip)
         self.filmstrip_delegate = _FilmstripItemDelegate(self.page_filmstrip)
@@ -391,13 +384,27 @@ class BottomFilmstripDock(QDockWidget):
         self.filmstrip_view.clicked.connect(self._on_filmstrip_clicked)
         p0_lay.addWidget(self.filmstrip_view, 1)
 
-        self.btn_scroll_right = QPushButton("›", self.page_filmstrip)
-        self.btn_scroll_right.setObjectName("FilmstripScrollBtn")
-        self.btn_scroll_right.setFixedWidth(20)
+        _overlay_btn_qss = (
+            "QPushButton { background-color: rgba(15, 23, 42, 115); color: rgba(248, 250, 252, 220); "
+            "border: 1px solid rgba(148, 163, 184, 70); border-radius: 6px; font-size: 14pt; font-weight: 700; }"
+            "QPushButton:hover { background-color: rgba(15, 23, 42, 225); color: #FFFFFF; "
+            "border: 1px solid rgba(56, 189, 248, 170); }"
+        )
+        self.btn_scroll_left = QPushButton("‹", self.filmstrip_view.viewport())
+        self.btn_scroll_left.setObjectName("FilmstripOverlayScrollBtn")
+        self.btn_scroll_left.setFixedSize(26, 54)
+        self.btn_scroll_left.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_scroll_left.setToolTip("Scroll filmstrip left")
+        self.btn_scroll_left.setStyleSheet(_overlay_btn_qss)
+        self.btn_scroll_left.clicked.connect(lambda: self._scroll_filmstrip(-3))
+
+        self.btn_scroll_right = QPushButton("›", self.filmstrip_view.viewport())
+        self.btn_scroll_right.setObjectName("FilmstripOverlayScrollBtn")
+        self.btn_scroll_right.setFixedSize(26, 54)
         self.btn_scroll_right.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_scroll_right.setToolTip("Scroll filmstrip right")
+        self.btn_scroll_right.setStyleSheet(_overlay_btn_qss)
         self.btn_scroll_right.clicked.connect(lambda: self._scroll_filmstrip(3))
-        p0_lay.addWidget(self.btn_scroll_right)
 
         # Page 1: Create Studio Workspace Tray Host
         self.page_tray = QWidget(self.stack)
@@ -415,13 +422,26 @@ class BottomFilmstripDock(QDockWidget):
         self.setMaximumHeight(168)
         self.apply_theme_mode("wlpg_aero")
 
+    def _position_scroll_buttons(self) -> None:
+        vp = self.filmstrip_view.viewport()
+        if vp is None:
+            return
+        cy = max(2, (vp.height() - self.btn_scroll_left.height()) // 2)
+        self.btn_scroll_left.move(6, cy)
+        self.btn_scroll_right.move(max(6, vp.width() - self.btn_scroll_right.width() - 6), cy)
+        self.btn_scroll_left.raise_()
+        self.btn_scroll_right.raise_()
+
     def eventFilter(self, watched: Any, event: QEvent) -> bool:
-        if watched is self.filmstrip_view.viewport() and event.type() == QEvent.Type.Wheel:
-            sb = self.filmstrip_view.horizontalScrollBar()
-            if sb is not None:
-                delta = event.angleDelta().y() or event.angleDelta().x()
-                sb.setValue(sb.value() - int(delta * 0.6))
-                return True
+        if watched is self.filmstrip_view.viewport():
+            if event.type() == QEvent.Type.Resize:
+                self._position_scroll_buttons()
+            elif event.type() == QEvent.Type.Wheel:
+                sb = self.filmstrip_view.horizontalScrollBar()
+                if sb is not None:
+                    delta = event.angleDelta().y() or event.angleDelta().x()
+                    sb.setValue(sb.value() - int(delta * 0.6))
+                    return True
         return super().eventFilter(watched, event)
 
     def bind_sources(
@@ -483,12 +503,11 @@ class BottomFilmstripDock(QDockWidget):
     def set_filmstrip_mode(self) -> None:
         self.clear_tray_widget()
         self.stack.setCurrentIndex(0)
-        self.lbl_title.setText("Filmstrip")
-        cnt = self.filmstrip_model.rowCount()
-        self.lbl_count.setText(f"({cnt:,} items)" if cnt else "")
-        self.btn_close.setVisible(True)
-        self.setMinimumHeight(98)
-        self.setMaximumHeight(124)
+        if hasattr(self, "_header"):
+            self._header.setVisible(False)
+        self.setMinimumHeight(92)
+        self.setMaximumHeight(112)
+        self._position_scroll_buttons()
 
     def set_tray_widget(self, widget: QWidget | None, title: str = "") -> None:
         self.clear_tray_widget()
@@ -498,6 +517,8 @@ class BottomFilmstripDock(QDockWidget):
         widget.setParent(self.page_tray)
         self.tray_layout.addWidget(widget)
         self.stack.setCurrentIndex(1)
+        if hasattr(self, "_header"):
+            self._header.setVisible(True)
         self.lbl_title.setText(title or "Tools Tray")
         self.lbl_count.setText("")
         self.btn_close.setVisible(False)

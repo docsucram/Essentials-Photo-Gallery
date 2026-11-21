@@ -624,7 +624,7 @@ class MediaCardDelegate(QStyledItemDelegate):
 
     def heart_rect(self, card_rect: QRect) -> QRect:
         cb = self.checkbox_rect(card_rect)
-        return QRect(cb.right() + 4, cb.top(), 16, 16)
+        return QRect(cb.right() + 6, cb.top(), 20, 20)
 
     def flag_rect(self, card_rect: QRect) -> QRect:
         if getattr(self, "is_horizontal_card", False):
@@ -3311,6 +3311,11 @@ class ThumbnailGridView(QListView):
             menu.addSeparator()
 
             # 3. Organize & AI
+            if is_mw and hasattr(main_win, "toggle_favourite_selection"):
+                act_fav = menu.addAction("♥ Toggle Favourite")
+                act_fav.setShortcut("F")
+                act_fav.triggered.connect(lambda: main_win.toggle_favourite_selection())
+
             self._append_album_menu_actions(menu, media_id, main_win)
 
             create_menu = menu.addMenu("Create")

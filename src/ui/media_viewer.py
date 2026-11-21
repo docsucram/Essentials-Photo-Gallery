@@ -1887,6 +1887,21 @@ class SingleMediaViewer(QWidget):
         self.btn_hud_flag.clicked.connect(self._on_hud_flag_clicked)
         self.cull_hud.hide()
 
+        self.btn_filmstrip_toggle = QPushButton("Filmstrip", self.graphics_view.viewport())
+        self.btn_filmstrip_toggle.setCheckable(True)
+        self.btn_filmstrip_toggle.setCursor(Qt.PointingHandCursor)
+        self.btn_filmstrip_toggle.setToolTip("Show / Hide Filmstrip")
+        self.btn_filmstrip_toggle.setStyleSheet(
+            "QPushButton { background-color: rgba(15, 23, 42, 160); color: #E2E8F0; "
+            "border: 1px solid rgba(148, 163, 184, 95); border-radius: 13px; "
+            "padding: 4px 11px; font-size: 8.5pt; font-weight: 600; }"
+            "QPushButton:hover { background-color: rgba(15, 23, 42, 230); color: #FFFFFF; }"
+            "QPushButton:checked { border: 1px solid #38BDF8; color: #38BDF8; }"
+        )
+        self.btn_filmstrip_toggle.adjustSize()
+        self.btn_filmstrip_toggle.clicked.connect(self._on_filmstrip_toggle_clicked)
+        self.btn_filmstrip_toggle.hide()
+
         self.media_stack.addWidget(self.graphics_view)
 
         # Page 1: Video Player (Authentic WLPG White Background & Transport Bar)
@@ -2950,6 +2965,39 @@ class SingleMediaViewer(QWidget):
         hud.move(max(14, vp.width() - hud.width() - 14), 14)
         hud.show()
         hud.raise_()
+        self._update_filmstrip_toggle()
+
+    def _update_filmstrip_toggle(self) -> None:
+        btn = getattr(self, "btn_filmstrip_toggle", None)
+        if btn is None:
+            return
+        vp = self.graphics_view.viewport()
+        if (
+            self.current_media_id is None
+            or self.is_in_edit_mode()
+            or self.media_stack.currentWidget() != self.graphics_view
+            or vp is None
+            or vp.width() < 160
+            or vp.height() < 120
+        ):
+            btn.hide()
+            return
+        mw = getattr(self, "main_window", None) or self.window()
+        enabled = bool(getattr(mw, "_filmstrip_viewer_enabled", False))
+        btn.blockSignals(True)
+        btn.setChecked(enabled)
+        btn.setText("Hide Filmstrip" if enabled else "Filmstrip")
+        btn.blockSignals(False)
+        btn.adjustSize()
+        btn.move(14, max(14, vp.height() - btn.height() - 14))
+        btn.show()
+        btn.raise_()
+
+    def _on_filmstrip_toggle_clicked(self) -> None:
+        mw = getattr(self, "main_window", None) or self.window()
+        if hasattr(mw, "toggle_filmstrip_dock"):
+            mw.toggle_filmstrip_dock()
+        self._update_filmstrip_toggle()
 
     def _get_current_cull_state(self) -> tuple[bool, int]:
         if self.current_media_id is None:
@@ -8998,6 +9046,7 @@ class SingleMediaViewer(QWidget):
                 self._update_cull_hud()
                 self._update_zoom_minimap()
                 self._update_live_badge()
+                self._update_filmstrip_toggle()
             if event.type() == QEvent.Wheel:
                 if getattr(self, "is_markup_mode", False):
                     tool = getattr(self.markup_toolbar, "active_tool", "pen")
