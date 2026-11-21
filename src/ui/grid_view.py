@@ -1245,7 +1245,8 @@ class MediaCardDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
-        card_rect = option.rect.adjusted(2, 2, -2, -2)
+        is_mosaic = (self._layout_mode == "mosaic")
+        card_rect = option.rect if is_mosaic else option.rect.adjusted(2, 2, -2, -2)
         if self.is_horizontal_card:
             self._paint_horizontal_media_card(painter, option, index, card_rect)
             painter.restore()
@@ -1261,7 +1262,7 @@ class MediaCardDelegate(QStyledItemDelegate):
         # 1. Card Outer Background / Aero Selection & Hover Frame
         # Per reference main_ui.png & find_ui.png: unselected cards have NO outer box border;
         # hovered cards show a faint Aero outline, and selected cards show the Aero sky-blue box.
-        if is_selected:
+        if is_selected and not is_mosaic:
             grad = QLinearGradient(card_rect.topLeft(), card_rect.bottomLeft())
             if self.dark_mode:
                 grad.setColorAt(0.0, QColor("#1E3A5F"))
@@ -1274,7 +1275,7 @@ class MediaCardDelegate(QStyledItemDelegate):
                 painter.setBrush(grad)
                 painter.setPen(QPen(QColor("#6CB8FF"), 1.2))
             painter.drawRoundedRect(card_rect, 3, 3)
-        elif is_hovered:
+        elif is_hovered and not is_mosaic:
             grad = QLinearGradient(card_rect.topLeft(), card_rect.bottomLeft())
             if self.dark_mode:
                 grad.setColorAt(0.0, QColor("#262B33"))
@@ -1319,8 +1320,9 @@ class MediaCardDelegate(QStyledItemDelegate):
                 extra_lines.append(_epoch_to_datetime_utc(int(mtime)).strftime("%d/%m/%Y %H:%M"))
 
         bottom_reserve += len(extra_lines) * 14
-        if self._layout_mode == "mosaic":
-            img_box = card_rect.adjusted(3, 3, -3, -bottom_reserve)
+        if is_mosaic:
+            b_pad = 1 if bottom_reserve <= 6 else bottom_reserve
+            img_box = card_rect.adjusted(1, 1, -1, -b_pad)
         else:
             img_box = card_rect.adjusted(10, 10, -10, -bottom_reserve)
 
@@ -1389,12 +1391,13 @@ class MediaCardDelegate(QStyledItemDelegate):
                     scaled_sz.height(),
                 )
 
-            # Multi-layer soft WLPG drop shadow behind photo
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(0, 0, 0, 75 if self.dark_mode else 26))
-            painter.drawRect(target_rect.adjusted(2, 2, 4, 4))
-            painter.setBrush(QColor(0, 0, 0, 120 if self.dark_mode else 48))
-            painter.drawRect(target_rect.adjusted(1, 1, 2, 2))
+            if not is_mosaic:
+                # Multi-layer soft WLPG drop shadow behind photo
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(0, 0, 0, 75 if self.dark_mode else 26))
+                painter.drawRect(target_rect.adjusted(2, 2, 4, 4))
+                painter.setBrush(QColor(0, 0, 0, 120 if self.dark_mode else 48))
+                painter.drawRect(target_rect.adjusted(1, 1, 2, 2))
 
             s_key = (int(pixmap.cacheKey()), scaled_sz.width(), scaled_sz.height())
             scaled_pix = self._scaled_pixmap_cache.get(s_key)
@@ -1424,8 +1427,17 @@ class MediaCardDelegate(QStyledItemDelegate):
                 painter.drawPixmap(target_rect.topLeft(), scaled_pix)
 
             painter.setBrush(Qt.NoBrush)
-            painter.setPen(QPen(QColor("#3E4656") if self.dark_mode else QColor("#B8B8B8"), 1))
-            painter.drawRect(target_rect)
+            if is_mosaic and is_selected:
+                sel_col = QColor("#60A5FA") if self.dark_mode else QColor("#2563EB")
+                painter.setPen(QPen(sel_col, 2.6))
+                painter.drawRect(target_rect.adjusted(1, 1, -1, -1))
+            elif is_mosaic and is_hovered:
+                hov_col = QColor("#94A3B8") if self.dark_mode else QColor("#60A5FA")
+                painter.setPen(QPen(hov_col, 1.5))
+                painter.drawRect(target_rect)
+            else:
+                painter.setPen(QPen(QColor("#3E4656") if self.dark_mode else QColor("#B8B8B8"), 1))
+                painter.drawRect(target_rect)
         else:
             # Subtle placeholder while worker decodes WebP
             painter.setBrush(QColor("#22262E") if self.dark_mode else QColor("#F4F6F9"))
@@ -1568,7 +1580,8 @@ class MediaCardDelegate(QStyledItemDelegate):
                 if media_id is None:
                     return False
 
-                card_rect = option.rect.adjusted(2, 2, -2, -2)
+                is_mosaic = (self._layout_mode == "mosaic")
+                card_rect = option.rect if is_mosaic else option.rect.adjusted(2, 2, -2, -2)
 
                 # 1. Check top-left checkbox hit
                 if self.checkbox_rect(card_rect).contains(pos):

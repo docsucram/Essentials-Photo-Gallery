@@ -2838,9 +2838,10 @@ class SingleMediaViewer(QWidget):
             return
         enabled = bool(getattr(mw, "_filmstrip_viewer_enabled", False))
 
-        # Attached pull-tab welded flush onto the bottom-left edge of the viewer (top of filmstrip)
-        if btn.parentWidget() is not vp:
-            btn.setParent(vp)
+        # Attached pull-tab welded flush onto the top of the filmstrip (bridging any QMainWindow dock separator)
+        target_parent = mw if (mw is not None and mw is not self) else vp
+        if btn.parentWidget() is not target_parent:
+            btn.setParent(target_parent)
 
         is_dark = bool(getattr(mw, "current_theme", "dark") == "dark")
         if is_dark:
@@ -2884,7 +2885,17 @@ class SingleMediaViewer(QWidget):
         btn.setIcon(QIcon(pm))
         btn.setToolTip("Hide Filmstrip" if enabled else "Show Filmstrip")
         btn.blockSignals(False)
-        btn.move(10, max(0, vp.height() - btn.height()))
+        if target_parent is mw:
+            vp_bl = vp.mapTo(mw, QPoint(10, vp.height()))
+            dock = getattr(mw, "bottom_dock", None)
+            if dock is not None and dock.isVisible() and dock.height() > 0:
+                dock_top_y = dock.mapTo(mw, QPoint(0, 0)).y()
+                y_pos = max(0, dock_top_y - btn.height() + 1)
+            else:
+                y_pos = max(0, vp_bl.y() - btn.height())
+            btn.move(vp_bl.x(), y_pos)
+        else:
+            btn.move(10, max(0, vp.height() - btn.height()))
         btn.show()
         btn.raise_()
 

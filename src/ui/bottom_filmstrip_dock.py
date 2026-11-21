@@ -117,6 +117,15 @@ class _FilmstripItemDelegate(QStyledItemDelegate):
     def set_theme_name(self, theme_name: str) -> None:
         self._theme_name = theme_name or "wlpg_aero"
 
+    def set_item_height(self, h: int) -> bool:
+        new_h = max(72, min(144, int(h)))
+        new_w = int(round(new_h * 4 / 3))
+        if new_h == self.ITEM_H and new_w == self.ITEM_W:
+            return False
+        self.ITEM_H = new_h
+        self.ITEM_W = new_w
+        return True
+
     def sizeHint(self, _option: QStyleOptionViewItem, _index: QModelIndex) -> QSize:
         return QSize(self.ITEM_W, self.ITEM_H)
 
@@ -147,7 +156,7 @@ class _FilmstripItemDelegate(QStyledItemDelegate):
                 reader.setAutoTransform(True)
                 orig = reader.size()
                 if orig.isValid() and orig.width() > 0 and orig.height() > 0:
-                    scaled_sz = orig.scaled(160, 120, Qt.AspectRatioMode.KeepAspectRatioByExpanding)
+                    scaled_sz = orig.scaled(220, 165, Qt.AspectRatioMode.KeepAspectRatioByExpanding)
                     reader.setScaledSize(scaled_sz)
                 qimg = reader.read()
                 if not qimg.isNull():
@@ -481,8 +490,8 @@ class BottomFilmstripDock(QDockWidget):
         self.stack.addWidget(self.page_tray)
 
         self.setWidget(self.container)
-        self.setMinimumHeight(98)
-        self.setMaximumHeight(168)
+        self.setMinimumHeight(92)
+        self.setMaximumHeight(148)
         self.apply_theme_mode("wlpg_aero")
 
     def _position_scroll_buttons(self) -> None:
@@ -522,7 +531,7 @@ class BottomFilmstripDock(QDockWidget):
 
             def _on_shown() -> None:
                 self.setMinimumHeight(92)
-                self.setMaximumHeight(112)
+                self.setMaximumHeight(148)
                 self._position_scroll_buttons()
 
             anim.finished.connect(_on_shown)
@@ -535,7 +544,7 @@ class BottomFilmstripDock(QDockWidget):
             def _on_hidden() -> None:
                 self.hide()
                 self.setMinimumHeight(92)
-                self.setMaximumHeight(112)
+                self.setMaximumHeight(148)
 
             anim.finished.connect(_on_hidden)
 
@@ -547,7 +556,11 @@ class BottomFilmstripDock(QDockWidget):
             self._position_scroll_buttons()
         elif watched is self.filmstrip_view.viewport():
             if event.type() == QEvent.Type.Resize:
+                vp_h = self.filmstrip_view.viewport().height()
+                if vp_h >= 70 and self.filmstrip_delegate.set_item_height(vp_h - 4):
+                    self.filmstrip_view.doItemsLayout()
                 self._position_scroll_buttons()
+                self.height_anim_tick.emit()
             elif event.type() == QEvent.Type.Wheel:
                 sb = self.filmstrip_view.horizontalScrollBar()
                 if sb is not None:
@@ -618,7 +631,7 @@ class BottomFilmstripDock(QDockWidget):
         if hasattr(self, "_header"):
             self._header.setVisible(False)
         self.setMinimumHeight(92)
-        self.setMaximumHeight(112)
+        self.setMaximumHeight(148)
         self._position_scroll_buttons()
 
     def set_tray_widget(self, widget: QWidget | None, title: str = "") -> None:
