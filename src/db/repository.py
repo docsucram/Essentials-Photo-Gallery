@@ -41,6 +41,7 @@ ArrangeMode = Literal[
     "media_type",
     "rating",
     "flag",
+    "favourites",
     "folder",
     "tag",
     "people",
@@ -1372,8 +1373,13 @@ class CatalogRepository:
             grp_expr = "m.rating"
             grp_dir = "ASC" if getattr(spec, "group_reverse", False) else "DESC"
         elif group_mode in ("flag",):
-            grp_expr = "m.flag"
+            grp_expr = "CASE WHEN COALESCE(m.flag, 0) = 1 THEN 2 WHEN COALESCE(m.is_rejected, 0) = 1 THEN 1 ELSE 0 END"
             grp_dir = "ASC" if getattr(spec, "group_reverse", False) else "DESC"
+            extra_col = "CASE WHEN COALESCE(m.flag, 0) = 1 THEN 'Picked / Flagged' WHEN COALESCE(m.is_rejected, 0) = 1 THEN 'Rejected' ELSE 'Not flagged' END AS group_name"
+        elif group_mode in ("favourite", "favourites"):
+            grp_expr = "COALESCE(m.is_favourite, 0)"
+            grp_dir = "ASC" if getattr(spec, "group_reverse", False) else "DESC"
+            extra_col = "CASE WHEN COALESCE(m.is_favourite, 0) = 1 THEN 'Favourites' ELSE 'Not favourited' END AS group_name"
         elif group_mode in ("folder",):
             grp_expr = "COALESCE(f.name, '') COLLATE NOCASE"
             grp_dir = "DESC" if getattr(spec, "group_reverse", False) else "ASC"
@@ -1719,7 +1725,9 @@ class CatalogRepository:
             elif group_mode in ("rating",):
                 gkey = _RATING_LABELS.get(rating, "Unrated")
             elif group_mode in ("flag",):
-                gkey = "Flagged" if flag else "Not flagged"
+                gkey = g_extra or ("Picked / Flagged" if flag else "Not flagged")
+            elif group_mode in ("favourite", "favourites"):
+                gkey = g_extra or "Not favourited"
             elif group_mode in ("folder",):
                 gkey = folder_name or f"Folder {fid}"
             elif group_mode in ("published",):
@@ -1843,7 +1851,8 @@ class CatalogRepository:
             SELECT
                 SUM(CASE WHEN is_favourite = 1 THEN 1 ELSE 0 END),
                 SUM(CASE WHEN flag = 1 THEN 1 ELSE 0 END),
-                SUM(CASE WHEN is_rejected = 1 THEN 1 ELSE 0 END)
+                SUM(CASE WHEN is_rejected = 1 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN COALESCE(flag, 0) = 0 AND COALESCE(is_rejected, 0) = 0 THEN 1 ELSE 0 END)
             FROM media
             WHERE live_companion_for_id IS NULL;
             """
@@ -1852,6 +1861,7 @@ class CatalogRepository:
             "favourites": int((row[0] if row else 0) or 0),
             "picked": int((row[1] if row else 0) or 0),
             "rejected": int((row[2] if row else 0) or 0),
+            "unflagged": int((row[3] if row else 0) or 0),
         }
 
     # -------------------------------------------------------------------------

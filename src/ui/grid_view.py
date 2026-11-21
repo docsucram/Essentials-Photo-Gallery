@@ -542,6 +542,7 @@ class MediaCardDelegate(QStyledItemDelegate):
         self.face_crop_person_id: int | None = None
         self.thumb_repo: Any | None = None
         self.dark_mode: bool = False
+        self.favourites_enabled: bool = True
         self._face_crop_cache: dict[tuple[int, int], QPixmap] = {}
         self._person_face_rects: dict[tuple[int, int], tuple[float, float, float, float]] = {}
         self._scaled_pixmap_cache: dict[tuple[int, int, int], QPixmap] = {}
@@ -622,7 +623,30 @@ class MediaCardDelegate(QStyledItemDelegate):
             return QRect(img_x + 4, img_y + 4, 16, 16)
         return QRect(card_rect.left() + 6, card_rect.top() + 6, 16, 16)
 
-    def heart_rect(self, card_rect: QRect) -> QRect:
+    def _estimate_img_box(self, card_rect: QRect) -> QRect:
+        """Deterministic image area matching paint() for badge placement & hit-testing."""
+        if getattr(self, "is_horizontal_card", False):
+            thumb_side = max(70, min(int(card_rect.height() - 12), 120))
+            img_x = card_rect.left() + 8
+            img_y = card_rect.top() + (card_rect.height() - thumb_side) // 2
+            return QRect(img_x, img_y, thumb_side, thumb_side)
+        has_stars = ("rating" in self._visible_details or "all" in self._visible_details)
+        has_caption = ("caption" in self._visible_details or "all" in self._visible_details)
+        bottom_reserve = 6
+        if has_stars:
+            bottom_reserve += 20
+        if has_caption:
+            bottom_reserve += 18
+        extra_cnt = 0
+        for k in ("filename", "size", "dimensions", "date_taken", "date_modified"):
+            if k in self._visible_details or "all" in self._visible_details:
+                extra_cnt += 1
+        bottom_reserve += extra_cnt * 14
+        if self._layout_mode == "mosaic":
+            return card_rect.adjusted(3, 3, -3, -bottom_reserve)
+        return card_rect.adjusted(10, 10, -10, -bottom_reserve)
+
+    def flag_rect(self, card_rect: QRect) -> QRect:
         if getattr(self, "is_horizontal_card", False):
             thumb_side = max(70, min(int(card_rect.height() - 12), 120))
             img_x = card_rect.left() + 8
@@ -630,9 +654,12 @@ class MediaCardDelegate(QStyledItemDelegate):
             return QRect(img_x + thumb_side - 26, img_y + 4, 24, 24)
         return QRect(card_rect.right() - 28, card_rect.top() + 4, 24, 24)
 
-    def flag_rect(self, card_rect: QRect) -> QRect:
-        hr = self.heart_rect(card_rect)
-        return QRect(hr.left() - 26, hr.top(), 24, 24)
+    def heart_rect(self, card_rect: QRect, img_box: QRect | None = None) -> QRect:
+        if not getattr(self, "favourites_enabled", True):
+            return QRect()
+        box = img_box if img_box is not None else self._estimate_img_box(card_rect)
+        sz = 26
+        return QRect(box.right() - sz - 4, box.bottom() - sz - 4, sz, sz)
 
     def stack_badge_rect(self, card_rect: QRect) -> QRect:
         fl = self.flag_rect(card_rect)
@@ -650,23 +677,24 @@ class MediaCardDelegate(QStyledItemDelegate):
         if flag == -1:
             painter.fillRect(img_box, QColor(15, 23, 42, 115))
 
-        # Flag (Pick = 1 solid red / Reject = -1 hollow with red strike / Unreviewed = 0 on hover)
+        # Top-Right WLPG Flag (Pick = 1 shaded red pennant + silver pole / Reject = -1 hollow with strike / Unreviewed = 0 on hover)
         if "flag" in self._visible_details or "all" in self._visible_details:
             if flag == -1:
                 fl_rect = self.flag_rect(card_rect)
                 pole_x = fl_rect.left() + 6
                 painter.save()
                 painter.setRenderHint(QPainter.Antialiasing, True)
-                painter.setPen(QPen(QColor("#CBD5E1") if self.dark_mode else QColor("#64748B"), 1.6))
+                pole_col = QColor("#CBD5E1") if self.dark_mode else QColor("#64748B")
+                painter.setPen(QPen(pole_col, 1.6, Qt.SolidLine, Qt.RoundCap))
                 painter.setBrush(Qt.NoBrush)
                 painter.drawLine(pole_x, fl_rect.top() + 3, pole_x, fl_rect.bottom() - 3)
                 banner = QPolygonF([
-                    QPointF(pole_x, fl_rect.top() + 3),
-                    QPointF(fl_rect.right() - 3, fl_rect.top() + 8.0),
-                    QPointF(pole_x, fl_rect.top() + 13),
+                    QPointF(pole_x, fl_rect.top() + 3.5),
+                    QPointF(fl_rect.right() - 3.5, fl_rect.top() + 8.0),
+                    QPointF(pole_x, fl_rect.top() + 12.5),
                 ])
                 painter.drawPolygon(banner)
-                painter.setPen(QPen(QColor("#EF4444"), 2.2, Qt.SolidLine, Qt.RoundCap))
+                painter.setPen(QPen(QColor("#EF4444"), 2.1, Qt.SolidLine, Qt.RoundCap))
                 painter.drawLine(fl_rect.left() + 3, fl_rect.bottom() - 3, fl_rect.right() - 3, fl_rect.top() + 3)
                 painter.restore()
             elif flag == 1 or is_hovered:
@@ -674,42 +702,66 @@ class MediaCardDelegate(QStyledItemDelegate):
                 pole_x = fl_rect.left() + 6
                 painter.save()
                 painter.setRenderHint(QPainter.Antialiasing, True)
-                painter.setPen(QPen(QColor("#E81123") if flag == 1 else QColor("#94A3B8"), 1.6))
-                painter.drawLine(pole_x, fl_rect.top() + 3, pole_x, fl_rect.bottom() - 3)
                 banner = QPolygonF([
-                    QPointF(pole_x, fl_rect.top() + 3),
-                    QPointF(fl_rect.right() - 3, fl_rect.top() + 8.0),
-                    QPointF(pole_x, fl_rect.top() + 13),
+                    QPointF(pole_x + 0.5, fl_rect.top() + 3.5),
+                    QPointF(fl_rect.right() - 3.5, fl_rect.top() + 8.0),
+                    QPointF(pole_x + 0.5, fl_rect.top() + 12.5),
                 ])
-                painter.setBrush(QColor("#E81123") if flag == 1 else Qt.NoBrush)
-                painter.drawPolygon(banner)
+                if flag == 1:
+                    # Shaded WLPG pennant matching the Ribbon Flagged icon + neutral silver flagpole
+                    grad = QLinearGradient(pole_x, fl_rect.top() + 3, pole_x, fl_rect.top() + 13)
+                    grad.setColorAt(0.0, QColor("#F87171"))
+                    grad.setColorAt(0.45, QColor("#DC2626"))
+                    grad.setColorAt(1.0, QColor("#991B1B"))
+                    painter.setPen(QPen(QColor("#7F1D1D"), 0.9))
+                    painter.setBrush(grad)
+                    painter.drawPolygon(banner)
+                    pole_col = QColor("#CBD5E1") if self.dark_mode else QColor("#64748B")
+                    painter.setPen(QPen(pole_col, 1.7, Qt.SolidLine, Qt.RoundCap))
+                    painter.drawLine(pole_x, fl_rect.top() + 3, pole_x, fl_rect.bottom() - 3)
+                else:
+                    pole_col = QColor("#94A3B8") if self.dark_mode else QColor("#64748B")
+                    painter.setPen(QPen(pole_col, 1.5, Qt.SolidLine, Qt.RoundCap))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawLine(pole_x, fl_rect.top() + 3, pole_x, fl_rect.bottom() - 3)
+                    painter.drawPolygon(banner)
                 painter.restore()
 
         rec_meta = index.data(CatalogRoles.RecordRole)
         if rec_meta is None:
             return
 
-        # Favourite Heart (to the right of Flag in top-right; solid rose when active, outline on hover)
-        is_fav = bool(getattr(rec_meta, "is_favourite", 0))
-        if is_fav or is_hovered:
-            hr_rect = self.heart_rect(card_rect)
-            painter.save()
-            painter.setRenderHint(QPainter.Antialiasing, True)
-            cx, cy = hr_rect.center().x(), hr_rect.center().y()
-            hpath = QPainterPath()
-            hpath.moveTo(cx, cy + 6.8)
-            hpath.cubicTo(cx - 7.8, cy + 1.8, cx - 8.2, cy - 4.8, cx - 4.4, cy - 6.5)
-            hpath.cubicTo(cx - 1.9, cy - 7.7, cx - 0.4, cy - 5.3, cx, cy - 3.3)
-            hpath.cubicTo(cx + 0.4, cy - 5.3, cx + 1.9, cy - 7.7, cx + 4.4, cy - 6.5)
-            hpath.cubicTo(cx + 8.2, cy - 4.8, cx + 7.8, cy + 1.8, cx, cy + 6.8)
-            if is_fav:
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(QColor("#F43F5E"))
-            else:
-                painter.setPen(QPen(QColor("#94A3B8"), 1.6))
-                painter.setBrush(Qt.NoBrush)
-            painter.drawPath(hpath)
-            painter.restore()
+        # Option A: Favourite Heart in a subtle translucent dark pill on bottom-right corner of the photo
+        if getattr(self, "favourites_enabled", True):
+            is_fav = bool(getattr(rec_meta, "is_favourite", 0))
+            if is_fav or is_hovered:
+                hr_rect = self.heart_rect(card_rect, img_box)
+                painter.save()
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                pill_bg = QColor(15, 23, 42, 185 if is_fav else 135)
+                pill_bd = QColor(255, 255, 255, 65 if is_fav else 45)
+                painter.setBrush(pill_bg)
+                painter.setPen(QPen(pill_bd, 1.0))
+                painter.drawRoundedRect(QRectF(hr_rect).adjusted(0.5, 0.5, -0.5, -0.5), 13.0, 13.0)
+
+                cx, cy = hr_rect.center().x() + 0.5, hr_rect.center().y() + 0.8
+                hpath = QPainterPath()
+                hpath.moveTo(cx, cy + 5.6)
+                hpath.cubicTo(cx - 6.6, cy + 1.4, cx - 7.0, cy - 4.0, cx - 3.7, cy - 5.4)
+                hpath.cubicTo(cx - 1.6, cy - 6.4, cx - 0.3, cy - 4.4, cx, cy - 2.6)
+                hpath.cubicTo(cx + 0.3, cy - 4.4, cx + 1.6, cy - 6.4, cx + 3.7, cy - 5.4)
+                hpath.cubicTo(cx + 7.0, cy - 4.0, cx + 6.6, cy + 1.4, cx, cy + 5.6)
+                if is_fav:
+                    hgrad = QLinearGradient(cx, cy - 6, cx, cy + 6)
+                    hgrad.setColorAt(0.0, QColor("#FB7185"))
+                    hgrad.setColorAt(1.0, QColor("#E11D48"))
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(hgrad)
+                else:
+                    painter.setPen(QPen(QColor("#E2E8F0"), 1.5))
+                    painter.setBrush(Qt.NoBrush)
+                painter.drawPath(hpath)
+                painter.restore()
 
         is_live = bool(getattr(rec_meta, "is_live_photo", 0))
         is_offline = bool(getattr(rec_meta, "is_offline", 0))
@@ -1466,8 +1518,8 @@ class MediaCardDelegate(QStyledItemDelegate):
                     self.checkbox_toggled.emit(int(media_id), not is_sel)
                     return True
 
-                # 1b. Check top-left heart (favourite) hit
-                if self.heart_rect(card_rect).contains(pos):
+                # 1b. Check bottom-right photo-corner heart (favourite) pill hit
+                if getattr(self, "favourites_enabled", True) and self.heart_rect(card_rect).contains(pos):
                     rec_fav = index.data(CatalogRoles.RecordRole)
                     cur_fav = bool(getattr(rec_fav, "is_favourite", 0)) if rec_fav is not None else False
                     self.favourite_toggled.emit(int(media_id), not cur_fav)
@@ -2344,6 +2396,7 @@ class ThumbnailGridView(QListView):
                 if (
                     self.card_delegate.checkbox_rect(card_rect).contains(pos)
                     or self.card_delegate.flag_rect(card_rect).contains(pos)
+                    or self.card_delegate.heart_rect(card_rect).contains(pos)
                     or self.card_delegate.stars_bar_rect(card_rect).contains(pos)
                 ):
                     self._drag_start_pos = None
@@ -2882,7 +2935,7 @@ class ThumbnailGridView(QListView):
                     main_win.rename_selection()
                     event.accept()
                     return
-            if event.key() == Qt.Key_F:
+            if event.key() == Qt.Key_F and getattr(self.card_delegate, "favourites_enabled", True):
                 main_win = getattr(self, "main_window", None) or self.window()
                 if hasattr(main_win, "toggle_favourite_selection"):
                     main_win.toggle_favourite_selection(advance=shift_held)
@@ -3356,7 +3409,11 @@ class ThumbnailGridView(QListView):
             menu.addSeparator()
 
             # 3. Organize & AI
-            if is_mw and hasattr(main_win, "toggle_favourite_selection"):
+            if (
+                is_mw
+                and hasattr(main_win, "toggle_favourite_selection")
+                and getattr(self.card_delegate, "favourites_enabled", True)
+            ):
                 hpm = QPixmap(32, 32)
                 hpm.fill(Qt.transparent)
                 hp = QPainter(hpm)
@@ -3552,6 +3609,10 @@ class ThumbnailGridView(QListView):
             ("Media type", "media_type"),
             ("Rating", "rating"),
             ("Flag", "flag"),
+        ]
+        if getattr(self.card_delegate, "favourites_enabled", True):
+            group_criteria.append(("Favourites", "favourites"))
+        group_criteria.extend([
             ("Folder", "folder"),
             ("Tag", "tag"),
             ("People", "people"),
@@ -3559,7 +3620,7 @@ class ThumbnailGridView(QListView):
             ("Geotag", "geotag"),
             ("Camera", "camera"),
             ("None", "none"),
-        ]
+        ])
 
         curr_group = getattr(main_win, "_group_by", "month") if is_mw else "month"
         curr_grp_rev = getattr(main_win, "_group_reverse", False) if is_mw else False

@@ -1869,6 +1869,7 @@ class SingleMediaViewer(QWidget):
         hud_lay = QHBoxLayout(self.cull_hud)
         hud_lay.setContentsMargins(6, 3, 6, 3)
         hud_lay.setSpacing(4)
+        self._favourites_enabled: bool = True
         self.btn_hud_fav = QPushButton(self.cull_hud)
         self.btn_hud_fav.setToolTip("Favourite (F / Shift+F)")
         self.btn_hud_flag = QPushButton(self.cull_hud)
@@ -2945,6 +2946,7 @@ class SingleMediaViewer(QWidget):
             pm.setDevicePixelRatio(2.0)
             return QIcon(pm)
 
+        self.btn_hud_fav.setVisible(bool(getattr(self, "_favourites_enabled", True)))
         self.btn_hud_fav.setIcon(_make_hud_icon("heart", "#F43F5E" if is_fav else "#CBD5E1", filled=is_fav))
         if flag == 1:
             self.btn_hud_flag.setIcon(_make_hud_icon("flag", "#E81123", filled=True))

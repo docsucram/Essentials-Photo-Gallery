@@ -484,6 +484,8 @@ class LeftNavigationDock(QDockWidget):
     save_filter_as_smart_album_requested = Signal()
     folder_options_requested = Signal(int)  # folder_id
     private_mode_toggled = Signal(bool)  # include_private
+    flag_filter_requested = Signal(object)  # int | None (1=picked, -1=rejected, 0=unflagged, None=all)
+    builtin_smart_albums_changed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Navigation", parent)
@@ -532,6 +534,11 @@ class LeftNavigationDock(QDockWidget):
         self._show_people: bool = True
         self._show_ratings: bool = True
         self._show_places: bool = True
+        self._favourites_enabled: bool = True
+        self._show_smart_favourites: bool = True
+        self._show_smart_picked: bool = True
+        self._show_smart_rejected: bool = True
+        self._show_smart_unflagged: bool = True
         self._default_section_order: tuple[str, ...] = (
             "all_media",
             "section_albums",
@@ -1454,33 +1461,93 @@ class LeftNavigationDock(QDockWidget):
         album_icon = make_wlpg_icon("pictures_library", 16)
         smart_icon = make_wlpg_icon("star_filled", 16)
 
-        # Permanent "Favourites" smart item with its own rose heart icon
+        # Permanent built-in smart items (Favourites + Picked / Flagged, Rejected, Unflagged)
         try:
-            fav_cnt = int((repo.get_favourite_and_flag_counts() or {}).get("favourites", 0))
+            counts = repo.get_favourite_and_flag_counts() or {}
         except Exception:
-            fav_cnt = 0
-        from PySide6.QtGui import QPainterPath
+            counts = {}
+        fav_cnt = int(counts.get("favourites", 0))
+        picked_cnt = int(counts.get("picked", 0))
+        rejected_cnt = int(counts.get("rejected", 0))
+        unflagged_cnt = int(counts.get("unflagged", 0))
 
-        hpm = QPixmap(32, 32)
-        hpm.fill(Qt.transparent)
-        hp = QPainter(hpm)
-        hp.setRenderHint(QPainter.Antialiasing, True)
-        hp.setPen(Qt.NoPen)
-        hp.setBrush(QColor("#F43F5E"))
-        hpath = QPainterPath()
-        hpath.moveTo(16.0, 26.5)
-        hpath.cubicTo(5.5, 19.8, 4.0, 11.5, 8.8, 7.2)
-        hpath.cubicTo(12.2, 4.4, 15.0, 6.6, 16.0, 9.2)
-        hpath.cubicTo(17.0, 6.6, 19.8, 4.4, 23.2, 7.2)
-        hpath.cubicTo(28.0, 11.5, 26.5, 19.8, 16.0, 26.5)
-        hp.drawPath(hpath)
-        hp.end()
-        hpm.setDevicePixelRatio(2.0)
-        fav_item = QTreeWidgetItem([f"Favourites ({fav_cnt})"])
-        fav_item.setData(0, _NODE_TYPE_ROLE, "favourites")
-        fav_item.setData(0, _NODE_PAYLOAD_ROLE, True)
-        fav_item.setIcon(0, QIcon(hpm))
-        self.root_smart_albums.addChild(fav_item)
+        def _make_builtin_smart_icon(kind: str) -> QIcon:
+            from PySide6.QtCore import QPointF
+            from PySide6.QtGui import QLinearGradient, QPainterPath, QPolygonF
+
+            pm = QPixmap(32, 32)
+            pm.fill(Qt.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.Antialiasing, True)
+            if kind == "heart":
+                p.setPen(Qt.NoPen)
+                grad = QLinearGradient(16, 6, 16, 26)
+                grad.setColorAt(0.0, QColor("#FB7185"))
+                grad.setColorAt(1.0, QColor("#E11D48"))
+                p.setBrush(grad)
+                hpath = QPainterPath()
+                hpath.moveTo(16.0, 26.5)
+                hpath.cubicTo(5.5, 19.8, 4.0, 11.5, 8.8, 7.2)
+                hpath.cubicTo(12.2, 4.4, 15.0, 6.6, 16.0, 9.2)
+                hpath.cubicTo(17.0, 6.6, 19.8, 4.4, 23.2, 7.2)
+                hpath.cubicTo(28.0, 11.5, 26.5, 19.8, 16.0, 26.5)
+                p.drawPath(hpath)
+            elif kind == "picked":
+                banner = QPolygonF([QPointF(9.0, 6.0), QPointF(26.0, 11.5), QPointF(9.0, 17.5)])
+                grad = QLinearGradient(9.0, 6.0, 9.0, 18.0)
+                grad.setColorAt(0.0, QColor("#F87171"))
+                grad.setColorAt(0.5, QColor("#DC2626"))
+                grad.setColorAt(1.0, QColor("#991B1B"))
+                p.setPen(QPen(QColor("#7F1D1D"), 1.2))
+                p.setBrush(grad)
+                p.drawPolygon(banner)
+                p.setPen(QPen(QColor("#94A3B8"), 2.4, Qt.SolidLine, Qt.RoundCap))
+                p.drawLine(8, 5, 8, 27)
+            elif kind == "rejected":
+                p.setPen(QPen(QColor("#94A3B8"), 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                p.setBrush(Qt.NoBrush)
+                p.drawLine(8, 5, 8, 27)
+                banner = QPolygonF([QPointF(8.0, 6.0), QPointF(25.0, 11.5), QPointF(8.0, 17.5)])
+                p.drawPolygon(banner)
+                p.setPen(QPen(QColor("#EF4444"), 2.8, Qt.SolidLine, Qt.RoundCap))
+                p.drawLine(5, 26, 27, 5)
+            else:  # unflagged
+                p.setPen(QPen(QColor("#94A3B8"), 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                p.setBrush(Qt.NoBrush)
+                p.drawLine(8, 5, 8, 27)
+                banner = QPolygonF([QPointF(8.0, 6.0), QPointF(25.0, 11.5), QPointF(8.0, 17.5)])
+                p.drawPolygon(banner)
+            p.end()
+            pm.setDevicePixelRatio(2.0)
+            return QIcon(pm)
+
+        if getattr(self, "_favourites_enabled", True) and getattr(self, "_show_smart_favourites", True):
+            fav_item = QTreeWidgetItem([f"Favourites ({fav_cnt})"])
+            fav_item.setData(0, _NODE_TYPE_ROLE, "favourites")
+            fav_item.setData(0, _NODE_PAYLOAD_ROLE, True)
+            fav_item.setIcon(0, _make_builtin_smart_icon("heart"))
+            self.root_smart_albums.addChild(fav_item)
+
+        if getattr(self, "_show_smart_picked", True):
+            pick_item = QTreeWidgetItem([f"Picked / Flagged ({picked_cnt})"])
+            pick_item.setData(0, _NODE_TYPE_ROLE, "smart_flag")
+            pick_item.setData(0, _NODE_PAYLOAD_ROLE, 1)
+            pick_item.setIcon(0, _make_builtin_smart_icon("picked"))
+            self.root_smart_albums.addChild(pick_item)
+
+        if getattr(self, "_show_smart_rejected", True):
+            rej_item = QTreeWidgetItem([f"Rejected ({rejected_cnt})"])
+            rej_item.setData(0, _NODE_TYPE_ROLE, "smart_flag")
+            rej_item.setData(0, _NODE_PAYLOAD_ROLE, -1)
+            rej_item.setIcon(0, _make_builtin_smart_icon("rejected"))
+            self.root_smart_albums.addChild(rej_item)
+
+        if getattr(self, "_show_smart_unflagged", True):
+            unf_item = QTreeWidgetItem([f"Unflagged ({unflagged_cnt})"])
+            unf_item.setData(0, _NODE_TYPE_ROLE, "smart_flag")
+            unf_item.setData(0, _NODE_PAYLOAD_ROLE, 0)
+            unf_item.setIcon(0, _make_builtin_smart_icon("unflagged"))
+            self.root_smart_albums.addChild(unf_item)
 
         try:
             static_albums = repo.get_albums_with_counts()
@@ -1528,6 +1595,33 @@ class LeftNavigationDock(QDockWidget):
             self.tree.blockSignals(False)
             self._updating_tree = False
         self._update_summary_label()
+
+    def set_favourites_enabled(self, enabled: bool) -> None:
+        self._favourites_enabled = bool(enabled)
+        if getattr(self, "_repo", None) is not None:
+            self.refresh_albums_only(self._repo)
+
+    def set_builtin_smart_albums_visibility(
+        self,
+        *,
+        favourites: bool | None = None,
+        picked: bool | None = None,
+        rejected: bool | None = None,
+        unflagged: bool | None = None,
+        emit_signal: bool = True,
+    ) -> None:
+        if favourites is not None:
+            self._show_smart_favourites = bool(favourites)
+        if picked is not None:
+            self._show_smart_picked = bool(picked)
+        if rejected is not None:
+            self._show_smart_rejected = bool(rejected)
+        if unflagged is not None:
+            self._show_smart_unflagged = bool(unflagged)
+        if getattr(self, "_repo", None) is not None:
+            self.refresh_albums_only(self._repo)
+        if emit_signal:
+            self.builtin_smart_albums_changed.emit()
 
     def active_album_id(self) -> int | None:
         """Return currently selected Static Album id, or None."""
@@ -1767,10 +1861,16 @@ class LeftNavigationDock(QDockWidget):
             elif ntype == "smart_album" and isinstance(payload, tuple):
                 smart_album_tuple = (int(payload[0]), str(payload[1]))
             elif ntype == "favourites":
+                self.flag_filter_requested.emit(None)
                 self.favourite_filter_requested.emit(True)
+                return
+            elif ntype == "smart_flag" and payload is not None:
+                self.favourite_filter_requested.emit(False)
+                self.flag_filter_requested.emit(int(payload))
                 return
             elif ntype == "all_media":
                 self.favourite_filter_requested.emit(False)
+                self.flag_filter_requested.emit(None)
                 all_media = True
 
         if all_media and (
@@ -2310,6 +2410,40 @@ class LeftNavigationDock(QDockWidget):
             )
             act_save_smart.triggered.connect(self.save_filter_as_smart_album_requested.emit)
             menu.addAction(act_save_smart)
+
+            menu.addSeparator()
+            if getattr(self, "_favourites_enabled", True):
+                act_show_fav = QAction("Show Favourites", menu)
+                act_show_fav.setCheckable(True)
+                act_show_fav.setChecked(bool(getattr(self, "_show_smart_favourites", True)))
+                act_show_fav.toggled.connect(
+                    lambda checked: self.set_builtin_smart_albums_visibility(favourites=checked)
+                )
+                menu.addAction(act_show_fav)
+
+            act_show_pick = QAction("Show Picked / Flagged", menu)
+            act_show_pick.setCheckable(True)
+            act_show_pick.setChecked(bool(getattr(self, "_show_smart_picked", True)))
+            act_show_pick.toggled.connect(
+                lambda checked: self.set_builtin_smart_albums_visibility(picked=checked)
+            )
+            menu.addAction(act_show_pick)
+
+            act_show_rej = QAction("Show Rejected", menu)
+            act_show_rej.setCheckable(True)
+            act_show_rej.setChecked(bool(getattr(self, "_show_smart_rejected", True)))
+            act_show_rej.toggled.connect(
+                lambda checked: self.set_builtin_smart_albums_visibility(rejected=checked)
+            )
+            menu.addAction(act_show_rej)
+
+            act_show_unf = QAction("Show Unflagged", menu)
+            act_show_unf.setCheckable(True)
+            act_show_unf.setChecked(bool(getattr(self, "_show_smart_unflagged", True)))
+            act_show_unf.toggled.connect(
+                lambda checked: self.set_builtin_smart_albums_visibility(unflagged=checked)
+            )
+            menu.addAction(act_show_unf)
         elif ntype == "album" and isinstance(payload, tuple):
             aid, aname = int(payload[0]), str(payload[1])
             act_ren = QAction("Rename Album...", menu)

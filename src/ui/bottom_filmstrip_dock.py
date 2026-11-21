@@ -107,6 +107,7 @@ class _FilmstripItemDelegate(QStyledItemDelegate):
         self._thumb_repo: Any = None
         self._local_thumbs: OrderedDict[int, QPixmap] = OrderedDict()
         self._theme_name: str = "wlpg_aero"
+        self.favourites_enabled: bool = True
 
     def set_sources(self, pixmap_cache: dict[int, QPixmap] | None, thumb_repo: Any) -> None:
         self._pixmap_cache = pixmap_cache
@@ -227,7 +228,7 @@ class _FilmstripItemDelegate(QStyledItemDelegate):
         painter.setClipping(False)
 
         # Top-left: Favourite Heart badge
-        if is_fav:
+        if is_fav and getattr(self, "favourites_enabled", True):
             hr = QRect(thumb_rect.left() + 3, thumb_rect.top() + 3, 14, 14)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(15, 23, 42, 195))
@@ -312,6 +313,7 @@ class BottomFilmstripDock(QDockWidget):
         self.setTitleBarWidget(QWidget(self))  # Hide standard QDockWidget title bar
 
         self._theme_name: str = "wlpg_aero"
+        self.favourites_enabled: bool = True
         self._catalog_model: Any = None
         self._pixmap_cache: dict[int, QPixmap] | None = None
         self._thumb_repo: Any = None

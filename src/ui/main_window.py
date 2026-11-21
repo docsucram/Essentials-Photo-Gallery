@@ -227,6 +227,11 @@ class _FavouriteUndoCommand(QUndoCommand):
             self.main_win.grid_view.viewport().update()
         if hasattr(self.main_win, "media_viewer") and getattr(self.main_win.media_viewer, "_update_cull_hud", None):
             self.main_win.media_viewer._update_cull_hud()
+        if hasattr(self.main_win, "left_nav_dock") and hasattr(self.main_win, "catalog_repo"):
+            try:
+                self.main_win.left_nav_dock.refresh_albums_only(self.main_win.catalog_repo)
+            except Exception:
+                pass
 
     def redo(self) -> None:
         self.main_win.catalog_repo.batch_update_favourite(self.target_ids, bool(self.new_fav))
@@ -241,6 +246,11 @@ class _FavouriteUndoCommand(QUndoCommand):
             self.main_win.grid_view.viewport().update()
         if hasattr(self.main_win, "media_viewer") and getattr(self.main_win.media_viewer, "_update_cull_hud", None):
             self.main_win.media_viewer._update_cull_hud()
+        if hasattr(self.main_win, "left_nav_dock") and hasattr(self.main_win, "catalog_repo"):
+            try:
+                self.main_win.left_nav_dock.refresh_albums_only(self.main_win.catalog_repo)
+            except Exception:
+                pass
 
 
 class _CaptionUndoCommand(QUndoCommand):
@@ -1072,6 +1082,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.central_stack.addWidget(self.compare_view)
         self._expanded_stack_ids: set[int] = set()
         self._favourites_only: bool = False
+        self.favourites_enabled: bool = True
         self.grid_view.compare_requested.connect(self.open_compare_view)
         self.grid_view.stack_toggle_requested.connect(self.toggle_stack_expanded)
         self.grid_view.favourite_toggled.connect(self._on_card_favourite_toggled)
@@ -1409,6 +1420,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         # Left Navigation Dock
         self.left_nav_dock.filter_changed.connect(self._on_nav_filter_changed)
         self.left_nav_dock.favourite_filter_requested.connect(self._on_favourite_filter_selected)
+        self.left_nav_dock.flag_filter_requested.connect(self._on_nav_smart_flag_selected)
+        self.left_nav_dock.builtin_smart_albums_changed.connect(self._save_builtin_smart_albums_prefs)
         self.left_nav_dock.people_directory_requested.connect(self.open_people_directory_view)
         self.left_nav_dock.albums_section_requested.connect(self.open_albums_view)
         self.left_nav_dock.dates_section_requested.connect(self._on_dates_section_requested)
@@ -4447,6 +4460,11 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.undo_stack.push(cmd)
         if hasattr(self, "media_viewer") and getattr(self.media_viewer, "_update_cull_hud", None):
             self.media_viewer._update_cull_hud()
+        if hasattr(self, "left_nav_dock") and hasattr(self, "catalog_repo"):
+            try:
+                self.left_nav_dock.refresh_albums_only(self.catalog_repo)
+            except Exception:
+                pass
         if flag == 1:
             lbl = "Picked"
         elif flag == -1:
@@ -4473,6 +4491,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._advance_after_cull()
 
     def toggle_favourite_selection(self, *, advance: bool = False) -> None:
+        if not getattr(self, "favourites_enabled", True):
+            return
         ids = self.get_active_target_ids()
         if not ids:
             return
@@ -4481,11 +4501,71 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.apply_favourite_to_selection(any_unfav, target_ids=ids, advance=advance)
 
     def _on_card_favourite_toggled(self, media_id: int, is_fav: bool) -> None:
+        if not getattr(self, "favourites_enabled", True):
+            return
         self.apply_favourite_to_selection(is_fav, target_ids=[int(media_id)])
 
     def _on_favourite_filter_selected(self, enabled: bool) -> None:
-        self._favourites_only = bool(enabled)
+        self._favourites_only = bool(enabled) and bool(getattr(self, "favourites_enabled", True))
+        if self._favourites_only:
+            # Clear folder/album/flag scope so the permanent Favourites smart album shows all favourites
+            self.left_nav_dock._folder_id = None
+            self.left_nav_dock._album_id = None
+            self.left_nav_dock._smart_album_id = None
+            self.left_nav_dock._smart_album_rules = None
+            self.left_nav_dock._flag_filter = None
+            self.left_nav_dock._flagged_only = False
         self.rebuild_and_run_query()
+
+    def _on_nav_smart_flag_selected(self, flag_val: object) -> None:
+        if flag_val is not None:
+            self._favourites_only = False
+            self.left_nav_dock._folder_id = None
+            self.left_nav_dock._album_id = None
+            self.left_nav_dock._smart_album_id = None
+            self.left_nav_dock._smart_album_rules = None
+        self.left_nav_dock.set_flag_filter(flag_val)
+
+    def _save_builtin_smart_albums_prefs(self) -> None:
+        settings = QSettings("PhotoGallery64", "PhotoGallery64")
+        settings.setValue("smart_show_favourites", getattr(self.left_nav_dock, "_show_smart_favourites", True))
+        settings.setValue("smart_show_picked", getattr(self.left_nav_dock, "_show_smart_picked", True))
+        settings.setValue("smart_show_rejected", getattr(self.left_nav_dock, "_show_smart_rejected", True))
+        settings.setValue("smart_show_unflagged", getattr(self.left_nav_dock, "_show_smart_unflagged", True))
+
+    def set_favourites_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        self.favourites_enabled = enabled
+        if hasattr(self, "grid_view") and self.grid_view is not None and self.grid_view.card_delegate is not None:
+            self.grid_view.card_delegate.favourites_enabled = enabled
+            self.grid_view.viewport().update()
+        if hasattr(self, "media_viewer") and self.media_viewer is not None:
+            self.media_viewer._favourites_enabled = enabled
+            try:
+                self.media_viewer._update_cull_hud()
+            except Exception:
+                pass
+        if hasattr(self, "filmstrip_dock") and self.filmstrip_dock is not None:
+            dlg = getattr(self.filmstrip_dock, "_delegate", None)
+            if dlg is not None:
+                dlg.favourites_enabled = enabled
+            lv = getattr(self.filmstrip_dock, "list_view", None)
+            if lv is not None:
+                lv.viewport().update()
+        if hasattr(self, "ribbon") and self.ribbon is not None:
+            self.ribbon.set_favourites_enabled(enabled)
+        if hasattr(self, "left_nav_dock") and self.left_nav_dock is not None:
+            self.left_nav_dock.set_favourites_enabled(enabled)
+        if not enabled:
+            needs_requery = False
+            if getattr(self, "_favourites_only", False):
+                self._favourites_only = False
+                needs_requery = True
+            if getattr(self, "_group_by", "month") == "favourites":
+                self.set_group_by("month")
+                needs_requery = False  # set_group_by already triggers rebuild
+            if needs_requery:
+                self.rebuild_and_run_query()
 
     def select_all_rejected(self) -> list[int]:
         rejected = self.catalog_repo.get_rejected_media_ids()
@@ -9091,6 +9171,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             show_ratings=getattr(self.left_nav_dock, "_show_ratings", True),
             show_places=getattr(self.left_nav_dock, "_show_places", True),
             show_albums=getattr(self.left_nav_dock, "_show_albums", True),
+            favourites_enabled=getattr(self, "favourites_enabled", True),
             find_people_enabled=getattr(self, "find_people_enabled", True),
             tooltip_previews=getattr(self, "tooltip_previews", True),
             jpeg_quality=getattr(self, "jpeg_quality", 83),
@@ -9142,6 +9223,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                 show_albums=self.nav_show_albums,
             )
 
+            self.set_favourites_enabled(dlg.favourites_enabled())
+
             old_find_people = getattr(self, "find_people_enabled", True)
             self.find_people_enabled = dlg.find_people_enabled()
             if self.find_people_enabled and not old_find_people:
@@ -9166,6 +9249,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             settings.setValue("nav_show_ratings", self.nav_show_ratings)
             settings.setValue("nav_show_places", self.nav_show_places)
             settings.setValue("nav_show_albums", self.nav_show_albums)
+            settings.setValue("favourites_enabled", self.favourites_enabled)
             settings.setValue("find_people_enabled", self.find_people_enabled)
             settings.setValue("tooltip_previews", self.tooltip_previews)
             settings.setValue("jpeg_quality", self.jpeg_quality)
@@ -10800,7 +10884,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                     self.apply_flag_to_selection(0, advance=shift_held)
                     event.accept()
                     return
-            if event.key() == Qt.Key_F:
+            if event.key() == Qt.Key_F and getattr(self, "favourites_enabled", True):
                 if self.get_active_target_ids():
                     self.toggle_favourite_selection(advance=shift_held)
                     event.accept()
@@ -11037,6 +11121,11 @@ class PhotoGalleryMainWindow(QMainWindow):
             settings.setValue("nav_show_ratings", getattr(self.left_nav_dock, "_show_ratings", True))
             settings.setValue("nav_show_places", getattr(self.left_nav_dock, "_show_places", True))
             settings.setValue("nav_show_albums", getattr(self.left_nav_dock, "_show_albums", True))
+            settings.setValue("favourites_enabled", getattr(self, "favourites_enabled", True))
+            settings.setValue("smart_show_favourites", getattr(self.left_nav_dock, "_show_smart_favourites", True))
+            settings.setValue("smart_show_picked", getattr(self.left_nav_dock, "_show_smart_picked", True))
+            settings.setValue("smart_show_rejected", getattr(self.left_nav_dock, "_show_smart_rejected", True))
+            settings.setValue("smart_show_unflagged", getattr(self.left_nav_dock, "_show_smart_unflagged", True))
             settings.setValue("nav_section_order", json.dumps(self.left_nav_dock.get_section_order()))
             settings.setValue("find_people_enabled", getattr(self, "find_people_enabled", True))
             settings.setValue("tooltip_previews", getattr(self, "tooltip_previews", True))
@@ -11204,6 +11293,14 @@ class PhotoGalleryMainWindow(QMainWindow):
                 show_places=self.nav_show_places,
                 show_albums=self.nav_show_albums,
             )
+            self.left_nav_dock.set_builtin_smart_albums_visibility(
+                favourites=_to_bool(_get_val("smart_show_favourites", True), True),
+                picked=_to_bool(_get_val("smart_show_picked", True), True),
+                rejected=_to_bool(_get_val("smart_show_rejected", True), True),
+                unflagged=_to_bool(_get_val("smart_show_unflagged", True), True),
+                emit_signal=False,
+            )
+            self.set_favourites_enabled(_to_bool(_get_val("favourites_enabled", True), True))
 
             saved_theme = _get_val("theme", "wlpg_aero")
             if saved_theme and saved_theme in ("wlpg_aero", "modern", "dark"):

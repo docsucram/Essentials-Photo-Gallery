@@ -7323,11 +7323,23 @@ class RibbonToolbar(QWidget):
         pm.setDevicePixelRatio(2.0)
         return QIcon(pm)
 
+    def set_favourites_enabled(self, enabled: bool) -> None:
+        self._favourites_enabled = bool(enabled)
+        for act in getattr(self, "_ribbon_fav_actions", []):
+            try:
+                act.setVisible(self._favourites_enabled)
+            except RuntimeError:
+                pass
+
     def _build_flagged_menu(self, btn: QToolButton) -> None:
         menu = QMenu(btn)
         menu.setFont(QFont("Segoe UI", 9))
         act_all = menu.addAction("All items")
         act_fav = menu.addAction(self._make_cull_menu_icon("heart"), "Favourites")
+        act_fav.setVisible(bool(getattr(self, "_favourites_enabled", True)))
+        if not hasattr(self, "_ribbon_fav_actions"):
+            self._ribbon_fav_actions = []
+        self._ribbon_fav_actions.append(act_fav)
         act_flagged = menu.addAction(self._make_cull_menu_icon("flag_picked"), "Picked / Flagged")
         act_rejected = menu.addAction(self._make_cull_menu_icon("flag_rejected"), "Rejected")
         act_unflagged = menu.addAction("Not flagged")
@@ -8954,6 +8966,10 @@ class RibbonToolbar(QWidget):
             ("Media type", "media_type"),
             ("Rating", "rating"),
             ("Flag", "flag"),
+        ]
+        if getattr(self, "_favourites_enabled", True):
+            group_criteria.append(("Favourites", "favourites"))
+        group_criteria.extend([
             ("Folder", "folder"),
             ("Tag", "tag"),
             ("People", "people"),
@@ -8961,7 +8977,7 @@ class RibbonToolbar(QWidget):
             ("Geotag", "geotag"),
             ("Camera", "camera"),
             ("None", "none"),
-        ]
+        ])
 
         curr = getattr(self, "_arrange_by", "date")
 
