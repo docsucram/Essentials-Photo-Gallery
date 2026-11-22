@@ -3738,6 +3738,7 @@ class _FaceCarouselWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._is_dark: bool = False
         self._buttons: dict[int, QToolButton] = {}
         self._button_list: list[QToolButton] = []
         self._all_people_list: list[dict[str, Any]] = []
@@ -3753,30 +3754,22 @@ class _FaceCarouselWidget(QWidget):
         self.container = QFrame(self)
         self.container.setObjectName("FaceCarouselContainer")
         self.container.setFixedHeight(62)
-        self.container.setStyleSheet(
-            """
-            QFrame#FaceCarouselContainer,
-            QFrame#RibbonArrangeBox {
-                background: #FFFFFF;
-                border: 1px solid #ABBFD3;
-                border-radius: 2px;
-            }
-            """
-        )
         c_layout = QHBoxLayout(self.container)
         c_layout.setContentsMargins(1, 1, 1, 1)
         c_layout.setSpacing(1)
 
         self.scroll = QScrollArea(self.container)
+        self.scroll.setObjectName("FaceCarouselScroll")
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setFixedHeight(58)
         self.scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.scroll.viewport().setObjectName("FaceCarouselViewport")
 
         self.strip = QWidget()
-        self.strip.setStyleSheet("background: transparent;")
+        self.strip.setObjectName("FaceCarouselStrip")
         self.strip_layout = QHBoxLayout(self.strip)
         self.strip_layout.setContentsMargins(1, 0, 1, 0)
         self.strip_layout.setSpacing(2)
@@ -3796,43 +3789,10 @@ class _FaceCarouselWidget(QWidget):
         self.btn_expand = QPushButton(self.container)
         self.btn_expand.setToolTip("Show all people and search options")
 
-        # Draw classic ribbon gallery "More" icon (top line + down arrow)
-        more_pix = QPixmap(10, 10)
-        more_pix.fill(Qt.transparent)
-        mp = QPainter(more_pix)
-        mp.setRenderHint(QPainter.Antialiasing)
-        mp.setPen(QPen(QColor("#55687C"), 1.2))
-        mp.drawLine(1, 2, 9, 2)
-        mp.setBrush(QColor("#55687C"))
-        tri = QPolygonF([QPointF(2, 4.5), QPointF(8, 4.5), QPointF(5, 7.5)])
-        mp.drawPolygon(tri)
-        mp.end()
-        self.btn_expand.setIcon(QIcon(more_pix))
-        self.btn_expand.setIconSize(QSize(10, 10))
-
-        btn_style = """
-            QPushButton {
-                border: 1px solid #D2DFEE;
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F6F9FD, stop:1 #E2ECF7);
-                color: #55687C;
-                font-size: 7pt;
-                padding: 0;
-            }
-            QPushButton:hover {
-                background: #CCE4F7;
-                border-color: #7BAEDB;
-            }
-            QPushButton:disabled {
-                color: #B0C4DE;
-                background: #F4F6F9;
-                border-color: #DCE6F2;
-            }
-        """
         for b in (self.btn_scroll_left, self.btn_scroll_right, self.btn_expand):
             b.setFixedSize(14, 19)
             b.setFlat(True)
             b.setCursor(Qt.PointingHandCursor)
-            b.setStyleSheet(btn_style)
 
         self.btn_scroll_left.clicked.connect(self._scroll_left)
         self.btn_scroll_right.clicked.connect(self._scroll_right)
@@ -3845,19 +3805,100 @@ class _FaceCarouselWidget(QWidget):
         hbox.addWidget(self.container)
         self.setFixedHeight(62)
         self.set_visible_faces(5)
+        self.set_dark_mode(False)
+
+    @staticmethod
+    def _face_card_style(is_dark: bool) -> str:
+        if is_dark:
+            return """
+                QToolButton {
+                    border: 1px solid #333A45;
+                    border-radius: 2px;
+                    background: transparent;
+                    padding: 0px;
+                }
+                QToolButton:hover {
+                    border: 1px solid #60A5FA;
+                    background: #1E3A5F;
+                }
+                QToolTip {
+                    background-color: #1E242C;
+                    color: #E2E8F0;
+                    border: 1px solid #3B4252;
+                    border-radius: 2px;
+                    padding: 3px 6px;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                }
+            """
+        return """
+            QToolButton {
+                border: 1px solid #C8D7E6;
+                border-radius: 2px;
+                background: transparent;
+                padding: 0px;
+            }
+            QToolButton:hover {
+                border: 1px solid #E2B034;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #FFFDF5, stop:1 #FCE7A2);
+            }
+            QToolTip {
+                background-color: #FFFFFF;
+                color: #1E395B;
+                border: 1px solid #7DA2CE;
+                border-radius: 2px;
+                padding: 3px 6px;
+                font-family: 'Segoe UI';
+                font-size: 8.5pt;
+            }
+        """
 
     def set_dark_mode(self, is_dark: bool) -> None:
         self._is_dark = bool(is_dark)
-        if is_dark:
-            self.container.setStyleSheet(
-                """
-                QFrame#FaceCarouselContainer {
-                    background: #14171C;
-                    border: 1px solid #333A45;
-                    border-radius: 2px;
-                }
-                """
-            )
+        bg = "#14171C" if self._is_dark else "#FFFFFF"
+        border = "#333A45" if self._is_dark else "#ABBFD3"
+        self.container.setStyleSheet(
+            f"""
+            QFrame#FaceCarouselContainer,
+            QFrame#RibbonArrangeBox {{
+                background: {bg};
+                border: 1px solid {border};
+                border-radius: 2px;
+            }}
+            """
+        )
+        self.scroll.setStyleSheet(
+            f"""
+            QScrollArea#FaceCarouselScroll {{
+                background: {bg};
+                border: none;
+            }}
+            QWidget#FaceCarouselViewport,
+            QWidget#FaceCarouselStrip {{
+                background: {bg};
+            }}
+            """
+        )
+        self.scroll.viewport().setStyleSheet(f"background: {bg};")
+        self.strip.setStyleSheet(f"background: {bg};")
+
+        # Draw classic ribbon gallery "More" icon (top line + down arrow)
+        icon_col = QColor("#94A3B8" if self._is_dark else "#55687C")
+        more_pix = QPixmap(10, 10)
+        more_pix.fill(Qt.transparent)
+        mp = QPainter(more_pix)
+        mp.setRenderHint(QPainter.Antialiasing)
+        mp.setPen(QPen(icon_col, 1.2))
+        mp.drawLine(1, 2, 9, 2)
+        mp.setBrush(icon_col)
+        tri = QPolygonF([QPointF(2, 4.5), QPointF(8, 4.5), QPointF(5, 7.5)])
+        mp.drawPolygon(tri)
+        mp.end()
+        self.btn_expand.setIcon(QIcon(more_pix))
+        self.btn_expand.setIconSize(QSize(10, 10))
+
+        if self._is_dark:
             btn_style = """
                 QPushButton {
                     border: 1px solid #333A45;
@@ -3878,15 +3919,6 @@ class _FaceCarouselWidget(QWidget):
                 }
             """
         else:
-            self.container.setStyleSheet(
-                """
-                QFrame#FaceCarouselContainer {
-                    background: #FFFFFF;
-                    border: 1px solid #ABBFD3;
-                    border-radius: 2px;
-                }
-                """
-            )
             btn_style = """
                 QPushButton {
                     border: 1px solid #D2DFEE;
@@ -3907,6 +3939,10 @@ class _FaceCarouselWidget(QWidget):
             """
         for b in (self.btn_scroll_left, self.btn_scroll_right, self.btn_expand):
             b.setStyleSheet(btn_style)
+
+        card_style = self._face_card_style(self._is_dark)
+        for card_btn in self._button_list:
+            card_btn.setStyleSheet(card_style)
 
     def set_visible_faces(self, count: int) -> None:
         self._visible_faces = max(1, min(10, count))
@@ -3968,6 +4004,7 @@ class _FaceCarouselWidget(QWidget):
             reverse=True,
         )
 
+        card_style = self._face_card_style(getattr(self, "_is_dark", False))
         for p in self._top_people:
             pid = int(p["id"])
             name = str(p["name"])
@@ -3982,30 +4019,7 @@ class _FaceCarouselWidget(QWidget):
             pix = make_person_avatar_pixmap(name, blob, size=50)
             btn.setIcon(QIcon(pix))
             btn.setIconSize(QSize(50, 50))
-            btn.setStyleSheet(
-                """
-                QToolButton {
-                    border: 1px solid #C8D7E6;
-                    border-radius: 2px;
-                    background: transparent;
-                    padding: 0px;
-                }
-                QToolButton:hover {
-                    border: 1px solid #E2B034;
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 #FFFDF5, stop:1 #FCE7A2);
-                }
-                QToolTip {
-                    background-color: #FFFFFF;
-                    color: #1E395B;
-                    border: 1px solid #7DA2CE;
-                    border-radius: 2px;
-                    padding: 3px 6px;
-                    font-family: 'Segoe UI';
-                    font-size: 8.5pt;
-                }
-                """
-            )
+            btn.setStyleSheet(card_style)
             btn.clicked.connect(lambda _checked=False, person_id=pid: self.person_clicked.emit(person_id))
             self.strip_layout.insertWidget(self.strip_layout.count() - 1, btn)
             self._buttons[pid] = btn
