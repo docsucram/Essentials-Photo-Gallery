@@ -1090,18 +1090,23 @@ class CollageWorkspace(CreateWorkspaceBase):
         self.preview_view.apply_theme_mode(self._theme_name)
         self.zoom_bar.apply_theme_mode(self._theme_name)
         self.lbl_info.setStyleSheet(f"color: {tok.text_secondary}; font-size: 9pt; background: transparent;")
-        if hasattr(self, "lbl_canvas_rotation"):
+        if hasattr(self, "rotation_bar"):
+            canvas_bg = "#111318" if tok.is_dark else "#232730"
+            self.rotation_bar.setStyleSheet(
+                f"QFrame#CollageRotationBar {{ background-color: {canvas_bg}; border: none; }}"
+                f"QFrame#CollageRotationBar QSlider::groove:horizontal {{ height: 4px; background: rgba(255,255,255,48); border-radius: 2px; }}"
+                f"QFrame#CollageRotationBar QSlider::handle:horizontal {{ width: 12px; height: 12px; margin: -4px 0; "
+                f"background: #F8FAFC; border: 1.5px solid {tok.accent}; border-radius: 6px; }}"
+            )
             self.lbl_canvas_rotation.setStyleSheet(
-                f"color: {tok.text_primary}; font-size: 8.5pt; font-weight: 600; background: transparent;"
+                "color: #F8FAFC; font-size: 8.5pt; font-weight: 600; background: transparent;"
             )
-            rot_btn_qss = (
-                f"QPushButton {{ background-color: {tok.bg_elevated}; color: {tok.text_primary}; "
-                f"border: 1px solid {tok.border_subtle}; border-radius: 12px; padding: 2px 10px; font-size: 8.5pt; }}"
-                f"QPushButton:hover {{ background-color: {tok.bg_hover}; border-color: {tok.accent}; }}"
-                f"QPushButton:disabled {{ color: {tok.text_secondary}; border-color: {tok.border_subtle}; }}"
+            self.btn_reset_rotation.setStyleSheet(
+                f"QPushButton {{ background-color: rgba(255,255,255,18); color: #F8FAFC; "
+                f"border: 1px solid rgba(255,255,255,55); border-radius: 11px; padding: 2px 12px; font-size: 8.5pt; }}"
+                f"QPushButton:hover {{ background-color: rgba(255,255,255,34); border-color: {tok.accent}; }}"
+                f"QPushButton:disabled {{ color: rgba(248,250,252,95); border-color: rgba(255,255,255,28); }}"
             )
-            self.btn_rotate_90.setStyleSheet(rot_btn_qss)
-            self.btn_reset_rotation.setStyleSheet(rot_btn_qss)
         self._refresh_visual_picker_icons()
         self._refresh_bg_swatch_styles()
         self._refresh_tray_card_styles()
@@ -1134,34 +1139,27 @@ class CollageWorkspace(CreateWorkspaceBase):
         self.preview_view.zoom_changed.connect(self._on_zoom_changed)
         lay.addWidget(self.preview_view, 1)
 
-        # Google Photos-style Canvas Rotation bar
+        # Google Photos-style Canvas Rotation bar (inside dark canvas zone, above the grey info bar)
         self.rotation_bar = QFrame(self)
-        self.rotation_bar.setObjectName("StudioTrayRoot")
+        self.rotation_bar.setObjectName("CollageRotationBar")
         rot_lay = QHBoxLayout(self.rotation_bar)
-        rot_lay.setContentsMargins(12, 3, 12, 3)
-        rot_lay.setSpacing(8)
+        rot_lay.setContentsMargins(12, 4, 12, 6)
+        rot_lay.setSpacing(10)
         rot_lay.addStretch(1)
 
-        self.btn_rotate_90 = QPushButton("↻ 90°", self.rotation_bar)
-        self.btn_rotate_90.setFixedHeight(24)
-        self.btn_rotate_90.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_rotate_90.setToolTip("Rotate collage canvas 90° clockwise")
-        self.btn_rotate_90.clicked.connect(self._rotate_canvas_90)
-        rot_lay.addWidget(self.btn_rotate_90)
-
         self.lbl_canvas_rotation = QLabel("0°", self.rotation_bar)
-        self.lbl_canvas_rotation.setFixedWidth(38)
+        self.lbl_canvas_rotation.setFixedWidth(36)
         self.lbl_canvas_rotation.setAlignment(Qt.AlignmentFlag.AlignCenter)
         rot_lay.addWidget(self.lbl_canvas_rotation)
 
-        self.sld_canvas_rotation = AeroStudioSlider(-180, 180, 0, self.rotation_bar)
-        self.sld_canvas_rotation.setFixedWidth(220)
-        self.sld_canvas_rotation.setToolTip("Rotate collage canvas (-180° to +180°, double-click to reset)")
+        self.sld_canvas_rotation = AeroStudioSlider(-45, 45, 0, self.rotation_bar)
+        self.sld_canvas_rotation.setFixedWidth(240)
+        self.sld_canvas_rotation.setToolTip("Rotate collage canvas (-45° to +45°, double-click to reset)")
         self.sld_canvas_rotation.valueChanged.connect(self._on_canvas_rotation_slider_changed)
         rot_lay.addWidget(self.sld_canvas_rotation)
 
         self.btn_reset_rotation = QPushButton("Reset", self.rotation_bar)
-        self.btn_reset_rotation.setFixedHeight(24)
+        self.btn_reset_rotation.setFixedHeight(22)
         self.btn_reset_rotation.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_reset_rotation.setToolTip("Reset canvas rotation to 0°")
         self.btn_reset_rotation.setEnabled(False)
@@ -1827,19 +1825,14 @@ class CollageWorkspace(CreateWorkspaceBase):
         self._render_preview()
 
     def _set_canvas_rotation(self, deg: float, *, interactive: bool = False) -> None:
-        val = float(deg)
-        # Normalize into [-180, 180]
-        while val > 180.0:
-            val -= 360.0
-        while val < -180.0:
-            val += 360.0
+        val = max(-45.0, min(45.0, float(deg)))
         if abs(val) < 0.01:
             val = 0.0
         self._canvas_rotation_deg = val
         iv = int(round(val))
         if hasattr(self, "sld_canvas_rotation"):
             self.sld_canvas_rotation.blockSignals(True)
-            self.sld_canvas_rotation.setValue(max(-180, min(180, iv)))
+            self.sld_canvas_rotation.setValue(max(-45, min(45, iv)))
             self.sld_canvas_rotation.blockSignals(False)
         if hasattr(self, "lbl_canvas_rotation"):
             self.lbl_canvas_rotation.setText(f"{iv}°")
@@ -1850,12 +1843,6 @@ class CollageWorkspace(CreateWorkspaceBase):
 
     def _on_canvas_rotation_slider_changed(self, deg: int) -> None:
         self._set_canvas_rotation(float(deg), interactive=True)
-
-    def _rotate_canvas_90(self) -> None:
-        nxt = self._canvas_rotation_deg + 90.0
-        if nxt > 180.0:
-            nxt -= 360.0
-        self._set_canvas_rotation(nxt, interactive=False)
 
     def _reset_canvas_rotation(self) -> None:
         if abs(self._canvas_rotation_deg) > 1e-4:
@@ -2008,13 +1995,14 @@ class CollageWorkspace(CreateWorkspaceBase):
             )
         elif style_idx == 1:
             layout_name = self.cmb_grid_layout.currentText().lower().replace(" ", "_")
-            # Scale border/corner proportionally if render_size is expanded for rotation
-            rot_scale = render_size[0] / max(1.0, float(target_size[0]))
+            # Scale border/corner strictly by target resolution vs 1280px preview reference
+            # (NEVER by rotation expansion factor, since rotation center-crops at 1:1 scale)
+            px_scale = max(1, max(target_size)) / 1280.0
             raw_bgr = create_grid_collage(
                 images_bgr=images_bgr,
                 layout=layout_name,
-                border_thickness=max(0, int(round(self.sld_border.value() * rot_scale))),
-                corner_radius=max(0, int(round(self.sld_corner.value() * rot_scale))),
+                border_thickness=max(0, int(round(self.sld_border.value() * px_scale))),
+                corner_radius=max(0, int(round(self.sld_corner.value() * px_scale))),
                 bg_color=_qcolor_to_bgr(self.bg_color),
                 target_size=render_size,
                 focus_centers=focus_centers,
@@ -2149,11 +2137,11 @@ class CollageWorkspace(CreateWorkspaceBase):
 
     def _current_grid_slots(self) -> list[tuple[int, int, int, int]]:
         layout_name = self.cmb_grid_layout.currentText().lower().replace(" ", "_")
-        rot_scale = self._last_render_size[0] / max(1.0, float(self._last_preview_size[0]))
+        px_scale = max(1, max(self._last_preview_size)) / 1280.0
         return compute_grid_slots(
             count=len(self.photos_data),
             layout=layout_name,
-            border_thickness=max(0, int(round(self.sld_border.value() * rot_scale))),
+            border_thickness=max(0, int(round(self.sld_border.value() * px_scale))),
             target_size=self._last_render_size,
         )
 

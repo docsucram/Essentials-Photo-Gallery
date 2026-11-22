@@ -30,16 +30,18 @@ from src.utils.paths import get_app_data_dir
 
 logger = logging.getLogger(__name__)
 
-MODEL_VERSION_ID = "mobileclip_s1"
+MODEL_VERSION_ID = "mobileclip_s1_fp16"
 EMBED_DIM = 512
-SEMANTIC_ADDON_SIZE_MB = 85
+SEMANTIC_ADDON_SIZE_MB = 105
 
 # (fname, url, approx_bytes)
+# NOTE: vision_model_fp16.onnx is used because Xenova's vision_model_int8.onnx
+# suffers dynamic-INT8 overflow on MobileOne reparameterized convs.
 SEMANTIC_MODEL_FILES: tuple[tuple[str, str, int], ...] = (
     (
-        "mobileclip_s1_image.onnx",
-        "https://huggingface.co/Xenova/mobileclip_s1/resolve/main/onnx/vision_model_int8.onnx",
-        22_357_190,
+        "mobileclip_s1_image_fp16.onnx",
+        "https://huggingface.co/Xenova/mobileclip_s1/resolve/main/onnx/vision_model_fp16.onnx",
+        43_211_279,
     ),
     (
         "mobileclip_s1_text.onnx",
@@ -216,19 +218,20 @@ def _select_embedding_output(
     return np.asarray(outputs[0])
 
 # 12 curated built-in Subject presets: (key, label, prompts, calibrated_threshold)
+# Thresholds calibrated to MobileCLIP-S1 FP16 image / INT8 text cosine scale (~0.13-0.26).
 SUBJECT_PRESETS: tuple[tuple[str, str, tuple[str, ...], float], ...] = (
-    ("family", "Family", ("a family photo together", "relatives gathered together"), 0.25),
-    ("kids", "Kids", ("a photo of children playing or smiling", "toddlers and kids"), 0.25),
-    ("pets", "Pets", ("a pet dog or cat animal photo", "cute dog or cat indoors or outdoors"), 0.24),
-    ("portraits", "Portraits", ("a close-up portrait photograph of a person", "headshot portrait"), 0.24),
-    ("food", "Food", ("a photograph of plated food, meal or dessert", "restaurant dish"), 0.24),
-    ("sports", "Sports", ("people playing sports or athletic action", "running cycling soccer"), 0.25),
-    ("landscape", "Landscape", ("scenic landscape mountains hills countryside view", "panoramic nature scenery"), 0.23),
-    ("night", "Night", ("nighttime photograph city lights stars evening dark sky", "night scene"), 0.24),
-    ("architecture", "Architecture", ("building architecture cityscape bridge facade", "historic or modern building"), 0.24),
-    ("beach", "Beach & Coast", ("beach ocean coastline sea waves sand", "seaside vacation photo"), 0.24),
-    ("nature", "Nature & Flowers", ("flowers plants trees wildlife nature closeup", "botanical garden"), 0.24),
-    ("documents", "Documents & Notes", ("document page receipt text screenshot", "printed paper or whiteboards"), 0.25),
+    ("family", "Family", ("a family photo together", "relatives gathered together"), 0.135),
+    ("kids", "Kids", ("a photo of children playing or smiling", "toddlers and kids"), 0.135),
+    ("pets", "Pets", ("a pet dog or cat animal photo", "cute dog or cat indoors or outdoors"), 0.13),
+    ("portraits", "Portraits", ("a close-up portrait photograph of a person", "headshot portrait"), 0.15),
+    ("food", "Food", ("a photograph of plated food, meal or dessert", "restaurant dish"), 0.135),
+    ("sports", "Sports", ("people playing sports or athletic action", "running cycling soccer"), 0.14),
+    ("landscape", "Landscape", ("scenic landscape mountains hills countryside view", "panoramic nature scenery"), 0.145),
+    ("night", "Night", ("nighttime photograph city lights stars evening dark sky", "night scene"), 0.145),
+    ("architecture", "Architecture", ("building architecture cityscape bridge facade", "historic or modern building"), 0.135),
+    ("beach", "Beach & Coast", ("beach ocean coastline sea waves sand", "seaside vacation photo"), 0.13),
+    ("nature", "Nature & Flowers", ("flowers plants trees wildlife nature closeup", "botanical garden"), 0.13),
+    ("documents", "Documents & Notes", ("document page receipt text screenshot", "printed paper or whiteboards"), 0.165),
 )
 
 
@@ -240,7 +243,7 @@ def get_semantic_model_dir() -> Path:
 def get_semantic_addon_status() -> dict[str, Any]:
     """Probe installation status of optional MobileCLIP-S1 ONNX models + tokenizer."""
     model_dir = get_semantic_model_dir()
-    img_model = model_dir / "mobileclip_s1_image.onnx"
+    img_model = model_dir / "mobileclip_s1_image_fp16.onnx"
     txt_model = model_dir / "mobileclip_s1_text.onnx"
     tok_file = model_dir / "tokenizer.json"
     img_ok = img_model.is_file() and img_model.stat().st_size > 1024
@@ -777,7 +780,7 @@ class SemanticEngine:
         repo: SemanticVectorRepository,
         query_vec: np.ndarray,
         *,
-        threshold: float = 0.22,
+        threshold: float = 0.14,
         limit: int = 500,
         scope_ids: set[int] | None = None,
         model_ver: str = MODEL_VERSION_ID,
@@ -812,7 +815,7 @@ class SemanticEngine:
         subject_vectors: dict[str, np.ndarray],
         *,
         thresholds: dict[str, float] | None = None,
-        default_threshold: float = 0.24,
+        default_threshold: float = 0.14,
         scope_ids: set[int] | None = None,
         model_ver: str = MODEL_VERSION_ID,
     ) -> dict[str, int]:
