@@ -154,14 +154,15 @@ class PanoramaWorkspace(CreateWorkspaceBase):
             self._is_fit_mode = True
             self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
             self._on_zoom_changed(self.preview_view.transform().m11())
-            self.zoom_bar.set_is_fit(True)
 
     def zoom_actual(self) -> None:
         if self.preview_scene.sceneRect().isValid():
             self._is_fit_mode = False
             self.preview_view.resetTransform()
             self._on_zoom_changed(1.0)
-            self.zoom_bar.set_is_fit(False)
+
+    def set_zoom_percent(self, pct: int) -> None:
+        self._on_slider_zoom_moved(pct)
 
     def handle_key_press(self, event: QKeyEvent) -> bool:
         if event.key() == Qt.Key.Key_F:
@@ -180,7 +181,6 @@ class PanoramaWorkspace(CreateWorkspaceBase):
         self._inspector_root.setStyleSheet(qss)
         self._tray_root.setStyleSheet(qss)
         self.preview_view.apply_theme_mode(self._theme_name)
-        self.zoom_bar.apply_theme_mode(self._theme_name)
         self.lbl_status.setStyleSheet(f"color: {tok.text_secondary}; font-size: 9pt; background: transparent;")
         self.lbl_dims.setStyleSheet(f"color: {tok.text_secondary}; font-size: 9pt; background: transparent;")
         self._refresh_frame_card_styles()
@@ -224,14 +224,6 @@ class PanoramaWorkspace(CreateWorkspaceBase):
 
         self.lbl_dims = QLabel("", bottom_bar)
         b_lay.addWidget(self.lbl_dims)
-
-        self.zoom_bar = CreateStudioZoomBar(bottom_bar)
-        self.zoom_bar.fit_clicked.connect(self.zoom_fit)
-        self.zoom_bar.actual_size_clicked.connect(self.zoom_actual)
-        self.zoom_bar.zoom_in_clicked.connect(self.zoom_in)
-        self.zoom_bar.zoom_out_clicked.connect(self.zoom_out)
-        self.zoom_bar.zoom_slider_moved.connect(self._on_slider_zoom_moved)
-        b_lay.addWidget(self.zoom_bar)
         lay.addWidget(bottom_bar)
 
     def _build_inspector_ui(self) -> None:
@@ -461,18 +453,15 @@ class PanoramaWorkspace(CreateWorkspaceBase):
             if self._is_fit_mode and self.preview_scene.sceneRect().isValid() and self.preview_scene.sceneRect().width() > 0:
                 self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
                 self._on_zoom_changed(self.preview_view.transform().m11())
-                self.zoom_bar.set_is_fit(True)
         return super().eventFilter(watched, event)
 
     def _apply_zoom(self, factor: float) -> None:
         self._is_fit_mode = False
-        self.zoom_bar.set_is_fit(False)
         self.preview_view.scale(factor, factor)
         self._on_zoom_changed(self.preview_view.transform().m11())
 
     def _on_slider_zoom_moved(self, pct: int) -> None:
         self._is_fit_mode = False
-        self.zoom_bar.set_is_fit(False)
         target_scale = max(0.1, min(5.0, pct / 100.0))
         current_scale = self.preview_view.transform().m11()
         if abs(current_scale) > 1e-4:
@@ -480,7 +469,7 @@ class PanoramaWorkspace(CreateWorkspaceBase):
         self._on_zoom_changed(target_scale)
 
     def _on_zoom_changed(self, scale_val: float) -> None:
-        self.zoom_bar.update_zoom_display(scale_val)
+        self.zoom_state_changed.emit(float(scale_val), bool(self._is_fit_mode))
 
     # ------------------------------------------------------------------
     # Stitching & Post-Processing

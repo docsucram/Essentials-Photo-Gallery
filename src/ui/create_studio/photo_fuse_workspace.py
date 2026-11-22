@@ -322,7 +322,6 @@ class PhotoFuseWorkspace(CreateWorkspaceBase):
             self._is_fit_mode = True
             self.view.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
             self._on_zoom_changed(self.view.transform().m11())
-            self.zoom_bar.set_is_fit(True)
             self._reposition_popover()
 
     def zoom_actual(self) -> None:
@@ -330,8 +329,10 @@ class PhotoFuseWorkspace(CreateWorkspaceBase):
             self._is_fit_mode = False
             self.view.resetTransform()
             self._on_zoom_changed(1.0)
-            self.zoom_bar.set_is_fit(False)
             self._reposition_popover()
+
+    def set_zoom_percent(self, pct: int) -> None:
+        self._on_slider_zoom_moved(pct)
 
     def handle_key_press(self, event: QKeyEvent) -> bool:
         if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat() and self.base_fused_bgr is not None:
@@ -353,7 +354,6 @@ class PhotoFuseWorkspace(CreateWorkspaceBase):
         self._inspector_root.setStyleSheet(qss)
         self._tray_root.setStyleSheet(qss)
         self.view.apply_theme_mode(self._theme_name)
-        self.zoom_bar.apply_theme_mode(self._theme_name)
         self.candidate_popover.apply_theme_mode(self._theme_name)
         self.lbl_align_warning.setStyleSheet(
             f"background: {'#451A03' if tok.is_dark else '#FEF3C7'}; "
@@ -421,14 +421,6 @@ class PhotoFuseWorkspace(CreateWorkspaceBase):
 
         self.lbl_status = QLabel("Loading & aligning burst photos...", bottom_bar)
         b_lay.addWidget(self.lbl_status, 1)
-
-        self.zoom_bar = CreateStudioZoomBar(bottom_bar)
-        self.zoom_bar.fit_clicked.connect(self.zoom_fit)
-        self.zoom_bar.actual_size_clicked.connect(self.zoom_actual)
-        self.zoom_bar.zoom_in_clicked.connect(self.zoom_in)
-        self.zoom_bar.zoom_out_clicked.connect(self.zoom_out)
-        self.zoom_bar.zoom_slider_moved.connect(self._on_slider_zoom_moved)
-        b_lay.addWidget(self.zoom_bar)
         lay.addWidget(bottom_bar)
 
     def _build_inspector_ui(self) -> None:
@@ -561,7 +553,6 @@ class PhotoFuseWorkspace(CreateWorkspaceBase):
                 if self._is_fit_mode and self.scene.sceneRect().isValid() and self.scene.sceneRect().width() > 0:
                     self.view.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
                     self._on_zoom_changed(self.view.transform().m11())
-                    self.zoom_bar.set_is_fit(True)
                 self._reposition_popover()
         return super().eventFilter(watched, event)
 
@@ -839,14 +830,12 @@ class PhotoFuseWorkspace(CreateWorkspaceBase):
     # ------------------------------------------------------------------
     def _apply_zoom(self, factor: float) -> None:
         self._is_fit_mode = False
-        self.zoom_bar.set_is_fit(False)
         self.view.scale(factor, factor)
         self._on_zoom_changed(self.view.transform().m11())
         self._reposition_popover()
 
     def _on_slider_zoom_moved(self, pct: int) -> None:
         self._is_fit_mode = False
-        self.zoom_bar.set_is_fit(False)
         target_scale = max(0.1, min(5.0, pct / 100.0))
         current_scale = self.view.transform().m11()
         if abs(current_scale) > 1e-4:
@@ -855,7 +844,7 @@ class PhotoFuseWorkspace(CreateWorkspaceBase):
         self._reposition_popover()
 
     def _on_zoom_changed(self, scale_val: float) -> None:
-        self.zoom_bar.update_zoom_display(scale_val)
+        self.zoom_state_changed.emit(float(scale_val), bool(self._is_fit_mode))
         self._reposition_popover()
 
     def _on_show_boxes_toggled(self, checked: bool) -> None:

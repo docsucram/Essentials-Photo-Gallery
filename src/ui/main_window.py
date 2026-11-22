@@ -9629,6 +9629,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             "bottom_visible": not self.bottom_dock.isHidden() if hasattr(self, "bottom_dock") else False,
             "window_title": self.windowTitle(),
             "was_viewer": cur_widget == self.media_viewer,
+            "zoom_slider_val": self.slider_status_zoom.value() if hasattr(self, "slider_status_zoom") else 150,
         }
 
         self._active_create_workspace = workspace
@@ -9646,11 +9647,15 @@ class PhotoGalleryMainWindow(QMainWindow):
             getattr(self, "btn_status_prev", None),
             getattr(self, "btn_status_next", None),
             getattr(self, "btn_status_filmstrip", None),
-            getattr(self, "btn_status_fit", None),
-            getattr(self, "btn_status_actual", None),
         ):
             if btn is not None:
                 btn.setVisible(False)
+        has_canvas_zoom = getattr(workspace, "workspace_id", "") != "cinematic"
+        if hasattr(self, "btn_status_fit") and self.btn_status_fit is not None:
+            self.btn_status_fit.setVisible(has_canvas_zoom)
+        if has_canvas_zoom and hasattr(workspace, "zoom_state_changed"):
+            workspace.zoom_state_changed.connect(self._sync_status_zoom_from_create_workspace)
+            self._sync_status_zoom_from_create_workspace(1.0, getattr(workspace, "_is_fit_mode", True))
 
         inspector_w = workspace.inspector_widget()
         if inspector_w is not None:
@@ -9773,6 +9778,13 @@ class PhotoGalleryMainWindow(QMainWindow):
         else:
             self.ribbon.set_active_mode("grid")
             self.right_tag_dock.set_view_mode("grid")
+            if hasattr(self, "btn_status_fit") and self.btn_status_fit is not None:
+                self.btn_status_fit.setVisible(False)
+            prev_z = snap.get("zoom_slider_val")
+            if prev_z is not None and hasattr(self, "slider_status_zoom"):
+                self.slider_status_zoom.blockSignals(True)
+                self.slider_status_zoom.setValue(int(prev_z))
+                self.slider_status_zoom.blockSignals(False)
             try:
                 self._update_scope_bar_visibility()
             except Exception:
@@ -11042,6 +11054,13 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.grid_view.set_thumbnail_size(size_px)
 
     def _on_status_zoom_changed(self, size_px: int) -> None:
+        ws = getattr(self, "_active_create_workspace", None)
+        if ws is not None:
+            factor = (size_px / 150.0) ** 2.0
+            pct = int(round(max(20.0, min(400.0, factor * 100.0))))
+            ws.set_zoom_percent(pct)
+            return
+
         if self.central_stack.currentWidget() == self.media_viewer:
             # Map status slider (72..320) to viewer zoom (0.2x..4.0x, 150 -> 1.0x)
             factor = (size_px / 150.0) ** 2.0
@@ -11088,7 +11107,34 @@ class PhotoGalleryMainWindow(QMainWindow):
         cur_h = sr.height() * gv.transform().m22()
         return (cur_w > vp.width() + 2) or (cur_h > vp.height() + 2)
 
+    def _sync_status_zoom_from_create_workspace(self, scale_val: float, is_fit: bool) -> None:
+        if getattr(self, "_active_create_workspace", None) is None:
+            return
+        import math
+
+        zoom_lvl = max(0.2, min(float(scale_val), 4.0))
+        size_px = int(round(150.0 * math.sqrt(zoom_lvl)))
+        clamped = max(72, min(size_px, 320))
+        if hasattr(self, "slider_status_zoom"):
+            self.slider_status_zoom.blockSignals(True)
+            self.slider_status_zoom.setValue(clamped)
+            self.slider_status_zoom.blockSignals(False)
+        if hasattr(self, "btn_status_fit") and self.btn_status_fit is not None:
+            if is_fit:
+                self.btn_status_fit.setIcon(make_wlpg_icon("actual_size", 18))
+                self.btn_status_fit.setToolTip("Actual size (1)")
+            else:
+                self.btn_status_fit.setIcon(make_wlpg_icon("fit_window", 18))
+                self.btn_status_fit.setToolTip("Fit to window (F)")
+
     def _on_status_zoom_toggle_clicked(self) -> None:
+        ws = getattr(self, "_active_create_workspace", None)
+        if ws is not None:
+            if getattr(ws, "_is_fit_mode", True):
+                ws.zoom_actual()
+            else:
+                ws.zoom_fit()
+            return
         if self._is_viewer_image_bigger_than_window():
             self.media_viewer.set_zoom_mode("fit")
         else:

@@ -39,6 +39,7 @@ class CreateWorkspaceBase(QWidget):
     status_message = Signal(str, int)
     ribbon_state_changed = Signal()
     undo_redo_state_changed = Signal(bool, bool)
+    zoom_state_changed = Signal(float, bool)  # (scale_factor, is_fit_mode)
 
     workspace_id: str = "create_workspace"
     display_title: str = "Create Studio"
@@ -115,6 +116,10 @@ class CreateWorkspaceBase(QWidget):
         pass
 
     def zoom_actual(self) -> None:
+        pass
+
+    def set_zoom_percent(self, _pct: int) -> None:
+        """Set explicit canvas zoom percentage (e.g. 20..400) from MainWindow status slider."""
         pass
 
     def handle_key_press(self, _event: QKeyEvent) -> bool:

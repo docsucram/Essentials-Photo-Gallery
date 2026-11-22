@@ -224,14 +224,15 @@ class ColourPopWorkspace(CreateWorkspaceBase):
             self._is_fit_mode = True
             self.view.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
             self._on_zoom_changed(self.view.transform().m11())
-            self.zoom_bar.set_is_fit(True)
 
     def zoom_actual(self) -> None:
         if self.scene.sceneRect().isValid():
             self._is_fit_mode = False
             self.view.resetTransform()
             self._on_zoom_changed(1.0)
-            self.zoom_bar.set_is_fit(False)
+
+    def set_zoom_percent(self, pct: int) -> None:
+        self._on_slider_zoom_moved(pct)
 
     def handle_key_press(self, event: QKeyEvent) -> bool:
         if event.key() == Qt.Key.Key_F:
@@ -250,7 +251,6 @@ class ColourPopWorkspace(CreateWorkspaceBase):
         self._inspector_root.setStyleSheet(qss)
         canvas_bg = "#111318" if tok.is_dark else "#232730"
         self.view.setStyleSheet(f"QGraphicsView {{ background-color: {canvas_bg}; border: none; }}")
-        self.zoom_bar.apply_theme_mode(self._theme_name)
         self.lbl_status.setStyleSheet(f"color: {tok.text_secondary}; font-size: 9pt; background: transparent;")
         self.lbl_dims.setStyleSheet(f"color: {tok.text_secondary}; font-size: 9pt; background: transparent;")
         self._update_color_swatches_ui()
@@ -291,14 +291,6 @@ class ColourPopWorkspace(CreateWorkspaceBase):
         h, w = self.original_bgr.shape[:2]
         self.lbl_dims = QLabel(f"{w} × {h} px", bottom_bar)
         b_lay.addWidget(self.lbl_dims)
-
-        self.zoom_bar = CreateStudioZoomBar(bottom_bar)
-        self.zoom_bar.fit_clicked.connect(self.zoom_fit)
-        self.zoom_bar.actual_size_clicked.connect(self.zoom_actual)
-        self.zoom_bar.zoom_in_clicked.connect(self.zoom_in)
-        self.zoom_bar.zoom_out_clicked.connect(self.zoom_out)
-        self.zoom_bar.zoom_slider_moved.connect(self._on_slider_zoom_moved)
-        b_lay.addWidget(self.zoom_bar)
         lay.addWidget(bottom_bar)
 
     def _build_inspector_ui(self) -> None:
@@ -465,18 +457,15 @@ class ColourPopWorkspace(CreateWorkspaceBase):
             if self._is_fit_mode and self.scene.sceneRect().isValid() and self.scene.sceneRect().width() > 0:
                 self.view.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
                 self._on_zoom_changed(self.view.transform().m11())
-                self.zoom_bar.set_is_fit(True)
         return super().eventFilter(obj, event)
 
     def _apply_zoom(self, factor: float) -> None:
         self._is_fit_mode = False
-        self.zoom_bar.set_is_fit(False)
         self.view.scale(factor, factor)
         self._on_zoom_changed(self.view.transform().m11())
 
     def _on_slider_zoom_moved(self, val: int) -> None:
         self._is_fit_mode = False
-        self.zoom_bar.set_is_fit(False)
         target_scale = val / 100.0
         current_scale = self.view.transform().m11()
         if abs(current_scale) > 1e-4:
@@ -484,7 +473,7 @@ class ColourPopWorkspace(CreateWorkspaceBase):
             self._on_zoom_changed(target_scale)
 
     def _on_zoom_changed(self, scale_val: float) -> None:
-        self.zoom_bar.update_zoom_display(scale_val)
+        self.zoom_state_changed.emit(float(scale_val), bool(self._is_fit_mode))
 
     # ------------------------------------------------------------------
     # Masking & Colour Selection
