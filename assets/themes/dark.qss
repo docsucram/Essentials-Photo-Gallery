@@ -15,6 +15,26 @@ QDialog QLabel {
     color: #E2E8F0;
 }
 
+QProgressDialog {
+    background-color: #1B1E24;
+    color: #E2E8F0;
+}
+
+QProgressBar {
+    border: 1px solid #334155;
+    border-radius: 5px;
+    background-color: #14171C;
+    color: #F8FAFC;
+    text-align: center;
+    min-height: 20px;
+    font-weight: 600;
+}
+
+QProgressBar::chunk {
+    background-color: #2563EB;
+    border-radius: 4px;
+}
+
 QListView {
     background-color: #121417;
     color: #E2E8F0;

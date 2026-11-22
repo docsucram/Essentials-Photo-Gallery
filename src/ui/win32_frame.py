@@ -355,6 +355,27 @@ def apply_win32_frameless_styles(hwnd: int) -> bool:
         return False
 
 
+def apply_windows_dark_titlebar(widget: QWidget, is_dark: bool) -> bool:
+    """Apply native Windows 10/11 dark-mode caption bar (`DWMWA_USE_IMMERSIVE_DARK_MODE`)."""
+    if sys.platform != "win32" or widget is None:
+        return False
+    if os.environ.get("QT_QPA_PLATFORM", "").lower() == "offscreen":
+        return False
+    try:
+        hwnd = int(widget.winId())
+        if not hwnd:
+            return False
+        dwmapi = ctypes.windll.dwmapi
+        val = ctypes.c_int(1 if is_dark else 0)
+        # Windows 11 / Win10 20H1+: 20; earlier Win10 builds: 19
+        hr = dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(val), ctypes.sizeof(val))
+        if hr != 0:
+            hr = dwmapi.DwmSetWindowAttribute(hwnd, 19, ctypes.byref(val), ctypes.sizeof(val))
+        return hr == 0
+    except Exception:
+        return False
+
+
 def handle_win32_native_event(
     window: "QMainWindow",
     event_type: QByteArray | bytes,

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from PIL import Image, ImageOps
-from PySide6.QtCore import QDate, QObject, QRect, QSettings, QThread, QTime, Qt, QUrl, Signal
+from PySide6.QtCore import QDate, QObject, QRect, QSettings, QThread, QTime, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QProgressBar,
+    QProgressDialog,
     QPushButton,
     QRadioButton,
     QSlider,
@@ -56,6 +57,89 @@ from PySide6.QtWidgets import (
 
 from src.db.repository import _EPOCH_UTC, _epoch_to_datetime_utc
 from src.ui.ribbon_toolbar import make_wlpg_icon
+from src.ui.theme_tokens import get_theme_tokens
+
+
+def _resolve_dialog_is_dark(parent: QWidget | None = None, is_dark: bool | None = None) -> bool:
+    if is_dark is not None:
+        return bool(is_dark)
+    for cand in (parent, parent.window() if parent is not None else None):
+        if cand is not None:
+            if hasattr(cand, "_is_dark"):
+                return bool(cand._is_dark)
+            if getattr(cand, "current_theme", None) is not None:
+                return str(cand.current_theme).strip().lower() == "dark"
+    settings = QSettings("PhotoGallery64", "PhotoGallery64")
+    return str(settings.value("theme", "wlpg_aero") or "").strip().lower() == "dark"
+
+
+def style_progress_dialog(
+    prog: QProgressDialog,
+    parent: QWidget | None = None,
+    *,
+    is_dark: bool | None = None,
+    min_width: int = 380,
+) -> None:
+    """Apply consistent Dark Studio / Light Aero styling and dark Windows titlebar to a QProgressDialog."""
+    dark_mode = _resolve_dialog_is_dark(parent, is_dark)
+    tok = get_theme_tokens("dark" if dark_mode else "wlpg_aero")
+    prog.setMinimumWidth(max(360, int(min_width)))
+
+    bar_track = "#14171C" if tok.is_dark else "#E2E8F0"
+    bar_text = "#F8FAFC" if tok.is_dark else "#0F172A"
+    btn_bg = "#262B35" if tok.is_dark else "#FFFFFF"
+    btn_border = "#3E4756" if tok.is_dark else tok.border_subtle
+
+    prog.setStyleSheet(
+        f"""
+        QProgressDialog {{
+            background-color: {tok.bg_surface};
+            color: {tok.text_primary};
+        }}
+        QProgressDialog QLabel {{
+            color: {tok.text_primary};
+            background: transparent;
+            font-family: 'Segoe UI';
+            font-size: 9pt;
+        }}
+        QProgressDialog QProgressBar {{
+            border: 1px solid {tok.border_subtle};
+            border-radius: 5px;
+            background-color: {bar_track};
+            color: {bar_text};
+            text-align: center;
+            min-height: 20px;
+            font-family: 'Segoe UI';
+            font-size: 8.5pt;
+            font-weight: 600;
+        }}
+        QProgressDialog QProgressBar::chunk {{
+            background-color: {tok.accent};
+            border-radius: 4px;
+        }}
+        QProgressDialog QPushButton {{
+            background-color: {btn_bg};
+            color: {tok.text_primary};
+            border: 1px solid {btn_border};
+            border-radius: 4px;
+            padding: 4px 14px;
+            font-family: 'Segoe UI';
+            font-size: 9pt;
+        }}
+        QProgressDialog QPushButton:hover {{
+            background-color: {tok.bg_hover};
+            border-color: {tok.accent};
+        }}
+        """
+    )
+
+    from src.ui.win32_frame import apply_windows_dark_titlebar
+
+    apply_windows_dark_titlebar(prog, bool(tok.is_dark))
+    QTimer.singleShot(
+        0,
+        lambda p=prog, d=bool(tok.is_dark): apply_windows_dark_titlebar(p, d),
+    )
 
 
 def _format_delta_human(delta_sec: int, selected_count: int) -> str:
@@ -1259,6 +1343,9 @@ class AppSettingsDialog(QDialog):
                 QLineEdit, QSpinBox, QComboBox { background: #262B35; color: #E2E8F0; border: 1px solid #3E4756; border-radius: 3px; padding: 3px 6px; }
                 QPushButton { background: #262B35; color: #E2E8F0; border: 1px solid #3E4756; border-radius: 3px; padding: 4px 10px; }
                 QPushButton:hover { background: #303744; }
+                QProgressDialog { background: #1B1E24; color: #E2E8F0; }
+                QProgressBar { border: 1px solid #334155; border-radius: 5px; background: #14171C; color: #F8FAFC; text-align: center; min-height: 20px; font-weight: 600; }
+                QProgressBar::chunk { background-color: #2563EB; border-radius: 4px; }
                 """
             )
             if hasattr(self, "lbl_autoplay"):
@@ -1344,6 +1431,9 @@ class AppSettingsDialog(QDialog):
                 }
                 """
             )
+        from src.ui.win32_frame import apply_windows_dark_titlebar
+
+        apply_windows_dark_titlebar(self, self._is_dark)
 
     def _refresh_ai_downloads_tab(self) -> None:
         try:
@@ -3408,11 +3498,7 @@ class AboutDialog(QDialog):
                 prog = QProgressDialog(f"Downloading v{latest_ver} installer...", "Cancel", 0, 100, self)
                 prog.setWindowTitle("Updating Essentials Photo Gallery")
                 prog.setWindowModality(Qt.WindowModal)
-                prog.setMinimumWidth(380)
-                prog.setStyleSheet(
-                    f"QProgressDialog {{ background-color: {tok.bg_surface}; color: {tok.text_primary}; }} "
-                    f"QProgressDialog QLabel {{ color: {tok.text_primary}; background: transparent; }}"
-                )
+                style_progress_dialog(prog, self, is_dark=tok.is_dark, min_width=380)
                 prog.show()
                 cancelled = {"v": False}
                 prog.canceled.connect(lambda: cancelled.__setitem__("v", True))
@@ -3542,6 +3628,7 @@ def prompt_and_download_lama_addon(
     prog.setAutoClose(False)
     prog.setAutoReset(False)
     prog.setMinimumDuration(0)
+    style_progress_dialog(prog, parent, min_width=390)
     prog.show()
 
     cancelled = {"v": False}
@@ -3628,6 +3715,7 @@ def prompt_and_download_rapidocr_addon(
     prog.setWindowTitle("Downloading OCR Add-on")
     prog.setWindowModality(Qt.WindowModal)
     prog.setMinimumDuration(0)
+    style_progress_dialog(prog, parent, min_width=380)
     prog.show()
 
     cancelled = {"v": False}
@@ -3714,7 +3802,10 @@ def prompt_and_download_semantic_addon(
     )
     prog.setWindowTitle("Downloading AI Subjects Add-on")
     prog.setWindowModality(Qt.WindowModal)
+    prog.setAutoClose(False)
+    prog.setAutoReset(False)
     prog.setMinimumDuration(0)
+    style_progress_dialog(prog, parent, min_width=400)
     prog.show()
 
     cancelled = {"v": False}
@@ -3731,12 +3822,24 @@ def prompt_and_download_semantic_addon(
             )
 
     t = _SemDlThread(parent)
-    t.progress.connect(lambda d, tot: prog.setValue(int(min(99, (d * 100) // tot))) if tot > 0 else None)
+
+    def _on_sem_progress(done_b: int, total_b: int) -> None:
+        if total_b > 0:
+            pct = int(min(99, (done_b * 100) // total_b))
+            prog.setValue(pct)
+            prog.setLabelText(
+                f"Downloading MobileCLIP-S1 ({done_b / (1024 * 1024):.1f} / {total_b / (1024 * 1024):.1f} MB)..."
+            )
+
+    t.progress.connect(_on_sem_progress)
     t.start()
     while t.isRunning():
         QApplication.processEvents()
         t.wait(30)
+    if result_holder["dir"] is not None and not cancelled["v"]:
+        prog.setValue(100)
     prog.close()
+    prog.deleteLater()
 
     if result_holder["dir"] is None and not cancelled["v"]:
         QMessageBox.warning(

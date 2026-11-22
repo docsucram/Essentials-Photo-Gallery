@@ -3077,6 +3077,12 @@ class ThumbnailGridView(QListView):
                     self.compare_requested.emit(sel_ids)
                     event.accept()
                     return
+            if event.key() == Qt.Key_S and not shift_held:
+                main_win = getattr(self, "main_window", None) or self.window()
+                if hasattr(main_win, "toggle_selected_stack_expanded") and self.selected_media_ids():
+                    main_win.toggle_selected_stack_expanded()
+                    event.accept()
+                    return
         super().keyPressEvent(event)
 
     def leaveEvent(self, event: QEvent) -> None:
@@ -3600,10 +3606,21 @@ class ThumbnailGridView(QListView):
                 stack_menu = menu.addMenu("Stacks")
                 stack_menu.setFont(QFont("Segoe UI", 9))
                 act_grp = stack_menu.addAction("Group Selected as Stack")
+                act_grp.setShortcut("Ctrl+G")
                 act_grp.setEnabled(len(target_mids) >= 2)
                 act_grp.triggered.connect(main_win.group_selection_as_stack)
                 act_ungrp = stack_menu.addAction("Unstack")
+                act_ungrp.setShortcut("Ctrl+Shift+G")
                 act_ungrp.triggered.connect(main_win.unstack_selection)
+                if hasattr(main_win, "toggle_selected_stack_expanded"):
+                    has_stack = bool(
+                        target_mids
+                        and len(main_win.catalog_repo.get_stack_member_ids(int(target_mids[0]))) > 1
+                    )
+                    act_toggle = stack_menu.addAction("Expand / Collapse Stack")
+                    act_toggle.setShortcut("S")
+                    act_toggle.setEnabled(has_stack)
+                    act_toggle.triggered.connect(main_win.toggle_selected_stack_expanded)
                 stack_menu.addSeparator()
                 act_raw_jpg = stack_menu.addAction("Auto-Stack RAW + JPEG Pairs")
                 act_raw_jpg.triggered.connect(main_win.auto_stack_raw_jpeg_pairs)

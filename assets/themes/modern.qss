@@ -412,3 +412,23 @@ QPushButton[uiRole="danger_btn"]:disabled {
     border-color: #94A3B8;
     color: #F1F5F9;
 }
+
+QProgressDialog {
+    background-color: #F8FAFC;
+    color: #0F172A;
+}
+
+QProgressBar {
+    border: 1px solid #CBD5E1;
+    border-radius: 5px;
+    background-color: #E2E8F0;
+    color: #0F172A;
+    text-align: center;
+    min-height: 20px;
+    font-weight: 600;
+}
+
+QProgressBar::chunk {
+    background-color: #0F6CBD;
+    border-radius: 4px;
+}

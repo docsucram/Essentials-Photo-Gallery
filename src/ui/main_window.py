@@ -1928,6 +1928,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.sc_properties_enter = QShortcut(QKeySequence("Alt+Enter"), self)
         self.sc_properties_enter.activated.connect(self.open_file_properties)
 
+        # Stack / Unstack shortcuts
+        self.sc_stack_group = QShortcut(QKeySequence("Ctrl+G"), self)
+        self.sc_stack_group.activated.connect(self.group_selection_as_stack)
+        self.sc_stack_unstack = QShortcut(QKeySequence("Ctrl+Shift+G"), self)
+        self.sc_stack_unstack.activated.connect(self.unstack_selection)
+
         # F1: Keyboard Shortcuts Cheat-Sheet & Quick-Tag Hotkeys (Alt+1..Alt+9)
         self.sc_shortcuts = QShortcut(QKeySequence(Qt.Key_F1), self)
         self.sc_shortcuts.activated.connect(lambda: self.open_keyboard_shortcuts_dialog(0))
@@ -5069,13 +5075,30 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._expanded_stack_ids.add(hid)
         self.rebuild_and_run_query()
 
+    def toggle_selected_stack_expanded(self) -> None:
+        target_ids = list(self.get_active_target_ids())
+        if not target_ids:
+            return
+        members = self.catalog_repo.get_stack_member_ids(int(target_ids[0]))
+        if len(members) > 1:
+            self.toggle_stack_expanded(members[0])
+
     def group_selection_as_stack(self) -> None:
         target_ids = list(self.get_active_target_ids())
         if len(target_ids) < 2:
-            self.show_status_message("Select at least 2 items to group into a stack.", 3000)
+            self.show_status_message("Select at least 2 items to group into a stack (Ctrl+G).", 3000)
             return
+        affected_ids: set[int] = {int(mid) for mid in target_ids}
+        for mid in target_ids:
+            affected_ids.update(self.catalog_repo.get_stack_member_ids(int(mid)))
+        before_map = self.catalog_repo.get_stack_parent_map(sorted(affected_ids))
         head = self.catalog_repo.create_stack(target_ids)
         if head is not None:
+            after_map = self.catalog_repo.get_stack_parent_map(sorted(affected_ids))
+            if before_map != after_map:
+                self.undo_stack.push(
+                    _StackMutationUndoCommand(self, before_map, after_map, "Group into Stack")
+                )
             self._expanded_stack_ids.discard(head)
             self.rebuild_and_run_query()
             self.show_status_message(f"✓ Stacked {len(target_ids)} item(s)", 3000)
@@ -5084,8 +5107,22 @@ class PhotoGalleryMainWindow(QMainWindow):
         target_ids = list(self.get_active_target_ids())
         if not target_ids:
             return
-        changed = self.catalog_repo.unstack_media(target_ids)
+        all_members: list[int] = []
+        seen: set[int] = set()
         for mid in target_ids:
+            for m in self.catalog_repo.get_stack_member_ids(int(mid)):
+                if m not in seen:
+                    seen.add(m)
+                    all_members.append(m)
+        before_map = self.catalog_repo.get_stack_parent_map(all_members)
+        changed = self.catalog_repo.unstack_media(all_members)
+        if changed > 0:
+            after_map = self.catalog_repo.get_stack_parent_map(all_members)
+            if before_map != after_map:
+                self.undo_stack.push(
+                    _StackMutationUndoCommand(self, before_map, after_map, "Unstack")
+                )
+        for mid in all_members:
             self._expanded_stack_ids.discard(int(mid))
         self.rebuild_and_run_query()
         self.show_status_message(f"✓ Unstacked {changed} item(s)", 3000)
