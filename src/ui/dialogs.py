@@ -607,7 +607,9 @@ class AppSettingsDialog(QDialog):
         v_imp.addLayout(h_dev)
 
         imp_frame = QFrame(tab_import)
+        imp_frame.setObjectName("ImportSettingsCard")
         imp_frame.setFrameShape(QFrame.StyledPanel)
+        self.imp_frame = imp_frame
         imp_frame_layout = QVBoxLayout(imp_frame)
         imp_frame_layout.setContentsMargins(12, 10, 12, 10)
         imp_frame_layout.setSpacing(8)
@@ -673,6 +675,7 @@ class AppSettingsDialog(QDialog):
 
         lbl_autoplay = QLabel("<a href='autoplay' style='color:#0066CC;'>Change default autoplay options</a>", tab_import)
         lbl_autoplay.setOpenExternalLinks(False)
+        self.lbl_autoplay = lbl_autoplay
         v_imp.addWidget(lbl_autoplay)
 
         self.btn_restore_import_defaults = QPushButton("Restore defaults", tab_import)
@@ -1233,6 +1236,8 @@ class AppSettingsDialog(QDialog):
             elif itab in ("downloads", "ai_downloads", "ai", "addons", "optional_downloads"):
                 self.tab_widget.setCurrentWidget(self.ai_downloads_tab)
 
+        self._apply_dialog_theme(self._is_dark)
+
     def _apply_dialog_theme(self, is_dark: bool) -> None:
         """Apply light or dark stylesheet to this dialog and its tab widget (supports live Apply)."""
         self._is_dark = bool(is_dark)
@@ -1240,7 +1245,13 @@ class AppSettingsDialog(QDialog):
             self.setStyleSheet(
                 """
                 QDialog { background: #1A1D24; color: #E2E8F0; }
-                QLabel, QCheckBox, QRadioButton, QGroupBox { color: #E2E8F0; }
+                QLabel, QCheckBox, QRadioButton, QGroupBox { color: #E2E8F0; background: transparent; }
+                QFrame#ImportSettingsCard {
+                    background-color: #232832;
+                    border: 1px solid #3E4756;
+                    border-radius: 5px;
+                }
+                QFrame[frameShape="4"] { color: #3E4756; }
                 QGroupBox { border: 1px solid #3E4756; border-radius: 4px; margin-top: 8px; padding-top: 10px; }
                 QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; color: #94A3B8; }
                 QLineEdit, QSpinBox, QComboBox { background: #262B35; color: #E2E8F0; border: 1px solid #3E4756; border-radius: 3px; padding: 3px 6px; }
@@ -1248,6 +1259,10 @@ class AppSettingsDialog(QDialog):
                 QPushButton:hover { background: #303744; }
                 """
             )
+            if hasattr(self, "lbl_autoplay"):
+                self.lbl_autoplay.setText(
+                    "<a href='autoplay' style='color:#60A5FA;'>Change default autoplay options</a>"
+                )
             self.tab_widget.setStyleSheet(
                 """
                 QTabWidget::pane {
@@ -1282,7 +1297,19 @@ class AppSettingsDialog(QDialog):
                 """
             )
         else:
-            self.setStyleSheet("")
+            self.setStyleSheet(
+                """
+                QFrame#ImportSettingsCard {
+                    background-color: #FFFFFF;
+                    border: 1px solid #C8D6E5;
+                    border-radius: 5px;
+                }
+                """
+            )
+            if hasattr(self, "lbl_autoplay"):
+                self.lbl_autoplay.setText(
+                    "<a href='autoplay' style='color:#0066CC;'>Change default autoplay options</a>"
+                )
             self.tab_widget.setStyleSheet(
                 """
                 QTabWidget::pane {

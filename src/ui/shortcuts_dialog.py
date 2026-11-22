@@ -6,10 +6,11 @@ from __future__ import annotations
 import json
 from typing import Any, Sequence
 
-from PySide6.QtCore import QSettings, Qt, Signal
+from PySide6.QtCore import QSettings, QStringListModel, Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
+    QCompleter,
     QDialog,
     QFormLayout,
     QHBoxLayout,
@@ -107,6 +108,81 @@ def save_quick_tag_hotkeys(mapping: dict[int, str]) -> None:
     settings.setValue(_QUICK_TAG_SETTINGS_KEY, json.dumps(cleaned))
 
 
+class _FilterableTagComboBox(QComboBox):
+    """
+    Editable tag picker mirroring `_DescriptiveTagInput` in `right_tag_dock.py`:
+    browse all tags via the dropdown arrow, or type any substring to filter
+    with leaf-prefix matches ranked first.
+    """
+
+    def __init__(
+        self, all_tags: Sequence[str] = (), parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self._all_tags: list[str] = list(
+            dict.fromkeys(str(t).strip() for t in all_tags if str(t or "").strip())
+        )
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.addItem("")
+        if self._all_tags:
+            self.addItems(self._all_tags)
+
+        self._completer_model = QStringListModel(self._all_tags, self)
+        self.completer_model = self._completer_model
+        self._completer = QCompleter(self._completer_model, self)
+        self._completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
+        self._completer.setCompletionPrefix("")
+        self.setCompleter(self._completer)
+        self._completer.activated[str].connect(self._on_completion_activated)
+
+        le = self.lineEdit()
+        if le is not None:
+            le.setClearButtonEnabled(True)
+            le.setPlaceholderText("Type to filter tags or pick...")
+            le.textEdited.connect(self._on_text_edited)
+
+    def _sync_filter(self, text: str) -> None:
+        val = (text or "").strip()
+        if not val:
+            matched = list(self._all_tags)
+        else:
+            q = val.lower()
+            matched = [t for t in self._all_tags if q in t.lower()]
+
+            def _sort_key(tag_str: str) -> tuple[int, str, str]:
+                low = tag_str.lower()
+                leaf = low.rsplit("/", 1)[-1]
+                if leaf.startswith(q):
+                    rank = 0
+                elif low.startswith(q):
+                    rank = 1
+                else:
+                    rank = 2
+                return (rank, leaf, low)
+
+            matched.sort(key=_sort_key)
+
+        self._completer_model.setStringList(matched)
+        self._completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
+        self._completer.setCompletionPrefix("")
+
+    def _on_text_edited(self, text: str) -> None:
+        self._sync_filter(text)
+        if self._completer_model.rowCount() > 0:
+            self._completer.complete()
+        elif self._completer.popup() is not None:
+            self._completer.popup().hide()
+
+    def _on_completion_activated(self, text: str) -> None:
+        idx = self.findText(text)
+        if idx >= 0:
+            self.setCurrentIndex(idx)
+        else:
+            self.setEditText(text)
+
+
 class KeyboardShortcutsDialog(QDialog):
     """Searchable F1 Keyboard Shortcuts reference & Alt+1..9 Quick-Tag configurator."""
 
@@ -138,6 +214,13 @@ class KeyboardShortcutsDialog(QDialog):
                 border: 1px solid {tok.border_subtle};
                 border-radius: 4px;
                 padding: 4px 6px;
+            }}
+            QAbstractItemView {{
+                background-color: {tok.bg_card};
+                color: {tok.text_primary};
+                border: 1px solid {tok.border_subtle};
+                selection-background-color: {tok.selection_bg};
+                selection-color: {tok.text_primary};
             }}
             QTreeWidget::item:selected {{
                 background-color: {tok.selection_bg};
@@ -190,7 +273,7 @@ class KeyboardShortcutsDialog(QDialog):
         v_tags.setSpacing(8)
 
         lbl_info = QLabel(
-            "Assign up to 9 descriptive tags to Alt+1 through Alt+9 for one-keystroke tagging while culling:",
+            "Assign up to 9 descriptive tags to Alt+1 through Alt+9 (type to filter tags, or pick from the list):",
             tab_tags,
         )
         lbl_info.setWordWrap(True)
@@ -200,14 +283,9 @@ class KeyboardShortcutsDialog(QDialog):
         form.setSpacing(7)
         current_map = load_quick_tag_hotkeys()
         sorted_tags = sorted({str(t).strip() for t in available_tags if str(t or "").strip()}, key=str.casefold)
-        self.hotkey_combos: dict[int, QComboBox] = {}
+        self.hotkey_combos: dict[int, _FilterableTagComboBox] = {}
         for slot in range(1, 10):
-            cmb = QComboBox(tab_tags)
-            cmb.setEditable(True)
-            cmb.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-            cmb.addItem("")
-            for tag_name in sorted_tags:
-                cmb.addItem(tag_name)
+            cmb = _FilterableTagComboBox(sorted_tags, tab_tags)
             if slot in current_map:
                 val = current_map[slot]
                 idx = cmb.findText(val)
@@ -217,13 +295,13 @@ class KeyboardShortcutsDialog(QDialog):
                     cmb.setEditText(val)
             else:
                 cmb.setEditText("")
-            cmb.lineEdit().setPlaceholderText("Type or pick a tag...")
             self.hotkey_combos[slot] = cmb
             form.addRow(f"Alt + {slot}:", cmb)
         v_tags.addLayout(form)
 
         row_clear = QHBoxLayout()
         self.btn_clear_hotkeys = QPushButton("Clear All", tab_tags)
+        self.btn_clear_hotkeys.setAutoDefault(False)
         self.btn_clear_hotkeys.clicked.connect(self._on_clear_hotkeys)
         row_clear.addWidget(self.btn_clear_hotkeys)
         row_clear.addStretch(1)
@@ -238,8 +316,10 @@ class KeyboardShortcutsDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
         self.btn_save = QPushButton("Save Hotkeys", self)
+        self.btn_save.setAutoDefault(False)
         self.btn_save.clicked.connect(self._on_save_clicked)
         self.btn_close = QPushButton("Close", self)
+        self.btn_close.setAutoDefault(False)
         self.btn_close.clicked.connect(self.accept)
         btn_row.addWidget(self.btn_save)
         btn_row.addWidget(self.btn_close)

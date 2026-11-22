@@ -5571,6 +5571,8 @@ class RibbonToolbar(QWidget):
 
         self._arrange_by: ArrangeMode = "date"
         self._reverse_sort: bool = False
+        self._current_layout_mode: str = "wlpg_grid"
+        self._last_mosaic_mode: Literal["mosaic", "tiles", "masonry"] = "mosaic"
         self._visible_details: set[str] = {"rating"}
         self._detail_checkboxes: dict[str, QAbstractButton] = {}
         self._responsive_large_buttons: list[QToolButton] = []
@@ -5955,8 +5957,7 @@ class RibbonToolbar(QWidget):
         file_menu.addAction(self.act_pause_write_back)
         file_menu.addSeparator()
         file_menu.addAction(make_wlpg_icon("options", 16), "Options...", lambda: self.action_triggered.emit("open_settings"))
-        file_menu.addAction(make_wlpg_icon("properties", 16), "Keyboard Shortcuts...\tF1", lambda: self.action_triggered.emit("show_shortcuts"))
-        file_menu.addAction(make_wlpg_icon("app_logo", 16), "About Essentials Photo Gallery", lambda: self.action_triggered.emit("about_photo_gallery"))
+        file_menu.addAction(make_wlpg_icon("app_logo", 16), "About and updates", lambda: self.action_triggered.emit("about_photo_gallery"))
         file_menu.addSeparator()
         file_menu.addAction(make_wlpg_icon("cross", 16), "Exit", lambda: self.action_triggered.emit("exit_app"))
         self.btn_file.setMenu(file_menu)
@@ -6038,6 +6039,15 @@ class RibbonToolbar(QWidget):
         self.btn_ribbon_settings.setCursor(Qt.PointingHandCursor)
         self.btn_ribbon_settings.clicked.connect(lambda: self.action_triggered.emit("open_settings"))
         rc_layout.addWidget(self.btn_ribbon_settings)
+
+        self.btn_ribbon_help = QPushButton(right_corner)
+        self.btn_ribbon_help.setFixedSize(22, 22)
+        self.btn_ribbon_help.setFlat(True)
+        self.btn_ribbon_help.setIconSize(QSize(15, 15))
+        self.btn_ribbon_help.setToolTip("Keyboard Shortcuts (F1)")
+        self.btn_ribbon_help.setCursor(Qt.PointingHandCursor)
+        self.btn_ribbon_help.clicked.connect(lambda: self.action_triggered.emit("show_shortcuts"))
+        rc_layout.addWidget(self.btn_ribbon_help)
 
         self.btn_collapse_ribbon = QPushButton("▲", right_corner)
         self.btn_collapse_ribbon.setFixedSize(22, 22)
@@ -6454,6 +6464,109 @@ class RibbonToolbar(QWidget):
 
         return container, btn_top
 
+    def _make_split_mosaic_button(self, parent: QWidget) -> tuple[QWidget, QToolButton]:
+        """
+        Creates a 2-button vertical split 'View mosaic' control matching 'Descriptive tag':
+        - Top button: Icon cycles between Mosaic, Tiles, and Masonry (first click from Grid enters last mosaic mode).
+        - Bottom button ('View\\nmosaic ▾'): Direct mode picker menu.
+        """
+        container = QWidget(parent)
+        container.setObjectName("MosaicLayoutSplitContainer")
+        container.setFixedSize(72, 73)
+        container._orig_w = 72
+        vbox = QVBoxLayout(container)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
+
+        btn_top = QToolButton(container)
+        btn_top.setObjectName("MosaicLayoutTopBtn")
+        btn_top.setFixedSize(72, 38)
+        btn_top.setCheckable(True)
+        btn_top.setCursor(Qt.PointingHandCursor)
+        btn_top.setIcon(make_wlpg_icon("layout_mosaic", 32))
+        btn_top.setIconSize(QSize(28, 28))
+        btn_top.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        btn_top.setText("")
+        btn_top.setToolTip("Mosaic — click to cycle Mosaic / Tiles / Masonry")
+        btn_top._tooltip_override = "Mosaic — click to cycle Mosaic / Tiles / Masonry"
+        btn_top.clicked.connect(self._cycle_mosaic_layout)
+        vbox.addWidget(btn_top)
+
+        btn_bot = QToolButton(container)
+        btn_bot.setObjectName("MosaicLayoutBottomBtn")
+        btn_bot.setFixedSize(72, 35)
+        btn_bot.setCheckable(True)
+        btn_bot.setCursor(Qt.PointingHandCursor)
+        btn_bot.setText("View\nmosaic ▾")
+        btn_bot.setToolTip("Choose Mosaic, Tiles, or Masonry photo layout")
+        btn_bot.setPopupMode(QToolButton.InstantPopup)
+
+        menu = QMenu(btn_bot)
+        grp_actions = QActionGroup(menu)
+        grp_actions.setExclusive(True)
+
+        self.act_layout_mosaic = menu.addAction(
+            make_wlpg_icon("layout_mosaic", 16), "Mosaic (Landscape rows)"
+        )
+        self.act_layout_mosaic.setCheckable(True)
+        self.act_layout_mosaic.setChecked(True)
+        self.act_layout_mosaic.triggered.connect(lambda: self.set_layout_mode("mosaic"))
+        grp_actions.addAction(self.act_layout_mosaic)
+
+        self.act_layout_tiles = menu.addAction(
+            make_wlpg_icon("layout_tiles", 16), "Tiles (Uniform square)"
+        )
+        self.act_layout_tiles.setCheckable(True)
+        self.act_layout_tiles.triggered.connect(lambda: self.set_layout_mode("tiles"))
+        grp_actions.addAction(self.act_layout_tiles)
+
+        self.act_layout_masonry = menu.addAction(
+            make_wlpg_icon("layout_masonry", 16), "Masonry (Portrait waterfall)"
+        )
+        self.act_layout_masonry.setCheckable(True)
+        self.act_layout_masonry.triggered.connect(lambda: self.set_layout_mode("masonry"))
+        grp_actions.addAction(self.act_layout_masonry)
+
+        menu.aboutToHide.connect(self._sync_mosaic_split_checked)
+        self._mosaic_layout_menu = menu
+        btn_bot.setMenu(menu)
+        self.btn_layout_mosaic_drop = btn_bot
+        vbox.addWidget(btn_bot)
+
+        btn_top.menu = btn_bot.menu
+        btn_top.setMenu = btn_bot.setMenu
+        btn_top.popupMode = btn_bot.popupMode
+        btn_top.container_widget = container
+        btn_top.btn_bottom = btn_bot
+        btn_top.original_text = ""
+        btn_top._orig_text = ""
+
+        if hasattr(self, "_all_themed_buttons"):
+            btn_top._icon_kind = "layout_mosaic"
+            btn_top._is_large = True
+            self._all_themed_buttons.append(btn_top)
+
+        return container, btn_top
+
+    def _sync_mosaic_split_checked(self) -> None:
+        is_mosaic_family = self._current_layout_mode in ("mosaic", "tiles", "masonry")
+        for w in (
+            getattr(self, "btn_layout_mosaic", None),
+            getattr(self, "btn_layout_mosaic_drop", None),
+        ):
+            if w is not None:
+                w.blockSignals(True)
+                w.setChecked(is_mosaic_family)
+                w.blockSignals(False)
+
+    def _cycle_mosaic_layout(self) -> None:
+        order: tuple[Literal["mosaic", "tiles", "masonry"], ...] = ("mosaic", "tiles", "masonry")
+        if self._current_layout_mode in order:
+            next_mode = order[(order.index(self._current_layout_mode) + 1) % len(order)]
+        else:
+            next_mode = self._last_mosaic_mode
+        self.set_layout_mode(next_mode)
+
     def _build_descriptive_tag_menu(self, parent: QWidget | None = None) -> QMenu:
         menu = QMenu(parent or self)
 
@@ -6783,9 +6896,7 @@ class RibbonToolbar(QWidget):
             getattr(self, "btn_toggle_nav_pane", None),
             getattr(self, "btn_toggle_tag_pane", None),
             getattr(self, "btn_layout_grid", None),
-            getattr(self, "btn_layout_tiles", None),
             getattr(self, "btn_layout_mosaic", None),
-            getattr(self, "btn_layout_masonry", None),
         ):
             if btn is not None:
                 self._set_button_compact(btn, width < 920)
@@ -8925,49 +9036,21 @@ class RibbonToolbar(QWidget):
         )
         self.btn_layout_grid.setChecked(True)
         self.btn_layout_grid.setToolTip("Classic Gallery Grid with details under photos")
-        self.btn_layout_tiles = self._make_btn(
-            "Tiles", "layout_tiles", grp_layout, large=True, checkable=True
-        )
-        self.btn_layout_tiles.setToolTip("Uniform edge-to-edge square tiles")
-        self.btn_layout_mosaic = self._make_btn(
-            "Mosaic", "layout_mosaic", grp_layout, large=True, checkable=True
-        )
-        self.btn_layout_mosaic.setToolTip("Justified horizontal rows (landscape-priority)")
-        self.btn_layout_masonry = self._make_btn(
-            "Masonry", "layout_masonry", grp_layout, large=True, checkable=True
-        )
-        self.btn_layout_masonry.setToolTip("Waterfall vertical columns (portrait-priority)")
-
-        self._layout_btn_group = QButtonGroup(self)
-        self._layout_btn_group.setExclusive(True)
-        for l_btn in (
-            self.btn_layout_grid,
-            self.btn_layout_tiles,
-            self.btn_layout_mosaic,
-            self.btn_layout_masonry,
-        ):
-            self._layout_btn_group.addButton(l_btn)
-
         self.btn_layout_grid.clicked.connect(
-            lambda: self.layout_mode_changed.emit("wlpg_grid")
+            lambda: self.set_layout_mode("wlpg_grid")
         )
-        self.btn_layout_tiles.clicked.connect(
-            lambda: self.layout_mode_changed.emit("tiles")
+
+        self._mosaic_split_container, self.btn_layout_mosaic = (
+            self._make_split_mosaic_button(grp_layout)
         )
-        self.btn_layout_mosaic.clicked.connect(
-            lambda: self.layout_mode_changed.emit("mosaic")
-        )
-        self.btn_layout_masonry.clicked.connect(
-            lambda: self.layout_mode_changed.emit("masonry")
-        )
+
         l_hbox = QHBoxLayout()
         l_hbox.setContentsMargins(0, 0, 0, 0)
         l_hbox.setSpacing(3)
         l_hbox.addWidget(self.btn_layout_grid)
-        l_hbox.addWidget(self.btn_layout_tiles)
-        l_hbox.addWidget(self.btn_layout_mosaic)
-        l_hbox.addWidget(self.btn_layout_masonry)
+        l_hbox.addWidget(self._mosaic_split_container)
         grp_layout.content_layout.addLayout(l_hbox)
+        grp_layout.adjust_to_content()
         hbox.addWidget(grp_layout)
 
         hbox.addStretch(1)
@@ -9190,15 +9273,64 @@ class RibbonToolbar(QWidget):
     def set_layout_mode(
         self, mode: Literal["wlpg_grid", "tiles", "mosaic", "masonry"]
     ) -> None:
-        if mode == "mosaic":
-            self.btn_layout_mosaic.setChecked(True)
-        elif mode == "tiles":
-            self.btn_layout_tiles.setChecked(True)
-        elif mode == "masonry":
-            self.btn_layout_masonry.setChecked(True)
-        else:
+        mosaic_meta: dict[str, tuple[str, str, str, QAction | None]] = {
+            "mosaic": (
+                "layout_mosaic",
+                "View\nmosaic ▾",
+                "Mosaic (landscape rows) — click to cycle Mosaic / Tiles / Masonry",
+                getattr(self, "act_layout_mosaic", None),
+            ),
+            "tiles": (
+                "layout_tiles",
+                "View\ntiles ▾",
+                "Tiles (uniform square) — click to cycle Mosaic / Tiles / Masonry",
+                getattr(self, "act_layout_tiles", None),
+            ),
+            "masonry": (
+                "layout_masonry",
+                "View\nmasonry ▾",
+                "Masonry (portrait waterfall) — click to cycle Mosaic / Tiles / Masonry",
+                getattr(self, "act_layout_masonry", None),
+            ),
+        }
+        if mode not in mosaic_meta:
             mode = "wlpg_grid"
-            self.btn_layout_grid.setChecked(True)
+        self._current_layout_mode = mode
+
+        self.btn_layout_grid.blockSignals(True)
+        self.btn_layout_grid.setChecked(mode == "wlpg_grid")
+        self.btn_layout_grid.blockSignals(False)
+
+        if mode in mosaic_meta:
+            self._last_mosaic_mode = mode  # type: ignore[assignment]
+            icon_kind, bot_text, tip, active_act = mosaic_meta[mode]
+            self.btn_layout_mosaic.blockSignals(True)
+            self.btn_layout_mosaic.setChecked(True)
+            self.btn_layout_mosaic._icon_kind = icon_kind
+            self.btn_layout_mosaic.setIcon(make_wlpg_icon(icon_kind, 32))
+            self.btn_layout_mosaic.setToolTip(tip)
+            self.btn_layout_mosaic._tooltip_override = tip
+            self.btn_layout_mosaic.blockSignals(False)
+
+            if hasattr(self, "btn_layout_mosaic_drop"):
+                self.btn_layout_mosaic_drop.blockSignals(True)
+                self.btn_layout_mosaic_drop.setChecked(True)
+                self.btn_layout_mosaic_drop.setText(bot_text)
+                self.btn_layout_mosaic_drop.blockSignals(False)
+
+            if active_act is not None:
+                active_act.blockSignals(True)
+                active_act.setChecked(True)
+                active_act.blockSignals(False)
+        else:
+            self.btn_layout_mosaic.blockSignals(True)
+            self.btn_layout_mosaic.setChecked(False)
+            self.btn_layout_mosaic.blockSignals(False)
+            if hasattr(self, "btn_layout_mosaic_drop"):
+                self.btn_layout_mosaic_drop.blockSignals(True)
+                self.btn_layout_mosaic_drop.setChecked(False)
+                self.btn_layout_mosaic_drop.blockSignals(False)
+
         self.layout_mode_changed.emit(mode)
 
     def set_scope_label(self, text: str) -> None:
@@ -10942,6 +11074,7 @@ class RibbonToolbar(QWidget):
             }
             QWidget#SlideshowSplitContainer,
             QWidget#TagDescSplitContainer,
+            QWidget#MosaicLayoutSplitContainer,
             QWidget#SaveCopySplitContainer {
                 background: transparent;
                 border: 1px solid transparent;
@@ -10949,6 +11082,7 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowTopBtn,
             QToolButton#TagDescTopBtn,
+            QToolButton#MosaicLayoutTopBtn,
             QToolButton#SaveCopyTopBtn {
                 background: transparent;
                 border: 1px solid transparent;
@@ -10960,6 +11094,7 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowTopBtn:hover,
             QToolButton#TagDescTopBtn:hover,
+            QToolButton#MosaicLayoutTopBtn:hover,
             QToolButton#SaveCopyTopBtn:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #FFFDF5, stop:1 #FCE7A2);
@@ -10967,6 +11102,8 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowTopBtn:pressed,
             QToolButton#TagDescTopBtn:pressed,
+            QToolButton#MosaicLayoutTopBtn:pressed,
+            QToolButton#MosaicLayoutTopBtn:checked,
             QToolButton#SaveCopyTopBtn:pressed {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #FCE293, stop:1 #F7CE65);
@@ -10974,6 +11111,7 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowBottomBtn,
             QToolButton#TagDescBottomBtn,
+            QToolButton#MosaicLayoutBottomBtn,
             QToolButton#SaveCopyBottomBtn {
                 background: transparent;
                 border: 1px solid transparent;
@@ -10989,6 +11127,7 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowBottomBtn:hover,
             QToolButton#TagDescBottomBtn:hover,
+            QToolButton#MosaicLayoutBottomBtn:hover,
             QToolButton#SaveCopyBottomBtn:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #FFFDF5, stop:1 #FCE7A2);
@@ -10996,6 +11135,8 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowBottomBtn:pressed,
             QToolButton#TagDescBottomBtn:pressed,
+            QToolButton#MosaicLayoutBottomBtn:pressed,
+            QToolButton#MosaicLayoutBottomBtn:checked,
             QToolButton#SaveCopyBottomBtn:pressed {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #FCE293, stop:1 #F7CE65);
@@ -11003,6 +11144,7 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowBottomBtn::menu-indicator,
             QToolButton#TagDescBottomBtn::menu-indicator,
+            QToolButton#MosaicLayoutBottomBtn::menu-indicator,
             QToolButton#SaveCopyBottomBtn::menu-indicator {
                 image: none;
                 width: 0px;
@@ -11209,9 +11351,10 @@ class RibbonToolbar(QWidget):
         self._apply_file_menu_stylesheet(False)
 
     def _apply_corner_buttons_theme(self, is_dark: bool) -> None:
-        """Keep ribbon corner buttons transparent at rest with crisp high-contrast cog & chevron."""
+        """Keep ribbon corner buttons transparent at rest with crisp high-contrast cog, help (?) & chevron."""
         import math
-        from PySide6.QtCore import QPointF
+        from PySide6.QtCore import QPointF, QRectF
+        from PySide6.QtGui import QPainterPath
 
         fg_hex = "#E2E8F0" if is_dark else "#334155"
         hover_bg = "rgba(148, 163, 184, 48)" if is_dark else "#D9E8F7"
@@ -11246,6 +11389,27 @@ class RibbonToolbar(QWidget):
             p.end()
             pm.setDevicePixelRatio(2.0)
             self.btn_ribbon_settings.setIcon(QIcon(pm))
+        if hasattr(self, "btn_ribbon_help"):
+            self.btn_ribbon_help.setStyleSheet(corner_qss)
+            pm_h = QPixmap(30, 30)
+            pm_h.fill(Qt.transparent)
+            ph = QPainter(pm_h)
+            ph.setRenderHint(QPainter.Antialiasing, True)
+            ph.setPen(QPen(QColor(fg_hex), 1.9, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            ph.setBrush(Qt.NoBrush)
+            ph.drawEllipse(QPointF(15.0, 15.0), 10.6, 10.6)
+            qpath = QPainterPath()
+            qpath.moveTo(11.9, 11.9)
+            qpath.arcTo(QRectF(11.9, 9.1, 6.2, 5.4), 180.0, -235.0)
+            qpath.quadTo(15.0, 14.9, 15.0, 16.9)
+            ph.setPen(QPen(QColor(fg_hex), 2.1, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            ph.drawPath(qpath)
+            ph.setPen(Qt.NoPen)
+            ph.setBrush(QColor(fg_hex))
+            ph.drawEllipse(QPointF(15.0, 20.4), 1.25, 1.25)
+            ph.end()
+            pm_h.setDevicePixelRatio(2.0)
+            self.btn_ribbon_help.setIcon(QIcon(pm_h))
 
     def _apply_arrange_box_theme(self, is_dark: bool) -> None:
         self._apply_corner_buttons_theme(is_dark)
@@ -11522,6 +11686,7 @@ class RibbonToolbar(QWidget):
             }
             QWidget#SlideshowSplitContainer,
             QWidget#TagDescSplitContainer,
+            QWidget#MosaicLayoutSplitContainer,
             QWidget#SaveCopySplitContainer {
                 background: transparent;
                 border: 1px solid transparent;
@@ -11529,6 +11694,7 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowTopBtn,
             QToolButton#TagDescTopBtn,
+            QToolButton#MosaicLayoutTopBtn,
             QToolButton#SaveCopyTopBtn {
                 background: transparent;
                 border: 1px solid transparent;
@@ -11539,13 +11705,21 @@ class RibbonToolbar(QWidget):
             QToolButton#SlideshowBottomBtn:hover,
             QToolButton#TagDescTopBtn:hover,
             QToolButton#TagDescBottomBtn:hover,
+            QToolButton#MosaicLayoutTopBtn:hover,
+            QToolButton#MosaicLayoutBottomBtn:hover,
             QToolButton#SaveCopyTopBtn:hover,
             QToolButton#SaveCopyBottomBtn:hover {
                 background: #2A323D;
                 border: 1px solid #475569;
             }
+            QToolButton#MosaicLayoutTopBtn:checked,
+            QToolButton#MosaicLayoutBottomBtn:checked {
+                background: #2A3A50;
+                border: 1px solid #60A5FA;
+            }
             QToolButton#SlideshowBottomBtn,
             QToolButton#TagDescBottomBtn,
+            QToolButton#MosaicLayoutBottomBtn,
             QToolButton#SaveCopyBottomBtn {
                 background: transparent;
                 border: 1px solid transparent;
@@ -11558,6 +11732,7 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowBottomBtn::menu-indicator,
             QToolButton#TagDescBottomBtn::menu-indicator,
+            QToolButton#MosaicLayoutBottomBtn::menu-indicator,
             QToolButton#SaveCopyBottomBtn::menu-indicator {
                 image: none;
                 width: 0px;
@@ -12041,6 +12216,7 @@ class RibbonToolbar(QWidget):
             }
             QWidget#TagDescSplitContainer,
             QWidget#SlideshowSplitContainer,
+            QWidget#MosaicLayoutSplitContainer,
             QWidget#SaveCopySplitContainer {
                 background: transparent;
                 border: 1px solid transparent;
@@ -12048,6 +12224,7 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowTopBtn,
             QToolButton#TagDescTopBtn,
+            QToolButton#MosaicLayoutTopBtn,
             QToolButton#SaveCopyTopBtn {
                 background: transparent;
                 border: 1px solid transparent;
@@ -12059,18 +12236,26 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowTopBtn:hover,
             QToolButton#TagDescTopBtn:hover,
+            QToolButton#MosaicLayoutTopBtn:hover,
             QToolButton#SaveCopyTopBtn:hover {
                 background: #E5E7EB;
                 border: 1px solid #D1D5DB;
             }
             QToolButton#SlideshowTopBtn:pressed,
             QToolButton#TagDescTopBtn:pressed,
+            QToolButton#MosaicLayoutTopBtn:pressed,
             QToolButton#SaveCopyTopBtn:pressed {
                 background: #D1D5DB;
                 border: 1px solid #9CA3AF;
             }
+            QToolButton#MosaicLayoutTopBtn:checked,
+            QToolButton#MosaicLayoutBottomBtn:checked {
+                background: #DBEAFE;
+                border: 1px solid #60A5FA;
+            }
             QToolButton#SlideshowBottomBtn,
             QToolButton#TagDescBottomBtn,
+            QToolButton#MosaicLayoutBottomBtn,
             QToolButton#SaveCopyBottomBtn {
                 background: transparent;
                 border: 1px solid transparent;
@@ -12086,18 +12271,21 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowBottomBtn:hover,
             QToolButton#TagDescBottomBtn:hover,
+            QToolButton#MosaicLayoutBottomBtn:hover,
             QToolButton#SaveCopyBottomBtn:hover {
                 background: #E5E7EB;
                 border: 1px solid #D1D5DB;
             }
             QToolButton#SlideshowBottomBtn:pressed,
             QToolButton#TagDescBottomBtn:pressed,
+            QToolButton#MosaicLayoutBottomBtn:pressed,
             QToolButton#SaveCopyBottomBtn:pressed {
                 background: #D1D5DB;
                 border: 1px solid #9CA3AF;
             }
             QToolButton#SlideshowBottomBtn::menu-indicator,
             QToolButton#TagDescBottomBtn::menu-indicator,
+            QToolButton#MosaicLayoutBottomBtn::menu-indicator,
             QToolButton#SaveCopyBottomBtn::menu-indicator {
                 image: none;
                 width: 0px;
