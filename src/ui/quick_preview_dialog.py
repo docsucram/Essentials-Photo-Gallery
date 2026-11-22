@@ -344,6 +344,7 @@ class QuickPreviewDialog(QDialog):
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
+        shift_held = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
         if key == Qt.Key.Key_Space and event.isAutoRepeat():
             event.accept()
             return
@@ -365,10 +366,29 @@ class QuickPreviewDialog(QDialog):
             self.navigate_requested.emit(1)
             event.accept()
             return
-        if Qt.Key.Key_0 <= key <= Qt.Key.Key_5 and self._current_media_id is not None:
-            self._rating = key - Qt.Key.Key_0
+        _SHIFT_DIGIT_KEYS = {
+            Qt.Key.Key_ParenRight: 0,
+            Qt.Key.Key_Exclam: 1,
+            Qt.Key.Key_At: 2,
+            Qt.Key.Key_QuoteDbl: 2,
+            Qt.Key.Key_NumberSign: 3,
+            Qt.Key.Key_sterling: 3,
+            Qt.Key.Key_Dollar: 4,
+            Qt.Key.Key_Percent: 5,
+        }
+        rating_val: int | None = None
+        if Qt.Key.Key_0 <= key <= Qt.Key.Key_5:
+            rating_val = key - Qt.Key.Key_0
+        elif shift_held and key in _SHIFT_DIGIT_KEYS:
+            rating_val = _SHIFT_DIGIT_KEYS[key]
+        elif shift_held and 0x30 <= int(event.nativeVirtualKey() or 0) <= 0x35:
+            rating_val = int(event.nativeVirtualKey()) - 0x30
+        if rating_val is not None and self._current_media_id is not None:
+            self._rating = rating_val
             self._update_header()
             self.rate_requested.emit(self._current_media_id, self._rating)
+            if shift_held:
+                self.navigate_requested.emit(1)
             event.accept()
             return
         if key == Qt.Key.Key_P and self._current_media_id is not None:
@@ -376,24 +396,32 @@ class QuickPreviewDialog(QDialog):
             self._update_header()
             self.flag_set_requested.emit(self._current_media_id, self._flag)
             self.flag_requested.emit(self._current_media_id)
+            if shift_held:
+                self.navigate_requested.emit(1)
             event.accept()
             return
         if key == Qt.Key.Key_X and self._current_media_id is not None:
             self._flag = 0 if self._flag == -1 else -1
             self._update_header()
             self.flag_set_requested.emit(self._current_media_id, self._flag)
+            if shift_held:
+                self.navigate_requested.emit(1)
             event.accept()
             return
         if key == Qt.Key.Key_U and self._current_media_id is not None:
             self._flag = 0
             self._update_header()
             self.flag_set_requested.emit(self._current_media_id, 0)
+            if shift_held:
+                self.navigate_requested.emit(1)
             event.accept()
             return
         if key == Qt.Key.Key_F and self._favourites_enabled and self._current_media_id is not None:
             self._is_favourite = not self._is_favourite
             self._update_header()
             self.favourite_requested.emit(self._current_media_id)
+            if shift_held:
+                self.navigate_requested.emit(1)
             event.accept()
             return
         super().keyPressEvent(event)

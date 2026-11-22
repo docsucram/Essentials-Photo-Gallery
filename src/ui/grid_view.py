@@ -2972,21 +2972,23 @@ class ThumbnailGridView(QListView):
                 Qt.Key_ParenRight: 0,
                 Qt.Key_Exclam: 1,
                 Qt.Key_At: 2,
+                Qt.Key_QuoteDbl: 2,
                 Qt.Key_NumberSign: 3,
+                Qt.Key_sterling: 3,
                 Qt.Key_Dollar: 4,
                 Qt.Key_Percent: 5,
             }
+            rating_val: int | None = None
             if Qt.Key_0 <= event.key() <= Qt.Key_5:
                 rating_val = event.key() - Qt.Key_0
+            elif shift_held and event.key() in _SHIFT_DIGIT_KEYS:
+                rating_val = _SHIFT_DIGIT_KEYS[event.key()]
+            elif shift_held and 0x30 <= int(event.nativeVirtualKey() or 0) <= 0x35:
+                rating_val = int(event.nativeVirtualKey()) - 0x30
+            if rating_val is not None:
                 main_win = getattr(self, "main_window", None) or self.window()
                 if hasattr(main_win, "apply_rating_to_selection"):
                     main_win.apply_rating_to_selection(rating_val, advance=shift_held)
-                    event.accept()
-                    return
-            if shift_held and event.key() in _SHIFT_DIGIT_KEYS:
-                main_win = getattr(self, "main_window", None) or self.window()
-                if hasattr(main_win, "apply_rating_to_selection"):
-                    main_win.apply_rating_to_selection(_SHIFT_DIGIT_KEYS[event.key()], advance=True)
                     event.accept()
                     return
             if event.key() == Qt.Key_Space and not shift_held:

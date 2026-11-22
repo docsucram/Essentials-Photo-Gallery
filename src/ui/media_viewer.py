@@ -9556,21 +9556,23 @@ class SingleMediaViewer(QWidget):
                     Qt.Key_ParenRight: 0,
                     Qt.Key_Exclam: 1,
                     Qt.Key_At: 2,
+                    Qt.Key_QuoteDbl: 2,
                     Qt.Key_NumberSign: 3,
+                    Qt.Key_sterling: 3,
                     Qt.Key_Dollar: 4,
                     Qt.Key_Percent: 5,
                 }
+                r_val: int | None = None
                 if Qt.Key_0 <= event.key() <= Qt.Key_5:
                     r_val = event.key() - Qt.Key_0
+                elif shift_held and event.key() in _SHIFT_DIGIT_KEYS:
+                    r_val = _SHIFT_DIGIT_KEYS[event.key()]
+                elif shift_held and 0x30 <= int(event.nativeVirtualKey() or 0) <= 0x35:
+                    r_val = int(event.nativeVirtualKey()) - 0x30
+                if r_val is not None:
                     mw = getattr(self, "main_window", None) or self.window()
                     if hasattr(mw, "apply_rating_to_selection"):
                         mw.apply_rating_to_selection(r_val, advance=shift_held)
-                    event.accept()
-                    return True
-                if shift_held and event.key() in _SHIFT_DIGIT_KEYS:
-                    mw = getattr(self, "main_window", None) or self.window()
-                    if hasattr(mw, "apply_rating_to_selection"):
-                        mw.apply_rating_to_selection(_SHIFT_DIGIT_KEYS[event.key()], advance=True)
                     event.accept()
                     return True
 
