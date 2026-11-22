@@ -363,6 +363,8 @@ class BottomFilmstripDock(QDockWidget):
         self._thumb_repo: Any = None
         self._hosted_tray: QWidget | None = None
         self._syncing_selection = False
+        self._saved_filmstrip_height: int = 96
+        self._animating_visibility: bool = False
 
         self.container = QFrame(self)
         self.container.setObjectName("BottomDockContainer")
@@ -505,6 +507,25 @@ class BottomFilmstripDock(QDockWidget):
         self.btn_scroll_left.raise_()
         self.btn_scroll_right.raise_()
 
+    def saved_filmstrip_height(self) -> int:
+        if self.isVisible() and self.stack.currentIndex() == 0 and not getattr(self, "_animating_visibility", False):
+            h = self.height()
+            if h >= 92:
+                self._saved_filmstrip_height = max(92, min(148, h))
+        return int(getattr(self, "_saved_filmstrip_height", 96))
+
+    def set_saved_filmstrip_height(self, height: int) -> None:
+        self._saved_filmstrip_height = max(92, min(148, int(height)))
+        if self.stack.currentIndex() == 0 and self.isVisible():
+            self._apply_saved_filmstrip_height()
+
+    def _apply_saved_filmstrip_height(self) -> None:
+        from PySide6.QtWidgets import QMainWindow
+        h = max(92, min(148, int(getattr(self, "_saved_filmstrip_height", 96))))
+        mw = self.parentWidget()
+        if isinstance(mw, QMainWindow):
+            mw.resizeDocks([self], [h], Qt.Orientation.Vertical)
+
     def animate_visible(self, show: bool) -> None:
         """Smoothly and quickly slide the filmstrip dock up or down."""
         from PySide6.QtCore import QEasingCurve, QPropertyAnimation
@@ -516,7 +537,11 @@ class BottomFilmstripDock(QDockWidget):
             except Exception:
                 pass
 
-        target_h = 90
+        if not show and self.isVisible() and self.stack.currentIndex() == 0 and self.height() >= 92:
+            self._saved_filmstrip_height = max(92, min(148, self.height()))
+
+        target_h = max(92, min(148, int(getattr(self, "_saved_filmstrip_height", 96))))
+        self._animating_visibility = True
         self.setMinimumHeight(0)
         anim = QPropertyAnimation(self, b"maximumHeight", self)
         anim.setDuration(140)
@@ -530,18 +555,23 @@ class BottomFilmstripDock(QDockWidget):
             anim.setEndValue(target_h)
 
             def _on_shown() -> None:
+                self._animating_visibility = False
                 self.setMinimumHeight(92)
                 self.setMaximumHeight(148)
+                self._apply_saved_filmstrip_height()
                 self._position_scroll_buttons()
+                self.height_anim_tick.emit()
 
             anim.finished.connect(_on_shown)
         else:
             if not self.isVisible():
+                self._animating_visibility = False
                 return
             anim.setStartValue(self.height())
             anim.setEndValue(0)
 
             def _on_hidden() -> None:
+                self._animating_visibility = False
                 self.hide()
                 self.setMinimumHeight(92)
                 self.setMaximumHeight(148)
@@ -556,6 +586,13 @@ class BottomFilmstripDock(QDockWidget):
             self._position_scroll_buttons()
         elif watched is self.filmstrip_view.viewport():
             if event.type() == QEvent.Type.Resize:
+                if (
+                    self.isVisible()
+                    and self.stack.currentIndex() == 0
+                    and not getattr(self, "_animating_visibility", False)
+                    and self.height() >= 92
+                ):
+                    self._saved_filmstrip_height = max(92, min(148, self.height()))
                 vp_h = self.filmstrip_view.viewport().height()
                 if vp_h >= 70 and self.filmstrip_delegate.set_item_height(vp_h - 4):
                     self.filmstrip_view.doItemsLayout()
@@ -632,6 +669,7 @@ class BottomFilmstripDock(QDockWidget):
             self._header.setVisible(False)
         self.setMinimumHeight(92)
         self.setMaximumHeight(148)
+        self._apply_saved_filmstrip_height()
         self._position_scroll_buttons()
 
     def set_tray_widget(self, widget: QWidget | None, title: str = "") -> None:

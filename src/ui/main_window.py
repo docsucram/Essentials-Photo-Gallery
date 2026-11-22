@@ -11286,6 +11286,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                 elif self.central_stack.currentWidget() == self.map_view:
                     current_view = "map"
             settings.setValue("filmstrip_visible", bool(getattr(self, "_filmstrip_viewer_enabled", False)))
+            if hasattr(self, "bottom_dock") and self.bottom_dock is not None:
+                settings.setValue("filmstrip_height", int(self.bottom_dock.saved_filmstrip_height()))
             settings.setValue("arrange_by", self._arrange_by)
             settings.setValue("reverse_sort", self._reverse_sort)
             settings.setValue("group_by", self._group_by)
@@ -11381,6 +11383,9 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.restoreState(win_state)
             self._filmstrip_viewer_enabled = str(settings.value("filmstrip_visible", "false")).lower() in ("true", "1")
             if hasattr(self, "bottom_dock") and self.bottom_dock is not None:
+                fs_h = settings.value("filmstrip_height", type=int)
+                if fs_h and fs_h >= 92:
+                    self.bottom_dock.set_saved_filmstrip_height(fs_h)
                 self.bottom_dock.hide()
 
             f_json = settings.value("filter_state")
