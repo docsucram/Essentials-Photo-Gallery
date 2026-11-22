@@ -30,7 +30,7 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 - **Overhauled Export / Resize Dialog:** Defaults cleanly to **Original size (No resize)** with an always-visible **Customize dimensions & scaling** toggle (housing **Fit within**, **Exact W × H**, **Percentage**, **Do not enlarge smaller photos**, and **+ Save Preset**), customizable **File name** patterns (`Auto`, `name_export`, `name_size`, `name_edited`, `Keep original name`, `Custom...`) with live italic `Filename:` preview, plain `Original → Output` readout, and in-session settings memory.
 
 ![Overhauled Export / Resize dialog with Original size default and italic Filename preview](docs/images/release-0.16.0/export-resize-dialog.png)
-- **Zoom Minimap Navigator + Sharpness Heatmap Grid:** Floating bottom-right minimap in Single Image View and Compare Mode when zoomed beyond fit (`> 100%`), with click/drag panning, quick zoom controls, and an optional **Sharpness** (`16×12` Laplacian variance heatmap) overlay.
+- **Zoom Minimap Navigator:** Floating bottom-right minimap in Single Image View and Compare Mode when zoomed beyond fit (`> 100%`), with click/drag panning and quick scroll-wheel zoom controls.
 - **Batch Rename (`F2`) & Camera AF Area Overlay (`A`):** Template-driven batch renaming (`{name}`, `{date}`, `{seq}`, `{camera}`, etc.) with two-phase atomic staging and `.xmp` / `.OriginalFiles` syncing, plus on-demand EXIF/MakerNote AF focus point overlay (`A`) for Nikon, Canon, Sony, and Fujifilm.
 
 ### Favourites, Tri-State Flags, Picasa Importer & Polish

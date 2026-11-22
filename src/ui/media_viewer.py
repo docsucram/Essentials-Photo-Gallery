@@ -1842,14 +1842,14 @@ class SingleMediaViewer(QWidget):
 
         self._show_af_overlay: bool = False
         self._af_overlay_items: list[Any] = []
-        self.zoom_minimap = ZoomMinimapOverlay(self.graphics_view.viewport())
+        self.zoom_minimap = ZoomMinimapOverlay(self.graphics_view)
         self.zoom_minimap.navigate_requested.connect(self._on_minimap_navigate)
         self.zoom_minimap.zoom_requested.connect(self._on_minimap_zoom)
         self.zoom_minimap.hide()
 
         self._live_motion_spec: tuple[Path, int] | None = None
         self._is_playing_live_motion: bool = False
-        self.btn_live_play = QPushButton("▶ LIVE", self.graphics_view.viewport())
+        self.btn_live_play = QPushButton("▶ LIVE", self.graphics_view)
         self.btn_live_play.setCursor(Qt.PointingHandCursor)
         self.btn_live_play.setToolTip("Play Live / Motion Photo (L)")
         self.btn_live_play.setStyleSheet(
@@ -1861,7 +1861,7 @@ class SingleMediaViewer(QWidget):
         self.btn_live_play.clicked.connect(self.toggle_live_photo_playback)
         self.btn_live_play.hide()
 
-        self.cull_hud = QFrame(self.graphics_view.viewport())
+        self.cull_hud = QFrame(self.graphics_view)
         self.cull_hud.setStyleSheet(
             "QFrame { background-color: rgba(15, 23, 42, 210); border: 1px solid rgba(148, 163, 184, 110); "
             "border-radius: 16px; }"

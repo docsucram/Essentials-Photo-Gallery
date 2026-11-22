@@ -117,25 +117,6 @@ class ZoomMinimapOverlay(QFrame):
         self._vx1: float = 1.0
         self._vy1: float = 1.0
         self._dragging: bool = False
-
-        self.btn_sharpness = QToolButton(self)
-        self.btn_sharpness.setText("Focus")
-        self.btn_sharpness.setCheckable(True)
-        self.btn_sharpness.setToolTip("Toggle Sharpness Heatmap Grid")
-        self.btn_sharpness.setFixedSize(44, 18)
-        self.btn_sharpness.move(6, 6)
-        self.btn_sharpness.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_sharpness.setStyleSheet(
-            "QToolButton { "
-            "  background: rgba(15, 23, 42, 190); color: #E2E8F0; "
-            "  border: 1px solid rgba(255,255,255,60); border-radius: 3px; "
-            "  font-size: 9px; font-weight: 600; padding: 0 3px; "
-            "} "
-            "QToolButton:checked { "
-            "  background: #0078D7; color: #FFFFFF; border-color: #60A5FA; "
-            "}"
-        )
-        self.btn_sharpness.toggled.connect(self._on_sharpness_toggled)
         self.hide()
 
     def _on_sharpness_toggled(self, checked: bool) -> None:
@@ -208,35 +189,6 @@ class ZoomMinimapOverlay(QFrame):
         img_rect = self._image_rect()
         if not self._thumb.isNull():
             painter.drawPixmap(img_rect.toRect(), self._thumb)
-
-        if self._sharpness_enabled and self._sharpness_cells:
-            # Darken photo slightly so the thermal focus heatmap pops clearly over bright/colorful areas
-            painter.fillRect(img_rect, QColor(0, 0, 0, 125))
-            cw = img_rect.width() / float(self._sharpness_cols)
-            ch = img_rect.height() / float(self._sharpness_rows)
-            painter.setPen(Qt.PenStyle.NoPen)
-            for col, row, intensity in self._sharpness_cells:
-                t = max(0.0, min(1.0, float(intensity)))
-                if t < 0.5:
-                    u = t * 2.0
-                    r = int(34 + (250 - 34) * u)
-                    g = int(197 + (204 - 197) * u)
-                    b = int(94 + (21 - 94) * u)
-                else:
-                    u = (t - 0.5) * 2.0
-                    r = int(250 + (239 - 250) * u)
-                    g = int(204 + (68 - 204) * u)
-                    b = int(21 + (68 - 21) * u)
-                alpha = int(105 + t * 115)
-                painter.setBrush(QColor(r, g, b, alpha))
-                painter.drawRect(
-                    QRectF(
-                        img_rect.left() + col * cw,
-                        img_rect.top() + row * ch,
-                        cw + 0.5,
-                        ch + 0.5,
-                    )
-                )
 
         # Dim outside the active viewport box
         vx0 = img_rect.left() + self._vx0 * img_rect.width()
