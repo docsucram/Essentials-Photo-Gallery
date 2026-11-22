@@ -2366,13 +2366,12 @@ class ResizePhotoDialog(QDialog):
 
         vbox.addWidget(out_group)
 
-        # 5. Live Output Summary Pill
+        # 5. Live Output Size Summary (plain text, no box)
         self.lbl_preview_summary = QLabel("", self)
         self.lbl_preview_summary.setProperty("uiRole", "muted")
         self.lbl_preview_summary.setWordWrap(True)
         self.lbl_preview_summary.setStyleSheet(
-            f"background-color: {tok.bg_card}; color: {tok.text_primary}; "
-            f"border: 1px solid {tok.border_subtle}; border-radius: 6px; padding: 7px 10px; font-size: 9pt;"
+            f"color: {tok.text_secondary}; background: transparent; border: none; font-size: 9pt;"
         )
         vbox.addWidget(self.lbl_preview_summary)
 
@@ -2392,6 +2391,15 @@ class ResizePhotoDialog(QDialog):
         self.btn_browse.clicked.connect(self._on_browse_clicked)
         save_row.addWidget(self.btn_browse)
         vbox.addLayout(save_row)
+
+        self.lbl_preview_filename = QLabel("", self)
+        self.lbl_preview_filename.setProperty("uiRole", "muted")
+        self.lbl_preview_filename.setWordWrap(True)
+        self.lbl_preview_filename.setStyleSheet(
+            f"color: {tok.text_secondary}; background: transparent; border: none; "
+            "font-size: 9pt; font-style: italic;"
+        )
+        vbox.addWidget(self.lbl_preview_filename)
 
         # Progress bar (visible during batch resizing)
         self.progress_bar = QProgressBar(self)
@@ -2557,10 +2565,20 @@ class ResizePhotoDialog(QDialog):
 
     def _toggle_custom_dims_drawer(self) -> None:
         vis = self._custom_dims_box.isHidden()
+        if vis and not self.mode_group.isChecked():
+            self.mode_group.blockSignals(True)
+            self.mode_group.setChecked(True)
+            self.mode_group.blockSignals(False)
+            if self.cmb_size.currentIndex() == 0:
+                self.cmb_size.blockSignals(True)
+                self.cmb_size.setCurrentIndex(5)  # Custom
+                self.cmb_size.blockSignals(False)
         self._custom_dims_box.setVisible(vis)
         self.btn_toggle_custom_dims.setText(
             "▾ Customize dimensions && scaling" if vis else "▸ Customize dimensions && scaling"
         )
+        self._sync_mode_enabled_states()
+        self._update_preview_summary()
         self.adjustSize()
 
     def _on_resize_toggled(self, checked: bool) -> None:
@@ -2569,10 +2587,9 @@ class ResizePhotoDialog(QDialog):
             self.cmb_size.setCurrentIndex(0)  # Original size (No resize)
             self.cmb_size.blockSignals(False)
             self.btn_delete_preset.setVisible(False)
-            self.btn_toggle_custom_dims.setVisible(False)
             self._custom_dims_box.setVisible(False)
+            self.btn_toggle_custom_dims.setText("▸ Customize dimensions && scaling")
         else:
-            self.btn_toggle_custom_dims.setVisible(True)
             if self.cmb_size.currentIndex() == 0:
                 self.cmb_size.blockSignals(True)
                 self.cmb_size.setCurrentIndex(5)  # Custom
@@ -2583,9 +2600,10 @@ class ResizePhotoDialog(QDialog):
 
     def _sync_mode_enabled_states(self) -> None:
         is_resizing = self.mode_group.isChecked()
-        self.btn_toggle_custom_dims.setVisible(is_resizing)
+        self.btn_toggle_custom_dims.setVisible(True)
         if not is_resizing:
             self._custom_dims_box.setVisible(False)
+            self.btn_toggle_custom_dims.setText("▸ Customize dimensions && scaling")
             return
         mode = self.active_mode()
         self.txt_dim.setEnabled(mode == "long_edge")
@@ -2853,8 +2871,9 @@ class ResizePhotoDialog(QDialog):
             )
             est = _format_bytes_human(_estimate_resized_file_bytes(ow, oh, ext, cfg["quality"]))
             self.lbl_preview_summary.setText(
-                f"File: {out_stem}{ext}   •   Original: {sw} × {sh} px  →  Output: {ow} × {oh} px ({est})"
+                f"Original: {sw} × {sh} px  →  Output: {ow} × {oh} px ({est})"
             )
+            self.lbl_preview_filename.setText(f"Filename: {out_stem}{ext}")
         else:
             count = len(self.file_paths)
             if not cfg["resize_enabled"]:
@@ -2868,7 +2887,7 @@ class ResizePhotoDialog(QDialog):
                 detail = f"Target size: {cfg['target_w']} × {cfg['target_h']} px ({sub})"
             else:
                 detail = f"Scaled to {cfg['percent']}%"
-            sample_line = ""
+            self.lbl_preview_summary.setText(f"{count} photos selected • {detail}")
             if self.file_paths:
                 _, s_ext = _resolve_output_format_and_ext(self.file_paths[0].suffix or ".jpg", cfg["out_format"])
                 s_stem = _resolve_export_filename_stem(
@@ -2880,8 +2899,9 @@ class ResizePhotoDialog(QDialog):
                     out_h=cfg["max_dim"] if cfg["mode"] == "long_edge" else cfg["target_h"],
                     ext=s_ext,
                 )
-                sample_line = f" • e.g. {s_stem}{s_ext}"
-            self.lbl_preview_summary.setText(f"{count} photos selected • {detail}{sample_line}")
+                self.lbl_preview_filename.setText(f"Filename: {s_stem}{s_ext} (example)")
+            else:
+                self.lbl_preview_filename.setText("")
 
     def _on_browse_clicked(self) -> None:
         curr = self.txt_save_path.text()
