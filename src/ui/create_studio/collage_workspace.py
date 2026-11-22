@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime
+import math
 import random
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QPixmap,
+    QPolygonF,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -45,6 +47,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGraphicsPixmapItem,
+    QGraphicsPolygonItem,
     QGraphicsRectItem,
     QGraphicsScene,
     QGridLayout,
@@ -61,14 +64,17 @@ from src.imaging.create_tools import (
     _apply_rounded_corners,
     _crop_to_aspect,
     _get_seamless_slots,
+    compute_canvas_rotation_render_size,
     compute_grid_slots,
     compute_polaroid_card_size,
+    compute_polaroid_metrics,
     create_blended_seamless_collage,
     create_grid_collage,
     create_polaroid_scatter_collage,
     create_then_and_now_card,
     default_polaroid_positions_norm,
     detect_faces_in_image,
+    rotate_collage_canvas,
 )
 from src.imaging.creative_effects import load_bgr_exif_safe
 from src.ui.create_studio.base import CreateWorkspaceBase, RibbonActionSpec
@@ -943,9 +949,11 @@ class CollageWorkspace(CreateWorkspaceBase):
         self._is_fit_mode: bool = True
         self._dirty: bool = False
         self._user_shuffled: bool = False
-        self._last_preview_size: tuple[int, int] = (1000, 600)
+        self._last_preview_size: tuple[int, int] = (1280, 720)
+        self._last_render_size: tuple[int, int] = (1280, 720)
+        self._canvas_rotation_deg: float = 0.0
         self._selected_grid_slot: int | None = None
-        self._grid_selection_rect: QGraphicsRectItem | None = None
+        self._grid_selection_rect: QGraphicsPolygonItem | None = None
         self._dragging_polaroid_idx: int | None = None
         self._drag_offset: QPointF = QPointF(0.0, 0.0)
         self._press_pos_vp: QPoint | None = None
@@ -1032,6 +1040,7 @@ class CollageWorkspace(CreateWorkspaceBase):
         elif action_id == "reset_framing":
             self._reset_photo_framing()
             self._reset_polaroid_positions()
+            self._reset_canvas_rotation()
         else:
             super().handle_ribbon_action(action_id)
 
@@ -1081,6 +1090,18 @@ class CollageWorkspace(CreateWorkspaceBase):
         self.preview_view.apply_theme_mode(self._theme_name)
         self.zoom_bar.apply_theme_mode(self._theme_name)
         self.lbl_info.setStyleSheet(f"color: {tok.text_secondary}; font-size: 9pt; background: transparent;")
+        if hasattr(self, "lbl_canvas_rotation"):
+            self.lbl_canvas_rotation.setStyleSheet(
+                f"color: {tok.text_primary}; font-size: 8.5pt; font-weight: 600; background: transparent;"
+            )
+            rot_btn_qss = (
+                f"QPushButton {{ background-color: {tok.bg_elevated}; color: {tok.text_primary}; "
+                f"border: 1px solid {tok.border_subtle}; border-radius: 12px; padding: 2px 10px; font-size: 8.5pt; }}"
+                f"QPushButton:hover {{ background-color: {tok.bg_hover}; border-color: {tok.accent}; }}"
+                f"QPushButton:disabled {{ color: {tok.text_secondary}; border-color: {tok.border_subtle}; }}"
+            )
+            self.btn_rotate_90.setStyleSheet(rot_btn_qss)
+            self.btn_reset_rotation.setStyleSheet(rot_btn_qss)
         self._refresh_visual_picker_icons()
         self._refresh_bg_swatch_styles()
         self._refresh_tray_card_styles()
@@ -1100,7 +1121,7 @@ class CollageWorkspace(CreateWorkspaceBase):
         self.preview_pixmap_item = QGraphicsPixmapItem()
         self.preview_scene.addItem(self.preview_pixmap_item)
 
-        self._grid_selection_rect = QGraphicsRectItem()
+        self._grid_selection_rect = QGraphicsPolygonItem()
         self._grid_selection_rect.setPen(QPen(QColor(50, 150, 255), 4))
         self._grid_selection_rect.setBrush(QBrush(QColor(50, 150, 255, 35)))
         self._grid_selection_rect.setZValue(10.0)
@@ -1112,6 +1133,42 @@ class CollageWorkspace(CreateWorkspaceBase):
         self.preview_view.viewport().installEventFilter(self)
         self.preview_view.zoom_changed.connect(self._on_zoom_changed)
         lay.addWidget(self.preview_view, 1)
+
+        # Google Photos-style Canvas Rotation bar
+        self.rotation_bar = QFrame(self)
+        self.rotation_bar.setObjectName("StudioTrayRoot")
+        rot_lay = QHBoxLayout(self.rotation_bar)
+        rot_lay.setContentsMargins(12, 3, 12, 3)
+        rot_lay.setSpacing(8)
+        rot_lay.addStretch(1)
+
+        self.btn_rotate_90 = QPushButton("↻ 90°", self.rotation_bar)
+        self.btn_rotate_90.setFixedHeight(24)
+        self.btn_rotate_90.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_rotate_90.setToolTip("Rotate collage canvas 90° clockwise")
+        self.btn_rotate_90.clicked.connect(self._rotate_canvas_90)
+        rot_lay.addWidget(self.btn_rotate_90)
+
+        self.lbl_canvas_rotation = QLabel("0°", self.rotation_bar)
+        self.lbl_canvas_rotation.setFixedWidth(38)
+        self.lbl_canvas_rotation.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        rot_lay.addWidget(self.lbl_canvas_rotation)
+
+        self.sld_canvas_rotation = AeroStudioSlider(-180, 180, 0, self.rotation_bar)
+        self.sld_canvas_rotation.setFixedWidth(220)
+        self.sld_canvas_rotation.setToolTip("Rotate collage canvas (-180° to +180°, double-click to reset)")
+        self.sld_canvas_rotation.valueChanged.connect(self._on_canvas_rotation_slider_changed)
+        rot_lay.addWidget(self.sld_canvas_rotation)
+
+        self.btn_reset_rotation = QPushButton("Reset", self.rotation_bar)
+        self.btn_reset_rotation.setFixedHeight(24)
+        self.btn_reset_rotation.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_reset_rotation.setToolTip("Reset canvas rotation to 0°")
+        self.btn_reset_rotation.setEnabled(False)
+        self.btn_reset_rotation.clicked.connect(self._reset_canvas_rotation)
+        rot_lay.addWidget(self.btn_reset_rotation)
+        rot_lay.addStretch(1)
+        lay.addWidget(self.rotation_bar)
 
         bottom_bar = QFrame(self)
         bottom_bar.setObjectName("StudioTrayRoot")
@@ -1148,6 +1205,7 @@ class CollageWorkspace(CreateWorkspaceBase):
             "Polaroid Table Scatter",
             "Then & Now Comparison Card",
         ])
+        self.cmb_style.setCurrentIndex(1)  # Default to Grid collage
         self.cmb_style.currentIndexChanged.connect(self._on_style_changed)
         self.cmb_style.setVisible(False)
         grp_style.add_widget(self.cmb_style)
@@ -1167,7 +1225,7 @@ class CollageWorkspace(CreateWorkspaceBase):
         for idx, lbl, tip in style_labels:
             btn = QPushButton(lbl, grp_style)
             btn.setCheckable(True)
-            btn.setChecked(idx == 0)
+            btn.setChecked(idx == 1)
             btn.setToolTip(tip)
             btn.setIconSize(QSize(20, 20))
             btn.setMinimumHeight(32)
@@ -1267,6 +1325,7 @@ class CollageWorkspace(CreateWorkspaceBase):
 
         # 4. Seamless Blend card
         self.grp_seamless = StudioCardGroup("Blended Collage Settings", self._inspector_root)
+        self.grp_seamless.setVisible(False)
         self.grp_seamless.add_widget(QLabel("Edge Softness / Blending:", self.grp_seamless))
         self.sld_feather = AeroStudioSlider(10, 45, 22, self.grp_seamless)
         self.sld_feather.valueChanged.connect(lambda: self._mark_dirty_and_render())
@@ -1275,7 +1334,7 @@ class CollageWorkspace(CreateWorkspaceBase):
 
         # 5. Grid Options card (visual grid layout diagrams + border + colour swatches)
         self.grp_grid = StudioCardGroup("Grid Layout & Border", self._inspector_root)
-        self.grp_grid.setVisible(False)
+        self.grp_grid.setVisible(True)
         self.cmb_grid_layout = QComboBox(self.grp_grid)
         self.cmb_grid_layout.addItems(recommended_grid_layouts(len(self.photos_data)))
         self.cmb_grid_layout.currentIndexChanged.connect(self._on_grid_layout_changed)
@@ -1331,10 +1390,23 @@ class CollageWorkspace(CreateWorkspaceBase):
         self.cmb_texture.currentIndexChanged.connect(lambda: self._mark_dirty_and_render())
         self.grp_polaroid.add_widget(self.cmb_texture)
 
-        self.chk_captions = QCheckBox("Print Date / Caption on Border", self.grp_polaroid)
-        self.chk_captions.setChecked(True)
-        self.chk_captions.toggled.connect(lambda: self._mark_dirty_and_render())
-        self.grp_polaroid.add_widget(self.chk_captions)
+        cap_row = QHBoxLayout()
+        cap_row.setSpacing(6)
+        cap_row.addWidget(QLabel("Border Caption:", self.grp_polaroid))
+        self.cmb_polaroid_caption = QComboBox(self.grp_polaroid)
+        self.cmb_polaroid_caption.addItems([
+            "Caption",
+            "Date",
+            "File Name",
+            "Tagged People",
+            "None",
+        ])
+        self.cmb_polaroid_caption.setToolTip(
+            "Choose what text is printed on the lower Polaroid border"
+        )
+        self.cmb_polaroid_caption.currentIndexChanged.connect(lambda: self._mark_dirty_and_render())
+        cap_row.addWidget(self.cmb_polaroid_caption, 1)
+        self.grp_polaroid.add_layout(cap_row)
 
         self.btn_reset_polaroids = QPushButton("Reset Polaroid Positions", self.grp_polaroid)
         self.btn_reset_polaroids.clicked.connect(self._reset_polaroid_positions)
@@ -1413,13 +1485,28 @@ class CollageWorkspace(CreateWorkspaceBase):
         self._sync_active_photo_zoom_ui()
         self._refresh_tray_card_styles()
 
+    def _preserve_polaroid_slot_positions(self, reorder_fn: Any) -> None:
+        """Keep each Polaroid slot's position fixed when photos are reordered or swapped."""
+        saved_positions = [d.get("polaroid_pos") for d in self.photos_data]
+        reorder_fn()
+        for i, d in enumerate(self.photos_data):
+            pos = saved_positions[i] if i < len(saved_positions) else None
+            if pos is not None:
+                d["polaroid_pos"] = pos
+            else:
+                d.pop("polaroid_pos", None)
+
     def _on_animated_tray_reorder(self, src_idx: int, dst_idx: int) -> None:
         """Sync Collage state after an animated pointer drag reorder completes without rebuilding tiles."""
         n = len(self.photos_data)
         if src_idx == dst_idx or not (0 <= src_idx < n and 0 <= dst_idx < n):
             return
-        item = self.photos_data.pop(src_idx)
-        self.photos_data.insert(dst_idx, item)
+
+        def _do_move() -> None:
+            item = self.photos_data.pop(src_idx)
+            self.photos_data.insert(dst_idx, item)
+
+        self._preserve_polaroid_slot_positions(_do_move)
         self._user_shuffled = True
         self._dirty = True
         self._active_photo_idx = dst_idx
@@ -1632,8 +1719,12 @@ class CollageWorkspace(CreateWorkspaceBase):
         n = len(self.photos_data)
         if src_idx == dst_idx or not (0 <= src_idx < n and 0 <= dst_idx < n):
             return
-        item = self.photos_data.pop(src_idx)
-        self.photos_data.insert(dst_idx, item)
+
+        def _do_move() -> None:
+            item = self.photos_data.pop(src_idx)
+            self.photos_data.insert(dst_idx, item)
+
+        self._preserve_polaroid_slot_positions(_do_move)
         self._user_shuffled = True
         self._dirty = True
         self._active_photo_idx = dst_idx
@@ -1722,12 +1813,53 @@ class CollageWorkspace(CreateWorkspaceBase):
             return
         if not (0 <= idx_a < len(self.photos_data) and 0 <= idx_b < len(self.photos_data)):
             return
-        self.photos_data[idx_a], self.photos_data[idx_b] = self.photos_data[idx_b], self.photos_data[idx_a]
+
+        def _do_swap() -> None:
+            self.photos_data[idx_a], self.photos_data[idx_b] = self.photos_data[idx_b], self.photos_data[idx_a]
+
+        self._preserve_polaroid_slot_positions(_do_swap)
         self._user_shuffled = True
         self._dirty = True
         self._selected_grid_slot = None
-        self._refresh_order_tray(selected_slot=idx_b)
+        self._refresh_order_tray(selected_slot=None)
+        self._update_grid_selection_overlay()
+        self._refresh_tray_card_styles()
         self._render_preview()
+
+    def _set_canvas_rotation(self, deg: float, *, interactive: bool = False) -> None:
+        val = float(deg)
+        # Normalize into [-180, 180]
+        while val > 180.0:
+            val -= 360.0
+        while val < -180.0:
+            val += 360.0
+        if abs(val) < 0.01:
+            val = 0.0
+        self._canvas_rotation_deg = val
+        iv = int(round(val))
+        if hasattr(self, "sld_canvas_rotation"):
+            self.sld_canvas_rotation.blockSignals(True)
+            self.sld_canvas_rotation.setValue(max(-180, min(180, iv)))
+            self.sld_canvas_rotation.blockSignals(False)
+        if hasattr(self, "lbl_canvas_rotation"):
+            self.lbl_canvas_rotation.setText(f"{iv}°")
+        if hasattr(self, "btn_reset_rotation"):
+            self.btn_reset_rotation.setEnabled(iv != 0)
+        self._dirty = True
+        self._render_preview(fast=interactive)
+
+    def _on_canvas_rotation_slider_changed(self, deg: int) -> None:
+        self._set_canvas_rotation(float(deg), interactive=True)
+
+    def _rotate_canvas_90(self) -> None:
+        nxt = self._canvas_rotation_deg + 90.0
+        if nxt > 180.0:
+            nxt -= 360.0
+        self._set_canvas_rotation(nxt, interactive=False)
+
+    def _reset_canvas_rotation(self) -> None:
+        if abs(self._canvas_rotation_deg) > 1e-4:
+            self._set_canvas_rotation(0.0, interactive=False)
 
     def _shuffle_photos(self) -> None:
         if len(self.photos_data) <= 1:
@@ -1768,6 +1900,73 @@ class CollageWorkspace(CreateWorkspaceBase):
     # ------------------------------------------------------------------
     # Rendering & Interactive Hit-Testing
     # ------------------------------------------------------------------
+    def _format_polaroid_caption(self, d: dict[str, Any]) -> str:
+        """Build the Polaroid border caption according to the user's selected mode."""
+        mode = (
+            self.cmb_polaroid_caption.currentText().strip().lower()
+            if hasattr(self, "cmb_polaroid_caption")
+            else "caption"
+        )
+        if mode == "none":
+            return ""
+        if mode == "caption":
+            return str(d.get("caption") or "").strip()
+        if mode == "file name":
+            fp = d.get("filename") or d.get("file_path") or ""
+            return Path(str(fp)).name if fp else ""
+        if mode == "date":
+            raw_dt = d.get("date_taken") or d.get("date_str") or d.get("mtime")
+            if isinstance(raw_dt, (int, float)) and raw_dt > 100000000:
+                try:
+                    return datetime.datetime.fromtimestamp(raw_dt).strftime("%d %b %Y")
+                except Exception:
+                    return str(raw_dt)
+            if raw_dt:
+                return str(raw_dt).strip()
+            return ""
+        if mode == "tagged people":
+            names: list[str] = []
+            seen: set[str] = set()
+            src_list = d.get("confirmed_people") or d.get("people") or d.get("face_regions") or []
+            for entry in src_list:
+                if isinstance(entry, str):
+                    nm = entry.strip()
+                elif isinstance(entry, dict):
+                    nm = str(entry.get("person_name") or entry.get("name") or "").strip()
+                else:
+                    nm = ""
+                if nm and nm.lower() not in seen:
+                    seen.add(nm.lower())
+                    names.append(nm)
+            return " + ".join(names)
+        return str(d.get("caption") or "").strip()
+
+    def _scene_to_unrotated(self, scene_pos: QPointF) -> QPointF:
+        """Map a point on the displayed preview canvas into unrotated render coordinates."""
+        pw, ph = self._last_preview_size
+        rw, rh = self._last_render_size
+        dx = scene_pos.x() - (pw / 2.0)
+        dy = scene_pos.y() - (ph / 2.0)
+        ang = self._canvas_rotation_deg % 360.0
+        if abs(ang) > 1e-4 and abs(ang - 360.0) > 1e-4:
+            rad = math.radians(-ang)
+            ca, sa = math.cos(rad), math.sin(rad)
+            dx, dy = (dx * ca - dy * sa), (dx * sa + dy * ca)
+        return QPointF(dx + (rw / 2.0), dy + (rh / 2.0))
+
+    def _unrotated_to_scene(self, ux: float, uy: float) -> QPointF:
+        """Map a point from unrotated render coordinates onto the displayed preview canvas."""
+        pw, ph = self._last_preview_size
+        rw, rh = self._last_render_size
+        dx = ux - (rw / 2.0)
+        dy = uy - (rh / 2.0)
+        ang = self._canvas_rotation_deg % 360.0
+        if abs(ang) > 1e-4 and abs(ang - 360.0) > 1e-4:
+            rad = math.radians(ang)
+            ca, sa = math.cos(rad), math.sin(rad)
+            dx, dy = (dx * ca - dy * sa), (dx * sa + dy * ca)
+        return QPointF(dx + (pw / 2.0), dy + (ph / 2.0))
+
     def _render_canvas(self, target_size: tuple[int, int], *, use_proxy: bool = False) -> np.ndarray:
         style_idx = self.cmb_style.currentIndex()
         images_bgr: list[np.ndarray] = []
@@ -1786,6 +1985,7 @@ class CollageWorkspace(CreateWorkspaceBase):
         if not images_bgr:
             return np.full((target_size[1], target_size[0], 3), (245, 245, 248), dtype=np.uint8)
 
+        render_size = compute_canvas_rotation_render_size(target_size, self._canvas_rotation_deg)
         focus_centers = [d.get("focus_center") for d in valid_entries]
         zooms = [float(d.get("crop_zoom", 1.0)) for d in valid_entries]
 
@@ -1797,47 +1997,45 @@ class CollageWorkspace(CreateWorkspaceBase):
                 if fk not in d:
                     d[fk] = d.get("faces") if d.get("faces") is not None else detect_faces_in_image(im)
                 faces_per_image.append(d[fk])
-            return create_blended_seamless_collage(
+            raw_bgr = create_blended_seamless_collage(
                 images_bgr=images_bgr,
-                target_size=target_size,
+                target_size=render_size,
                 blend_feather=feather_ratio,
                 faces_per_image=faces_per_image,
                 prioritize_faces=not self._user_shuffled,
                 focus_centers=focus_centers,
                 zooms=zooms,
             )
-        if style_idx == 1:
+        elif style_idx == 1:
             layout_name = self.cmb_grid_layout.currentText().lower().replace(" ", "_")
-            return create_grid_collage(
+            # Scale border/corner proportionally if render_size is expanded for rotation
+            rot_scale = render_size[0] / max(1.0, float(target_size[0]))
+            raw_bgr = create_grid_collage(
                 images_bgr=images_bgr,
                 layout=layout_name,
-                border_thickness=self.sld_border.value(),
-                corner_radius=self.sld_corner.value(),
+                border_thickness=max(0, int(round(self.sld_border.value() * rot_scale))),
+                corner_radius=max(0, int(round(self.sld_corner.value() * rot_scale))),
                 bg_color=_qcolor_to_bgr(self.bg_color),
-                target_size=target_size,
+                target_size=render_size,
                 focus_centers=focus_centers,
                 zooms=zooms,
             )
-        if style_idx == 2:
+        elif style_idx == 2:
             tex_txt = self.cmb_texture.currentText()
             tex_name = "dark_wood" if "Wood" in tex_txt else ("linen" if "Linen" in tex_txt else "slate")
+            cap_mode = (
+                self.cmb_polaroid_caption.currentText().strip().lower()
+                if hasattr(self, "cmb_polaroid_caption")
+                else "caption"
+            )
             polaroid_data = []
             for i, d in enumerate(self.photos_data):
                 if i < len(images_bgr):
-                    raw_dt = d.get("date_taken")
-                    dt_str = ""
-                    if isinstance(raw_dt, (int, float)) and raw_dt > 100000000:
-                        try:
-                            dt_str = datetime.datetime.fromtimestamp(raw_dt).strftime("%d %b %Y")
-                        except Exception:
-                            dt_str = str(raw_dt)
-                    elif raw_dt:
-                        dt_str = str(raw_dt)
-                    caption = d.get("caption") or dt_str or d.get("filename") or ""
+                    cap_text = self._format_polaroid_caption(d)
                     p_entry: dict[str, Any] = {
                         "image_bgr": images_bgr[i],
-                        "caption": str(caption),
-                        "date_str": dt_str,
+                        "caption": cap_text,
+                        "caption_override": cap_text,
                         "crop_zoom": float(d.get("crop_zoom", 1.0)),
                     }
                     if d.get("polaroid_pos") is not None:
@@ -1845,29 +2043,34 @@ class CollageWorkspace(CreateWorkspaceBase):
                     if d.get("focus_center") is not None:
                         p_entry["focus_center"] = d["focus_center"]
                     polaroid_data.append(p_entry)
-            return create_polaroid_scatter_collage(
+            raw_bgr = create_polaroid_scatter_collage(
                 images_data=polaroid_data,
-                target_size=target_size,
+                target_size=render_size,
                 bg_style=tex_name,
-                print_captions=self.chk_captions.isChecked(),
+                print_captions=(cap_mode != "none"),
             )
-        then_now_data = [
-            {
-                "image_bgr": images_bgr[i],
-                "date_taken": d.get("date_taken") or d.get("date_str") or "",
-                "caption": d.get("caption") or "",
-                "mtime": d.get("mtime") or 0,
-                "focus_center": d.get("focus_center"),
-                "crop_zoom": float(d.get("crop_zoom", 1.0)),
-            }
-            for i, d in enumerate(self.photos_data)
-            if i < len(images_bgr)
-        ]
-        return create_then_and_now_card(images_data=then_now_data, target_size=target_size)
+        else:
+            then_now_data = [
+                {
+                    "image_bgr": images_bgr[i],
+                    "date_taken": d.get("date_taken") or d.get("date_str") or "",
+                    "caption": d.get("caption") or "",
+                    "mtime": d.get("mtime") or 0,
+                    "focus_center": d.get("focus_center"),
+                    "crop_zoom": float(d.get("crop_zoom", 1.0)),
+                }
+                for i, d in enumerate(self.photos_data)
+                if i < len(images_bgr)
+            ]
+            raw_bgr = create_then_and_now_card(images_data=then_now_data, target_size=render_size)
+
+        return rotate_collage_canvas(raw_bgr, target_size, self._canvas_rotation_deg)
 
     def _fast_update_grid_slot(self, idx: int) -> bool:
         """Ultra-fast single-slot partial blit during interactive Grid zoom/pan (<2ms)."""
         if self.rendered_bgr is None or self.cmb_style.currentIndex() != 1:
+            return False
+        if abs(self._canvas_rotation_deg % 360.0) > 1e-4:
             return False
         slots = self._current_grid_slots()
         if not (0 <= idx < len(slots) and idx < len(self.photos_data)):
@@ -1900,36 +2103,58 @@ class CollageWorkspace(CreateWorkspaceBase):
 
     def _render_preview(self, *, fast: bool = False) -> None:
         full_w, full_h = self._get_target_resolution()
-        max_edge = 640.0 if fast else 1280.0
-        scale = min(1.0, max_edge / max(full_w, full_h))
-        pw = max(16, int(round(full_w * scale)))
-        ph = max(16, int(round(full_h * scale)))
-        self._last_preview_size = (pw, ph)
+        # Keep scene coordinate size fixed at 1280px max-edge so fast previews never
+        # alter sceneRect or jump the user's canvas zoom during interactive photo edits.
+        base_scale = min(1.0, 1280.0 / max(full_w, full_h))
+        scene_w = max(16, int(round(full_w * base_scale)))
+        scene_h = max(16, int(round(full_h * base_scale)))
+        self._last_preview_size = (scene_w, scene_h)
+        self._last_render_size = compute_canvas_rotation_render_size(
+            (scene_w, scene_h), self._canvas_rotation_deg
+        )
 
-        rendered = self._render_canvas(target_size=(pw, ph), use_proxy=True)
-        self.rendered_bgr = rendered
         if fast:
+            fast_scale = min(1.0, 640.0 / max(full_w, full_h))
+            pw = max(16, int(round(full_w * fast_scale)))
+            ph = max(16, int(round(full_h * fast_scale)))
+            rendered_small = self._render_canvas(target_size=(pw, ph), use_proxy=True)
+            rendered = (
+                cv2.resize(rendered_small, (scene_w, scene_h), interpolation=cv2.INTER_LINEAR)
+                if (pw, ph) != (scene_w, scene_h)
+                else rendered_small
+            )
             self._hq_preview_timer.start()
         else:
+            rendered = self._render_canvas(target_size=(scene_w, scene_h), use_proxy=True)
             self._hq_preview_timer.stop()
+
+        self.rendered_bgr = rendered
         pm = _cv2_to_qpixmap(rendered)
+        prev_rect = self.preview_scene.sceneRect()
+        new_rect = QRectF(pm.rect())
+        size_changed = (not prev_rect.isValid()) or (prev_rect.size() != new_rect.size())
         self.preview_pixmap_item.setPixmap(pm)
-        self.preview_scene.setSceneRect(QRectF(pm.rect()))
+        if size_changed:
+            self.preview_scene.setSceneRect(new_rect)
         self._update_grid_selection_overlay()
-        if self._is_fit_mode:
+        if self._is_fit_mode and size_changed:
             self.zoom_fit()
 
         style_idx = self.cmb_style.currentIndex()
         hint = " • Click 2 tiles to swap" if style_idx == 1 else (" • Drag Polaroids to move" if style_idx == 2 else "")
-        self.lbl_info.setText(f"{pw} × {ph} px (Export: {full_w} × {full_h}) • {len(self.photos_data)} photo(s){hint}")
+        rot_str = f" • {int(round(self._canvas_rotation_deg))}°" if abs(self._canvas_rotation_deg) > 0.4 else ""
+        self.lbl_info.setText(
+            f"{scene_w} × {scene_h} px (Export: {full_w} × {full_h}){rot_str} • {len(self.photos_data)} photo(s){hint}"
+        )
 
     def _current_grid_slots(self) -> list[tuple[int, int, int, int]]:
         layout_name = self.cmb_grid_layout.currentText().lower().replace(" ", "_")
+        rot_scale = self._last_render_size[0] / max(1.0, float(self._last_preview_size[0]))
         return compute_grid_slots(
             count=len(self.photos_data),
             layout=layout_name,
-            border_thickness=self.sld_border.value(),
-            target_size=self._last_preview_size,
+            border_thickness=max(0, int(round(self.sld_border.value() * rot_scale))),
+            target_size=self._last_render_size,
         )
 
     def _update_grid_selection_overlay(self) -> None:
@@ -1941,35 +2166,43 @@ class CollageWorkspace(CreateWorkspaceBase):
         slots = self._current_grid_slots()
         if 0 <= self._selected_grid_slot < len(slots):
             sx, sy, sw, sh = slots[self._selected_grid_slot]
-            self._grid_selection_rect.setRect(QRectF(sx, sy, sw, sh))
+            poly = QPolygonF([
+                self._unrotated_to_scene(sx, sy),
+                self._unrotated_to_scene(sx + sw, sy),
+                self._unrotated_to_scene(sx + sw, sy + sh),
+                self._unrotated_to_scene(sx, sy + sh),
+            ])
+            self._grid_selection_rect.setPolygon(poly)
             self._grid_selection_rect.setVisible(True)
         else:
             self._grid_selection_rect.setVisible(False)
 
     def _hit_test_grid_slot(self, scene_pos: QPointF) -> int | None:
         slots = self._current_grid_slots()
-        px, py = scene_pos.x(), scene_pos.y()
+        u_pos = self._scene_to_unrotated(scene_pos)
+        px, py = u_pos.x(), u_pos.y()
         for idx, (sx, sy, sw, sh) in enumerate(slots):
             if idx < len(self.photos_data) and sx <= px <= sx + sw and sy <= py <= sy + sh:
                 return idx
         return None
 
     def _polaroid_center_px(self, idx: int, defaults: list[tuple[float, float]]) -> tuple[float, float]:
-        pw, ph = self._last_preview_size
+        rw, rh = self._last_render_size
         custom_pos = self.photos_data[idx].get("polaroid_pos")
         if custom_pos is not None and len(custom_pos) == 2:
             nx, ny = float(custom_pos[0]), float(custom_pos[1])
         else:
             nx, ny = defaults[idx % len(defaults)]
-        return pw * nx, ph * ny
+        return rw * nx, rh * ny
 
     def _hit_test_polaroid(self, scene_pos: QPointF) -> tuple[int, tuple[float, float]] | None:
         count = len(self.photos_data)
         if count == 0:
             return None
-        card_w, card_h = compute_polaroid_card_size(self._last_preview_size)
+        card_w, card_h = compute_polaroid_card_size(self._last_render_size)
         defaults = default_polaroid_positions_norm(count)
-        px, py = scene_pos.x(), scene_pos.y()
+        u_pos = self._scene_to_unrotated(scene_pos)
+        px, py = u_pos.x(), u_pos.y()
         for idx in range(count - 1, -1, -1):
             cx, cy = self._polaroid_center_px(idx, defaults)
             if abs(px - cx) <= card_w * 0.52 and abs(py - cy) <= card_h * 0.52:
@@ -1992,19 +2225,20 @@ class CollageWorkspace(CreateWorkspaceBase):
     def _hit_test_any_slot(self, scene_pos: QPointF) -> int | None:
         """Hit-test which photo index is under scene_pos regardless of whether it is cropped."""
         style_idx = self.cmb_style.currentIndex()
-        pw, ph = self._last_preview_size
-        px, py = scene_pos.x(), scene_pos.y()
+        rw, rh = self._last_render_size
+        u_pos = self._scene_to_unrotated(scene_pos)
+        px, py = u_pos.x(), u_pos.y()
         if style_idx == 0:
             n = len(self.photos_data)
             if n == 0:
                 return None
-            slots = _get_seamless_slots(n, ph > pw)
+            slots = _get_seamless_slots(n, rh > rw)
             for idx in range(min(n, len(slots)) - 1, -1, -1):
                 cx_n, cy_n, sw_n, sh_n = slots[idx]
-                sw = max(64, int(pw * sw_n))
-                sh = max(64, int(ph * sh_n))
-                sx = pw * cx_n - sw / 2.0
-                sy = ph * cy_n - sh / 2.0
+                sw = max(64, int(rw * sw_n))
+                sh = max(64, int(rh * sh_n))
+                sx = rw * cx_n - sw / 2.0
+                sy = rh * cy_n - sh / 2.0
                 if sx <= px <= sx + sw and sy <= py <= sy + sh:
                     return idx
             return None
@@ -2014,27 +2248,28 @@ class CollageWorkspace(CreateWorkspaceBase):
             hit_pol = self._hit_test_polaroid(scene_pos)
             return hit_pol[0] if hit_pol is not None else None
         count = min(4, len(self.photos_data))
-        if count > 0 and pw > 0:
-            idx = int(px / max(1.0, pw / float(count)))
+        if count > 0 and rw > 0:
+            idx = int(px / max(1.0, rw / float(count)))
             return max(0, min(count - 1, idx))
         return None
 
     def _hit_test_cropped_slot(self, scene_pos: QPointF) -> tuple[int, int, int] | None:
         style_idx = self.cmb_style.currentIndex()
-        pw, ph = self._last_preview_size
-        px, py = scene_pos.x(), scene_pos.y()
+        rw, rh = self._last_render_size
+        u_pos = self._scene_to_unrotated(scene_pos)
+        px, py = u_pos.x(), u_pos.y()
 
         if style_idx == 0:
             n = len(self.photos_data)
             if n == 0:
                 return None
-            slots = _get_seamless_slots(n, ph > pw)
+            slots = _get_seamless_slots(n, rh > rw)
             for idx in range(min(n, len(slots)) - 1, -1, -1):
                 cx_n, cy_n, sw_n, sh_n = slots[idx]
-                sw = max(64, int(pw * sw_n))
-                sh = max(64, int(ph * sh_n))
-                sx = pw * cx_n - sw / 2.0
-                sy = ph * cy_n - sh / 2.0
+                sw = max(64, int(rw * sw_n))
+                sh = max(64, int(rh * sh_n))
+                sx = rw * cx_n - sw / 2.0
+                sy = rh * cy_n - sh / 2.0
                 if sx <= px <= sx + sw and sy <= py <= sy + sh and self._is_photo_cropped_for_slot(idx, sw, sh):
                     return idx, sw, sh
             return None
@@ -2052,9 +2287,7 @@ class CollageWorkspace(CreateWorkspaceBase):
             hit_pol = self._hit_test_polaroid(scene_pos)
             if hit_pol is not None:
                 idx, _ = hit_pol
-                card_w, _ = compute_polaroid_card_size(self._last_preview_size)
-                photo_w = max(16, card_w - 32)
-                photo_h = max(16, int(photo_w * 0.85))
+                _cw, _ch, _pad, photo_w, photo_h, _bp = compute_polaroid_metrics(self._last_render_size)
                 if self._is_photo_cropped_for_slot(idx, photo_w, photo_h):
                     return idx, photo_w, photo_h
             return None
@@ -2065,7 +2298,7 @@ class CollageWorkspace(CreateWorkspaceBase):
         self._panning_crop_slot_size = (sw, sh)
         fc = self.photos_data[idx].get("focus_center")
         self._panning_crop_start_fc = (float(fc[0]), float(fc[1])) if fc else (0.5, 0.40)
-        self._panning_crop_start_scene = scene_pos
+        self._panning_crop_start_scene = self._scene_to_unrotated(scene_pos)
         self._active_photo_idx = idx
         self._selected_grid_slot = idx
         self._sync_active_photo_zoom_ui()
@@ -2088,13 +2321,15 @@ class CollageWorkspace(CreateWorkspaceBase):
                 if per_photo_zoom:
                     scene_pos = self.preview_view.mapToScene(event.position().toPoint())
                     hit_idx = self._hit_test_any_slot(scene_pos)
-                    if hit_idx is not None:
-                        delta = 10 if event.angleDelta().y() > 0 else -10
+                    raw_delta = event.angleDelta().y() or event.angleDelta().x()
+                    if hit_idx is not None and raw_delta != 0:
+                        delta = 10 if raw_delta > 0 else -10
                         cur_z = float(self.photos_data[hit_idx].get("crop_zoom", 1.0))
                         self._set_photo_zoom(hit_idx, int(round(cur_z * 100)) + delta, interactive=True)
                         self._refresh_tray_card_styles()
-                        event.accept()
-                        return True
+                    # Always consume so per-photo zoom never leaks to canvas zoom
+                    event.accept()
+                    return True
             if not getattr(self.preview_view, "_space_panning", False):
                 etype = event.type()
                 if etype not in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove, QEvent.Type.MouseButtonRelease):
@@ -2130,8 +2365,9 @@ class CollageWorkspace(CreateWorkspaceBase):
                         hit = self._hit_test_polaroid(scene_pos)
                         if hit is not None:
                             idx, (cx, cy) = hit
+                            u_pos = self._scene_to_unrotated(scene_pos)
                             self._dragging_polaroid_idx = idx
-                            self._drag_offset = QPointF(cx - scene_pos.x(), cy - scene_pos.y())
+                            self._drag_offset = QPointF(cx - u_pos.x(), cy - u_pos.y())
                             self._selected_grid_slot = idx
                             self._refresh_tray_card_styles()
                             self.preview_view.setCursor(Qt.CursorShape.ClosedHandCursor)
@@ -2149,8 +2385,9 @@ class CollageWorkspace(CreateWorkspaceBase):
 
                     if self._panning_crop_idx is not None:
                         sw, sh = self._panning_crop_slot_size
-                        dx = scene_pos.x() - self._panning_crop_start_scene.x()
-                        dy = scene_pos.y() - self._panning_crop_start_scene.y()
+                        u_pos = self._scene_to_unrotated(scene_pos)
+                        dx = u_pos.x() - self._panning_crop_start_scene.x()
+                        dy = u_pos.y() - self._panning_crop_start_scene.y()
                         sx0, sy0 = self._panning_crop_start_fc
                         self.photos_data[self._panning_crop_idx]["focus_center"] = (
                             max(0.0, min(1.0, sx0 - (dx / max(1, sw)))),
@@ -2162,10 +2399,11 @@ class CollageWorkspace(CreateWorkspaceBase):
                         return True
 
                     if self._dragging_polaroid_idx is not None and style_idx == 2:
-                        pw, ph = self._last_preview_size
+                        rw, rh = self._last_render_size
+                        u_pos = self._scene_to_unrotated(scene_pos)
                         self.photos_data[self._dragging_polaroid_idx]["polaroid_pos"] = (
-                            max(0.05, min(0.95, (scene_pos.x() + self._drag_offset.x()) / max(1, pw))),
-                            max(0.05, min(0.95, (scene_pos.y() + self._drag_offset.y()) / max(1, ph))),
+                            max(0.05, min(0.95, (u_pos.x() + self._drag_offset.x()) / max(1, rw))),
+                            max(0.05, min(0.95, (u_pos.y() + self._drag_offset.y()) / max(1, rh))),
                         )
                         self._dirty = True
                         self._render_preview(fast=True)

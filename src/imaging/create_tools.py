@@ -610,6 +610,88 @@ def _apply_rounded_corners(img_bgr: np.ndarray, radius: int) -> np.ndarray:
     return cv2.merge([b, g, r, mask_np])
 
 
+def _span_segments(total: int, n: int, gap: int) -> list[tuple[int, int]]:
+    """
+    Divides [gap, total - gap] into `n` segments separated by `gap` pixels,
+    distributing remainder pixels so the last segment always reaches `total - gap`
+    with zero trailing white gap.
+    """
+    n = max(1, int(n))
+    bt = max(0, int(gap))
+    avail = max(n, int(total) - (n + 1) * bt)
+    base = avail // n
+    rem = avail % n
+    out: list[tuple[int, int]] = []
+    pos = bt
+    for i in range(n):
+        seg = base + (1 if i < rem else 0)
+        out.append((pos, seg))
+        pos += seg + bt
+    return out
+
+
+def compute_canvas_rotation_scale(target_size: tuple[int, int], angle_deg: float) -> float:
+    """
+    Returns the exact uniform scale factor >= 1.0 needed so a canvas of size
+    `target_size` rotated by `angle_deg` completely covers `target_size` with
+    zero empty corner triangles (Google Photos-style collage rotation).
+    """
+    ang = float(angle_deg) % 360.0
+    if abs(ang) < 1e-4 or abs(ang - 360.0) < 1e-4:
+        return 1.0
+    tw, th = max(1.0, float(target_size[0])), max(1.0, float(target_size[1]))
+    rad = math.radians(ang)
+    c = abs(math.cos(rad))
+    s = abs(math.sin(rad))
+    return max((tw * c + th * s) / tw, (tw * s + th * c) / th)
+
+
+def compute_canvas_rotation_render_size(
+    target_size: tuple[int, int], angle_deg: float
+) -> tuple[int, int]:
+    """Returns the expanded unrotated render size `(rw, rh)` for crisp canvas rotation."""
+    tw, th = max(1, int(target_size[0])), max(1, int(target_size[1]))
+    scale = compute_canvas_rotation_scale((tw, th), angle_deg)
+    if scale <= 1.0001:
+        return (tw, th)
+    # Add 2px safety margin for subpixel interpolation at edges
+    rw = max(tw, int(math.ceil(tw * scale)) + 2)
+    rh = max(th, int(math.ceil(th * scale)) + 2)
+    return (rw, rh)
+
+
+def rotate_collage_canvas(
+    rendered_bgr: np.ndarray,
+    target_size: tuple[int, int],
+    angle_deg: float,
+) -> np.ndarray:
+    """
+    Rotates an expanded collage image by `angle_deg` (clockwise positive, matching
+    Google Photos) and center-crops to `target_size` with zero empty corners.
+    """
+    tw, th = max(1, int(target_size[0])), max(1, int(target_size[1]))
+    ang = float(angle_deg) % 360.0
+    rh, rw = rendered_bgr.shape[:2]
+    if abs(ang) < 1e-4 or abs(ang - 360.0) < 1e-4:
+        if (rw, rh) == (tw, th):
+            return rendered_bgr
+        return cv2.resize(rendered_bgr, (tw, th), interpolation=cv2.INTER_AREA)
+
+    # OpenCV getRotationMatrix2D uses counter-clockwise positive; negate for clockwise positive
+    cx, cy = rw / 2.0, rh / 2.0
+    mat = cv2.getRotationMatrix2D((cx, cy), -ang, 1.0)
+    # Shift center of rotated image directly onto center of output (tw, th)
+    mat[0, 2] += (tw / 2.0) - cx
+    mat[1, 2] += (th / 2.0) - cy
+    return cv2.warpAffine(
+        rendered_bgr,
+        mat,
+        (tw, th),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+
+
 def compute_grid_slots(
     count: int,
     layout: str = "2x2",
@@ -618,42 +700,53 @@ def compute_grid_slots(
 ) -> list[tuple[int, int, int, int]]:
     """
     Computes slot rectangles [(x, y, w, h)] for grid/masonry collages.
-    Supports 'CxR' grids (e.g. '1x1', '2x1', '1x2', '3x1', '1x3', '2x2', '3x2', '2x3', '4x2', '3x3'),
-    'center_hero', and 'masonry'.
+    Always fills 100% of the canvas with zero trailing gaps or empty cells,
+    and dynamically adapts when photos are added or removed.
     """
     if count <= 0:
         return []
 
-    tw, th = target_size
-    bt = border_thickness
+    tw, th = max(1, int(target_size[0])), max(1, int(target_size[1]))
+    bt = max(0, int(border_thickness))
     norm_layout = (layout or "").strip().lower().replace(" ", "_")
     slots: list[tuple[int, int, int, int]] = []
 
-    if norm_layout == "center_hero" and count >= 3:
-        # Left 60% hero, right 40% stacked
-        hero_w = int((tw - 3 * bt) * 0.60)
-        hero_h = th - 2 * bt
+    if count == 1:
+        return [(bt, bt, max(1, tw - 2 * bt), max(1, th - 2 * bt))]
+
+    if norm_layout == "center_hero":
+        # Left 60% hero, right 40% holds all remaining photos filling 100% height
+        hero_w = max(1, int(round((tw - 3 * bt) * 0.60)))
+        hero_h = max(1, th - 2 * bt)
         slots.append((bt, bt, hero_w, hero_h))
 
-        sub_count = min(count - 1, 4)
-        sub_h = (th - (sub_count + 1) * bt) // sub_count
-        sub_w = tw - hero_w - 3 * bt
-        for i in range(sub_count):
-            slots.append((hero_w + 2 * bt, bt + i * (sub_h + bt), sub_w, sub_h))
+        rem = count - 1
+        right_x = bt + hero_w + bt
+        right_w = max(1, tw - right_x - bt)
+        if rem <= 4:
+            for sy, sh in _span_segments(th, rem, bt):
+                slots.append((right_x, sy, right_w, sh))
+        else:
+            # Split right pane into 2 balanced columns when > 4 side photos
+            right_cols = 2
+            col_spans = _span_segments(right_w + 2 * bt, right_cols, bt)
+            for c_idx in range(right_cols):
+                n_in_col = rem // right_cols + (1 if c_idx < (rem % right_cols) else 0)
+                cx_off, cw = col_spans[c_idx]
+                sx = right_x - bt + cx_off
+                for sy, sh in _span_segments(th, n_in_col, bt):
+                    slots.append((sx, sy, cw, sh))
         return slots
 
     if norm_layout == "masonry":
-        cols = 1 if count == 1 else (3 if count >= 3 else 2)
-        col_w = (tw - (cols + 1) * bt) // cols
-        col_heights = [bt] * cols
-        rem_h = th - 2 * bt
-
-        for i in range(count):
-            c_idx = i % cols
-            slots_in_col = (count + cols - 1) // cols
-            slot_h = (rem_h - (slots_in_col - 1) * bt) // slots_in_col
-            slots.append((bt + c_idx * (col_w + bt), col_heights[c_idx], col_w, slot_h))
-            col_heights[c_idx] += slot_h + bt
+        cols = 2 if count == 2 else (3 if count <= 9 else 4)
+        cols = min(cols, count)
+        col_spans = _span_segments(tw, cols, bt)
+        for c_idx in range(cols):
+            n_in_col = count // cols + (1 if c_idx < (count % cols) else 0)
+            sx, sw = col_spans[c_idx]
+            for sy, sh in _span_segments(th, n_in_col, bt):
+                slots.append((sx, sy, sw, sh))
         return slots
 
     # Parse general CxR layout (e.g. '3x1', '1x3', '2x2', '3x2', '2x3', '4x2', '3x3')
@@ -661,20 +754,39 @@ def compute_grid_slots(
     if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
         cols = max(1, int(parts[0]))
         rows = max(1, int(parts[1]))
-    elif count == 1:
-        cols, rows = 1, 1
     elif count == 2:
         cols, rows = 2, 1
-    elif count >= 5:
-        cols, rows = 3, 2
-    else:
+    elif count == 3:
+        cols, rows = 3, 1
+    elif count == 4:
         cols, rows = 2, 2
+    elif count <= 6:
+        cols, rows = 3, 2
+    elif count <= 8:
+        cols, rows = 4, 2
+    else:
+        cols = max(3, int(math.ceil(math.sqrt(count))))
+        rows = max(1, int(math.ceil(count / cols)))
 
-    cell_w = (tw - (cols + 1) * bt) // cols
-    cell_h = (th - (rows + 1) * bt) // rows
+    # Never drop photos when count > cols * rows, and never leave empty rows when count < rows
+    if count > cols * rows:
+        if rows == 1 and cols > 1:
+            cols = count
+        elif cols == 1 and rows > 1:
+            rows = count
+        else:
+            rows = max(rows, int(math.ceil(count / cols)))
+    rows = min(rows, count)
+
+    # Distribute `count` photos across `rows` rows so every row fills 100% of width (zero white gap)
+    base_per_row = count // rows
+    extra_rows = count % rows
+    row_spans = _span_segments(th, rows, bt)
     for r in range(rows):
-        for c in range(cols):
-            slots.append((bt + c * (cell_w + bt), bt + r * (cell_h + bt), cell_w, cell_h))
+        row_cols = base_per_row + (1 if r < extra_rows else 0)
+        sy, sh = row_spans[r]
+        for sx, sw in _span_segments(tw, row_cols, bt):
+            slots.append((sx, sy, sw, sh))
     return slots
 
 
@@ -998,13 +1110,28 @@ def create_blended_seamless_collage(
     return np.clip(canvas, 0, 255).astype(np.uint8)
 
 
+def compute_polaroid_metrics(
+    target_size: tuple[int, int] = (2560, 1440),
+) -> tuple[int, int, int, int, int, int]:
+    """
+    Returns strictly resolution-proportional Polaroid geometry:
+    `(card_w, card_h, pad, photo_w, photo_h, bottom_pad)`.
+    Keeping every margin proportional to `card_w` ensures Polaroids keep identical
+    aspect ratios across fast preview (640px), HQ preview (1280px), and 4K export.
+    """
+    tw, th = max(1, int(target_size[0])), max(1, int(target_size[1]))
+    card_w = max(48, min(int(round(tw * 0.35)), int(round(th * 0.55))))
+    pad = max(4, int(round(card_w * 0.045)))
+    photo_w = max(16, card_w - 2 * pad)
+    photo_h = max(16, int(round(photo_w * 0.85)))
+    bottom_pad = max(14, int(round(card_w * 0.165)))
+    card_h = pad + photo_h + bottom_pad
+    return card_w, card_h, pad, photo_w, photo_h, bottom_pad
+
+
 def compute_polaroid_card_size(target_size: tuple[int, int] = (2560, 1440)) -> tuple[int, int]:
     """Returns (card_w, card_h) for a Polaroid card on the given canvas size."""
-    tw, th = target_size
-    card_w = min(int(tw * 0.35), int(th * 0.55))
-    photo_w = card_w - 32
-    photo_h = int(photo_w * 0.85)
-    card_h = photo_h + 32 + 56  # 16 margin top/sides, 56 margin bottom for caption
+    card_w, card_h, _pad, _pw, _ph, _bp = compute_polaroid_metrics(target_size)
     return card_w, card_h
 
 
@@ -1082,10 +1209,8 @@ def create_polaroid_scatter_collage(
     # Pre-calculated pleasant scatter angles and centers
     preset_angles = [-8.0, 6.0, -12.0, 10.0, -4.0, 8.0, -10.0, 12.0]
 
-    # Calculate polaroid card dimensions based on count
-    card_w, card_h = compute_polaroid_card_size(target_size)
-    photo_w = card_w - 32
-    photo_h = int(photo_w * 0.85)
+    # Calculate resolution-proportional Polaroid card dimensions
+    card_w, card_h, pad, photo_w, photo_h, bottom_pad = compute_polaroid_metrics(target_size)
 
     # Determine positions across canvas (normalized centers, overridable per item via 'center_norm')
     default_positions = default_polaroid_positions_norm(count)
@@ -1117,14 +1242,21 @@ def create_polaroid_scatter_collage(
             zoom=item.get("crop_zoom", 1.0),
         )
         photo_pil = Image.fromarray(cv2.cvtColor(cropped_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
-        card.paste(photo_pil, (16, 16))
+        card.paste(photo_pil, (pad, pad))
 
         # Thin inner photo inset border
-        draw_card.rectangle([(15, 15), (16 + photo_w, 16 + photo_h)], outline=(215, 215, 215, 255), width=1)
+        draw_card.rectangle(
+            [(max(0, pad - 1), max(0, pad - 1)), (pad + photo_w, pad + photo_h)],
+            outline=(215, 215, 215, 255),
+            width=1,
+        )
 
-        # 3. Print Date Taken / Caption on bottom margin
+        # 3. Print Date Taken / Caption / Filename / People on bottom margin
         if print_captions:
-            raw_cap = item.get("caption") or item.get("date_str") or item.get("filename") or ""
+            if "caption_override" in item:
+                raw_cap = item.get("caption_override") or ""
+            else:
+                raw_cap = item.get("caption") or item.get("date_str") or item.get("filename") or ""
             cap = ""
             if isinstance(raw_cap, (int, float)):
                 if raw_cap > 100000000:
@@ -1149,25 +1281,29 @@ def create_polaroid_scatter_collage(
                 cap = str(raw_cap).strip()
 
             if cap:
-                if len(cap) > 34:
-                    cap = cap[:31] + "..."
-                font = _load_scalable_font(max(14, int(card_h * 0.045)))
+                if len(cap) > 38:
+                    cap = cap[:35] + "..."
+                font = _load_scalable_font(max(10, int(round(card_h * 0.048))))
                 bbox = draw_card.textbbox((0, 0), cap, font=font)
                 text_w = bbox[2] - bbox[0]
                 text_h = bbox[3] - bbox[1]
-                tx = max(16, (card_w - text_w) // 2)
-                ty = 16 + photo_h + max(8, (card_h - (16 + photo_h) - text_h) // 2)
+                tx = max(pad, (card_w - text_w) // 2)
+                chin_top = pad + photo_h
+                ty = chin_top + max(2, (bottom_pad - text_h) // 2) - bbox[1]
                 draw_card.text((tx, ty), cap, fill=(60, 60, 65, 255), font=font)
 
-        # 4. Render soft drop shadow
-        shadow_margin = 40
+        # 4. Render resolution-proportional soft drop shadow
+        shadow_margin = max(12, int(round(card_w * 0.10)))
+        sh_dx = max(2, int(round(card_w * 0.015)))
+        sh_dy = max(3, int(round(card_w * 0.020)))
+        sh_blur = max(3, int(round(card_w * 0.030)))
         shadow_box = Image.new("RGBA", (card_w + 2 * shadow_margin, card_h + 2 * shadow_margin), (0, 0, 0, 0))
         shadow_draw = ImageDraw.Draw(shadow_box)
         shadow_draw.rectangle(
-            [(shadow_margin + 6, shadow_margin + 8), (shadow_margin + card_w + 6, shadow_margin + card_h + 8)],
+            [(shadow_margin + sh_dx, shadow_margin + sh_dy), (shadow_margin + card_w + sh_dx, shadow_margin + card_h + sh_dy)],
             fill=(0, 0, 0, 110),
         )
-        shadow_box = shadow_box.filter(ImageFilter.GaussianBlur(radius=12))
+        shadow_box = shadow_box.filter(ImageFilter.GaussianBlur(radius=sh_blur))
 
         # Paste card over shadow
         shadow_box.paste(card, (shadow_margin, shadow_margin), card)

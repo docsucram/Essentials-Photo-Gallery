@@ -9515,6 +9515,14 @@ class PhotoGalleryMainWindow(QMainWindow):
                 "filename": p.name if p else "photo.jpg",
                 "folder_path": str(p.parent) if p else "",
             }
+            if self.media_viewer.current_media_id is not None:
+                try:
+                    det = self.catalog_repo.get_media_detail(self.media_viewer.current_media_id)
+                    for k in ("caption", "date_taken", "mtime", "confirmed_people", "people", "face_regions"):
+                        if k in det:
+                            d[k] = det[k]
+                except Exception:
+                    pass
             if bgr is not None:
                 d["image_bgr"] = bgr
             details.append(d)
