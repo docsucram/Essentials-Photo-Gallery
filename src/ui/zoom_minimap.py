@@ -210,18 +210,31 @@ class ZoomMinimapOverlay(QFrame):
             painter.drawPixmap(img_rect.toRect(), self._thumb)
 
         if self._sharpness_enabled and self._sharpness_cells:
+            # Darken photo slightly so the thermal focus heatmap pops clearly over bright/colorful areas
+            painter.fillRect(img_rect, QColor(0, 0, 0, 125))
             cw = img_rect.width() / float(self._sharpness_cols)
             ch = img_rect.height() / float(self._sharpness_rows)
+            painter.setPen(Qt.PenStyle.NoPen)
             for col, row, intensity in self._sharpness_cells:
-                alpha = int(40 + intensity * 165)
-                painter.setPen(QPen(QColor(56, 189, 248, alpha), 1.0))
-                painter.setBrush(QColor(56, 189, 248, int(intensity * 55)))
+                t = max(0.0, min(1.0, float(intensity)))
+                if t < 0.5:
+                    u = t * 2.0
+                    r = int(34 + (250 - 34) * u)
+                    g = int(197 + (204 - 197) * u)
+                    b = int(94 + (21 - 94) * u)
+                else:
+                    u = (t - 0.5) * 2.0
+                    r = int(250 + (239 - 250) * u)
+                    g = int(204 + (68 - 204) * u)
+                    b = int(21 + (68 - 21) * u)
+                alpha = int(105 + t * 115)
+                painter.setBrush(QColor(r, g, b, alpha))
                 painter.drawRect(
                     QRectF(
                         img_rect.left() + col * cw,
                         img_rect.top() + row * ch,
-                        cw,
-                        ch,
+                        cw + 0.5,
+                        ch + 0.5,
                     )
                 )
 
