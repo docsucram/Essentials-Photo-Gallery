@@ -6549,6 +6549,26 @@ class RibbonToolbar(QWidget):
         super().resizeEvent(event)
         self._apply_responsive_layout(event.size().width())
 
+    @staticmethod
+    def _is_widget_alive(w: Any) -> bool:
+        if w is None:
+            return False
+        try:
+            import shiboken6
+            return bool(shiboken6.isValid(w))
+        except Exception:
+            try:
+                _ = w.objectName()
+                return True
+            except RuntimeError:
+                return False
+
+    def _prune_dead_ribbon_buttons(self) -> None:
+        for attr in ("_responsive_large_buttons", "_responsive_secondary_buttons", "_all_themed_buttons"):
+            lst = getattr(self, attr, None)
+            if lst:
+                setattr(self, attr, [b for b in lst if self._is_widget_alive(b)])
+
     def _apply_responsive_layout(self, width: int) -> None:
         """
         Authentic WLPG priority collapse order across all tabs:
@@ -6575,6 +6595,7 @@ class RibbonToolbar(QWidget):
         - Arrange list buttons collapse to Icon-Only at < 980.
         """
         # --- 1. Large Button Scaling (Always vertical, authentic WLPG style) ---
+        self._prune_dead_ribbon_buttons()
         for btn in self._responsive_large_buttons:
             btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
             btn.setFixedHeight(73)
@@ -10296,20 +10317,25 @@ class RibbonToolbar(QWidget):
             self.tab_widget.setTabText(idx, title or "Create Studio")
 
         old_set = set(self._create_studio_buttons)
-        if old_set and hasattr(self, "_all_themed_buttons"):
-            self._all_themed_buttons = [b for b in self._all_themed_buttons if b not in old_set]
+        if old_set:
+            for attr in ("_all_themed_buttons", "_responsive_large_buttons", "_responsive_secondary_buttons"):
+                if hasattr(self, attr):
+                    setattr(self, attr, [b for b in getattr(self, attr) if b not in old_set])
         self._create_studio_buttons.clear()
         self._create_studio_action_btns.clear()
 
         for g in self._create_studio_groups:
             self._create_studio_hbox.removeWidget(g)
+            g.hide()
             g.deleteLater()
         self._create_studio_groups.clear()
 
         while self._create_studio_hbox.count():
             item = self._create_studio_hbox.takeAt(0)
-            if item.widget() is not None:
-                item.widget().deleteLater()
+            w = item.widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
 
         # 1. Workspace-declared tool groups
         grouped: dict[str, list[Any]] = {}
@@ -10397,6 +10423,7 @@ class RibbonToolbar(QWidget):
                 self._set_tab_visible(tab, False)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
                 self.scope_bar.setVisible(False)
+            self.tab_widget.tabBar().adjustSize()
             self.tab_widget.tabBar().updateGeometry()
             self.tab_widget.updateGeometry()
             self.tab_widget.tabBar().update()
@@ -10482,6 +10509,7 @@ class RibbonToolbar(QWidget):
                 self.btn_zoom_fit.setVisible(True)
             if hasattr(self, "grp_zoom"):
                 self.grp_zoom.adjust_to_content()
+            self.tab_widget.tabBar().adjustSize()
             self.tab_widget.tabBar().updateGeometry()
             self.tab_widget.updateGeometry()
             self.tab_widget.tabBar().update()
@@ -10522,6 +10550,7 @@ class RibbonToolbar(QWidget):
                 self.btn_zoom_fit.setVisible(False)
             if hasattr(self, "grp_zoom"):
                 self.grp_zoom.adjust_to_content()
+            self.tab_widget.tabBar().adjustSize()
             self.tab_widget.tabBar().updateGeometry()
             self.tab_widget.updateGeometry()
             self.tab_widget.tabBar().update()
@@ -11077,6 +11106,7 @@ class RibbonToolbar(QWidget):
                 carousel.set_dark_mode(False)
         if hasattr(self, "effects_gallery") and hasattr(self.effects_gallery, "set_dark_mode"):
             self.effects_gallery.set_dark_mode(False)
+        self._prune_dead_ribbon_buttons()
         for btn in getattr(self, "_responsive_large_buttons", []):
             if hasattr(btn, "_is_dark"):
                 btn._is_dark = False
@@ -11205,6 +11235,7 @@ class RibbonToolbar(QWidget):
         self._dark_mode = bool(is_dark)
         self._is_dark = self._dark_mode
         self._apply_arrange_box_theme(self._dark_mode)
+        self._prune_dead_ribbon_buttons()
         for btn in getattr(self, "_responsive_large_buttons", []):
             if hasattr(btn, "_is_dark"):
                 btn._is_dark = self._dark_mode
@@ -12060,6 +12091,7 @@ class RibbonToolbar(QWidget):
                 carousel.set_dark_mode(False)
         if hasattr(self, "effects_gallery") and hasattr(self.effects_gallery, "set_dark_mode"):
             self.effects_gallery.set_dark_mode(False)
+        self._prune_dead_ribbon_buttons()
         for btn in getattr(self, "_responsive_large_buttons", []):
             if hasattr(btn, "_is_dark"):
                 btn._is_dark = False
