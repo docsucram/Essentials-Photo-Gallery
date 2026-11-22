@@ -271,6 +271,8 @@ class MediaItemRecord:
     is_offline: int = 0
     stack_count: int = 1
     stack_parent_id: int | None = None
+    stack_pos: int = 0
+    is_raw_jpg_stack: bool = False
     is_favourite: int = 0
 
 
@@ -1833,19 +1835,30 @@ class CatalogRepository:
             int(r[0]) for r in cur.execute("SELECT id FROM media WHERE is_rejected = 1").fetchall()
         }
         stack_rows = cur.execute(
-            "SELECT id, stack_parent_id FROM media WHERE stack_parent_id IS NOT NULL AND live_companion_for_id IS NULL"
+            "SELECT id, stack_parent_id, LOWER(COALESCE(ext, '')) FROM media WHERE stack_parent_id IS NOT NULL AND live_companion_for_id IS NULL"
         ).fetchall()
         if not offline_folders and not live_ids and not fav_ids and not rej_ids and not stack_rows:
             return records
 
-        stack_counts: dict[int, int] = {}
+        raw_exts = {"nef", "cr2", "cr3", "arw", "dng", "raf", "orf", "rw2", "pef", "srw"}
+        jpg_exts = {"jpg", "jpeg"}
+        stack_members: dict[int, list[str]] = {}
         stack_parents: dict[int, int] = {}
-        for mid_raw, sp_raw in stack_rows:
+        for mid_raw, sp_raw, ext_raw in stack_rows:
             mid = int(mid_raw)
             sp = int(sp_raw)
             stack_parents[mid] = sp
-            stack_counts[sp] = stack_counts.get(sp, 0) + 1
+            stack_members.setdefault(sp, []).append(str(ext_raw or "").lstrip("."))
 
+        raw_jpg_heads: set[int] = set()
+        for sp, exts in stack_members.items():
+            if len(exts) == 2:
+                has_raw = any(e in raw_exts for e in exts)
+                has_jpg = any(e in jpg_exts for e in exts)
+                if has_raw and has_jpg:
+                    raw_jpg_heads.add(sp)
+
+        in_view_by_sp: dict[int, list[MediaItemRecord]] = {}
         for rec in records:
             if rec.folder_id in offline_folders:
                 rec.is_offline = 1
@@ -1858,8 +1871,24 @@ class CatalogRepository:
             sp = stack_parents.get(rec.id)
             if sp is not None:
                 rec.stack_parent_id = sp
-                if sp == rec.id:
-                    rec.stack_count = max(1, stack_counts.get(rec.id, 1))
+                in_view_by_sp.setdefault(sp, []).append(rec)
+
+        for sp, view_recs in in_view_by_sp.items():
+            total_cnt = max(1, len(stack_members.get(sp, ())))
+            if total_cnt <= 1:
+                continue
+            is_rj = sp in raw_jpg_heads
+            if len(view_recs) > 1:
+                for pos_idx, r in enumerate(view_recs, start=1):
+                    r.stack_count = total_cnt
+                    r.stack_pos = pos_idx
+                    r.is_raw_jpg_stack = is_rj
+            else:
+                r = view_recs[0]
+                if r.id == sp:
+                    r.stack_count = total_cnt
+                    r.stack_pos = 0
+                    r.is_raw_jpg_stack = is_rj
         return records
 
     def batch_update_favourite(self, media_ids: Sequence[int], is_favourite: bool) -> int:
@@ -2075,10 +2104,24 @@ class CatalogRepository:
                 [(new_head, int(r[0])) for r in rows],
             )
 
+    def set_stack_head(self, media_id: int) -> int | None:
+        """Promote `media_id` to be the cover (`stack_parent_id`) of its stack."""
+        members = self.get_stack_member_ids(int(media_id))
+        if len(members) < 2 or int(media_id) not in members:
+            return None
+        new_head = int(media_id)
+        with self.engine.catalog_transaction() as tx_conn:
+            tx_conn.executemany(
+                "UPDATE media SET stack_parent_id = ? WHERE id = ?;",
+                [(new_head, int(mid)) for mid in members],
+            )
+        return new_head
+
     def auto_stack_raw_jpeg_pairs(
         self,
         folder_id: int | None = None,
         *,
+        folder_ids: Sequence[int] | None = None,
         skip_existing_stacks: bool = True,
         capture_undo_out: dict[int, int | None] | None = None,
     ) -> int:
@@ -2089,7 +2132,12 @@ class CatalogRepository:
         cur = conn.cursor()
         where = "WHERE is_video = 0 AND live_companion_for_id IS NULL"
         params: list[Any] = []
-        if folder_id is not None:
+        if folder_ids:
+            fids = [int(f) for f in dict.fromkeys(folder_ids)]
+            ph = ",".join("?" for _ in fids)
+            where += f" AND folder_id IN ({ph})"
+            params.extend(fids)
+        elif folder_id is not None:
             where += " AND folder_id = ?"
             params.append(int(folder_id))
         rows = cur.execute(
@@ -2137,6 +2185,7 @@ class CatalogRepository:
         folder_id: int | None = None,
         max_gap_sec: float = 2.0,
         *,
+        folder_ids: Sequence[int] | None = None,
         max_span_sec: float = 30.0,
         thumb_repo: Any | None = None,
         max_dhash_hamming: int = 16,
@@ -2151,7 +2200,12 @@ class CatalogRepository:
         cur = conn.cursor()
         where = "WHERE is_video = 0 AND live_companion_for_id IS NULL AND date_taken IS NOT NULL AND date_taken > 0"
         params: list[Any] = []
-        if folder_id is not None:
+        if folder_ids:
+            fids = [int(f) for f in dict.fromkeys(folder_ids)]
+            ph = ",".join("?" for _ in fids)
+            where += f" AND folder_id IN ({ph})"
+            params.extend(fids)
+        elif folder_id is not None:
             where += " AND folder_id = ?"
             params.append(int(folder_id))
         rows = cur.execute(

@@ -662,9 +662,10 @@ class MediaCardDelegate(QStyledItemDelegate):
         sz = 26
         return QRect(box.right() - sz - 4, box.bottom() - sz - 4, sz, sz)
 
-    def stack_badge_rect(self, card_rect: QRect) -> QRect:
+    def stack_badge_rect(self, card_rect: QRect, *, wide: bool = False) -> QRect:
         fl = self.flag_rect(card_rect)
-        return QRect(fl.left() - 44, fl.top() + 3, 40, 17)
+        w = 54 if wide else 42
+        return QRect(fl.left() - w - 4, fl.top() + 3, w, 17)
 
     def _paint_cull_and_status_badges(
         self,
@@ -843,12 +844,30 @@ class MediaCardDelegate(QStyledItemDelegate):
                 painter.setPen(QColor("#FEF3C7"))
                 painter.drawText(off_rect, Qt.AlignCenter, "OFFLINE")
             if stack_cnt > 1:
-                st_rect = self.stack_badge_rect(card_rect)
-                painter.setPen(QPen(QColor("#38BDF8"), 1))
-                painter.setBrush(QColor(15, 23, 42, 215))
-                painter.drawRoundedRect(st_rect, 3, 3)
-                painter.setPen(QColor("#F8FAFC"))
-                painter.drawText(st_rect, Qt.AlignCenter, f"⧉ {stack_cnt}")
+                stack_pos = int(getattr(rec_meta, "stack_pos", 0) or 0)
+                is_rj = bool(getattr(rec_meta, "is_raw_jpg_stack", False))
+                if stack_pos > 0:
+                    badge_txt = f"⧉ {stack_pos}/{stack_cnt}"
+                    st_rect = self.stack_badge_rect(card_rect, wide=(stack_cnt >= 10 or stack_pos >= 10 or len(badge_txt) >= 6))
+                    painter.setPen(QPen(QColor("#38BDF8"), 1))
+                    painter.setBrush(QColor(14, 116, 144, 225))
+                    painter.drawRoundedRect(st_rect, 3, 3)
+                    painter.setPen(QColor("#F8FAFC"))
+                    painter.drawText(st_rect, Qt.AlignCenter, badge_txt)
+                elif is_rj:
+                    st_rect = self.stack_badge_rect(card_rect, wide=True)
+                    painter.setPen(QPen(QColor("#F59E0B"), 1))
+                    painter.setBrush(QColor(15, 23, 42, 225))
+                    painter.drawRoundedRect(st_rect, 3, 3)
+                    painter.setPen(QColor("#FDE68A"))
+                    painter.drawText(st_rect, Qt.AlignCenter, "RAW+JPG")
+                else:
+                    st_rect = self.stack_badge_rect(card_rect, wide=(stack_cnt >= 10))
+                    painter.setPen(QPen(QColor("#38BDF8"), 1))
+                    painter.setBrush(QColor(15, 23, 42, 215))
+                    painter.drawRoundedRect(st_rect, 3, 3)
+                    painter.setPen(QColor("#F8FAFC"))
+                    painter.drawText(st_rect, Qt.AlignCenter, f"⧉ {stack_cnt}")
             painter.restore()
 
     def stars_bar_rect(self, card_rect: QRect) -> QRect:
@@ -1401,6 +1420,22 @@ class MediaCardDelegate(QStyledItemDelegate):
                 painter.setBrush(QColor(0, 0, 0, 120 if self.dark_mode else 48))
                 painter.drawRect(target_rect.adjusted(1, 1, 2, 2))
 
+            rec_meta = index.data(CatalogRoles.RecordRole)
+            stack_cnt = int(getattr(rec_meta, "stack_count", 1) or 1)
+            stack_pos = int(getattr(rec_meta, "stack_pos", 0) or 0)
+            if stack_cnt > 1 and stack_pos == 0 and not is_mosaic:
+                # Visual stacked-deck offset cards peeking behind collapsed stack head
+                deck_fill_2 = QColor("#1E2430") if self.dark_mode else QColor("#E2E8F0")
+                deck_pen_2 = QColor("#475569") if self.dark_mode else QColor("#94A3B8")
+                deck_fill_1 = QColor("#283040") if self.dark_mode else QColor("#F1F5F9")
+                deck_pen_1 = QColor("#64748B") if self.dark_mode else QColor("#7C8EA3")
+                painter.setPen(QPen(deck_pen_2, 1))
+                painter.setBrush(deck_fill_2)
+                painter.drawRect(target_rect.adjusted(4, -4, 4, -4))
+                painter.setPen(QPen(deck_pen_1, 1))
+                painter.setBrush(deck_fill_1)
+                painter.drawRect(target_rect.adjusted(2, -2, 2, -2))
+
             s_key = (int(pixmap.cacheKey()), scaled_sz.width(), scaled_sz.height())
             scaled_pix = self._scaled_pixmap_cache.get(s_key)
             if scaled_pix is None:
@@ -1489,6 +1524,16 @@ class MediaCardDelegate(QStyledItemDelegate):
                 painter.drawRoundedRect(cb_rect, 2, 2)
 
         # 5. Top-Right Flag (Pick/Reject) + Heart (Favourite) + Live/Offline/Stack Badges
+        rec_meta = index.data(CatalogRoles.RecordRole)
+        if int(getattr(rec_meta, "stack_count", 1) or 1) > 1 and int(getattr(rec_meta, "stack_pos", 0) or 0) > 0:
+            # Connected accent bracket bar across expanded stack members
+            painter.save()
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(56, 189, 248, 22 if self.dark_mode else 28))
+            painter.drawRoundedRect(card_rect, 3, 3)
+            painter.setBrush(QColor("#38BDF8" if self.dark_mode else "#0284C7"))
+            painter.drawRect(QRect(card_rect.left() + 1, card_rect.top(), max(4, card_rect.width() - 2), 3))
+            painter.restore()
         self._paint_cull_and_status_badges(painter, card_rect, img_box, flag, is_hovered, index)
 
         # 6. Extra detail lines (Filename, Size, Date, etc.)
@@ -1619,10 +1664,15 @@ class MediaCardDelegate(QStyledItemDelegate):
                     self.flag_toggled.emit(int(media_id), new_flag)
                     return True
 
-                # 2b. Check stack badge [⧉ N] hit
+                # 2b. Check stack badge [⧉ N] / [RAW+JPG] / [⧉ i/N] hit
                 rec_meta = index.data(CatalogRoles.RecordRole)
                 if rec_meta is not None and int(getattr(rec_meta, "stack_count", 1) or 1) > 1:
-                    if self.stack_badge_rect(card_rect).contains(pos):
+                    is_wide = bool(
+                        getattr(rec_meta, "is_raw_jpg_stack", False)
+                        or int(getattr(rec_meta, "stack_pos", 0) or 0) > 0
+                        or int(getattr(rec_meta, "stack_count", 1) or 1) >= 10
+                    )
+                    if self.stack_badge_rect(card_rect, wide=is_wide).contains(pos):
                         self.stack_badge_clicked.emit(int(media_id))
                         return True
 
@@ -3162,7 +3212,7 @@ class ThumbnailGridView(QListView):
                             or self.card_delegate.heart_rect(card_rect).contains(pos)
                             or self.card_delegate.checkbox_rect(card_rect).contains(pos)
                             or self.card_delegate.stars_bar_rect(card_rect).contains(pos)
-                            or self.card_delegate.stack_badge_rect(card_rect).contains(pos)
+                            or self.card_delegate.stack_badge_rect(card_rect, wide=True).contains(pos)
                         ):
                             event.accept()
                             return
@@ -3612,15 +3662,24 @@ class ThumbnailGridView(QListView):
                 act_ungrp = stack_menu.addAction("Unstack")
                 act_ungrp.setShortcut("Ctrl+Shift+G")
                 act_ungrp.triggered.connect(main_win.unstack_selection)
+                lead_mid = int(target_mids[0]) if target_mids else (int(media_id) if media_id is not None else None)
+                lead_members = main_win.catalog_repo.get_stack_member_ids(lead_mid) if lead_mid is not None else []
+                has_stack = len(lead_members) > 1
                 if hasattr(main_win, "toggle_selected_stack_expanded"):
-                    has_stack = bool(
-                        target_mids
-                        and len(main_win.catalog_repo.get_stack_member_ids(int(target_mids[0]))) > 1
-                    )
                     act_toggle = stack_menu.addAction("Expand / Collapse Stack")
                     act_toggle.setShortcut("S")
                     act_toggle.setEnabled(has_stack)
                     act_toggle.triggered.connect(main_win.toggle_selected_stack_expanded)
+                act_cmp_stack = stack_menu.addAction("Compare Stack")
+                act_cmp_stack.setShortcut("C")
+                act_cmp_stack.setEnabled(has_stack)
+                act_cmp_stack.triggered.connect(
+                    lambda _c=False, tids=list(lead_members): main_win.open_compare_view(tids)
+                )
+                if hasattr(main_win, "set_as_stack_cover") and lead_mid is not None:
+                    act_cover = stack_menu.addAction("Set as Stack Cover")
+                    act_cover.setEnabled(has_stack and lead_members[0] != lead_mid)
+                    act_cover.triggered.connect(lambda _c=False, m=lead_mid: main_win.set_as_stack_cover(m))
                 stack_menu.addSeparator()
                 act_raw_jpg = stack_menu.addAction("Auto-Stack RAW + JPEG Pairs")
                 act_raw_jpg.triggered.connect(main_win.auto_stack_raw_jpeg_pairs)

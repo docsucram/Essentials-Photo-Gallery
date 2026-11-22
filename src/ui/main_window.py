@@ -1151,6 +1151,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._semantic_status_text: str = "Semantic AI: Idle"
         self.nav_show_cameras: bool = False
         self.nav_show_subjects: bool = False
+        self.auto_stack_raw_jpeg_on_scan: bool = False
         try:
             from src.core.semantic_engine import SemanticEngine, SemanticVectorRepository
 
@@ -2670,6 +2671,11 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.statusBar().showMessage("Scan cancelled", 3000)
         if upserted_count > 0 or was_completed:
             self._media_meta_lookup.clear()
+        if was_completed and upserted_count > 0 and getattr(self, "auto_stack_raw_jpeg_on_scan", False):
+            try:
+                self.catalog_repo.auto_stack_raw_jpeg_pairs()
+            except Exception:
+                pass
         self.refresh_navigation_and_autocomplete()
         self.rebuild_and_run_query()
         if hasattr(self, "folder_watcher"):
@@ -3639,6 +3645,10 @@ class PhotoGalleryMainWindow(QMainWindow):
         ids = list(media_ids) if media_ids is not None else self.grid_view.selected_media_ids()
         if not ids:
             return
+        if len(ids) == 1:
+            members = self.catalog_repo.get_stack_member_ids(int(ids[0]))
+            if len(members) > 1:
+                ids = members
         all_grid_ids = [
             int(r.id) for r in getattr(self.catalog_model, "_records", []) if getattr(r, "id", None) is not None
         ]
@@ -5068,7 +5078,8 @@ class PhotoGalleryMainWindow(QMainWindow):
     # Image Stacking & RAW+JPEG Pairs
     # -------------------------------------------------------------------------
     def toggle_stack_expanded(self, head_id: int) -> None:
-        hid = int(head_id)
+        members = self.catalog_repo.get_stack_member_ids(int(head_id))
+        hid = int(members[0]) if len(members) > 1 else int(head_id)
         if hid in self._expanded_stack_ids:
             self._expanded_stack_ids.discard(hid)
         else:
@@ -5082,6 +5093,85 @@ class PhotoGalleryMainWindow(QMainWindow):
         members = self.catalog_repo.get_stack_member_ids(int(target_ids[0]))
         if len(members) > 1:
             self.toggle_stack_expanded(members[0])
+
+    def expand_all_stacks(self) -> None:
+        records = getattr(self.catalog_model, "_records", []) or []
+        heads = [
+            int(r.id)
+            for r in records
+            if int(getattr(r, "stack_count", 1) or 1) > 1
+        ]
+        if not heads:
+            self.show_status_message("No stacks in current view.", 2500)
+            return
+        for hid in heads:
+            members = self.catalog_repo.get_stack_member_ids(hid)
+            if len(members) > 1:
+                self._expanded_stack_ids.add(int(members[0]))
+        self.rebuild_and_run_query()
+        self.show_status_message(f"✓ Expanded all stacks in view", 2500)
+
+    def collapse_all_stacks(self) -> None:
+        if not self._expanded_stack_ids:
+            return
+        self._expanded_stack_ids.clear()
+        self.rebuild_and_run_query()
+        self.show_status_message("✓ Collapsed all stacks", 2500)
+
+    def set_as_stack_cover(self, media_id: int | None = None) -> None:
+        mid = int(media_id) if media_id is not None else (self.get_active_target_ids()[0] if self.get_active_target_ids() else 0)
+        if mid <= 0:
+            return
+        members = self.catalog_repo.get_stack_member_ids(mid)
+        if len(members) < 2 or members[0] == mid:
+            return
+        before_map = self.catalog_repo.get_stack_parent_map(members)
+        new_head = self.catalog_repo.set_stack_head(mid)
+        if new_head is not None:
+            after_map = self.catalog_repo.get_stack_parent_map(members)
+            if before_map != after_map:
+                self.undo_stack.push(
+                    _StackMutationUndoCommand(self, before_map, after_map, "Set Stack Cover")
+                )
+            old_head = members[0]
+            if old_head in self._expanded_stack_ids:
+                self._expanded_stack_ids.discard(old_head)
+                self._expanded_stack_ids.add(new_head)
+            self.rebuild_and_run_query()
+            self.show_status_message("✓ Updated stack cover", 2500)
+
+    def _current_stack_scope_folder_ids(self) -> list[int] | None:
+        """Return folder IDs for the active view/folder scope, or None for entire library."""
+        if not hasattr(self, "left_nav_dock") or self.left_nav_dock is None:
+            return None
+        spec = self.left_nav_dock.build_filter_spec()
+        records = getattr(self.catalog_model, "_records", []) or []
+        if spec.folder_id is not None:
+            fids = {int(spec.folder_id)}
+            for r in records:
+                fid = getattr(r, "folder_id", None)
+                if fid:
+                    fids.add(int(fid))
+            return sorted(fids)
+        has_scope = any(
+            getattr(spec, attr, None) is not None
+            for attr in (
+                "album_id",
+                "smart_album_id",
+                "tag_id",
+                "person_id",
+                "camera_model",
+                "location_country",
+                "location_state",
+                "location_city",
+                "date_from",
+            )
+        ) or bool(getattr(self, "_active_subject_ids", None))
+        if has_scope and records:
+            fids = sorted({int(r.folder_id) for r in records if getattr(r, "folder_id", None)})
+            if fids:
+                return fids
+        return None
 
     def group_selection_as_stack(self) -> None:
         target_ids = list(self.get_active_target_ids())
@@ -5127,9 +5217,13 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.rebuild_and_run_query()
         self.show_status_message(f"✓ Unstacked {changed} item(s)", 3000)
 
-    def auto_stack_raw_jpeg_pairs(self) -> None:
+    def auto_stack_raw_jpeg_pairs(self, *, entire_library: bool = False) -> None:
+        scope_fids = None if entire_library else self._current_stack_scope_folder_ids()
         before_map: dict[int, int | None] = {}
-        count = self.catalog_repo.auto_stack_raw_jpeg_pairs(capture_undo_out=before_map)
+        count = self.catalog_repo.auto_stack_raw_jpeg_pairs(
+            folder_ids=scope_fids,
+            capture_undo_out=before_map,
+        )
         if before_map:
             after_map = self.catalog_repo.get_stack_parent_map(list(before_map.keys()))
             self.undo_stack.push(
@@ -5137,11 +5231,14 @@ class PhotoGalleryMainWindow(QMainWindow):
             )
         self._expanded_stack_ids.clear()
         self.rebuild_and_run_query()
-        self.show_status_message(f"✓ Paired {count} RAW + JPEG stack(s)", 3500)
+        scope_lbl = "in current folder" if scope_fids else "across library"
+        self.show_status_message(f"✓ Paired {count} RAW + JPEG stack(s) {scope_lbl}", 3500)
 
-    def auto_stack_bursts(self) -> None:
+    def auto_stack_bursts(self, *, entire_library: bool = False) -> None:
+        scope_fids = None if entire_library else self._current_stack_scope_folder_ids()
         before_map: dict[int, int | None] = {}
         count = self.catalog_repo.auto_stack_bursts(
+            folder_ids=scope_fids,
             max_gap_sec=2.0,
             thumb_repo=self.thumb_repo,
             capture_undo_out=before_map,
@@ -5153,7 +5250,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             )
         self._expanded_stack_ids.clear()
         self.rebuild_and_run_query()
-        self.show_status_message(f"✓ Grouped {count} burst stack(s)", 3500)
+        scope_lbl = "in current folder" if scope_fids else "across library"
+        self.show_status_message(f"✓ Grouped {count} burst stack(s) {scope_lbl}", 3500)
 
     def expand_stack_targets_if_collapsed(
         self, target_ids: Sequence[int], *, action_label: str = "modify"
@@ -8451,6 +8549,35 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.right_tag_dock.show()
             self.right_tag_dock.txt_caption.setFocus()
             self.right_tag_dock.txt_caption.selectAll()
+        elif action_id == "stacks_primary":
+            sel = list(self.get_active_target_ids())
+            if len(sel) >= 2:
+                self.group_selection_as_stack()
+            elif sel and len(self.catalog_repo.get_stack_member_ids(int(sel[0]))) > 1:
+                self.toggle_selected_stack_expanded()
+            else:
+                self.show_status_message(
+                    "Select 2+ photos to stack (Ctrl+G), or click 'Stacks ▾' for Auto-Stack.",
+                    3200,
+                )
+        elif action_id == "stack_group":
+            self.group_selection_as_stack()
+        elif action_id == "stack_unstack":
+            self.unstack_selection()
+        elif action_id == "stack_toggle":
+            self.toggle_selected_stack_expanded()
+        elif action_id == "stack_compare":
+            self.open_compare_view()
+        elif action_id == "stack_set_cover":
+            self.set_as_stack_cover()
+        elif action_id == "auto_stack_raw_jpeg":
+            self.auto_stack_raw_jpeg_pairs()
+        elif action_id == "auto_stack_bursts":
+            self.auto_stack_bursts()
+        elif action_id == "expand_all_stacks":
+            self.expand_all_stacks()
+        elif action_id == "collapse_all_stacks":
+            self.collapse_all_stacks()
         elif action_id == "batch_people_tag":
             self.open_batch_people_view()
         elif action_id == "batch_select_all":
@@ -9810,6 +9937,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             auto_exposure=getattr(self, "auto_exposure", True),
             originals_dir=str(Path.home() / "Pictures" / ".OriginalFiles"),
             pause_write_back=self.write_back_paused,
+            auto_stack_raw_jpeg_on_scan=getattr(self, "auto_stack_raw_jpeg_on_scan", False),
             icon_theme=getattr(self, "current_icon_theme", icon_provider.get_icon_theme()),
             engine=self.engine,
             initial_tab=initial_tab,
@@ -9874,6 +10002,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                     self._start_semantic_worker()
 
             self.set_favourites_enabled(dlg.favourites_enabled())
+            self.auto_stack_raw_jpeg_on_scan = dlg.auto_stack_raw_jpeg_on_scan()
 
             old_find_people = getattr(self, "find_people_enabled", True)
             self.find_people_enabled = dlg.find_people_enabled()
@@ -9902,6 +10031,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             settings.setValue("nav_show_cameras", self.nav_show_cameras)
             settings.setValue("nav_show_subjects", self.nav_show_subjects)
             settings.setValue("favourites_enabled", self.favourites_enabled)
+            settings.setValue("auto_stack_raw_jpeg_on_scan", self.auto_stack_raw_jpeg_on_scan)
             settings.setValue("find_people_enabled", self.find_people_enabled)
             settings.setValue("tooltip_previews", self.tooltip_previews)
             settings.setValue("jpeg_quality", self.jpeg_quality)
@@ -12006,6 +12136,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 except Exception:
                     pass
             self.find_people_enabled = _to_bool(_get_val("find_people_enabled", True), True)
+            self.auto_stack_raw_jpeg_on_scan = _to_bool(_get_val("auto_stack_raw_jpeg_on_scan", False), False)
             self.tooltip_previews = _to_bool(_get_val("tooltip_previews", True), True)
             self.jpeg_quality = int(_get_val("jpeg_quality", 83))
             self.retention_days = int(_get_val("retention_days", 180))

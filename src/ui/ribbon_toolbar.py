@@ -6464,6 +6464,72 @@ class RibbonToolbar(QWidget):
 
         return container, btn_top
 
+    def _make_split_stacks_button(self, parent: QWidget) -> tuple[QWidget, QToolButton]:
+        """
+        Creates a 2-button vertical split 'Stacks' control in Home -> Organize:
+        - Top button: Group selected (2+) into stack, or expand/collapse selected stack.
+        - Bottom button ('Stacks ▾'): Full Stacks menu (Group, Unstack, Compare, Set Cover, Auto-Stack, Expand/Collapse All).
+        """
+        container = QWidget(parent)
+        container.setObjectName("StacksSplitContainer")
+        container.setFixedSize(70, 73)
+        container._orig_w = 70
+        vbox = QVBoxLayout(container)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
+
+        btn_top = QToolButton(container)
+        btn_top.setObjectName("StacksTopBtn")
+        btn_top.setFixedSize(70, 38)
+        btn_top.setCursor(Qt.PointingHandCursor)
+        btn_top.setIcon(make_wlpg_icon("burst_stack", 32))
+        btn_top.setIconSize(QSize(28, 28))
+        btn_top.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        btn_top.setText("")
+        btn_top.setToolTip("Stacks: Group (Ctrl+G) or Expand/Collapse (S)")
+        btn_top._tooltip_override = "Stacks: Group (Ctrl+G) or Expand/Collapse (S)"
+        btn_top.clicked.connect(lambda: self.action_triggered.emit("stacks_primary"))
+        vbox.addWidget(btn_top)
+
+        btn_bot = QToolButton(container)
+        btn_bot.setObjectName("StacksBottomBtn")
+        btn_bot.setFixedSize(70, 35)
+        btn_bot.setCursor(Qt.PointingHandCursor)
+        btn_bot.setText("Stacks ▾")
+        btn_bot.setToolTip("Stacks menu (Group, Unstack, Compare, Auto-Stack)")
+        btn_bot.setPopupMode(QToolButton.InstantPopup)
+
+        menu = QMenu(btn_bot)
+        menu.setFont(QFont("Segoe UI", 9))
+        menu.addAction("Group Selected as Stack (Ctrl+G)", lambda: self.action_triggered.emit("stack_group"))
+        menu.addAction("Unstack (Ctrl+Shift+G)", lambda: self.action_triggered.emit("stack_unstack"))
+        menu.addAction("Expand / Collapse Stack (S)", lambda: self.action_triggered.emit("stack_toggle"))
+        menu.addAction("Compare Stack (C)", lambda: self.action_triggered.emit("stack_compare"))
+        menu.addAction("Set as Stack Cover", lambda: self.action_triggered.emit("stack_set_cover"))
+        menu.addSeparator()
+        menu.addAction("Auto-Stack RAW + JPEG Pairs", lambda: self.action_triggered.emit("auto_stack_raw_jpeg"))
+        menu.addAction("Auto-Stack Bursts (<= 2s)", lambda: self.action_triggered.emit("auto_stack_bursts"))
+        menu.addSeparator()
+        menu.addAction("Expand All Stacks in View", lambda: self.action_triggered.emit("expand_all_stacks"))
+        menu.addAction("Collapse All Stacks in View", lambda: self.action_triggered.emit("collapse_all_stacks"))
+        btn_bot.setMenu(menu)
+        vbox.addWidget(btn_bot)
+
+        btn_top.menu = btn_bot.menu
+        btn_top.setMenu = btn_bot.setMenu
+        btn_top.popupMode = btn_bot.popupMode
+        btn_top.container_widget = container
+        btn_top.btn_bottom = btn_bot
+        btn_top.original_text = ""
+        btn_top._orig_text = ""
+
+        if hasattr(self, "_all_themed_buttons"):
+            btn_top._icon_kind = "burst_stack"
+            btn_top._is_large = True
+            self._all_themed_buttons.append(btn_top)
+
+        return container, btn_top
+
     def _make_split_mosaic_button(self, parent: QWidget) -> tuple[QWidget, QToolButton]:
         """
         Creates a 2-button vertical split 'View mosaic' control matching 'Descriptive tag':
@@ -7706,10 +7772,8 @@ class RibbonToolbar(QWidget):
         split_tag_desc, self.btn_tag_desc = self._make_split_tag_desc_button(grp_org)
         grp_org.content_layout.addWidget(split_tag_desc)
 
-        self.btn_caption = self._make_btn("Caption", "caption", grp_org, large=True)
-        self.btn_caption.setToolTip("Caption")
-        self.btn_caption.clicked.connect(lambda: self.action_triggered.emit("edit_caption"))
-        grp_org.content_layout.addWidget(self.btn_caption)
+        split_stacks, self.btn_stacks = self._make_split_stacks_button(grp_org)
+        grp_org.content_layout.addWidget(split_stacks)
 
         # Right sub-column: Geotag, Rate, Flag (3 stacked rows)
         o_right_col = QVBoxLayout()
@@ -7781,7 +7845,7 @@ class RibbonToolbar(QWidget):
         self.home_manage_rot_delete = [self.btn_rot_ccw, self.btn_rot_cw, self.btn_delete]
         self.home_manage_select_copy_paste = [self.btn_select_all, self.btn_copy, self.btn_paste]
         self.home_org_geotag_rate_flag = [self.btn_geotag, self.btn_home_rate, self.btn_home_flag]
-        self.home_org_batch_desc_caption = [self.btn_batch_people, self.btn_tag_desc, self.btn_caption]
+        self.home_org_batch_desc_caption = [self.btn_batch_people, self.btn_tag_desc, self.btn_stacks]
 
         # ---------------------------------------------------------------------
         # Group 4: Quick find (Face carousel + Months/Rated/Flagged + Text search)
