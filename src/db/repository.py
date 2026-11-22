@@ -6359,6 +6359,8 @@ class CatalogRepository:
         max_flag: int | None = None
         min_fav: int | None = None
         max_fav: int | None = None
+        min_folder_id: int | None = None
+        max_folder_id: int | None = None
 
         for chunk in _iter_id_chunks(media_ids, 900):
             placeholders = ",".join("?" for _ in chunk)
@@ -6372,7 +6374,9 @@ class CatalogRepository:
                     MIN(CASE WHEN COALESCE(is_rejected, 0) = 1 THEN -1 ELSE COALESCE(flag, 0) END) AS min_flag,
                     MAX(CASE WHEN COALESCE(is_rejected, 0) = 1 THEN -1 ELSE COALESCE(flag, 0) END) AS max_flag,
                     MIN(COALESCE(is_favourite, 0)) AS min_fav,
-                    MAX(COALESCE(is_favourite, 0)) AS max_fav
+                    MAX(COALESCE(is_favourite, 0)) AS max_fav,
+                    MIN(COALESCE(folder_id, -1)) AS min_folder_id,
+                    MAX(COALESCE(folder_id, -1)) AS max_folder_id
                 FROM media
                 WHERE id IN ({placeholders});
                 """,
@@ -6387,6 +6391,8 @@ class CatalogRepository:
                 cur_max_f = int(agg["max_flag"]) if agg["max_flag"] is not None else None
                 cur_min_fv = int(agg["min_fav"]) if agg["min_fav"] is not None else None
                 cur_max_fv = int(agg["max_fav"]) if agg["max_fav"] is not None else None
+                cur_min_fid = int(agg["min_folder_id"]) if agg["min_folder_id"] is not None else None
+                cur_max_fid = int(agg["max_folder_id"]) if agg["max_folder_id"] is not None else None
 
                 if cur_min_r is not None:
                     min_rating = cur_min_r if min_rating is None else min(min_rating, cur_min_r)
@@ -6400,6 +6406,10 @@ class CatalogRepository:
                     min_fav = cur_min_fv if min_fav is None else min(min_fav, cur_min_fv)
                 if cur_max_fv is not None:
                     max_fav = cur_max_fv if max_fav is None else max(max_fav, cur_max_fv)
+                if cur_min_fid is not None:
+                    min_folder_id = cur_min_fid if min_folder_id is None else min(min_folder_id, cur_min_fid)
+                if cur_max_fid is not None:
+                    max_folder_id = cur_max_fid if max_folder_id is None else max(max_folder_id, cur_max_fid)
 
         # Tags shared by ALL selected items
         tag_occurrence_counts: dict[int, int] = {}
@@ -6456,6 +6466,13 @@ class CatalogRepository:
         people_list = list(people_seen.values())
         people_list.sort(key=lambda p: str(p["name"]).lower())
 
+        same_folder = (
+            min_folder_id is not None
+            and max_folder_id is not None
+            and min_folder_id == max_folder_id
+            and min_folder_id > 0
+        )
+
         return {
             "count": total_cnt,
             "lead": lead_detail,
@@ -6463,6 +6480,9 @@ class CatalogRepository:
             "common_rating": min_rating if min_rating == max_rating else None,
             "common_flag": min_flag if min_flag == max_flag else None,
             "common_favourite": min_fav if min_fav == max_fav else None,
+            "folder_path": str(lead_detail.get("folder_path") or "") if same_folder else "",
+            "folder_name": str(lead_detail.get("folder_name") or "") if same_folder else "",
+            "multiple_folders": not same_folder,
             "tags": tags_list,
             "people": people_list,
         }

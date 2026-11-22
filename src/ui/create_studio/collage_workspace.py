@@ -8,8 +8,34 @@ from typing import Any
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QDrag, QFont, QIcon, QKeyEvent, QPainter, QPen, QPixmap
+from PySide6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QMimeData,
+    QPoint,
+    QPointF,
+    QPropertyAnimation,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
+)
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QCursor,
+    QDrag,
+    QFont,
+    QFontMetrics,
+    QIcon,
+    QKeyEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -174,57 +200,276 @@ _COLLAGE_MIME = "application/x-collage-slot-idx"
 
 
 class _DraggableCollageCard(QFrame):
-    """Draggable & droppable tray card for click-to-select and drag-to-reorder."""
+    """Full-bleed filmstrip tile with hover-only remove and live smooth drag reordering."""
 
     card_clicked = Signal(int)
-    card_dropped = Signal(int, int)  # (src_idx, dst_idx)
+    card_dropped = Signal(int, int)  # (src_idx, dst_idx) for Qt QDrag compatibility
+    remove_clicked = Signal(int)
+    drag_started = Signal(int, int)  # (slot_idx, press_offset_x)
+    drag_moved = Signal(int)  # global_x
+    drag_finished = Signal()
+    drag_cancelled = Signal()
 
     def __init__(self, slot_idx: int, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.slot_idx = slot_idx
-        self._drag_start_pos: QPoint | None = None
+        self._selected: bool = False
+        self._hovered: bool = False
+        self._dragging: bool = False
+        self._can_remove: bool = False
+        self._theme_name: str = "wlpg_aero"
+        self._src_pixmap: QPixmap | None = None
+        self._scaled_pm: QPixmap | None = None
+        self._scaled_size: tuple[int, int] = (0, 0)
+        self._press_pos: QPoint | None = None
+        self._press_offset_x: int = 0
+        self._drag_active: bool = False
+
         self.setObjectName("CollageTrayCard")
+        self.setFrameShape(QFrame.Shape.NoFrame)
         self.setAcceptDrops(True)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+        self.btn_remove = QPushButton("✕", self)
+        self.btn_remove.setObjectName("TrayMiniBtn")
+        self.btn_remove.setFixedSize(18, 18)
+        self.btn_remove.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_remove.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_remove.setToolTip("Remove photo from collage")
+        self.btn_remove.setStyleSheet(
+            """
+            QFrame#CollageTrayCard QPushButton#TrayMiniBtn {
+                background-color: rgba(15, 23, 42, 200);
+                color: #F8FAFC;
+                border: 1px solid rgba(255, 255, 255, 85);
+                border-radius: 9px;
+                padding: 0px;
+                font-family: 'Segoe UI';
+                font-size: 8pt;
+                font-weight: 600;
+            }
+            QFrame#CollageTrayCard QPushButton#TrayMiniBtn:hover {
+                background-color: #DC2626;
+                border-color: #FCA5A5;
+                color: #FFFFFF;
+            }
+            """
+        )
+        self.btn_remove.clicked.connect(lambda _c=False: self.remove_clicked.emit(self.slot_idx))
+        self.btn_remove.hide()
+
+    def set_slot_idx(self, idx: int) -> None:
+        if self.slot_idx != int(idx):
+            self.slot_idx = int(idx)
+            self.update()
+
+    def set_selected(self, selected: bool) -> None:
+        val = bool(selected)
+        if self._selected != val:
+            self._selected = val
+            self.update()
+
+    def set_can_remove(self, can_remove: bool) -> None:
+        val = bool(can_remove)
+        if self._can_remove != val:
+            self._can_remove = val
+            self._sync_remove_btn_visibility()
+
+    def set_theme_name(self, theme_name: str) -> None:
+        t = theme_name or "wlpg_aero"
+        if self._theme_name != t:
+            self._theme_name = t
+            self.update()
+
+    def set_pixmap(self, pm: QPixmap | None) -> None:
+        self._src_pixmap = pm
+        self._scaled_pm = None
+        self._scaled_size = (0, 0)
+        self.update()
+
+    def _sync_remove_btn_visibility(self) -> None:
+        show = bool(self._hovered and self._can_remove and not self._dragging)
+        self.btn_remove.setVisible(show)
+        if show:
+            self.btn_remove.raise_()
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        self.btn_remove.move(max(4, self.width() - self.btn_remove.width() - 6), 6)
+
+    def enterEvent(self, event: Any) -> None:
+        self._hovered = True
+        self._sync_remove_btn_visibility()
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event: Any) -> None:
+        self._hovered = False
+        self._sync_remove_btn_visibility()
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, _event: Any) -> None:
+        tok = get_theme_tokens(self._theme_name)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        outer = self.rect().adjusted(2, 2, -2, -2)
+        thumb_rect = outer.adjusted(2, 2, -2, -2)
+        if thumb_rect.width() <= 2 or thumb_rect.height() <= 2:
+            painter.end()
+            return
+
+        if self._dragging:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(0, 0, 0, 75), 3.0))
+            painter.drawRoundedRect(outer.adjusted(0, 1, 0, 1), 6, 6)
+            painter.setBrush(QColor(tok.selection_bg))
+            painter.setPen(QPen(QColor(tok.accent), 2.4))
+            painter.drawRoundedRect(outer, 6, 6)
+        elif self._selected:
+            painter.setBrush(QColor(tok.selection_bg))
+            painter.setPen(QPen(QColor(tok.accent), 2.2))
+            painter.drawRoundedRect(outer, 6, 6)
+        elif self._hovered:
+            painter.setBrush(QColor(tok.bg_hover))
+            painter.setPen(QPen(QColor(tok.border_subtle), 1.0))
+            painter.drawRoundedRect(outer, 6, 6)
+        else:
+            painter.setBrush(QColor(tok.bg_card))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(outer, 6, 6)
+
+        clip_path = QPainterPath()
+        clip_path.addRoundedRect(thumb_rect.x(), thumb_rect.y(), thumb_rect.width(), thumb_rect.height(), 4, 4)
+        painter.save()
+        painter.setClipPath(clip_path)
+
+        if self._src_pixmap is not None and not self._src_pixmap.isNull():
+            target_wh = (thumb_rect.width(), thumb_rect.height())
+            if self._scaled_pm is None or self._scaled_size != target_wh:
+                expanded = self._src_pixmap.scaled(
+                    thumb_rect.size(),
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                sx = max(0, (expanded.width() - thumb_rect.width()) // 2)
+                sy = max(0, (expanded.height() - thumb_rect.height()) // 2)
+                self._scaled_pm = expanded.copy(sx, sy, thumb_rect.width(), thumb_rect.height())
+                self._scaled_size = target_wh
+            painter.drawPixmap(thumb_rect.topLeft(), self._scaled_pm)
+        else:
+            painter.fillRect(thumb_rect, QColor(tok.bg_input))
+
+        if not self._selected and not self._hovered and not self._dragging:
+            painter.fillRect(thumb_rect, QColor(0, 0, 0, 38))
+        painter.restore()
+
+        badge_font = QFont("Segoe UI", 8, QFont.Weight.DemiBold)
+        badge_text = f"#{self.slot_idx + 1}"
+        fm = QFontMetrics(badge_font)
+        bw = max(20, fm.horizontalAdvance(badge_text) + 10)
+        bh = 16
+        badge_rect = QRect(thumb_rect.left() + 4, thumb_rect.top() + 4, bw, bh)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(15, 23, 42, 185))
+        painter.drawRoundedRect(badge_rect, 4, 4)
+        painter.setFont(badge_font)
+        painter.setPen(QColor("#F8FAFC"))
+        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, badge_text)
+        painter.end()
 
     def mousePressEvent(self, event: Any) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_start_pos = event.position().toPoint()
-            self.card_clicked.emit(self.slot_idx)
+            self._press_pos = event.position().toPoint()
+            self._press_offset_x = int(round(event.position().x()))
+            self._drag_active = False
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: Any) -> None:
-        if (
-            self._drag_start_pos is not None
-            and (event.buttons() & Qt.MouseButton.LeftButton)
-            and (event.position().toPoint() - self._drag_start_pos).manhattanLength()
-            >= QApplication.startDragDistance()
-        ):
-            drag = QDrag(self)
-            mime = QMimeData()
-            mime.setData(_COLLAGE_MIME, str(self.slot_idx).encode("utf-8"))
-            drag.setMimeData(mime)
-            pm = self.grab()
-            if not pm.isNull():
-                drag.setPixmap(pm.scaled(96, 78, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-                drag.setHotSpot(QPoint(48, 39))
-            self._drag_start_pos = None
-            drag.exec(Qt.DropAction.MoveAction)
+        if self._press_pos is not None and (event.buttons() & Qt.MouseButton.LeftButton):
+            if not self._drag_active:
+                dist = (event.position().toPoint() - self._press_pos).manhattanLength()
+                if dist >= max(4, QApplication.startDragDistance()):
+                    self._drag_active = True
+                    self._dragging = True
+                    self._sync_remove_btn_visibility()
+                    self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                    self.raise_()
+                    self.update()
+                    self.drag_started.emit(self.slot_idx, self._press_offset_x)
+                    self.drag_moved.emit(int(round(event.globalPosition().x())))
+            else:
+                self.drag_moved.emit(int(round(event.globalPosition().x())))
+            event.accept()
             return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: Any) -> None:
-        self._drag_start_pos = None
+        if event.button() == Qt.MouseButton.LeftButton and self._press_pos is not None:
+            was_dragging = self._drag_active
+            self._press_pos = None
+            self._drag_active = False
+            self._dragging = False
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            self._sync_remove_btn_visibility()
+            self.update()
+            if was_dragging:
+                self.drag_finished.emit()
+            else:
+                self.card_clicked.emit(self.slot_idx)
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() == Qt.Key.Key_Escape and self._drag_active:
+            self._press_pos = None
+            self._drag_active = False
+            self._dragging = False
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            self._sync_remove_btn_visibility()
+            self.update()
+            self.drag_cancelled.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def dragEnterEvent(self, event: Any) -> None:
         if event.mimeData().hasFormat(_COLLAGE_MIME):
+            parent = self.parentWidget()
+            if isinstance(parent, _AnimatedCollageFilmstrip):
+                try:
+                    src_idx = int(bytes(event.mimeData().data(_COLLAGE_MIME)).decode("utf-8"))
+                    if parent._drag_src_idx is None:
+                        parent.begin_drag(src_idx)
+                    parent.set_drag_target_slot(self.slot_idx, animate=True)
+                except Exception:
+                    pass
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event: Any) -> None:
+        if event.mimeData().hasFormat(_COLLAGE_MIME):
+            parent = self.parentWidget()
+            if isinstance(parent, _AnimatedCollageFilmstrip):
+                parent.set_drag_target_slot(self.slot_idx, animate=True)
             event.acceptProposedAction()
             return
         event.ignore()
 
     def dropEvent(self, event: Any) -> None:
         if event.mimeData().hasFormat(_COLLAGE_MIME):
+            parent = self.parentWidget()
+            if isinstance(parent, _AnimatedCollageFilmstrip) and parent._drag_src_idx is not None:
+                parent.cancel_drag()
             try:
                 src_idx = int(bytes(event.mimeData().data(_COLLAGE_MIME)).decode("utf-8"))
                 if src_idx != self.slot_idx:
@@ -234,6 +479,449 @@ class _DraggableCollageCard(QFrame):
             except Exception:
                 pass
         event.ignore()
+
+
+class _AnimatedCollageFilmstrip(QWidget):
+    """Horizontal filmstrip container that animates sibling cards out of the way during drag-and-drop."""
+
+    reorder_committed = Signal(int, int)  # (src_idx, dst_idx)
+
+    PAD_X = 14
+    PAD_Y = 4
+    CARD_GAP = 6
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("StudioTrayHost")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAcceptDrops(True)
+
+        self._theme_name: str = "wlpg_aero"
+        self._cards: list[_DraggableCollageCard] = []
+        self._anims: list[QPropertyAnimation] = []
+        self._drag_src_idx: int | None = None
+        self._drag_target_idx: int | None = None
+        self._drag_card: _DraggableCollageCard | None = None
+        self._drag_offset_x: int = 48
+        self._scroll_area: QScrollArea | None = None
+        self._autoscroll_dir: int = 0
+
+        self._autoscroll_timer = QTimer(self)
+        self._autoscroll_timer.setInterval(16)
+        self._autoscroll_timer.timeout.connect(self._on_autoscroll_tick)
+
+    def set_scroll_area(self, scroll_area: QScrollArea) -> None:
+        self._scroll_area = scroll_area
+
+    def set_theme_name(self, theme_name: str) -> None:
+        t = theme_name or "wlpg_aero"
+        if self._theme_name != t:
+            self._theme_name = t
+            self.update()
+
+    def _tile_size(self) -> tuple[int, int]:
+        raw_h = self.height()
+        avail_h = 84 if raw_h <= 20 else (raw_h - 2 * self.PAD_Y)
+        card_h = max(64, min(124, avail_h))
+        card_w = max(86, int(round(card_h * 4 / 3)))
+        return card_w, card_h
+
+    def slot_x(self, slot: int) -> int:
+        card_w, _ = self._tile_size()
+        return self.PAD_X + int(slot) * (card_w + self.CARD_GAP)
+
+    def slot_y(self) -> int:
+        _, card_h = self._tile_size()
+        return max(self.PAD_Y, (self.height() - card_h) // 2)
+
+    def _update_content_width(self) -> None:
+        card_w, _ = self._tile_size()
+        n = len(self._cards)
+        content_w = self.PAD_X * 2 + n * card_w + max(0, n - 1) * self.CARD_GAP
+        content_w = max(content_w, self.PAD_X * 2)
+        if self.minimumWidth() != content_w:
+            self.setMinimumWidth(content_w)
+
+    def _stop_anims(self) -> None:
+        for anim in list(self._anims):
+            try:
+                anim.stop()
+                anim.deleteLater()
+            except Exception:
+                pass
+        self._anims.clear()
+
+    def _animate_card_to(self, card: _DraggableCollageCard, target_pos: QPoint, duration_ms: int = 165) -> None:
+        if card.pos() == target_pos:
+            for anim in list(self._anims):
+                try:
+                    if anim.targetObject() is card and anim.endValue() != target_pos:
+                        anim.stop()
+                except RuntimeError:
+                    if anim in self._anims:
+                        self._anims.remove(anim)
+            return
+        for anim in list(self._anims):
+            try:
+                if anim.targetObject() is card:
+                    if anim.state() == QPropertyAnimation.State.Running and anim.endValue() == target_pos:
+                        return
+                    anim.stop()
+                    if anim in self._anims:
+                        self._anims.remove(anim)
+                    anim.deleteLater()
+            except RuntimeError:
+                if anim in self._anims:
+                    self._anims.remove(anim)
+
+        anim = QPropertyAnimation(card, b"pos", self)
+        anim.setDuration(max(60, int(duration_ms)))
+        anim.setStartValue(card.pos())
+        anim.setEndValue(target_pos)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        def _cleanup_anim(a: QPropertyAnimation = anim) -> None:
+            if a in self._anims:
+                self._anims.remove(a)
+            try:
+                a.deleteLater()
+            except RuntimeError:
+                pass
+
+        anim.finished.connect(_cleanup_anim)
+        self._anims.append(anim)
+        anim.start()
+
+    def clear_cards(self) -> None:
+        self._autoscroll_timer.stop()
+        self._autoscroll_dir = 0
+        self._stop_anims()
+        self._drag_src_idx = None
+        self._drag_target_idx = None
+        self._drag_card = None
+        for card in self._cards:
+            try:
+                card.setParent(None)
+                card.deleteLater()
+            except Exception:
+                pass
+        self._cards.clear()
+        self._update_content_width()
+        self.update()
+
+    def set_cards(self, cards: list[_DraggableCollageCard]) -> None:
+        self._cards = list(cards)
+        for card in self._cards:
+            card.setParent(self)
+            card.drag_started.connect(self.begin_drag)
+            card.drag_moved.connect(self.update_drag_global_x)
+            card.drag_finished.connect(self.finish_drag)
+            card.drag_cancelled.connect(self.cancel_drag)
+            card.show()
+        self._update_content_width()
+        self.layout_cards(animate=False)
+
+    def _visual_slot_for(self, orig_idx: int) -> int:
+        if self._drag_src_idx is None or self._drag_target_idx is None:
+            return orig_idx
+        src = self._drag_src_idx
+        dst = self._drag_target_idx
+        if src == dst:
+            return orig_idx
+        if src < dst and src < orig_idx <= dst:
+            return orig_idx - 1
+        if dst < src and dst <= orig_idx < src:
+            return orig_idx + 1
+        return orig_idx
+
+    def layout_cards(self, *, animate: bool = False, skip_dragged: bool = True) -> None:
+        self._update_content_width()
+        card_w, card_h = self._tile_size()
+        y = self.slot_y()
+        for idx, card in enumerate(self._cards):
+            if card.width() != card_w or card.height() != card_h:
+                card.setFixedSize(card_w, card_h)
+            if skip_dragged and card is self._drag_card:
+                continue
+            target_pos = QPoint(self.slot_x(self._visual_slot_for(idx)), y)
+            if animate:
+                self._animate_card_to(card, target_pos, duration_ms=165)
+            else:
+                card.move(target_pos)
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        self.layout_cards(animate=False)
+
+    def begin_drag(self, src_idx: int, press_offset_x: int | None = None) -> None:
+        if not (0 <= src_idx < len(self._cards)):
+            return
+        card_w, _ = self._tile_size()
+        self._drag_src_idx = int(src_idx)
+        self._drag_target_idx = int(src_idx)
+        self._drag_card = self._cards[src_idx]
+        self._drag_offset_x = card_w // 2 if press_offset_x is None else max(0, min(card_w, int(press_offset_x)))
+        self._drag_card.raise_()
+        lifted_y = max(0, self.slot_y() - 4)
+        self._drag_card.move(self.slot_x(src_idx), lifted_y)
+        self.update()
+
+    def set_drag_target_slot(self, target_idx: int, *, animate: bool = True) -> None:
+        if self._drag_src_idx is None or not self._cards:
+            return
+        clamped = max(0, min(len(self._cards) - 1, int(target_idx)))
+        if clamped != self._drag_target_idx:
+            self._drag_target_idx = clamped
+            self.layout_cards(animate=animate, skip_dragged=True)
+            self.update()
+
+    def update_drag_global_x(self, global_x: int) -> None:
+        if self._drag_card is None or self._drag_src_idx is None or not self._cards:
+            return
+        card_w, _ = self._tile_size()
+        local_pt = self.mapFromGlobal(QPoint(int(global_x), 0))
+        min_x = self.PAD_X - 12
+        max_x = self.slot_x(len(self._cards) - 1) + 12
+        new_x = max(min_x, min(max_x, local_pt.x() - self._drag_offset_x))
+        lifted_y = max(0, self.slot_y() - 4)
+        self._drag_card.move(new_x, lifted_y)
+
+        center_x = new_x + (card_w / 2.0)
+        slot_stride = max(1, card_w + self.CARD_GAP)
+        target = max(0, min(len(self._cards) - 1, int((center_x - self.PAD_X) // slot_stride)))
+        self.set_drag_target_slot(target, animate=True)
+
+        if self._scroll_area is not None:
+            vp = self._scroll_area.viewport()
+            vp_x = vp.mapFromGlobal(QPoint(int(global_x), 0)).x()
+            if vp_x < 36:
+                self._autoscroll_dir = -1
+                if not self._autoscroll_timer.isActive():
+                    self._autoscroll_timer.start()
+            elif vp_x > vp.width() - 36:
+                self._autoscroll_dir = 1
+                if not self._autoscroll_timer.isActive():
+                    self._autoscroll_timer.start()
+            else:
+                self._autoscroll_dir = 0
+                if self._autoscroll_timer.isActive():
+                    self._autoscroll_timer.stop()
+
+    def _on_autoscroll_tick(self) -> None:
+        if self._scroll_area is None or self._autoscroll_dir == 0 or self._drag_card is None:
+            self._autoscroll_timer.stop()
+            return
+        hbar = self._scroll_area.horizontalScrollBar()
+        nxt = hbar.value() + (self._autoscroll_dir * 12)
+        hbar.setValue(nxt)
+        self.update_drag_global_x(QCursor.pos().x())
+
+    def finish_drag(self) -> tuple[int, int] | None:
+        self._autoscroll_timer.stop()
+        self._autoscroll_dir = 0
+        if self._drag_src_idx is None or self._drag_target_idx is None:
+            self._drag_card = None
+            return None
+        src = self._drag_src_idx
+        dst = self._drag_target_idx
+        dragged = self._drag_card
+        self._drag_src_idx = None
+        self._drag_target_idx = None
+        self._drag_card = None
+        self.update()
+
+        y = self.slot_y()
+        if src != dst and 0 <= src < len(self._cards) and 0 <= dst < len(self._cards):
+            moved = self._cards.pop(src)
+            self._cards.insert(dst, moved)
+            for i, card in enumerate(self._cards):
+                card.set_slot_idx(i)
+                if card is dragged:
+                    self._animate_card_to(card, QPoint(self.slot_x(i), y), duration_ms=120)
+                else:
+                    self._animate_card_to(card, QPoint(self.slot_x(i), y), duration_ms=120)
+            self.reorder_committed.emit(src, dst)
+        elif dragged is not None:
+            self._animate_card_to(dragged, QPoint(self.slot_x(src), y), duration_ms=120)
+        return (src, dst)
+
+    def cancel_drag(self) -> None:
+        self._autoscroll_timer.stop()
+        self._autoscroll_dir = 0
+        self._drag_src_idx = None
+        self._drag_target_idx = None
+        self._drag_card = None
+        self.layout_cards(animate=True, skip_dragged=False)
+        self.update()
+
+    def paintEvent(self, event: Any) -> None:
+        super().paintEvent(event)
+        if self._drag_src_idx is None or self._drag_target_idx is None or not self._cards:
+            return
+        tok = get_theme_tokens(self._theme_name)
+        card_w, card_h = self._tile_size()
+        socket_rect = QRect(self.slot_x(self._drag_target_idx), self.slot_y(), card_w, card_h).adjusted(3, 3, -3, -3)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        fill = QColor(tok.accent)
+        fill.setAlpha(36)
+        pen = QPen(QColor(tok.accent), 2.0, Qt.PenStyle.DashLine)
+        painter.setBrush(fill)
+        painter.setPen(pen)
+        painter.drawRoundedRect(socket_rect, 6, 6)
+        lbl_col = QColor(tok.accent)
+        lbl_col.setAlpha(185)
+        painter.setPen(lbl_col)
+        painter.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
+        painter.drawText(socket_rect, Qt.AlignmentFlag.AlignCenter, f"#{self._drag_target_idx + 1}")
+        painter.end()
+
+    def dragEnterEvent(self, event: Any) -> None:
+        if event.mimeData().hasFormat(_COLLAGE_MIME):
+            try:
+                src_idx = int(bytes(event.mimeData().data(_COLLAGE_MIME)).decode("utf-8"))
+                self.begin_drag(src_idx)
+                event.acceptProposedAction()
+                return
+            except Exception:
+                pass
+        event.ignore()
+
+    def dragMoveEvent(self, event: Any) -> None:
+        if event.mimeData().hasFormat(_COLLAGE_MIME) and self._cards:
+            card_w, _ = self._tile_size()
+            x = int(event.position().x())
+            target = max(0, min(len(self._cards) - 1, int((x - self.PAD_X) // max(1, card_w + self.CARD_GAP))))
+            self.set_drag_target_slot(target, animate=True)
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragLeaveEvent(self, event: Any) -> None:
+        if self._drag_src_idx is not None:
+            self.cancel_drag()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event: Any) -> None:
+        if event.mimeData().hasFormat(_COLLAGE_MIME):
+            res = self.finish_drag()
+            if res is None:
+                try:
+                    src_idx = int(bytes(event.mimeData().data(_COLLAGE_MIME)).decode("utf-8"))
+                    card_w, _ = self._tile_size()
+                    x = int(event.position().x())
+                    dst_idx = max(0, min(len(self._cards) - 1, int((x - self.PAD_X) // max(1, card_w + self.CARD_GAP))))
+                    if src_idx != dst_idx:
+                        self.reorder_committed.emit(src_idx, dst_idx)
+                except Exception:
+                    pass
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+
+class _CollageTrayScrollArea(QScrollArea):
+    """Horizontal scroll area with wheel-to-horizontal pan and edge chevron scroll overlays."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("StudioTrayScroll")
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+
+        def _make_chevron_icon(direction: str) -> QIcon:
+            pm = QPixmap(32, 32)
+            pm.fill(Qt.GlobalColor.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.setPen(
+                QPen(
+                    QColor("#F8FAFC"),
+                    2.8,
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin,
+                )
+            )
+            if direction == "left":
+                p.drawLine(19, 9, 12, 16)
+                p.drawLine(12, 16, 19, 23)
+            else:
+                p.drawLine(13, 9, 20, 16)
+                p.drawLine(20, 16, 13, 23)
+            p.end()
+            pm.setDevicePixelRatio(2.0)
+            return QIcon(pm)
+
+        _btn_qss = (
+            "QPushButton { background-color: rgba(15, 23, 42, 135); "
+            "border: 1px solid rgba(148, 163, 184, 85); border-radius: 9px; padding: 0px; }"
+            "QPushButton:hover { background-color: rgba(15, 23, 42, 230); "
+            "border: 1px solid rgba(56, 189, 248, 190); }"
+        )
+        self.btn_scroll_left = QPushButton(self)
+        self.btn_scroll_left.setObjectName("FilmstripOverlayScrollBtn")
+        self.btn_scroll_left.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_scroll_left.setIcon(_make_chevron_icon("left"))
+        self.btn_scroll_left.setIconSize(QSize(16, 16))
+        self.btn_scroll_left.setFixedSize(32, 32)
+        self.btn_scroll_left.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_scroll_left.setToolTip("Scroll photos left")
+        self.btn_scroll_left.setStyleSheet(_btn_qss)
+        self.btn_scroll_left.clicked.connect(lambda: self._scroll_by_tiles(-3))
+
+        self.btn_scroll_right = QPushButton(self)
+        self.btn_scroll_right.setObjectName("FilmstripOverlayScrollBtn")
+        self.btn_scroll_right.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_scroll_right.setIcon(_make_chevron_icon("right"))
+        self.btn_scroll_right.setIconSize(QSize(16, 16))
+        self.btn_scroll_right.setFixedSize(32, 32)
+        self.btn_scroll_right.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_scroll_right.setToolTip("Scroll photos right")
+        self.btn_scroll_right.setStyleSheet(_btn_qss)
+        self.btn_scroll_right.clicked.connect(lambda: self._scroll_by_tiles(3))
+
+        self.horizontalScrollBar().rangeChanged.connect(lambda _a, _b: self._sync_scroll_buttons())
+        self.horizontalScrollBar().valueChanged.connect(lambda _v: self._sync_scroll_buttons())
+
+    def _scroll_by_tiles(self, tiles: int) -> None:
+        hbar = self.horizontalScrollBar()
+        step = 112 * int(tiles)
+        hbar.setValue(hbar.value() + step)
+
+    def _sync_scroll_buttons(self) -> None:
+        vp = self.viewport()
+        w = vp.width()
+        h = vp.height()
+        cy = max(4, (h - 32) // 2)
+        self.btn_scroll_left.move(6, cy)
+        self.btn_scroll_right.move(max(6, w - 38), cy)
+        hbar = self.horizontalScrollBar()
+        max_v = hbar.maximum()
+        val = hbar.value()
+        show_overflow = max_v > 2 and w >= 120
+        self.btn_scroll_left.setVisible(show_overflow and val > 2)
+        self.btn_scroll_right.setVisible(show_overflow and val < max_v - 2)
+        if self.btn_scroll_left.isVisible():
+            self.btn_scroll_left.raise_()
+        if self.btn_scroll_right.isVisible():
+            self.btn_scroll_right.raise_()
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        self._sync_scroll_buttons()
+
+    def wheelEvent(self, event: Any) -> None:
+        hbar = self.horizontalScrollBar()
+        if hbar.maximum() > 0:
+            dy = event.angleDelta().y() or event.angleDelta().x()
+            if dy:
+                hbar.setValue(hbar.value() - int(round(dy * 0.6)))
+                event.accept()
+                return
+        super().wheelEvent(event)
 
 
 class CollageWorkspace(CreateWorkspaceBase):
@@ -270,7 +958,7 @@ class CollageWorkspace(CreateWorkspaceBase):
         self.bg_color = QColor("#FFFFFF")
         self._active_photo_idx: int = 0
         self._active_shape_key: str = "16:9"
-        self._tray_cards: list[QFrame] = []
+        self._tray_cards: list[_DraggableCollageCard] = []
         self._style_btns: list[QPushButton] = []
         self._grid_layout_btns: list[QPushButton] = []
         self._shape_btns: dict[str, QPushButton] = {}
@@ -297,7 +985,7 @@ class CollageWorkspace(CreateWorkspaceBase):
         return self._tray_root
 
     def tray_title(self) -> str:
-        return "Collage Photos (Reorder, Remove or Add)"
+        return ""
 
     def ribbon_actions(self) -> list[RibbonActionSpec]:
         return [
@@ -658,116 +1346,93 @@ class CollageWorkspace(CreateWorkspaceBase):
         self._tray_root = QFrame()
         self._tray_root.setObjectName("StudioTrayRoot")
         lay = QHBoxLayout(self._tray_root)
-        lay.setContentsMargins(6, 4, 6, 4)
-        lay.setSpacing(8)
+        lay.setContentsMargins(0, 0, 8, 0)
+        lay.setSpacing(6)
 
-        self.tray_scroll = QScrollArea(self._tray_root)
-        self.tray_scroll.setObjectName("StudioTrayScroll")
-        self.tray_scroll.setWidgetResizable(True)
-        self.tray_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.tray_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.tray_scroll.setFrameShape(QFrame.Shape.NoFrame)
-
-        self.tray_host = QWidget(self.tray_scroll)
-        self.tray_host.setObjectName("StudioTrayHost")
-        self.tray_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.tray_layout = QHBoxLayout(self.tray_host)
-        self.tray_layout.setContentsMargins(2, 2, 2, 2)
-        self.tray_layout.setSpacing(8)
-        self.tray_layout.addStretch(1)
+        self.tray_scroll = _CollageTrayScrollArea(self._tray_root)
+        self.tray_host = _AnimatedCollageFilmstrip(self.tray_scroll)
+        self.tray_host.set_scroll_area(self.tray_scroll)
+        self.tray_host.reorder_committed.connect(self._on_animated_tray_reorder)
         self.tray_scroll.setWidget(self.tray_host)
         lay.addWidget(self.tray_scroll, 1)
 
-        self.btn_add_photos = QPushButton("+ Add Photos...", self._tray_root)
+        self.btn_add_photos = QPushButton("Add\nPhotos", self._tray_root)
+        self.btn_add_photos.setObjectName("CollageAddPhotoBtn")
         self.btn_add_photos.setIcon(make_wlpg_icon("folder_add", 16))
-        self.btn_add_photos.setFixedHeight(32)
+        self.btn_add_photos.setFixedSize(72, 72)
+        self.btn_add_photos.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_add_photos.setToolTip("Add more photos to collage...")
         self.btn_add_photos.clicked.connect(self._on_add_photos_clicked)
-        lay.addWidget(self.btn_add_photos)
+        lay.addWidget(self.btn_add_photos, 0, Qt.AlignmentFlag.AlignVCenter)
 
     # ------------------------------------------------------------------
     # Bottom Photo Tray Management
     # ------------------------------------------------------------------
     def _refresh_order_tray(self, selected_slot: int | None = None) -> None:
-        while self.tray_layout.count() > 1:
-            child = self.tray_layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
+        self.tray_host.clear_cards()
         self._tray_cards.clear()
 
         if selected_slot is not None:
             self._selected_grid_slot = selected_slot
 
+        can_remove = len(self.photos_data) > 1
+        cards: list[_DraggableCollageCard] = []
         for idx, d in enumerate(self.photos_data):
             img = self._ensure_preview_proxy(d)
             card = _DraggableCollageCard(idx, self.tray_host)
-            card.setFixedSize(114, 92)
-            card.setToolTip("Click to select • Drag and drop onto another photo to reorder")
-            card.card_clicked.connect(self._select_active_photo)
-            card.card_dropped.connect(self.move_photo)
-            c_lay = QVBoxLayout(card)
-            c_lay.setContentsMargins(4, 3, 4, 3)
-            c_lay.setSpacing(2)
-
-            top_row = QHBoxLayout()
-            top_row.setContentsMargins(0, 0, 0, 0)
-            top_row.setSpacing(3)
-            lbl_num = QLabel(f"#{idx + 1}", card)
-            lbl_num.setFont(QFont("Segoe UI", 8, QFont.DemiBold))
-            lbl_num.setStyleSheet("border: none; background: transparent;")
-            top_row.addWidget(lbl_num)
-            top_row.addStretch(1)
-
-            btn_left = QPushButton("◀", card)
-            btn_left.setObjectName("TrayMiniBtn")
-            btn_left.setFixedSize(18, 18)
-            btn_left.setToolTip("Move photo left")
-            btn_left.setEnabled(idx > 0)
-            btn_left.clicked.connect(lambda _c=False, i=idx: self.swap_photos(i, i - 1))
-            top_row.addWidget(btn_left)
-
-            btn_right = QPushButton("▶", card)
-            btn_right.setObjectName("TrayMiniBtn")
-            btn_right.setFixedSize(18, 18)
-            btn_right.setToolTip("Move photo right")
-            btn_right.setEnabled(idx < len(self.photos_data) - 1)
-            btn_right.clicked.connect(lambda _c=False, i=idx: self.swap_photos(i, i + 1))
-            top_row.addWidget(btn_right)
-
-            btn_rem = QPushButton("✕", card)
-            btn_rem.setObjectName("TrayMiniBtn")
-            btn_rem.setFixedSize(18, 18)
-            btn_rem.setToolTip("Remove photo from collage")
-            btn_rem.setEnabled(len(self.photos_data) > 1)
-            btn_rem.clicked.connect(lambda _c=False, i=idx: self._remove_photo(i))
-            top_row.addWidget(btn_rem)
-            c_lay.addLayout(top_row)
-
-            lbl_img = QLabel(card)
-            lbl_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl_img.setStyleSheet("border: none; background: transparent;")
-            if img is not None:
-                ih, iw = img.shape[:2]
-                sc = 72.0 / max(1, max(ih, iw))
-                small = cv2.resize(img, (max(16, int(round(iw * sc))), max(16, int(round(ih * sc)))), interpolation=cv2.INTER_AREA)
-                pm = _cv2_to_qpixmap(small)
-                lbl_img.setPixmap(pm.scaled(104, 50, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-            c_lay.addWidget(lbl_img, 1)
-
             fp = d.get("file_path") or d.get("filename") or ""
             name = Path(str(fp)).name if fp else f"Photo {idx + 1}"
-            lbl_name = QLabel(name, card)
-            lbl_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl_name.setMaximumWidth(104)
-            lbl_name.setStyleSheet("border: none; background: transparent; font-size: 8pt;")
-            c_lay.addWidget(lbl_name)
+            card.setToolTip(f"{name}\nClick to select • Drag left or right to reorder")
+            card.set_can_remove(can_remove)
+            card.set_theme_name(self._theme_name)
+            card.card_clicked.connect(self._select_active_photo)
+            card.card_dropped.connect(self.move_photo)
+            card.remove_clicked.connect(self._remove_photo)
 
-            self._tray_cards.append(card)
-            self.tray_layout.insertWidget(self.tray_layout.count() - 1, card)
+            pm: QPixmap | None = None
+            if img is not None:
+                ih, iw = img.shape[:2]
+                sc = 220.0 / max(1, max(ih, iw))
+                if sc < 1.0:
+                    small = cv2.resize(
+                        img,
+                        (max(16, int(round(iw * sc))), max(16, int(round(ih * sc)))),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                else:
+                    small = img
+                pm = _cv2_to_qpixmap(small)
+            card.set_pixmap(pm)
+            cards.append(card)
+
+        self._tray_cards = cards
+        self.tray_host.set_cards(cards)
 
         if self._active_photo_idx >= len(self.photos_data):
             self._active_photo_idx = max(0, len(self.photos_data) - 1)
         self._sync_active_photo_zoom_ui()
         self._refresh_tray_card_styles()
+
+    def _on_animated_tray_reorder(self, src_idx: int, dst_idx: int) -> None:
+        """Sync Collage state after an animated pointer drag reorder completes without rebuilding tiles."""
+        n = len(self.photos_data)
+        if src_idx == dst_idx or not (0 <= src_idx < n and 0 <= dst_idx < n):
+            return
+        item = self.photos_data.pop(src_idx)
+        self.photos_data.insert(dst_idx, item)
+        self._user_shuffled = True
+        self._dirty = True
+        self._active_photo_idx = dst_idx
+        self._selected_grid_slot = dst_idx if self.cmb_style.currentIndex() == 1 else None
+        self._tray_cards = list(self.tray_host._cards)
+        for i, card in enumerate(self._tray_cards):
+            fp = self.photos_data[i].get("file_path") or self.photos_data[i].get("filename") or ""
+            name = Path(str(fp)).name if fp else f"Photo {i + 1}"
+            card.setToolTip(f"{name}\nClick to select • Drag left or right to reorder")
+        self._sync_active_photo_zoom_ui()
+        self._refresh_tray_card_styles()
+        self._update_grid_selection_overlay()
+        self._render_preview(fast=False)
 
     def _on_tray_card_clicked(self, idx: int, _event: Any) -> None:
         self._select_active_photo(idx)
@@ -775,12 +1440,31 @@ class CollageWorkspace(CreateWorkspaceBase):
     def _refresh_tray_card_styles(self) -> None:
         tok = get_theme_tokens(self._theme_name)
         active_idx = self._selected_grid_slot if self._selected_grid_slot is not None else self._active_photo_idx
+        can_remove = len(self.photos_data) > 1
+        self.tray_host.set_theme_name(self._theme_name)
         for idx, card in enumerate(self._tray_cards):
-            is_sel = idx == active_idx
-            border_c = tok.accent if is_sel else tok.border_subtle
-            bg_c = tok.selection_bg if is_sel else tok.bg_elevated
-            card.setStyleSheet(
-                f"QFrame#CollageTrayCard {{ background: {bg_c}; border: 1.5px solid {border_c}; border-radius: 6px; }}"
+            card.set_theme_name(self._theme_name)
+            card.set_selected(idx == active_idx)
+            card.set_can_remove(can_remove)
+        if hasattr(self, "btn_add_photos"):
+            self.btn_add_photos.setStyleSheet(
+                f"""
+                QFrame#StudioTrayRoot QPushButton#CollageAddPhotoBtn {{
+                    background-color: transparent;
+                    color: {tok.text_secondary};
+                    border: 1.5px dashed {tok.border_subtle};
+                    border-radius: 6px;
+                    padding: 4px;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                    font-weight: 600;
+                }}
+                QFrame#StudioTrayRoot QPushButton#CollageAddPhotoBtn:hover {{
+                    background-color: {tok.bg_hover};
+                    color: {tok.text_primary};
+                    border-color: {tok.accent};
+                }}
+                """
             )
 
     def _on_add_photos_clicked(self) -> None:

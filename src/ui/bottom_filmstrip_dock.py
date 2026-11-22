@@ -680,13 +680,22 @@ class BottomFilmstripDock(QDockWidget):
         widget.setParent(self.page_tray)
         self.tray_layout.addWidget(widget)
         self.stack.setCurrentIndex(1)
+        clean_title = (title or "").strip()
+        has_title = bool(clean_title)
         if hasattr(self, "_header"):
-            self._header.setVisible(True)
-        self.lbl_title.setText(title or "Tools Tray")
+            self._header.setVisible(has_title)
+        self.lbl_title.setText(clean_title)
         self.lbl_count.setText("")
         self.btn_close.setVisible(False)
-        self.setMinimumHeight(104)
-        self.setMaximumHeight(168)
+        if has_title:
+            self.tray_layout.setContentsMargins(6, 2, 6, 4)
+            self.setMinimumHeight(104)
+            self.setMaximumHeight(168)
+        else:
+            self.tray_layout.setContentsMargins(0, 0, 0, 0)
+            self.setMinimumHeight(92)
+            self.setMaximumHeight(148)
+            self._apply_saved_filmstrip_height()
 
     def clear_tray_widget(self) -> None:
         if self._hosted_tray is not None:

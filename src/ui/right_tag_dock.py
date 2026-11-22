@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, Literal
 
 import cv2
@@ -2734,6 +2735,35 @@ class _RelightSphereButton(QToolButton):
         return pix
 
 
+class _ClickableFolderLabel(QLabel):
+    """Information-pane folder link label that emits `clicked` on left click when enabled."""
+
+    clicked = Signal()
+
+    def __init__(self, text: str = "-", parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self._clickable: bool = False
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        self.setWordWrap(True)
+
+    def set_clickable(self, clickable: bool) -> None:
+        val = bool(clickable)
+        self._clickable = val
+        self.setCursor(Qt.CursorShape.PointingHandCursor if val else Qt.CursorShape.ArrowCursor)
+
+    def is_clickable(self) -> bool:
+        return self._clickable
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if (
+            self._clickable
+            and event.button() == Qt.MouseButton.LeftButton
+            and self.rect().contains(event.position().toPoint())
+        ):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
 class TagAndCaptionDock(QDockWidget):
     """
     Unified Right Sidebar for PhotoGallery64:
@@ -2753,6 +2783,7 @@ class TagAndCaptionDock(QDockWidget):
     geotag_edited = Signal(str)             # location_name
     change_time_requested = Signal()        # user clicked Date Taken link
     filename_committed = Signal(str)        # renamed filename
+    folder_open_requested = Signal(str)     # user clicked Folder link to open in Explorer
     date_taken_edited = Signal(int)         # new timestamp (epoch seconds)
     author_committed = Signal(str)          # author string
     tag_filter_requested = Signal(int)      # tag_id clicked to filter gallery
@@ -3334,6 +3365,14 @@ class TagAndCaptionDock(QDockWidget):
             self.txt_filename, self.info_form_frame, empty_placeholder="-"
         )
         form.addRow(make_field_lbl("Filename:"), self.stack_filename)
+
+        self._current_folder_path: str = ""
+        self._folder_is_multiple: bool = False
+        self.lbl_folder = _ClickableFolderLabel("-", self.info_form_frame)
+        self.lbl_folder.setObjectName("InfoFolderLinkLabel")
+        self.lbl_folder.clicked.connect(self._on_folder_label_clicked)
+        form.addRow(make_field_lbl("Folder:"), self.lbl_folder)
+        self._update_folder_link_style()
 
         self.date_time_widget = QWidget(self.info_form_frame)
         dt_hbox = QHBoxLayout(self.date_time_widget)
@@ -6935,6 +6974,7 @@ class TagAndCaptionDock(QDockWidget):
                 self.txt_filename.setEnabled(False)
                 self.stack_filename.finish_edit("-")
                 self.stack_filename.set_editable(False)
+                self._set_folder_display("")
                 self.date_edit.setEnabled(False)
                 self.time_edit.setEnabled(False)
                 self.stack_date_time.finish_edit("-")
@@ -7095,6 +7135,11 @@ class TagAndCaptionDock(QDockWidget):
                 self.stack_filename.set_display_text(fname)
                 self.stack_filename.finish_edit()
                 self.stack_filename.set_editable(True)
+                self._set_folder_display(
+                    str(summary.get("folder_path") or ""),
+                    str(summary.get("folder_name") or ""),
+                    multiple=False,
+                )
 
                 dt_val = summary.get("date_taken") or summary.get("mtime")
                 if dt_val is not None:
@@ -7180,6 +7225,15 @@ class TagAndCaptionDock(QDockWidget):
                 self.stack_filename.set_display_text(f"Multiple files ({count})")
                 self.stack_filename.finish_edit()
                 self.stack_filename.set_editable(False)
+                mult_folders = bool(summary.get("multiple_folders", False))
+                if mult_folders:
+                    self._set_folder_display("", multiple=True)
+                else:
+                    self._set_folder_display(
+                        str(summary.get("folder_path") or lead.get("folder_path") or ""),
+                        str(summary.get("folder_name") or lead.get("folder_name") or ""),
+                        multiple=False,
+                    )
 
                 lead_dt = lead.get("date_taken") or lead.get("mtime")
                 if lead_dt is not None:
@@ -7385,6 +7439,74 @@ class TagAndCaptionDock(QDockWidget):
         if new_name and new_name != self._original_filename:
             self._original_filename = new_name
             self.filename_committed.emit(new_name)
+
+    def _set_folder_display(self, folder_path: str, folder_name: str = "", *, multiple: bool = False) -> None:
+        if not hasattr(self, "lbl_folder"):
+            return
+        clean_path = (folder_path or "").strip()
+        if multiple:
+            self._current_folder_path = ""
+            self._folder_is_multiple = True
+            self.lbl_folder.setText("Multiple folders")
+            self.lbl_folder.setToolTip("Selected items are in multiple folders")
+            self.lbl_folder.set_clickable(False)
+        elif clean_path:
+            display = (folder_name or "").strip() or Path(clean_path).name or clean_path
+            self._current_folder_path = clean_path
+            self._folder_is_multiple = False
+            self.lbl_folder.setText(display)
+            self.lbl_folder.setToolTip(f"{clean_path}\nClick to open folder in Explorer")
+            self.lbl_folder.set_clickable(True)
+        else:
+            self._current_folder_path = ""
+            self._folder_is_multiple = False
+            self.lbl_folder.setText("-")
+            self.lbl_folder.setToolTip("")
+            self.lbl_folder.set_clickable(False)
+        self._update_folder_link_style()
+
+    def _update_folder_link_style(self) -> None:
+        if not hasattr(self, "lbl_folder"):
+            return
+        is_dark = getattr(self, "_is_dark", False)
+        if self.lbl_folder.is_clickable():
+            col = "#60A5FA" if is_dark else "#0066CC"
+            hover_col = "#93C5FD" if is_dark else "#004C99"
+            self.lbl_folder.setStyleSheet(
+                f"""
+                QLabel#InfoFolderLinkLabel {{
+                    color: {col};
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                    background: transparent;
+                    border: none;
+                }}
+                QLabel#InfoFolderLinkLabel:hover {{
+                    color: {hover_col};
+                    text-decoration: underline;
+                }}
+                """
+            )
+        else:
+            if getattr(self, "_folder_is_multiple", False):
+                col = "#94A3B8" if is_dark else "#64748B"
+            else:
+                col = "#E2E8F0" if is_dark else "#1E293B"
+            self.lbl_folder.setStyleSheet(
+                f"""
+                QLabel#InfoFolderLinkLabel {{
+                    color: {col};
+                    font-family: 'Segoe UI';
+                    font-size: 9pt;
+                    background: transparent;
+                    border: none;
+                }}
+                """
+            )
+
+    def _on_folder_label_clicked(self) -> None:
+        if getattr(self, "_current_folder_path", ""):
+            self.folder_open_requested.emit(self._current_folder_path)
 
     def _on_datetime_committed(self) -> None:
         if self._updating_ui or not self._selected_ids:
@@ -7655,9 +7777,14 @@ class TagAndCaptionDock(QDockWidget):
                     )
                 fld_item = form.itemAt(row, QFormLayout.FieldRole)
                 if fld_item and isinstance(fld_item.widget(), QLabel):
-                    fld_item.widget().setStyleSheet(
+                    fld_widget = fld_item.widget()
+                    if hasattr(self, "lbl_folder") and fld_widget is self.lbl_folder:
+                        continue
+                    fld_widget.setStyleSheet(
                         f"color: {'#E2E8F0' if is_dark else '#1E293B'}; font-family: 'Segoe UI'; font-size: 9pt;"
                     )
+        if hasattr(self, "lbl_folder"):
+            self._update_folder_link_style()
 
         # Update existing people/tag chips only if visible
         if hasattr(self, "people_chips_layout") and self.isVisible():

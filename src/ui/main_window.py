@@ -1660,6 +1660,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.media_viewer.status_message_requested.connect(self.show_status_message)
         self.right_tag_dock.change_time_requested.connect(self.open_change_time_taken_dialog)
         self.right_tag_dock.filename_committed.connect(self.on_selection_filename_committed)
+        self.right_tag_dock.folder_open_requested.connect(self.open_folder_in_explorer)
         self.right_tag_dock.date_taken_edited.connect(self.on_selection_date_taken_edited)
         self.right_tag_dock.author_committed.connect(self.on_selection_author_committed)
         self.left_nav_dock.visibilityChanged.connect(
@@ -7824,6 +7825,29 @@ class PhotoGalleryMainWindow(QMainWindow):
             return True
         except Exception as e:
             self.show_status_message(f"⚠ Could not open file location: {e}", 4500)
+        return False
+
+    def open_folder_in_explorer(self, folder_path: str) -> bool:
+        """Opens the given directory in Windows File Explorer (or OS file manager)."""
+        try:
+            raw = (folder_path or "").strip()
+            if not raw:
+                return False
+            target = Path(raw)
+            if not target.is_dir():
+                self.show_status_message("⚠ Folder no longer exists on disk.", 4500)
+                return False
+            import os, subprocess, sys
+            norm = os.path.normpath(str(target.resolve()))
+            if sys.platform == "win32":
+                subprocess.Popen(["explorer.exe", norm])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", norm])
+            else:
+                subprocess.Popen(["xdg-open", norm])
+            return True
+        except Exception as e:
+            self.show_status_message(f"⚠ Could not open folder: {e}", 4500)
         return False
 
     def open_file_properties(self, media_id: int | None = None) -> bool:
