@@ -1,12 +1,10 @@
 """
-Zoom Minimap Navigator + Sharpness Heatmap Grid Overlay for SingleMediaViewer & CompareMediaView.
+Zoom Minimap Navigator Overlay for SingleMediaViewer & CompareMediaView.
 Appears automatically in the bottom-right corner when zoomed beyond fit (>100%),
-allowing click-and-drag panning, scroll-wheel zooming, and an optional thumbnail-resolution
-Laplacian sharpness grid overlay.
+allowing click-and-drag panning and scroll-wheel zooming.
 """
 from __future__ import annotations
 
-import numpy as np
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
@@ -18,77 +16,16 @@ from PySide6.QtGui import (
     QPixmap,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QFrame, QToolButton, QWidget
-
-
-def compute_sharpness_grid(
-    qimg: QImage, cols: int = 16, rows: int = 12
-) -> list[tuple[int, int, float]]:
-    """
-    Computes normalized [0.0..1.0] per-cell edge/sharpness intensity on a small thumbnail
-    QImage (never decodes full-res pixels). Returns `(col, row, intensity)` for active cells.
-    """
-    if qimg is None or qimg.isNull() or qimg.width() < 16 or qimg.height() < 16:
-        return []
-    small = (
-        qimg.scaled(256, 256, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
-        if max(qimg.width(), qimg.height()) > 256
-        else qimg
-    )
-    gray = small.convertToFormat(QImage.Format.Format_Grayscale8)
-    w, h = gray.width(), gray.height()
-    if w < cols or h < rows:
-        return []
-
-    bpl = gray.bytesPerLine()
-    raw = bytes(gray.constBits())
-    arr = np.frombuffer(raw, dtype=np.uint8).reshape((h, bpl))[:, :w].astype(np.float32)
-
-    # Fast 3x3 Laplacian response |4*c - u - d - l - r|
-    lap = np.zeros_like(arr)
-    lap[1:-1, 1:-1] = np.abs(
-        4.0 * arr[1:-1, 1:-1]
-        - arr[:-2, 1:-1]
-        - arr[2:, 1:-1]
-        - arr[1:-1, :-2]
-        - arr[1:-1, 2:]
-    )
-
-    cell_w = w / float(cols)
-    cell_h = h / float(rows)
-    scores: list[tuple[int, int, float]] = []
-    max_score = 0.0
-    for r in range(rows):
-        y0 = int(r * cell_h)
-        y1 = max(y0 + 1, int((r + 1) * cell_h))
-        for c in range(cols):
-            x0 = int(c * cell_w)
-            x1 = max(x0 + 1, int((c + 1) * cell_w))
-            val = float(np.mean(lap[y0:y1, x0:x1]))
-            scores.append((c, r, val))
-            if val > max_score:
-                max_score = val
-
-    if max_score <= 1e-3:
-        return []
-
-    thresh = max_score * 0.35
-    return [
-        (c, r, min(1.0, (val - thresh) / max(1e-3, max_score - thresh)))
-        for c, r, val in scores
-        if val >= thresh
-    ]
+from PySide6.QtWidgets import QFrame, QWidget
 
 
 class ZoomMinimapOverlay(QFrame):
     """
-    Translucent corner minimap showing the full image, the active viewport rectangle,
-    and an optional Sharpness Heatmap Grid toggle.
+    Translucent corner minimap showing the full image and the active viewport rectangle.
     """
 
     navigate_requested = Signal(float, float)  # norm_cx, norm_cy in [0..1]
     zoom_requested = Signal(float)             # wheel multiplier
-    sharpness_toggled = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -105,10 +42,6 @@ class ZoomMinimapOverlay(QFrame):
         )
 
         self._thumb: QPixmap = QPixmap()
-        self._sharpness_cells: list[tuple[int, int, float]] = []
-        self._sharpness_cols: int = 16
-        self._sharpness_rows: int = 12
-        self._sharpness_enabled: bool = False
         self._source_key: int | str | None = None
 
         # Normalized viewport rectangle in [0..1]
@@ -119,20 +52,10 @@ class ZoomMinimapOverlay(QFrame):
         self._dragging: bool = False
         self.hide()
 
-    def _on_sharpness_toggled(self, checked: bool) -> None:
-        self._sharpness_enabled = bool(checked)
-        if self._sharpness_enabled and not self._sharpness_cells and not self._thumb.isNull():
-            self._sharpness_cells = compute_sharpness_grid(
-                self._thumb.toImage(), self._sharpness_cols, self._sharpness_rows
-            )
-        self.sharpness_toggled.emit(self._sharpness_enabled)
-        self.update()
-
     def set_image(self, image: QPixmap | QImage | None, source_key: Any = None) -> None:
         if source_key is not None and source_key == self._source_key and not self._thumb.isNull():
             return
         self._source_key = source_key
-        self._sharpness_cells = []
         if isinstance(image, QImage) and not image.isNull():
             small = image.scaled(
                 QSize(152, 106),
@@ -140,20 +63,12 @@ class ZoomMinimapOverlay(QFrame):
                 Qt.TransformationMode.SmoothTransformation,
             )
             self._thumb = QPixmap.fromImage(small)
-            if self._sharpness_enabled:
-                self._sharpness_cells = compute_sharpness_grid(
-                    small, self._sharpness_cols, self._sharpness_rows
-                )
         elif isinstance(image, QPixmap) and not image.isNull():
             self._thumb = image.scaled(
                 QSize(152, 106),
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
-            if self._sharpness_enabled:
-                self._sharpness_cells = compute_sharpness_grid(
-                    self._thumb.toImage(), self._sharpness_cols, self._sharpness_rows
-                )
         else:
             self._thumb = QPixmap()
         self.update()
