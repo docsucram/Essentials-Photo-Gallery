@@ -49,11 +49,15 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
   - **3D Cinematic:** 2.5D depth-parallax motion studio with camera presets and MP4 export.
 - **Collapsible Bottom Filmstrip Dock:** Added `BottomFilmstripDock` (`src/ui/bottom_filmstrip_dock.py`) for quick photo navigation in Single Image View (hidden by default, toggleable on demand) and studio tray hosting across Classic Aero, Fluent, and Dark Studio themes.
 
+![Revamped Create Studio Collage workspace with integrated Ribbon, Inspector, and drag-and-drop photo strip](docs/images/release-0.15.0/create-studio-collage.jpg)
+
 ### Depth & Light 2.0: 3D Relight & Virtual Light Studio
 
 - **3D Surface-Normal Reconstruction & Albedo-Preserving De-Lighting:** Replaced flat Z-slice relighting with joint-guided depth edge refinement, multi-scale Scharr + hemispherical subject volume normals (`DepthAndMatteEngine.get_refined_depth_and_normals()`), optional ONNX normal-map model support (`dsine.onnx` / `normal_bae.onnx`), and linear-light ambient **Original light** suppression that keeps deep blacks rich without washing out into grey.
 - **Up to 3 Interactive Virtual 3D Lights & On-Canvas Gizmos:** Add up to 3 independent **Point**, **Spot**, or **Rim** lights with draggable on-canvas source orbs and aim reticles, per-light **Temperature (1800K–10000K)** + color swatch picker, **Intensity**, **Softness**, **Distance (Close ↔ Far)**, **Spot cone**, **Fine Shaping** (Gloss, Depth Range, and procedural **Gobo** projections), and **Hold to Compare (Original)**.
 - **1-Click "Relight Looks" Sphere Presets:** Six shaded visual lighting sphere presets (**Warm Streetlamp**, **Golden Rim**, **Rembrandt**, **Dual Neon**, **Moonlit**, **Window Gobo**) configure lights and ambient dimming in one click.
+
+![Depth & Light 2.0 3D Relight with interactive multi-light gizmos and sphere presets](docs/images/release-0.15.0/depth-3d-relight.jpg)
 
 ### Unified Crop & Straighten Tool
 
