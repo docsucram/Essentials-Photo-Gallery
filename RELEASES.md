@@ -19,8 +19,8 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 - **Keyboard Ergonomics & Discoverability (`F1` & `Alt+1..9`):**
   - Added `KeyboardShortcutsDialog` (`F1` / **File → Keyboard Shortcuts...**) featuring a searchable shortcut catalog across navigation, rating/culling, viewer, Compare Mode, and batch face confirmation, plus configurable `Alt+1..Alt+9` Quick-Tag hotkeys working across Grid View, Single Media Viewer, and Spacebar Quick Preview.
 - **Optional `MobileCLIP-S1` Semantic Search & AI Subjects Add-On:**
-  - Added `SemanticEngine`, `SemanticVectorRepository` (`semantic_vectors.db` with float16 vectors + cached L2-normalized search matrix), and background `SemanticIndexWorker` (reading strictly from cached `thumbnails.db` blobs) alongside HTTP `Range` resumable model download in **File → Options → Add-ons**.
-  - Powers hybrid Reciprocal Rank Fusion (`fuse_semantic_and_fts_scores`) in the Search Box and an optional **Subjects** left-nav section (`Show Subjects (AI)`, default off) covering 12 built-in visual concepts (`Family`, `Kids`, `Pets`, `Portraits`, `Food`, `Sports`, `Landscape`, `Night`, etc.).
+  - Added `SemanticEngine` (with pure-Python CLIP BPE `tokenizer.json`, shortest-edge 256 center-crop image preprocessing, and `input_ids`/`attention_mask` ONNX inference), `SemanticVectorRepository` (`semantic_vectors.db` with float16 vectors + cached L2-normalized search matrix), and background `SemanticIndexWorker` (automatically scheduled on startup, folder sync, worker resume, and add-on download, reading strictly from cached `thumbnails.db` blobs) alongside HTTP `Range` resumable model download in **File → Options → Add-ons**.
+  - Powers privacy- and scope-aware Reciprocal Rank Fusion (`fuse_semantic_and_fts_scores`) in the Search Box and an optional **Subjects** left-nav section (`Show Subjects (AI)`, default off) covering 12 built-in visual concepts (`Family`, `Kids`, `Pets`, `Portraits`, `Food`, `Sports`, `Landscape`, `Night`, etc.).
 
 ---
 

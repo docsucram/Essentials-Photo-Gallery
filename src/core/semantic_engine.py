@@ -13,10 +13,13 @@ Architecture highlights:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import sqlite3
 import threading
+import unicodedata
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -29,21 +32,188 @@ logger = logging.getLogger(__name__)
 
 MODEL_VERSION_ID = "mobileclip_s1"
 EMBED_DIM = 512
-SEMANTIC_ADDON_SIZE_MB = 82
+SEMANTIC_ADDON_SIZE_MB = 85
 
 # (fname, url, approx_bytes)
 SEMANTIC_MODEL_FILES: tuple[tuple[str, str, int], ...] = (
     (
         "mobileclip_s1_image.onnx",
         "https://huggingface.co/Xenova/mobileclip_s1/resolve/main/onnx/vision_model_int8.onnx",
-        24 * 1024 * 1024,
+        22_357_190,
     ),
     (
         "mobileclip_s1_text.onnx",
         "https://huggingface.co/Xenova/mobileclip_s1/resolve/main/onnx/text_model_int8.onnx",
-        58 * 1024 * 1024,
+        64_117_260,
+    ),
+    (
+        "tokenizer.json",
+        "https://huggingface.co/Xenova/mobileclip_s1/resolve/main/tokenizer.json",
+        2_224_081,
     ),
 )
+
+_CLIP_CONTRACTIONS: tuple[str, ...] = ("'s", "'t", "'re", "'ve", "'m", "'ll", "'d")
+
+
+def _bytes_to_unicode() -> dict[int, str]:
+    """Return OpenAI CLIP / GPT-2 byte-to-unicode lookup table."""
+    bs = (
+        list(range(ord("!"), ord("~") + 1))
+        + list(range(ord("¡"), ord("¬") + 1))
+        + list(range(ord("®"), ord("ÿ") + 1))
+    )
+    cs = bs[:]
+    n = 0
+    for b in range(256):
+        if b not in bs:
+            bs.append(b)
+            cs.append(256 + n)
+            n += 1
+    return {b: chr(c) for b, c in zip(bs, cs)}
+
+
+def _split_clip_pretokens(text: str) -> list[str]:
+    """
+    Reproduce CLIP's Unicode pre-tokenizer regex:
+    `'s|'t|'re|'ve|'m|'ll|'d|[\\p{L}]+|[\\p{N}]|[^\\s\\p{L}\\p{N}]+`
+    """
+    tokens: list[str] = []
+    n = len(text)
+    i = 0
+    while i < n:
+        ch = text[i]
+        if ch.isspace():
+            i += 1
+            continue
+        matched_contraction = False
+        for suffix in _CLIP_CONTRACTIONS:
+            if text.startswith(suffix, i):
+                tokens.append(suffix)
+                i += len(suffix)
+                matched_contraction = True
+                break
+        if matched_contraction:
+            continue
+        if ch.isalpha():
+            j = i + 1
+            while j < n and text[j].isalpha():
+                j += 1
+            tokens.append(text[i:j])
+            i = j
+        elif ch.isnumeric():
+            tokens.append(ch)
+            i += 1
+        else:
+            j = i + 1
+            while j < n:
+                cj = text[j]
+                if cj.isspace() or cj.isalpha() or cj.isnumeric():
+                    break
+                if any(text.startswith(suffix, j) for suffix in _CLIP_CONTRACTIONS):
+                    break
+                j += 1
+            tokens.append(text[i:j])
+            i = j
+    return tokens
+
+
+class _ClipBpeTokenizer:
+    """Pure-Python CLIP BPE tokenizer driven directly by HuggingFace `tokenizer.json`."""
+
+    def __init__(self, tokenizer_json_path: Path | str) -> None:
+        raw = json.loads(Path(tokenizer_json_path).read_text(encoding="utf-8"))
+        model = raw.get("model", {})
+        self.vocab: dict[str, int] = {str(k): int(v) for k, v in model.get("vocab", {}).items()}
+        self.end_of_word_suffix: str = str(model.get("end_of_word_suffix", "</w>"))
+        self.sot_id: int = int(self.vocab.get("<|startoftext|>", 49406))
+        self.eot_id: int = int(self.vocab.get("<|endoftext|>", 49407))
+        self.unk_id: int = int(self.vocab.get(str(model.get("unk_token", "<|endoftext|>")), self.eot_id))
+        self.pad_id: int = int(self.vocab.get("!", 0))
+
+        self.bpe_ranks: dict[tuple[str, str], int] = {}
+        rank_idx = 0
+        for merge in model.get("merges", ()):
+            if isinstance(merge, (list, tuple)) and len(merge) == 2:
+                self.bpe_ranks[(str(merge[0]), str(merge[1]))] = rank_idx
+                rank_idx += 1
+            elif isinstance(merge, str) and not merge.startswith("#version:"):
+                parts = merge.split(" ")
+                if len(parts) == 2:
+                    self.bpe_ranks[(parts[0], parts[1])] = rank_idx
+                    rank_idx += 1
+
+        self._byte_encoder = _bytes_to_unicode()
+        self._cache: dict[str, list[str]] = {}
+
+    def _bpe(self, token: str) -> list[str]:
+        if not token:
+            return []
+        cached = self._cache.get(token)
+        if cached is not None:
+            return cached
+
+        if len(token) == 1:
+            word = [token + self.end_of_word_suffix]
+        else:
+            word = list(token[:-1]) + [token[-1] + self.end_of_word_suffix]
+
+        while len(word) > 1:
+            pairs = {(word[i], word[i + 1]) for i in range(len(word) - 1)}
+            bigram = min(pairs, key=lambda p: self.bpe_ranks.get(p, float("inf")))
+            if bigram not in self.bpe_ranks:
+                break
+            first, second = bigram
+            new_word: list[str] = []
+            idx = 0
+            while idx < len(word):
+                if idx < len(word) - 1 and word[idx] == first and word[idx + 1] == second:
+                    new_word.append(first + second)
+                    idx += 2
+                else:
+                    new_word.append(word[idx])
+                    idx += 1
+            word = new_word
+
+        self._cache[token] = word
+        return word
+
+    def encode(self, prompt: str, context_len: int = 77) -> tuple[np.ndarray, np.ndarray]:
+        normalized = unicodedata.normalize("NFC", prompt or "")
+        normalized = re.sub(r"\s+", " ", normalized).strip().lower()
+        piece_ids: list[int] = []
+        for raw_tok in _split_clip_pretokens(normalized):
+            encoded = "".join(self._byte_encoder[b] for b in raw_tok.encode("utf-8"))
+            for sub in self._bpe(encoded):
+                piece_ids.append(self.vocab.get(sub, self.unk_id))
+
+        max_tokens = max(0, int(context_len) - 2)
+        seq = [self.sot_id, *piece_ids[:max_tokens], self.eot_id]
+        input_ids = np.full((1, int(context_len)), self.pad_id, dtype=np.int64)
+        attention_mask = np.zeros((1, int(context_len)), dtype=np.int64)
+        used = min(len(seq), int(context_len))
+        if used > 0:
+            input_ids[0, :used] = seq[:used]
+            attention_mask[0, :used] = 1
+        return input_ids, attention_mask
+
+
+def _select_embedding_output(
+    sess: Any, outputs: Sequence[Any], preferred_name: str
+) -> np.ndarray:
+    """Pick the named pooled projection output (fallback to first 2D tensor or index 0)."""
+    try:
+        out_metas = sess.get_outputs()
+        for idx, meta in enumerate(out_metas):
+            if getattr(meta, "name", None) == preferred_name and idx < len(outputs):
+                return np.asarray(outputs[idx])
+    except Exception:
+        pass
+    for arr in outputs:
+        np_arr = np.asarray(arr)
+        if np_arr.ndim == 2:
+            return np_arr
+    return np.asarray(outputs[0])
 
 # 12 curated built-in Subject presets: (key, label, prompts, calibrated_threshold)
 SUBJECT_PRESETS: tuple[tuple[str, str, tuple[str, ...], float], ...] = (
@@ -68,22 +238,33 @@ def get_semantic_model_dir() -> Path:
 
 
 def get_semantic_addon_status() -> dict[str, Any]:
-    """Probe installation status of optional MobileCLIP-S1 ONNX models without loading ONNX."""
+    """Probe installation status of optional MobileCLIP-S1 ONNX models + tokenizer."""
     model_dir = get_semantic_model_dir()
     img_model = model_dir / "mobileclip_s1_image.onnx"
     txt_model = model_dir / "mobileclip_s1_text.onnx"
-    installed = img_model.is_file() and img_model.stat().st_size > 1024
-    size_mb = SEMANTIC_ADDON_SIZE_MB
-    if installed:
-        total = img_model.stat().st_size + (txt_model.stat().st_size if txt_model.is_file() else 0)
+    tok_file = model_dir / "tokenizer.json"
+    img_ok = img_model.is_file() and img_model.stat().st_size > 1024
+    txt_ok = txt_model.is_file() and txt_model.stat().st_size > 1024
+    tok_ok = tok_file.is_file() and tok_file.stat().st_size > 1024
+    installed = img_ok and txt_ok and tok_ok
+    size_mb: float | int = SEMANTIC_ADDON_SIZE_MB
+    if img_ok or txt_ok or tok_ok:
+        total = (
+            (img_model.stat().st_size if img_ok else 0)
+            + (txt_model.stat().st_size if txt_ok else 0)
+            + (tok_file.stat().st_size if tok_ok else 0)
+        )
         size_mb = max(1.0, round(total / (1024 * 1024), 1))
     return {
         "installed": installed,
-        "text_encoder_installed": txt_model.is_file() and txt_model.stat().st_size > 1024,
+        "image_encoder_installed": img_ok,
+        "text_encoder_installed": txt_ok and tok_ok,
+        "tokenizer_installed": tok_ok,
         "dir": model_dir,
         "size_mb": size_mb,
-        "image_model_path": img_model if installed else None,
-        "text_model_path": txt_model if txt_model.is_file() else None,
+        "image_model_path": img_model if img_ok else None,
+        "text_model_path": txt_model if txt_ok else None,
+        "tokenizer_path": tok_file if tok_ok else None,
     }
 
 
@@ -326,6 +507,15 @@ class SemanticVectorRepository:
             c.commit()
             self._matrix_cache.clear()
 
+    def clear_all(self) -> None:
+        """Delete all persisted semantic and subject embeddings and invalidate cache."""
+        with self._lock:
+            c = self._conn()
+            c.execute("DELETE FROM semantic_vectors;")
+            c.execute("DELETE FROM subject_vectors;")
+            c.commit()
+            self._matrix_cache.clear()
+
     def count_indexed(self, *, model_ver: str = MODEL_VERSION_ID) -> int:
         with self._lock:
             c = self._conn()
@@ -428,17 +618,34 @@ class SemanticVectorRepository:
 class SemanticEngine:
     """
     Lazy ONNX Runtime wrapper + fast NumPy vector matcher for MobileCLIP-S1 embeddings.
-    Works cleanly offline; `is_available()` returns False unless optional ONNX models exist.
+    Works cleanly offline; `is_available()` returns False unless optional ONNX models + tokenizer exist.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._img_sess: Any = None
         self._txt_sess: Any = None
+        self._tokenizer: _ClipBpeTokenizer | None = None
 
     @staticmethod
     def is_available() -> bool:
         return bool(get_semantic_addon_status().get("installed", False))
+
+    def _ensure_tokenizer(self) -> _ClipBpeTokenizer | None:
+        if self._tokenizer is not None:
+            return self._tokenizer
+        with self._lock:
+            if self._tokenizer is not None:
+                return self._tokenizer
+            tok_p = get_semantic_addon_status().get("tokenizer_path")
+            if not tok_p:
+                return None
+            try:
+                self._tokenizer = _ClipBpeTokenizer(tok_p)
+            except Exception as exc:
+                logger.warning("Failed to load MobileCLIP tokenizer.json: %s", exc)
+                self._tokenizer = None
+            return self._tokenizer
 
     def _ensure_image_session(self) -> Any:
         if self._img_sess is not None:
@@ -489,7 +696,10 @@ class SemanticEngine:
             return self._txt_sess
 
     def encode_image_bytes(self, webp_or_img_bytes: bytes) -> np.ndarray | None:
-        """Encode cached thumbnail bytes into an L2-normalized 512-d float32 embedding."""
+        """
+        Preprocess per Xenova/mobileclip_s1/preprocessor_config.json (shortest-edge resize to 256,
+        256x256 center crop, RGB [0..1] float32 CHW) and encode into an L2-normalized 512-d vector.
+        """
         if not webp_or_img_bytes:
             return None
         sess = self._ensure_image_session()
@@ -503,46 +713,61 @@ class SemanticEngine:
                 return None
             inp = sess.get_inputs()[0]
             shape = getattr(inp, "shape", [1, 3, 256, 256])
-            target_h = int(shape[2]) if isinstance(shape[2], int) and shape[2] > 0 else 256
-            target_w = int(shape[3]) if isinstance(shape[3], int) and shape[3] > 0 else 256
-            resized = cv2.resize(arr, (target_w, target_h), interpolation=cv2.INTER_AREA)
-            rgb = resized[:, :, ::-1].astype(np.float32) / 255.0
+            target_h = int(shape[2]) if len(shape) >= 4 and isinstance(shape[2], int) and shape[2] > 0 else 256
+            target_w = int(shape[3]) if len(shape) >= 4 and isinstance(shape[3], int) and shape[3] > 0 else 256
+
+            h, w = arr.shape[:2]
+            if h <= 0 or w <= 0:
+                return None
+            scale = max(float(target_w) / float(w), float(target_h) / float(h))
+            new_w = max(target_w, int(round(w * scale)))
+            new_h = max(target_h, int(round(h * scale)))
+            interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+            resized = cv2.resize(arr, (new_w, new_h), interpolation=interp)
+            y0 = max(0, (new_h - target_h) // 2)
+            x0 = max(0, (new_w - target_w) // 2)
+            cropped = resized[y0 : y0 + target_h, x0 : x0 + target_w]
+
+            rgb = cropped[:, :, ::-1].astype(np.float32) * (1.0 / 255.0)
             chw = np.transpose(rgb, (2, 0, 1))[None, ...].astype(np.float32)
-            out = sess.run(None, {inp.name: chw})[0]
-            return _l2_normalize_1d(out[0])
+            outs = sess.run(None, {inp.name: chw})
+            emb = _select_embedding_output(sess, outs, "image_embeds")
+            return _l2_normalize_1d(emb[0] if emb.ndim >= 2 else emb)
         except Exception as exc:
             logger.debug("Semantic image encoding failed: %s", exc)
             return None
 
-    @staticmethod
-    def _simple_clip_tokenize(prompt: str, context_len: int = 77) -> np.ndarray:
-        """Deterministic lightweight token ID encoding when ONNX text session takes int64 tokens."""
-        import zlib
-
-        words = [w for w in (prompt or "").strip().lower().split() if w]
-        tokens = np.zeros((1, context_len), dtype=np.int64)
-        tokens[0, 0] = 49406  # SOT
-        idx = 1
-        for w in words[: max(0, context_len - 2)]:
-            tokens[0, idx] = 1 + (zlib.crc32(w.encode("utf-8")) % 49000)
-            idx += 1
-        tokens[0, min(idx, context_len - 1)] = 49407  # EOT
-        return tokens
-
     def encode_text(self, prompt: str) -> np.ndarray | None:
-        """Encode a natural-language query into a 512-d embedding when text ONNX is available."""
+        """Encode a natural-language query via real CLIP BPE tokenizer + ONNX text encoder."""
         clean = (prompt or "").strip()
         if not clean:
             return None
+        tok = self._ensure_tokenizer()
         sess = self._ensure_text_session()
-        if sess is None:
+        if tok is None or sess is None:
             return None
         try:
-            inp = sess.get_inputs()[0]
-            ctx = int(inp.shape[1]) if len(inp.shape) >= 2 and isinstance(inp.shape[1], int) else 77
-            toks = self._simple_clip_tokenize(clean, context_len=ctx)
-            out = sess.run(None, {inp.name: toks})[0]
-            return _l2_normalize_1d(out[0])
+            inps = sess.get_inputs()
+            ids_inp = next(
+                (ip for ip in inps if "input" in str(getattr(ip, "name", "")).lower()),
+                inps[0],
+            )
+            ctx = (
+                int(ids_inp.shape[1])
+                if len(getattr(ids_inp, "shape", ())) >= 2 and isinstance(ids_inp.shape[1], int)
+                else 77
+            )
+            input_ids, attention_mask = tok.encode(clean, context_len=ctx)
+            feeds: dict[str, Any] = {}
+            for idx, ip in enumerate(inps):
+                lname = str(getattr(ip, "name", "")).lower()
+                if "mask" in lname:
+                    feeds[ip.name] = attention_mask
+                elif "input_ids" in lname or "input" in lname or idx == 0:
+                    feeds[ip.name] = input_ids
+            outs = sess.run(None, feeds)
+            emb = _select_embedding_output(sess, outs, "text_embeds")
+            return _l2_normalize_1d(emb[0] if emb.ndim >= 2 else emb)
         except Exception as exc:
             logger.debug("Semantic text encoding failed: %s", exc)
             return None
@@ -588,6 +813,7 @@ class SemanticEngine:
         *,
         thresholds: dict[str, float] | None = None,
         default_threshold: float = 0.24,
+        scope_ids: set[int] | None = None,
         model_ver: str = MODEL_VERSION_ID,
     ) -> dict[str, int]:
         """Compute calibrated per-subject counts in one batched matrix multiply."""
@@ -595,6 +821,13 @@ class SemanticEngine:
         counts: dict[str, int] = {k: 0 for k in subject_vectors}
         if mat.shape[0] == 0 or not subject_vectors:
             return counts
+        if scope_ids is not None:
+            if not scope_ids:
+                return counts
+            row_mask = np.fromiter((int(mid) in scope_ids for mid in media_ids), dtype=bool, count=len(media_ids))
+            if not np.any(row_mask):
+                return counts
+            mat = mat[row_mask]
         keys = [k for k, v in subject_vectors.items() if v.size == mat.shape[1]]
         if not keys:
             return counts

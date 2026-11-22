@@ -351,6 +351,7 @@ class AppSettingsDialog(QDialog):
 
     settings_applied = Signal()
     picasa_import_requested = Signal()
+    semantic_addon_downloaded = Signal()
 
     def __init__(
         self,
@@ -1619,7 +1620,9 @@ class AppSettingsDialog(QDialog):
             self._opt_semantic_dl_thread = None
             self.btn_opt_semantic_download.setEnabled(True)
             self._refresh_ai_downloads_tab()
-            if not ok:
+            if ok:
+                self.semantic_addon_downloaded.emit()
+            else:
                 QMessageBox.warning(
                     self,
                     "Download Failed",

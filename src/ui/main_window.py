@@ -1146,6 +1146,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._create_ws_snapshot: dict[str, Any] | None = None
         self._active_subject_ids: list[int] | None = None
         self._active_subject_label: str = ""
+        self._active_semantic_worker: Any = None
+        self._semantic_cancel: Any = None
+        self._semantic_status_text: str = "Semantic AI: Idle"
         self.nav_show_cameras: bool = False
         self.nav_show_subjects: bool = False
         try:
@@ -2458,6 +2461,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._media_meta_lookup.clear()
             self.refresh_navigation_and_autocomplete()
             self.rebuild_and_run_query()
+            self._refresh_subjects_nav_counts()
             if hasattr(self, "batch_people_view") and self.batch_people_view is not None:
                 if self.central_stack.currentWidget() == self.batch_people_view:
                     self.batch_people_view.refresh_suggestions()
@@ -2540,6 +2544,111 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._active_ocr_worker = worker
         QThreadPool.globalInstance().start(worker)
 
+    def _visible_non_private_media_ids(self) -> set[int] | None:
+        """
+        Return all non-missing, non-private media IDs when Private Mode is locked and private
+        folders exist; return None when no privacy restriction is active.
+        """
+        try:
+            if bool(getattr(self.catalog_repo, "include_private", False)):
+                return None
+            if not self.catalog_repo.has_private_folders():
+                return None
+            rows = self.engine.catalog_conn().execute(
+                """
+                SELECT m.id
+                FROM media m
+                JOIN folders f ON f.id = m.folder_id
+                WHERE m.is_missing = 0 AND f.is_private = 0;
+                """
+            ).fetchall()
+            return {int(r[0]) for r in rows}
+        except Exception:
+            return None
+
+    def _start_semantic_worker(self, *, force: bool = False) -> None:
+        """Launch background MobileCLIP-S1 semantic indexing from cached thumbnails.db BLOBs."""
+        if getattr(self, "_is_shutting_down", False):
+            return
+        if getattr(self, "_workers_paused", False) and not force:
+            return
+        if (
+            getattr(self, "semantic_repo", None) is None
+            or getattr(self, "semantic_engine", None) is None
+            or not self.semantic_engine.is_available()
+        ):
+            return
+        from legacy_reference.imgBrowserv13 import CancellationFlag
+        from src.workers.semantic_worker import SemanticIndexWorker
+
+        if getattr(self, "_semantic_cancel", None) is not None:
+            try:
+                self._semantic_cancel.set()
+            except Exception:
+                pass
+        try:
+            rows = self.engine.catalog_conn().execute(
+                """
+                SELECT id, mtime
+                FROM media
+                WHERE is_video = 0 AND is_missing = 0
+                ORDER BY date_taken DESC, id DESC;
+                """
+            ).fetchall()
+            candidates = [(int(r[0]), int(r[1])) for r in rows]
+        except Exception:
+            candidates = []
+
+        if not candidates:
+            self._semantic_status_text = "Semantic AI: Idle"
+            self._update_worker_monitor()
+            return
+
+        flag = CancellationFlag()
+        self._semantic_cancel = flag
+        worker = SemanticIndexWorker(
+            self.engine,
+            self.semantic_repo,
+            self.semantic_engine,
+            candidates,
+            cancel_flag=flag,
+            is_paused_cb=lambda: bool(getattr(self, "_workers_paused", False)),
+        )
+        self._semantic_status_text = "Semantic AI: Starting..."
+        self._update_worker_monitor()
+
+        def _on_sem_prog(done: int, total: int, _msg: str) -> None:
+            if getattr(self, "_active_semantic_worker", None) is worker:
+                if total > 0:
+                    self._semantic_status_text = f"Semantic AI: {done:,} / {total:,}"
+                else:
+                    self._semantic_status_text = "Semantic AI: Idle"
+                self._update_worker_monitor()
+
+        def _on_sem_finished(indexed_now: int, total_indexed: int) -> None:
+            if getattr(self, "_active_semantic_worker", None) is worker:
+                self._active_semantic_worker = None
+                self._semantic_status_text = "Semantic AI: Idle"
+                self._update_worker_monitor()
+            self._refresh_subjects_nav_counts()
+            if indexed_now > 0:
+                self.statusBar().showMessage(
+                    f"✓ Semantic AI indexed {indexed_now:,} photo(s) ({total_indexed:,} total).",
+                    4000,
+                )
+
+        def _on_sem_error(_err: str) -> None:
+            if getattr(self, "_active_semantic_worker", None) is worker:
+                self._active_semantic_worker = None
+                self._semantic_status_text = "Semantic AI: Idle"
+                self._update_worker_monitor()
+
+        worker.signals.progress.connect(_on_sem_prog)
+        worker.signals.finished_stats.connect(_on_sem_finished)
+        worker.signals.error.connect(_on_sem_error)
+        self._active_semantic_worker = worker
+        QThreadPool.globalInstance().start(worker)
+
     def on_sync_progress(self, count: int, folder_name: str) -> None:
         self._scanner_status_text = f"Scanning: {count:,} files"
         self._update_worker_monitor()
@@ -2570,6 +2679,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.start_face_detection()
         if was_completed and upserted_count > 0:
             self._start_ocr_worker()
+            self._start_semantic_worker()
 
     def _on_folder_watcher_delta(
         self, folder_path: str, added: int, modified: int, deleted: int, folders_changed: int = 0
@@ -2600,6 +2710,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.start_face_detection()
             if added > 0:
                 self._start_ocr_worker()
+                self._start_semantic_worker()
 
     def _on_startup_reconciliation_completed(
         self, added: int, modified: int, deleted: int, folders_changed: int
@@ -2626,7 +2737,9 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.start_face_detection()
             if added > 0:
                 self._start_ocr_worker()
+                self._start_semantic_worker()
         QTimer.singleShot(3500, self._start_ocr_worker)
+        QTimer.singleShot(4500, self._start_semantic_worker)
         QTimer.singleShot(5000, self._maybe_start_startup_face_scan)
 
     def _on_missing_root_folders_detected(self, missing_roots: list[dict[str, object]]) -> None:
@@ -2983,6 +3096,9 @@ class PhotoGalleryMainWindow(QMainWindow):
             or state.get("location_country") is not None
             or state.get("location_state") is not None
             or state.get("location_city") is not None
+            or state.get("camera_model") is not None
+            or bool(getattr(self, "_active_subject_label", ""))
+            or (getattr(self, "_active_subject_ids", None) is not None)
             or getattr(self, "_active_special_people_filter", None) is not None
             or self._search_scope_bar_explicitly_opened
         )
@@ -2995,6 +3111,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         folder_name = self.left_nav_dock.selected_folder_name()
         if folder_name:
             return f"Folder: {folder_name}"
+        cam = state.get("camera_model")
+        if cam:
+            return f"Camera: {'No Camera Recorded' if cam == '__NO_CAMERA__' else cam}"
+        subj_lbl = getattr(self, "_active_subject_label", "")
+        if subj_lbl:
+            return f"Subject: {subj_lbl}"
         return None
 
     def _active_place_chip_label(self, state: dict[str, Any]) -> str | None:
@@ -3025,7 +3147,13 @@ class PhotoGalleryMainWindow(QMainWindow):
             special_people_label=getattr(self, "_active_special_people_label", None),
             date_label=getattr(self, "_active_date_label", None),
         )
-        if self.scope_bar.is_pinned() or self._has_active_filter_facets() or getattr(self, "_active_similar_label", None):
+        if (
+            self.scope_bar.is_pinned()
+            or self._has_active_filter_facets()
+            or getattr(self, "_active_similar_label", None)
+            or bool(getattr(self, "_active_subject_label", ""))
+            or bool(state.get("camera_model"))
+        ):
             self.scope_bar.show()
         else:
             self.scope_bar.hide()
@@ -3046,7 +3174,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.scope_bar.focus_search_input()
 
     def _on_clear_location_filter(self) -> None:
-        """Removes the location/map/similar filter chip and re-runs the catalog query."""
+        """Removes the location/map/similar/subject filter chip and re-runs the catalog query."""
         focus_mid: int | None = None
         if getattr(self, "_active_similar_seed_id", None) is not None:
             sel = self.grid_view.selected_media_ids() if hasattr(self, "grid_view") else []
@@ -3058,6 +3186,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._active_similar_label = None
         self._active_similar_seed_id = None
         self._active_similar_seed_name = ""
+        self._active_subject_ids = None
+        self._active_subject_label = ""
         self.scope_bar.set_similarity_controls(False)
         self._active_bbox = None
         self._active_map_location_label = None
@@ -4000,19 +4130,34 @@ class PhotoGalleryMainWindow(QMainWindow):
             and self.semantic_engine.is_available()
         ):
             try:
+                from dataclasses import replace as _dc_replace
                 from src.core.semantic_engine import fuse_semantic_and_fts_scores
 
                 qvec = self.semantic_engine.encode_text(self._search_text.strip())
                 if qvec is not None:
-                    sem_hits = self.semantic_engine.query_by_vector(self.semantic_repo, qvec, threshold=0.22, limit=400)
+                    sem_hits = self.semantic_engine.query_by_vector(
+                        self.semantic_repo,
+                        qvec,
+                        threshold=0.22,
+                        limit=400,
+                        scope_ids=self._visible_non_private_media_ids(),
+                    )
                     if sem_hits:
                         fts_ids = [int(r.id) for r in records]
                         fused_ids = fuse_semantic_and_fts_scores(fts_ids, sem_hits)
-                        missing_ids = [mid for mid in fused_ids if mid not in set(fts_ids)]
+                        fts_set = set(fts_ids)
+                        missing_ids = [mid for mid in fused_ids if mid not in fts_set]
+                        if spec.media_ids is not None:
+                            allowed_ids = set(spec.media_ids)
+                            missing_ids = [mid for mid in missing_ids if mid in allowed_ids]
                         if missing_ids:
-                            extra_recs = self.catalog_repo.query_media_records(
-                                FilterQuerySpec(media_ids=tuple(missing_ids), group_by="none")
+                            scoped_extra = _dc_replace(
+                                spec,
+                                search_text=None,
+                                media_ids=tuple(missing_ids),
+                                group_by="none",
                             )
+                            extra_recs = self.catalog_repo.query_media_records(scoped_extra)
                             rec_by_id = {int(r.id): r for r in (records + extra_recs)}
                             records = [rec_by_id[mid] for mid in fused_ids if mid in rec_by_id]
             except Exception:
@@ -7599,6 +7744,11 @@ class PhotoGalleryMainWindow(QMainWindow):
                     conn.execute("DELETE FROM media WHERE id = ?;", (mid,))
                     conn.commit()
                 self.catalog_repo.reconcile_stack_after_delete(mid)
+                if getattr(self, "semantic_repo", None) is not None:
+                    try:
+                        self.semantic_repo.delete_vectors([mid])
+                    except Exception:
+                        pass
                 deleted_count += 1
                 last_deleted_name = str(detail["filename"])
             except Exception:
@@ -8943,8 +9093,11 @@ class PhotoGalleryMainWindow(QMainWindow):
                 if computed:
                     self.semantic_repo.put_subject_vectors(computed)
                     subj_vecs = self.semantic_repo.get_subject_vectors()
+            scope_ids = self._visible_non_private_media_ids()
             counts = (
-                self.semantic_engine.compute_subject_counts(self.semantic_repo, subj_vecs)
+                self.semantic_engine.compute_subject_counts(
+                    self.semantic_repo, subj_vecs, scope_ids=scope_ids
+                )
                 if subj_vecs
                 else {}
             )
@@ -8960,6 +9113,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         if self.semantic_repo.count_indexed() == 0:
             self._active_subject_ids = []
             self._active_subject_label = label
+            self._update_scope_bar_visibility()
             self.rebuild_and_run_query()
             self.show_status_message(
                 f"Subject '{label}': download MobileCLIP-S1 & index photos in Options → Add-ons.",
@@ -8982,11 +9136,15 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.show_status_message(f"Subject preset '{label}' vector unavailable.", 3500)
             return
         thr = next((t for k, _l, _p, t in SUBJECT_PRESETS if k == subject_key), 0.24)
-        hits = self.semantic_engine.query_by_vector(self.semantic_repo, qvec, threshold=thr, limit=2000)
+        scope_ids = self._visible_non_private_media_ids()
+        hits = self.semantic_engine.query_by_vector(
+            self.semantic_repo, qvec, threshold=thr, limit=2000, scope_ids=scope_ids
+        )
         self._active_subject_ids = [mid for mid, _sc in hits]
         self._active_subject_label = label
         if self.central_stack.currentWidget() != self.grid_view:
             self.show_grid_view()
+        self._update_scope_bar_visibility()
         self.rebuild_and_run_query()
         self.show_status_message(f"✓ Subject '{label}': {len(self._active_subject_ids):,} match(es)", 3500)
 
@@ -9601,6 +9759,12 @@ class PhotoGalleryMainWindow(QMainWindow):
             )
             if self.nav_show_subjects:
                 self._refresh_subjects_nav_counts()
+                if (
+                    getattr(self, "semantic_engine", None) is not None
+                    and getattr(self, "semantic_repo", None) is not None
+                    and self.semantic_engine.is_available()
+                ):
+                    self._start_semantic_worker()
 
             self.set_favourites_enabled(dlg.favourites_enabled())
 
@@ -9647,6 +9811,7 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         dlg.settings_applied.connect(_apply_dlg_settings)
         dlg.picasa_import_requested.connect(self.open_picasa_import_dialog)
+        dlg.semantic_addon_downloaded.connect(lambda: self._start_semantic_worker(force=True))
         if dlg.exec() == AppSettingsDialog.Accepted:
             _apply_dlg_settings()
 
@@ -9720,6 +9885,13 @@ class PhotoGalleryMainWindow(QMainWindow):
             except Exception:
                 pass
             self._active_ocr_worker = None
+        if getattr(self, "_semantic_cancel", None) is not None:
+            try:
+                self._semantic_cancel.set()
+            except Exception:
+                pass
+        self._active_semantic_worker = None
+        self._semantic_status_text = "Semantic AI: Idle"
         if hasattr(self, "xmp_daemon"):
             try:
                 self.xmp_daemon.set_paused(True)
@@ -9754,11 +9926,18 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._active_similar_scored = None
         self._active_similar_label = None
         self._active_similar_seed_id = None
+        self._active_subject_ids = None
+        self._active_subject_label = ""
         self._active_bbox = None
         self._active_date_range = None
         self._active_date_label = None
 
         self.engine.reset_all_databases()
+        if getattr(self, "semantic_repo", None) is not None:
+            try:
+                self.semantic_repo.clear_all()
+            except Exception:
+                pass
         if hasattr(self, "_scanner_cancel") and not getattr(self, "_workers_paused", False):
             self._scanner_cancel.clear()
         if hasattr(self, "xmp_daemon"):
@@ -10242,6 +10421,13 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self._active_ocr_worker.cancel()
                 self._active_ocr_worker = None
             self._ocr_status_text = "OCR: Idle"
+            if getattr(self, "_semantic_cancel", None) is not None:
+                try:
+                    self._semantic_cancel.set()
+                except Exception:
+                    pass
+            self._active_semantic_worker = None
+            self._semantic_status_text = "Semantic AI: Idle"
             self.xmp_daemon.set_paused(True)
             self.btn_pause_workers.setText("▶")
             self.btn_pause_workers.setToolTip("Resume background indexing, face detection, and file write-back")
@@ -10271,6 +10457,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             if getattr(self, "find_people_enabled", True) and self._are_face_models_installed():
                 self.start_face_detection()
             self._start_ocr_worker()
+            self._start_semantic_worker()
             self.btn_pause_workers.setText("⏸")
             self.btn_pause_workers.setToolTip("Pause background indexing, face detection, and file write-back")
             self.btn_pause_workers.setStyleSheet(
@@ -10317,10 +10504,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         scan_summary = self._scanner_status_text.removeprefix("Scanning: ")
         face_summary = self._face_status_text.removeprefix("Faces: ")
         ocr_summary = getattr(self, "_ocr_status_text", "OCR: Idle").removeprefix("OCR: ")
+        sem_summary = getattr(self, "_semantic_status_text", "Semantic AI: Idle").removeprefix("Semantic AI: ")
         detailed_tooltip = (
             f"📁 Indexing: {scan_summary}\n"
             f"👤 Face Detection: {face_summary}\n"
             f"📝 OCR Indexing: {ocr_summary}\n"
+            f"🧠 Semantic AI: {sem_summary}\n"
             f"{crop_detail}\n"
             f"{thumb_detail}\n"
             f"{sync_detail}\n\n"
@@ -10330,6 +10519,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         is_scanning = "Idle" not in self._scanner_status_text
         is_faces = (getattr(self, "_face_worker", None) is not None) or ("Idle" not in self._face_status_text)
         is_ocr = (getattr(self, "_active_ocr_worker", None) is not None) or ("Idle" not in getattr(self, "_ocr_status_text", "OCR: Idle"))
+        is_semantic = (getattr(self, "_active_semantic_worker", None) is not None) or ("Idle" not in getattr(self, "_semantic_status_text", "Semantic AI: Idle"))
 
         if getattr(self, "_targeted_face_scan_active", False):
             # Targeted rescan in progress; keep targeted message visible
@@ -10349,6 +10539,9 @@ class PhotoGalleryMainWindow(QMainWindow):
             style = "color: #0066CC; font-size: 8.5pt;"
         elif is_ocr:
             summary_text = f"OCR Indexing: {ocr_summary}"
+            style = "color: #0066CC; font-size: 8.5pt;"
+        elif is_semantic:
+            summary_text = f"Semantic AI: {sem_summary}"
             style = "color: #0066CC; font-size: 8.5pt;"
         elif is_crops:
             summary_text = self._face_crop_status_text
@@ -11807,6 +12000,11 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._monitor_timer.stop()
         if getattr(self, "_active_ocr_worker", None) is not None:
             self._active_ocr_worker.cancel()
+        if getattr(self, "_semantic_cancel", None) is not None:
+            try:
+                self._semantic_cancel.set()
+            except Exception:
+                pass
         if hasattr(self, "folder_watcher"):
             self.folder_watcher.stop()
         if hasattr(self, "xmp_daemon"):
@@ -11838,6 +12036,11 @@ class PhotoGalleryMainWindow(QMainWindow):
         if hasattr(self, "xmp_daemon"):
             self.xmp_daemon.stop()
         QThreadPool.globalInstance().waitForDone(1000)
+        if getattr(self, "semantic_repo", None) is not None:
+            try:
+                self.semantic_repo.close()
+            except Exception:
+                pass
 
         # Prune expired '.OriginalFiles' backups older than self.retention_days
         try:

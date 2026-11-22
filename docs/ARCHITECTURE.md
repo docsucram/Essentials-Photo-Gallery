@@ -53,7 +53,7 @@ Gallery/
 │   │   ├── geotag_resolver.py                   # Offline reverse geocoding, KD-tree nearest search & Nominatim SQLite cache
 │   │   ├── gps_matcher.py                       # Companion phone/GPX timestamp-to-GPS correlation & Δt clock-drift calibration
 │   │   ├── ocr_engine.py                        # Multi-backend offline OCR (Tesseract, RapidOCR, Windows OCR)
-│   │   └── semantic_engine.py                   # Optional MobileCLIP-S1 INT8 ONNX semantic vector engine, Subject presets & RRF fusion
+│   │   └── semantic_engine.py                   # Optional MobileCLIP-S1 INT8 ONNX + CLIP BPE tokenizer, Subject presets & RRF fusion
 │   ├── db/
 │   │   ├── __init__.py
 │   │   ├── connection.py                        # DualDatabaseEngine: WAL connections, schema migrations, online backups
