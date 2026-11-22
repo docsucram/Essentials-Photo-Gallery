@@ -463,7 +463,6 @@ class AppSettingsDialog(QDialog):
         save_copy_switch_view: bool | None = None,
         originals_dir: str | None = None,
         pause_write_back: bool = True,
-        auto_stack_raw_jpeg_on_scan: bool = False,
         icon_theme: str = "wlpg_aero",
         engine: Any | None = None,
         initial_tab: str | None = None,
@@ -583,13 +582,6 @@ class AppSettingsDialog(QDialog):
         )
         self.chk_favourites_enabled.setChecked(bool(favourites_enabled))
         v_gen.addWidget(self.chk_favourites_enabled)
-
-        self.chk_auto_stack_raw_jpeg = QCheckBox(
-            "Automatically stack RAW + JPEG pairs when scanning folders",
-            tab_general,
-        )
-        self.chk_auto_stack_raw_jpeg.setChecked(bool(auto_stack_raw_jpeg_on_scan))
-        v_gen.addWidget(self.chk_auto_stack_raw_jpeg)
 
         sep3 = QFrame(tab_general)
         sep3.setFrameShape(QFrame.HLine)
@@ -2013,9 +2005,6 @@ class AppSettingsDialog(QDialog):
 
     def favourites_enabled(self) -> bool:
         return self.chk_favourites_enabled.isChecked()
-
-    def auto_stack_raw_jpeg_on_scan(self) -> bool:
-        return self.chk_auto_stack_raw_jpeg.isChecked()
 
     def tooltip_previews_enabled(self) -> bool:
         return True

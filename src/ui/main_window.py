@@ -1151,7 +1151,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._semantic_status_text: str = "Semantic AI: Idle"
         self.nav_show_cameras: bool = False
         self.nav_show_subjects: bool = False
-        self.auto_stack_raw_jpeg_on_scan: bool = False
+        self.auto_group_bursts: bool = False
+        self.auto_group_raw_jpeg: bool = False
+        self._badge_show_flags: bool = True
+        self._badge_show_favourites: bool = True
+        self._badge_show_groups: bool = True
+        self._saved_badge_prefs: tuple[bool, bool, bool] = (True, True, True)
         try:
             from src.core.semantic_engine import SemanticEngine, SemanticVectorRepository
 
@@ -1929,12 +1934,6 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.sc_properties_enter = QShortcut(QKeySequence("Alt+Enter"), self)
         self.sc_properties_enter.activated.connect(self.open_file_properties)
 
-        # Stack / Unstack shortcuts
-        self.sc_stack_group = QShortcut(QKeySequence("Ctrl+G"), self)
-        self.sc_stack_group.activated.connect(self.group_selection_as_stack)
-        self.sc_stack_unstack = QShortcut(QKeySequence("Ctrl+Shift+G"), self)
-        self.sc_stack_unstack.activated.connect(self.unstack_selection)
-
         # F1: Keyboard Shortcuts Cheat-Sheet & Quick-Tag Hotkeys (Alt+1..Alt+9)
         self.sc_shortcuts = QShortcut(QKeySequence(Qt.Key_F1), self)
         self.sc_shortcuts.activated.connect(lambda: self.open_keyboard_shortcuts_dialog(0))
@@ -2671,11 +2670,17 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.statusBar().showMessage("Scan cancelled", 3000)
         if upserted_count > 0 or was_completed:
             self._media_meta_lookup.clear()
-        if was_completed and upserted_count > 0 and getattr(self, "auto_stack_raw_jpeg_on_scan", False):
-            try:
-                self.catalog_repo.auto_stack_raw_jpeg_pairs()
-            except Exception:
-                pass
+        if was_completed and upserted_count > 0:
+            if getattr(self, "auto_group_raw_jpeg", False):
+                try:
+                    self.catalog_repo.auto_stack_raw_jpeg_pairs()
+                except Exception:
+                    pass
+            if getattr(self, "auto_group_bursts", False):
+                try:
+                    self.catalog_repo.auto_stack_bursts(max_gap_sec=2.0, thumb_repo=self.thumb_repo)
+                except Exception:
+                    pass
         self.refresh_navigation_and_autocomplete()
         self.rebuild_and_run_query()
         if hasattr(self, "folder_watcher"):
@@ -3656,8 +3661,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.right_tag_dock.setVisible(False)
         if hasattr(self, "bottom_dock") and getattr(self, "_active_create_workspace", None) is None:
             self.bottom_dock.hide()
+        is_dark_theme = (getattr(self, "current_theme", "wlpg_aero") == "dark")
         self.compare_view.bind_repositories(self.catalog_repo, self.thumb_repo)
-        self.compare_view.set_dark_mode(getattr(self, "_dark_mode", False))
+        self.compare_view.set_dark_mode(is_dark_theme)
         self.compare_view.open_media_ids(ids, all_grid_ids=all_grid_ids, repo=self.catalog_repo, thumb_repo=self.thumb_repo)
         self.central_stack.setCurrentWidget(self.compare_view)
         self.ribbon.set_active_mode("compare")
@@ -3670,7 +3676,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         if hasattr(self.ribbon, "btn_cmp_auto_advance"):
             self.ribbon.btn_cmp_auto_advance.setChecked(self.compare_view.auto_advance)
         if hasattr(self.ribbon, "btn_cmp_dark_bg"):
-            self.ribbon.btn_cmp_dark_bg.setChecked(getattr(self, "_dark_mode", False))
+            self.ribbon.btn_cmp_dark_bg.blockSignals(True)
+            self.ribbon.btn_cmp_dark_bg.setChecked(is_dark_theme)
+            self.ribbon.btn_cmp_dark_bg.blockSignals(False)
         if hasattr(self.ribbon, "btn_cmp_tag_pane"):
             self.ribbon.btn_cmp_tag_pane.blockSignals(True)
             self.ribbon.btn_cmp_tag_pane.setChecked(False)
@@ -5108,43 +5116,118 @@ class PhotoGalleryMainWindow(QMainWindow):
             if int(getattr(r, "stack_count", 1) or 1) > 1
         ]
         if not heads:
-            self.show_status_message("No stacks in current view.", 2500)
+            self.show_status_message("No photo groups in current view.", 2500)
             return
         for hid in heads:
             members = self.catalog_repo.get_stack_member_ids(hid)
             if len(members) > 1:
                 self._expanded_stack_ids.add(int(members[0]))
         self.rebuild_and_run_query()
-        self.show_status_message(f"✓ Expanded all stacks in view", 2500)
+        self.show_status_message("✓ Expanded all photo groups in view", 2500)
 
     def collapse_all_stacks(self) -> None:
         if not self._expanded_stack_ids:
             return
         self._expanded_stack_ids.clear()
         self.rebuild_and_run_query()
-        self.show_status_message("✓ Collapsed all stacks", 2500)
+        self.show_status_message("✓ Collapsed all photo groups", 2500)
 
-    def set_as_stack_cover(self, media_id: int | None = None) -> None:
-        mid = int(media_id) if media_id is not None else (self.get_active_target_ids()[0] if self.get_active_target_ids() else 0)
-        if mid <= 0:
-            return
-        members = self.catalog_repo.get_stack_member_ids(mid)
-        if len(members) < 2 or members[0] == mid:
-            return
-        before_map = self.catalog_repo.get_stack_parent_map(members)
-        new_head = self.catalog_repo.set_stack_head(mid)
-        if new_head is not None:
-            after_map = self.catalog_repo.get_stack_parent_map(members)
-            if before_map != after_map:
-                self.undo_stack.push(
-                    _StackMutationUndoCommand(self, before_map, after_map, "Set Stack Cover")
-                )
-            old_head = members[0]
-            if old_head in self._expanded_stack_ids:
-                self._expanded_stack_ids.discard(old_head)
-                self._expanded_stack_ids.add(new_head)
+    def set_auto_group_bursts(self, enabled: bool) -> None:
+        self.auto_group_bursts = bool(enabled)
+        settings = QSettings("PhotoGallery64", "PhotoGallery64")
+        settings.setValue("auto_group_bursts", self.auto_group_bursts)
+        if hasattr(self, "ribbon") and hasattr(self.ribbon, "set_photo_grouping_state"):
+            self.ribbon.set_photo_grouping_state(
+                auto_bursts=self.auto_group_bursts,
+                auto_raw_jpeg=self.auto_group_raw_jpeg,
+            )
+        if self.auto_group_bursts:
+            count = self.catalog_repo.auto_stack_bursts(
+                folder_ids=None,
+                max_gap_sec=2.0,
+                thumb_repo=self.thumb_repo,
+            )
+            self._expanded_stack_ids.clear()
             self.rebuild_and_run_query()
-            self.show_status_message("✓ Updated stack cover", 2500)
+            self.show_status_message(f"✓ Auto-group bursts enabled ({count} group(s))", 3500)
+        else:
+            removed = self.catalog_repo.unstack_by_source("burst")
+            self._expanded_stack_ids.clear()
+            self.rebuild_and_run_query()
+            self.show_status_message(f"✓ Auto-group bursts disabled ({removed} photo(s) ungrouped)", 3500)
+
+    def set_auto_group_raw_jpeg(self, enabled: bool) -> None:
+        self.auto_group_raw_jpeg = bool(enabled)
+        settings = QSettings("PhotoGallery64", "PhotoGallery64")
+        settings.setValue("auto_group_raw_jpeg", self.auto_group_raw_jpeg)
+        if hasattr(self, "ribbon") and hasattr(self.ribbon, "set_photo_grouping_state"):
+            self.ribbon.set_photo_grouping_state(
+                auto_bursts=self.auto_group_bursts,
+                auto_raw_jpeg=self.auto_group_raw_jpeg,
+            )
+        if self.auto_group_raw_jpeg:
+            count = self.catalog_repo.auto_stack_raw_jpeg_pairs(folder_ids=None)
+            self._expanded_stack_ids.clear()
+            self.rebuild_and_run_query()
+            self.show_status_message(f"✓ Auto-group RAW + JPEG enabled ({count} pair(s))", 3500)
+        else:
+            removed = self.catalog_repo.unstack_by_source("raw_jpeg")
+            self._expanded_stack_ids.clear()
+            self.rebuild_and_run_query()
+            self.show_status_message(f"✓ Auto-group RAW + JPEG disabled ({removed} photo(s) ungrouped)", 3500)
+
+    def toggle_all_badges(self) -> None:
+        any_on = bool(
+            self._badge_show_flags
+            or self._badge_show_favourites
+            or self._badge_show_groups
+        )
+        if any_on:
+            self._saved_badge_prefs = (
+                bool(self._badge_show_flags),
+                bool(self._badge_show_favourites),
+                bool(self._badge_show_groups),
+            )
+            self.set_badge_visibility(flags=False, favourites=False, groups=False)
+            self.show_status_message("Thumbnail badges hidden", 2000)
+        else:
+            saved = getattr(self, "_saved_badge_prefs", (True, True, True))
+            if not any(saved):
+                saved = (True, True, True)
+            self.set_badge_visibility(flags=saved[0], favourites=saved[1], groups=saved[2])
+            self.show_status_message("Thumbnail badges shown", 2000)
+
+    def set_badge_visibility(
+        self,
+        *,
+        flags: bool | None = None,
+        favourites: bool | None = None,
+        groups: bool | None = None,
+        save: bool = True,
+    ) -> None:
+        if flags is not None:
+            self._badge_show_flags = bool(flags)
+        if favourites is not None:
+            self._badge_show_favourites = bool(favourites)
+        if groups is not None:
+            self._badge_show_groups = bool(groups)
+        if hasattr(self, "card_delegate") and self.card_delegate is not None:
+            self.card_delegate.show_flag_badges = self._badge_show_flags
+            self.card_delegate.show_favourite_badges = self._badge_show_favourites
+            self.card_delegate.show_group_badges = self._badge_show_groups
+        if hasattr(self, "ribbon") and hasattr(self.ribbon, "set_badges_state"):
+            self.ribbon.set_badges_state(
+                show_flags=self._badge_show_flags,
+                show_favourites=self._badge_show_favourites,
+                show_groups=self._badge_show_groups,
+            )
+        if save:
+            settings = QSettings("PhotoGallery64", "PhotoGallery64")
+            settings.setValue("badge_show_flags", self._badge_show_flags)
+            settings.setValue("badge_show_favourites", self._badge_show_favourites)
+            settings.setValue("badge_show_groups", self._badge_show_groups)
+        if hasattr(self, "grid_view") and self.grid_view is not None:
+            self.grid_view.viewport().update()
 
     def _current_stack_scope_folder_ids(self) -> list[int] | None:
         """Return folder IDs for the active view/folder scope, or None for entire library."""
@@ -5179,50 +5262,6 @@ class PhotoGalleryMainWindow(QMainWindow):
                 return fids
         return None
 
-    def group_selection_as_stack(self) -> None:
-        target_ids = list(self.get_active_target_ids())
-        if len(target_ids) < 2:
-            self.show_status_message("Select at least 2 items to group into a stack (Ctrl+G).", 3000)
-            return
-        affected_ids: set[int] = {int(mid) for mid in target_ids}
-        for mid in target_ids:
-            affected_ids.update(self.catalog_repo.get_stack_member_ids(int(mid)))
-        before_map = self.catalog_repo.get_stack_parent_map(sorted(affected_ids))
-        head = self.catalog_repo.create_stack(target_ids)
-        if head is not None:
-            after_map = self.catalog_repo.get_stack_parent_map(sorted(affected_ids))
-            if before_map != after_map:
-                self.undo_stack.push(
-                    _StackMutationUndoCommand(self, before_map, after_map, "Group into Stack")
-                )
-            self._expanded_stack_ids.discard(head)
-            self.rebuild_and_run_query()
-            self.show_status_message(f"✓ Stacked {len(target_ids)} item(s)", 3000)
-
-    def unstack_selection(self) -> None:
-        target_ids = list(self.get_active_target_ids())
-        if not target_ids:
-            return
-        all_members: list[int] = []
-        seen: set[int] = set()
-        for mid in target_ids:
-            for m in self.catalog_repo.get_stack_member_ids(int(mid)):
-                if m not in seen:
-                    seen.add(m)
-                    all_members.append(m)
-        before_map = self.catalog_repo.get_stack_parent_map(all_members)
-        changed = self.catalog_repo.unstack_media(all_members)
-        if changed > 0:
-            after_map = self.catalog_repo.get_stack_parent_map(all_members)
-            if before_map != after_map:
-                self.undo_stack.push(
-                    _StackMutationUndoCommand(self, before_map, after_map, "Unstack")
-                )
-        for mid in all_members:
-            self._expanded_stack_ids.discard(int(mid))
-        self.rebuild_and_run_query()
-        self.show_status_message(f"✓ Unstacked {changed} item(s)", 3000)
-
     def auto_stack_raw_jpeg_pairs(self, *, entire_library: bool = False) -> None:
         scope_fids = None if entire_library else self._current_stack_scope_folder_ids()
         before_map: dict[int, int | None] = {}
@@ -5233,12 +5272,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         if before_map:
             after_map = self.catalog_repo.get_stack_parent_map(list(before_map.keys()))
             self.undo_stack.push(
-                _StackMutationUndoCommand(self, before_map, after_map, "Auto-Stack RAW + JPEG Pairs")
+                _StackMutationUndoCommand(self, before_map, after_map, "Auto-Group RAW + JPEG")
             )
         self._expanded_stack_ids.clear()
         self.rebuild_and_run_query()
         scope_lbl = "in current folder" if scope_fids else "across library"
-        self.show_status_message(f"✓ Paired {count} RAW + JPEG stack(s) {scope_lbl}", 3500)
+        self.show_status_message(f"✓ Paired {count} RAW + JPEG group(s) {scope_lbl}", 3500)
 
     def auto_stack_bursts(self, *, entire_library: bool = False) -> None:
         scope_fids = None if entire_library else self._current_stack_scope_folder_ids()
@@ -5252,12 +5291,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         if before_map:
             after_map = self.catalog_repo.get_stack_parent_map(list(before_map.keys()))
             self.undo_stack.push(
-                _StackMutationUndoCommand(self, before_map, after_map, "Auto-Stack Bursts")
+                _StackMutationUndoCommand(self, before_map, after_map, "Auto-Group Bursts")
             )
         self._expanded_stack_ids.clear()
         self.rebuild_and_run_query()
         scope_lbl = "in current folder" if scope_fids else "across library"
-        self.show_status_message(f"✓ Grouped {count} burst stack(s) {scope_lbl}", 3500)
+        self.show_status_message(f"✓ Grouped {count} burst group(s) {scope_lbl}", 3500)
 
     def expand_stack_targets_if_collapsed(
         self, target_ids: Sequence[int], *, action_label: str = "modify"
@@ -8555,35 +8594,39 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.right_tag_dock.show()
             self.right_tag_dock.txt_caption.setFocus()
             self.right_tag_dock.txt_caption.selectAll()
-        elif action_id == "stacks_primary":
-            sel = list(self.get_active_target_ids())
-            if len(sel) >= 2:
-                self.group_selection_as_stack()
-            elif sel and len(self.catalog_repo.get_stack_member_ids(int(sel[0]))) > 1:
-                self.toggle_selected_stack_expanded()
+        elif action_id == "photo_grouping_primary":
+            if self._expanded_stack_ids:
+                self.collapse_all_stacks()
             else:
-                self.show_status_message(
-                    "Select 2+ photos to stack (Ctrl+G), or click 'Stacks ▾' for Auto-Stack.",
-                    3200,
-                )
-        elif action_id == "stack_group":
-            self.group_selection_as_stack()
-        elif action_id == "stack_unstack":
-            self.unstack_selection()
+                records = getattr(self.catalog_model, "_records", []) or []
+                has_groups = any(int(getattr(r, "stack_count", 1) or 1) > 1 for r in records)
+                if has_groups:
+                    self.expand_all_stacks()
+                else:
+                    self.show_status_message(
+                        "Click 'Photo grouping ▾' to enable Auto-group bursts or RAW + JPEG.",
+                        3200,
+                    )
+        elif action_id in ("toggle_auto_group_bursts:1", "toggle_auto_group_bursts:0"):
+            self.set_auto_group_bursts(action_id.endswith(":1"))
+        elif action_id in ("toggle_auto_group_raw_jpeg:1", "toggle_auto_group_raw_jpeg:0"):
+            self.set_auto_group_raw_jpeg(action_id.endswith(":1"))
         elif action_id == "stack_toggle":
             self.toggle_selected_stack_expanded()
         elif action_id == "stack_compare":
             self.open_compare_view()
-        elif action_id == "stack_set_cover":
-            self.set_as_stack_cover()
-        elif action_id == "auto_stack_raw_jpeg":
-            self.auto_stack_raw_jpeg_pairs()
-        elif action_id == "auto_stack_bursts":
-            self.auto_stack_bursts()
         elif action_id == "expand_all_stacks":
             self.expand_all_stacks()
         elif action_id == "collapse_all_stacks":
             self.collapse_all_stacks()
+        elif action_id == "toggle_all_badges":
+            self.toggle_all_badges()
+        elif action_id in ("toggle_badge_flags:1", "toggle_badge_flags:0"):
+            self.set_badge_visibility(flags=action_id.endswith(":1"))
+        elif action_id in ("toggle_badge_favourites:1", "toggle_badge_favourites:0"):
+            self.set_badge_visibility(favourites=action_id.endswith(":1"))
+        elif action_id in ("toggle_badge_groups:1", "toggle_badge_groups:0"):
+            self.set_badge_visibility(groups=action_id.endswith(":1"))
         elif action_id == "batch_people_tag":
             self.open_batch_people_view()
         elif action_id == "batch_select_all":
@@ -9943,7 +9986,6 @@ class PhotoGalleryMainWindow(QMainWindow):
             auto_exposure=getattr(self, "auto_exposure", True),
             originals_dir=str(Path.home() / "Pictures" / ".OriginalFiles"),
             pause_write_back=self.write_back_paused,
-            auto_stack_raw_jpeg_on_scan=getattr(self, "auto_stack_raw_jpeg_on_scan", False),
             icon_theme=getattr(self, "current_icon_theme", icon_provider.get_icon_theme()),
             engine=self.engine,
             initial_tab=initial_tab,
@@ -10008,7 +10050,6 @@ class PhotoGalleryMainWindow(QMainWindow):
                     self._start_semantic_worker()
 
             self.set_favourites_enabled(dlg.favourites_enabled())
-            self.auto_stack_raw_jpeg_on_scan = dlg.auto_stack_raw_jpeg_on_scan()
 
             old_find_people = getattr(self, "find_people_enabled", True)
             self.find_people_enabled = dlg.find_people_enabled()
@@ -10037,7 +10078,6 @@ class PhotoGalleryMainWindow(QMainWindow):
             settings.setValue("nav_show_cameras", self.nav_show_cameras)
             settings.setValue("nav_show_subjects", self.nav_show_subjects)
             settings.setValue("favourites_enabled", self.favourites_enabled)
-            settings.setValue("auto_stack_raw_jpeg_on_scan", self.auto_stack_raw_jpeg_on_scan)
             settings.setValue("find_people_enabled", self.find_people_enabled)
             settings.setValue("tooltip_previews", self.tooltip_previews)
             settings.setValue("jpeg_quality", self.jpeg_quality)
@@ -12142,7 +12182,19 @@ class PhotoGalleryMainWindow(QMainWindow):
                 except Exception:
                     pass
             self.find_people_enabled = _to_bool(_get_val("find_people_enabled", True), True)
-            self.auto_stack_raw_jpeg_on_scan = _to_bool(_get_val("auto_stack_raw_jpeg_on_scan", False), False)
+            self.auto_group_bursts = _to_bool(_get_val("auto_group_bursts", False), False)
+            self.auto_group_raw_jpeg = _to_bool(_get_val("auto_group_raw_jpeg", False), False)
+            if hasattr(self, "ribbon") and hasattr(self.ribbon, "set_photo_grouping_state"):
+                self.ribbon.set_photo_grouping_state(
+                    auto_bursts=self.auto_group_bursts,
+                    auto_raw_jpeg=self.auto_group_raw_jpeg,
+                )
+            self.set_badge_visibility(
+                flags=_to_bool(_get_val("badge_show_flags", True), True),
+                favourites=_to_bool(_get_val("badge_show_favourites", True), True),
+                groups=_to_bool(_get_val("badge_show_groups", True), True),
+                save=False,
+            )
             self.tooltip_previews = _to_bool(_get_val("tooltip_previews", True), True)
             self.jpeg_quality = int(_get_val("jpeg_quality", 83))
             self.retention_days = int(_get_val("retention_days", 180))

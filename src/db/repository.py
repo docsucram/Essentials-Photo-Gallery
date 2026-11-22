@@ -2176,7 +2176,7 @@ class CatalogRepository:
         if updates:
             with self.engine.catalog_transaction() as tx_conn:
                 tx_conn.executemany(
-                    "UPDATE media SET stack_parent_id = ? WHERE id = ?;", updates
+                    "UPDATE media SET stack_parent_id = ?, stack_source = 'raw_jpeg' WHERE id = ?;", updates
                 )
         return stacks_created
 
@@ -2293,9 +2293,57 @@ class CatalogRepository:
         if updates:
             with self.engine.catalog_transaction() as tx_conn:
                 tx_conn.executemany(
-                    "UPDATE media SET stack_parent_id = ? WHERE id = ?;", updates
+                    "UPDATE media SET stack_parent_id = ?, stack_source = 'burst' WHERE id = ?;", updates
                 )
         return stacks_created
+
+    def unstack_by_source(self, source: str, *, folder_ids: Sequence[int] | None = None) -> int:
+        """Ungroup all photo groups created by `source` ('raw_jpeg' or 'burst'), including legacy untagged stacks."""
+        src_key = str(source or "").strip().lower()
+        if src_key not in ("raw_jpeg", "burst"):
+            return 0
+        raw_exts = {"nef", "cr2", "cr3", "arw", "dng", "raf", "orf", "rw2", "pef", "srw"}
+        jpg_exts = {"jpg", "jpeg"}
+        conn = self.engine.catalog_conn()
+        cur = conn.cursor()
+        where = "WHERE stack_parent_id IS NOT NULL AND live_companion_for_id IS NULL"
+        params: list[Any] = []
+        if folder_ids:
+            fids = [int(f) for f in dict.fromkeys(folder_ids)]
+            ph = ",".join("?" for _ in fids)
+            where += f" AND folder_id IN ({ph})"
+            params.extend(fids)
+        rows = cur.execute(
+            f"SELECT id, stack_parent_id, LOWER(COALESCE(ext, '')), COALESCE(stack_source, '') FROM media {where};",
+            params,
+        ).fetchall()
+        by_sp: dict[int, list[tuple[int, str, str]]] = {}
+        for mid, sp, ext, ssrc in rows:
+            by_sp.setdefault(int(sp), []).append((int(mid), str(ext or "").lstrip("."), str(ssrc or "").lower()))
+
+        to_clear: list[int] = []
+        for sp, members in by_sp.items():
+            sources = {m[2] for m in members if m[2]}
+            if src_key in sources:
+                to_clear.extend(m[0] for m in members)
+            elif not sources:
+                exts = [m[1] for m in members]
+                is_rj = len(exts) == 2 and any(e in raw_exts for e in exts) and any(e in jpg_exts for e in exts)
+                if (src_key == "raw_jpeg" and is_rj) or (src_key == "burst" and not is_rj):
+                    to_clear.extend(m[0] for m in members)
+        if not to_clear:
+            return 0
+        changed = 0
+        with self.engine.catalog_transaction() as tx_conn:
+            tx_cur = tx_conn.cursor()
+            for chunk in _iter_id_chunks(to_clear, 900):
+                ph = ",".join("?" for _ in chunk)
+                tx_cur.execute(
+                    f"UPDATE media SET stack_parent_id = NULL, stack_source = NULL WHERE id IN ({ph});",
+                    list(chunk),
+                )
+                changed += int(tx_cur.rowcount or 0)
+        return changed
 
     # -------------------------------------------------------------------------
     # Instant UI Metadata Writes (Marks metadata_dirty = 1)

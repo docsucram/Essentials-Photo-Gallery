@@ -2275,11 +2275,58 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.setBrush(grad)
         p.drawEllipse(QRectF(s * 0.16, s * 0.16, s * 0.68, s * 0.68))
 
-    elif kind == "burst_stack":
-        p.setPen(QPen(QColor("#2B6CB0"), 1.0))
-        for dx, dy, fc in ((0.28, 0.14, "#D8EAF9"), (0.20, 0.22, "#A8D0F5"), (0.12, 0.30, "#6BB3EB")):
-            p.setBrush(QColor(fc))
-            p.drawRoundedRect(QRectF(s * dx, s * dy, s * 0.58, s * 0.54), 2.0, 2.0)
+    elif kind in ("burst_stack", "photo_grouping"):
+        # Crisp 3-layer stacked photo deck with miniature sky/mountain landscape on front photo
+        p.setPen(QPen(QColor("#4A77A8"), 1.0))
+        p.setBrush(QColor("#CBD5E1"))
+        p.drawRoundedRect(QRectF(s * 0.30, s * 0.10, s * 0.56, s * 0.48), 2.2, 2.2)
+        p.setPen(QPen(QColor("#3B6B9E"), 1.0))
+        p.setBrush(QColor("#E2ECF7"))
+        p.drawRoundedRect(QRectF(s * 0.21, s * 0.19, s * 0.56, s * 0.48), 2.2, 2.2)
+        # Front framed photo
+        front_r = QRectF(s * 0.11, s * 0.28, s * 0.58, s * 0.50)
+        p.setPen(QPen(QColor("#1E4E8C"), 1.2))
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawRoundedRect(front_r, 2.4, 2.4)
+        inner_r = front_r.adjusted(s * 0.05, s * 0.05, -s * 0.05, -s * 0.07)
+        sky = QLinearGradient(inner_r.topLeft(), inner_r.bottomLeft())
+        sky.setColorAt(0.0, QColor("#60A5FA"))
+        sky.setColorAt(1.0, QColor("#BFDBFE"))
+        p.setPen(Qt.NoPen)
+        p.setBrush(sky)
+        p.drawRoundedRect(inner_r, 1.2, 1.2)
+        # Tiny golden sun + mountain peaks
+        p.setBrush(QColor("#FBBF24"))
+        p.drawEllipse(QRectF(inner_r.left() + inner_r.width() * 0.14, inner_r.top() + inner_r.height() * 0.14, s * 0.10, s * 0.10))
+        mtn = QPolygonF([
+            QPointF(inner_r.left(), inner_r.bottom()),
+            QPointF(inner_r.left() + inner_r.width() * 0.34, inner_r.top() + inner_r.height() * 0.42),
+            QPointF(inner_r.left() + inner_r.width() * 0.56, inner_r.top() + inner_r.height() * 0.68),
+            QPointF(inner_r.left() + inner_r.width() * 0.76, inner_r.top() + inner_r.height() * 0.36),
+            QPointF(inner_r.right(), inner_r.bottom()),
+        ])
+        p.setBrush(QColor("#1D4ED8"))
+        p.drawPolygon(mtn)
+
+    elif kind == "badges":
+        # Miniature photo frame with 3 crisp overlay corner badges (flag, heart, group pill)
+        card = QRectF(s * 0.12, s * 0.14, s * 0.76, s * 0.72)
+        bg = QLinearGradient(card.topLeft(), card.bottomRight())
+        bg.setColorAt(0.0, QColor("#DCEBFA"))
+        bg.setColorAt(1.0, QColor("#B7D4F2"))
+        p.setPen(QPen(QColor("#3E6B99"), 1.2))
+        p.setBrush(bg)
+        p.drawRoundedRect(card, 3.0, 3.0)
+        # Top-right red flag pill
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#DC2626"))
+        p.drawRoundedRect(QRectF(card.right() - s * 0.24, card.top() + s * 0.08, s * 0.18, s * 0.16), 2.0, 2.0)
+        # Bottom-right rose heart dot
+        p.setBrush(QColor("#F43F5E"))
+        p.drawEllipse(QRectF(card.right() - s * 0.23, card.bottom() - s * 0.25, s * 0.17, s * 0.17))
+        # Bottom-left cyan group squircle
+        p.setBrush(QColor("#0284C7"))
+        p.drawRoundedRect(QRectF(card.left() + s * 0.08, card.bottom() - s * 0.24, s * 0.28, s * 0.16), 2.5, 2.5)
 
     else:
         p.setPen(QPen(QColor("#3E6B99"), 1.1))
@@ -6464,54 +6511,60 @@ class RibbonToolbar(QWidget):
 
         return container, btn_top
 
-    def _make_split_stacks_button(self, parent: QWidget) -> tuple[QWidget, QToolButton]:
+    def _make_split_photo_grouping_button(self, parent: QWidget) -> tuple[QWidget, QToolButton]:
         """
-        Creates a 2-button vertical split 'Stacks' control in Home -> Organize:
-        - Top button: Group selected (2+) into stack, or expand/collapse selected stack.
-        - Bottom button ('Stacks ▾'): Full Stacks menu (Group, Unstack, Compare, Set Cover, Auto-Stack, Expand/Collapse All).
+        Creates a 2-button vertical split 'Photo grouping' control in Home -> Organize:
+        - Top button: Toggles Expand / Collapse all photo groups in current view.
+        - Bottom button ('Photo\\ngrouping ▾'): Checkable Auto-group bursts & Auto-group RAW + JPEG + Expand/Collapse all.
         """
         container = QWidget(parent)
-        container.setObjectName("StacksSplitContainer")
-        container.setFixedSize(70, 73)
-        container._orig_w = 70
+        container.setObjectName("PhotoGroupingSplitContainer")
+        container.setFixedSize(74, 73)
+        container._orig_w = 74
         vbox = QVBoxLayout(container)
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.setSpacing(0)
 
         btn_top = QToolButton(container)
-        btn_top.setObjectName("StacksTopBtn")
-        btn_top.setFixedSize(70, 38)
+        btn_top.setObjectName("PhotoGroupingTopBtn")
+        btn_top.setFixedSize(74, 38)
+        btn_top.setCheckable(True)
         btn_top.setCursor(Qt.PointingHandCursor)
-        btn_top.setIcon(make_wlpg_icon("burst_stack", 32))
+        btn_top.setIcon(make_wlpg_icon("photo_grouping", 32))
         btn_top.setIconSize(QSize(28, 28))
         btn_top.setToolButtonStyle(Qt.ToolButtonIconOnly)
         btn_top.setText("")
-        btn_top.setToolTip("Stacks: Group (Ctrl+G) or Expand/Collapse (S)")
-        btn_top._tooltip_override = "Stacks: Group (Ctrl+G) or Expand/Collapse (S)"
-        btn_top.clicked.connect(lambda: self.action_triggered.emit("stacks_primary"))
+        btn_top.setToolTip("Photo grouping: Click to expand/collapse groups, or use arrow for Auto-group toggles")
+        btn_top._tooltip_override = "Photo grouping: Click to expand/collapse groups, or use arrow for Auto-group toggles"
+        btn_top.clicked.connect(lambda: self.action_triggered.emit("photo_grouping_primary"))
         vbox.addWidget(btn_top)
 
         btn_bot = QToolButton(container)
-        btn_bot.setObjectName("StacksBottomBtn")
-        btn_bot.setFixedSize(70, 35)
+        btn_bot.setObjectName("PhotoGroupingBottomBtn")
+        btn_bot.setFixedSize(74, 35)
         btn_bot.setCursor(Qt.PointingHandCursor)
-        btn_bot.setText("Stacks ▾")
-        btn_bot.setToolTip("Stacks menu (Group, Unstack, Compare, Auto-Stack)")
+        btn_bot.setText("Photo\ngrouping ▾")
+        btn_bot.setToolTip("Photo grouping options (Auto-group bursts, Auto-group RAW + JPEG, Expand/Collapse)")
         btn_bot.setPopupMode(QToolButton.InstantPopup)
 
         menu = QMenu(btn_bot)
         menu.setFont(QFont("Segoe UI", 9))
-        menu.addAction("Group Selected as Stack (Ctrl+G)", lambda: self.action_triggered.emit("stack_group"))
-        menu.addAction("Unstack (Ctrl+Shift+G)", lambda: self.action_triggered.emit("stack_unstack"))
-        menu.addAction("Expand / Collapse Stack (S)", lambda: self.action_triggered.emit("stack_toggle"))
-        menu.addAction("Compare Stack (C)", lambda: self.action_triggered.emit("stack_compare"))
-        menu.addAction("Set as Stack Cover", lambda: self.action_triggered.emit("stack_set_cover"))
+
+        self.act_auto_group_bursts = menu.addAction("Auto-group bursts")
+        self.act_auto_group_bursts.setCheckable(True)
+        self.act_auto_group_bursts.toggled.connect(
+            lambda chk: self.action_triggered.emit(f"toggle_auto_group_bursts:{1 if chk else 0}")
+        )
+
+        self.act_auto_group_raw_jpeg = menu.addAction("Auto-group RAW + JPEG")
+        self.act_auto_group_raw_jpeg.setCheckable(True)
+        self.act_auto_group_raw_jpeg.toggled.connect(
+            lambda chk: self.action_triggered.emit(f"toggle_auto_group_raw_jpeg:{1 if chk else 0}")
+        )
+
         menu.addSeparator()
-        menu.addAction("Auto-Stack RAW + JPEG Pairs", lambda: self.action_triggered.emit("auto_stack_raw_jpeg"))
-        menu.addAction("Auto-Stack Bursts (<= 2s)", lambda: self.action_triggered.emit("auto_stack_bursts"))
-        menu.addSeparator()
-        menu.addAction("Expand All Stacks in View", lambda: self.action_triggered.emit("expand_all_stacks"))
-        menu.addAction("Collapse All Stacks in View", lambda: self.action_triggered.emit("collapse_all_stacks"))
+        menu.addAction("Expand all groups", lambda: self.action_triggered.emit("expand_all_stacks"))
+        menu.addAction("Collapse all groups", lambda: self.action_triggered.emit("collapse_all_stacks"))
         btn_bot.setMenu(menu)
         vbox.addWidget(btn_bot)
 
@@ -6524,11 +6577,121 @@ class RibbonToolbar(QWidget):
         btn_top._orig_text = ""
 
         if hasattr(self, "_all_themed_buttons"):
-            btn_top._icon_kind = "burst_stack"
+            btn_top._icon_kind = "photo_grouping"
             btn_top._is_large = True
             self._all_themed_buttons.append(btn_top)
 
         return container, btn_top
+
+    def set_photo_grouping_state(self, *, auto_bursts: bool, auto_raw_jpeg: bool) -> None:
+        """Sync Photo grouping dropdown checkmarks and top button active indicator."""
+        if hasattr(self, "act_auto_group_bursts"):
+            self.act_auto_group_bursts.blockSignals(True)
+            self.act_auto_group_bursts.setChecked(bool(auto_bursts))
+            self.act_auto_group_bursts.blockSignals(False)
+        if hasattr(self, "act_auto_group_raw_jpeg"):
+            self.act_auto_group_raw_jpeg.blockSignals(True)
+            self.act_auto_group_raw_jpeg.setChecked(bool(auto_raw_jpeg))
+            self.act_auto_group_raw_jpeg.blockSignals(False)
+        if hasattr(self, "btn_photo_grouping"):
+            self.btn_photo_grouping.blockSignals(True)
+            self.btn_photo_grouping.setChecked(bool(auto_bursts or auto_raw_jpeg))
+            self.btn_photo_grouping.blockSignals(False)
+
+    def _make_split_badges_button(self, parent: QWidget) -> tuple[QWidget, QToolButton]:
+        """
+        Creates a 2-button vertical split 'Badges' control in View -> Show details:
+        - Top button: Master toggle for all thumbnail overlay badges (Flags, Favourites, Photo groups).
+        - Bottom button ('Badges ▾'): Individual checkable toggles for each badge type.
+        """
+        container = QWidget(parent)
+        container.setObjectName("BadgesSplitContainer")
+        container.setFixedSize(64, 73)
+        container._orig_w = 64
+        vbox = QVBoxLayout(container)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
+
+        btn_top = QToolButton(container)
+        btn_top.setObjectName("BadgesTopBtn")
+        btn_top.setFixedSize(64, 38)
+        btn_top.setCheckable(True)
+        btn_top.setChecked(True)
+        btn_top.setCursor(Qt.PointingHandCursor)
+        btn_top.setIcon(make_wlpg_icon("badges", 32))
+        btn_top.setIconSize(QSize(28, 28))
+        btn_top.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        btn_top.setText("")
+        btn_top.setToolTip("Show / hide all thumbnail overlay badges (Flags, Favourites, Photo groups)")
+        btn_top._tooltip_override = "Show / hide all thumbnail overlay badges (Flags, Favourites, Photo groups)"
+        btn_top.clicked.connect(lambda: self.action_triggered.emit("toggle_all_badges"))
+        vbox.addWidget(btn_top)
+
+        btn_bot = QToolButton(container)
+        btn_bot.setObjectName("BadgesBottomBtn")
+        btn_bot.setFixedSize(64, 35)
+        btn_bot.setCursor(Qt.PointingHandCursor)
+        btn_bot.setText("Badges ▾")
+        btn_bot.setToolTip("Choose which overlay badges appear on thumbnails")
+        btn_bot.setPopupMode(QToolButton.InstantPopup)
+
+        menu = QMenu(btn_bot)
+        menu.setFont(QFont("Segoe UI", 9))
+
+        self.act_badge_flags = menu.addAction("Flags (Pick / Reject)")
+        self.act_badge_flags.setCheckable(True)
+        self.act_badge_flags.setChecked(True)
+        self.act_badge_flags.toggled.connect(
+            lambda chk: self.action_triggered.emit(f"toggle_badge_flags:{1 if chk else 0}")
+        )
+
+        self.act_badge_favourites = menu.addAction("Favourites (Heart)")
+        self.act_badge_favourites.setCheckable(True)
+        self.act_badge_favourites.setChecked(True)
+        self.act_badge_favourites.toggled.connect(
+            lambda chk: self.action_triggered.emit(f"toggle_badge_favourites:{1 if chk else 0}")
+        )
+
+        self.act_badge_groups = menu.addAction("Photo groups")
+        self.act_badge_groups.setCheckable(True)
+        self.act_badge_groups.setChecked(True)
+        self.act_badge_groups.toggled.connect(
+            lambda chk: self.action_triggered.emit(f"toggle_badge_groups:{1 if chk else 0}")
+        )
+
+        btn_bot.setMenu(menu)
+        vbox.addWidget(btn_bot)
+
+        btn_top.menu = btn_bot.menu
+        btn_top.setMenu = btn_bot.setMenu
+        btn_top.popupMode = btn_bot.popupMode
+        btn_top.container_widget = container
+        btn_top.btn_bottom = btn_bot
+        btn_top.original_text = ""
+        btn_top._orig_text = ""
+
+        if hasattr(self, "_all_themed_buttons"):
+            btn_top._icon_kind = "badges"
+            btn_top._is_large = True
+            self._all_themed_buttons.append(btn_top)
+
+        return container, btn_top
+
+    def set_badges_state(self, *, show_flags: bool, show_favourites: bool, show_groups: bool) -> None:
+        """Sync View -> Badges dropdown checkmarks and master top button checked state."""
+        for act, val in (
+            (getattr(self, "act_badge_flags", None), show_flags),
+            (getattr(self, "act_badge_favourites", None), show_favourites),
+            (getattr(self, "act_badge_groups", None), show_groups),
+        ):
+            if act is not None:
+                act.blockSignals(True)
+                act.setChecked(bool(val))
+                act.blockSignals(False)
+        if hasattr(self, "btn_detail_badges"):
+            self.btn_detail_badges.blockSignals(True)
+            self.btn_detail_badges.setChecked(bool(show_flags or show_favourites or show_groups))
+            self.btn_detail_badges.blockSignals(False)
 
     def _make_split_mosaic_button(self, parent: QWidget) -> tuple[QWidget, QToolButton]:
         """
@@ -7772,8 +7935,9 @@ class RibbonToolbar(QWidget):
         split_tag_desc, self.btn_tag_desc = self._make_split_tag_desc_button(grp_org)
         grp_org.content_layout.addWidget(split_tag_desc)
 
-        split_stacks, self.btn_stacks = self._make_split_stacks_button(grp_org)
-        grp_org.content_layout.addWidget(split_stacks)
+        split_pg, self.btn_photo_grouping = self._make_split_photo_grouping_button(grp_org)
+        self.btn_stacks = self.btn_photo_grouping  # Compatibility alias
+        grp_org.content_layout.addWidget(split_pg)
 
         # Right sub-column: Geotag, Rate, Flag (3 stacked rows)
         o_right_col = QVBoxLayout()
@@ -8923,14 +9087,13 @@ class RibbonToolbar(QWidget):
         det_hbox.addLayout(chk_col1)
         det_hbox.addLayout(chk_col2)
 
-        self.btn_detail_flags = self._make_btn("Flags", "flag", grp_details, large=True, checkable=True)
-        self.btn_detail_flags.setChecked("flag" in self._visible_details)
-        det_hbox.addWidget(self.btn_detail_flags)
+        split_badges, self.btn_detail_badges = self._make_split_badges_button(grp_details)
+        self.btn_detail_flags = self.btn_detail_badges  # Compatibility alias
+        det_hbox.addWidget(split_badges)
 
         self._detail_checkboxes = {
             "rating": self.btn_detail_rating,
             "caption": self.btn_detail_caption,
-            "flag": self.btn_detail_flags,
             "filename": self.chk_filename,
             "size": self.chk_filesize,
             "date_taken": self.chk_date_taken,
@@ -11138,6 +11301,8 @@ class RibbonToolbar(QWidget):
             }
             QWidget#SlideshowSplitContainer,
             QWidget#TagDescSplitContainer,
+            QWidget#PhotoGroupingSplitContainer,
+            QWidget#BadgesSplitContainer,
             QWidget#MosaicLayoutSplitContainer,
             QWidget#SaveCopySplitContainer {
                 background: transparent;
@@ -11146,6 +11311,8 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowTopBtn,
             QToolButton#TagDescTopBtn,
+            QToolButton#PhotoGroupingTopBtn,
+            QToolButton#BadgesTopBtn,
             QToolButton#MosaicLayoutTopBtn,
             QToolButton#SaveCopyTopBtn {
                 background: transparent;
@@ -11158,6 +11325,8 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowTopBtn:hover,
             QToolButton#TagDescTopBtn:hover,
+            QToolButton#PhotoGroupingTopBtn:hover,
+            QToolButton#BadgesTopBtn:hover,
             QToolButton#MosaicLayoutTopBtn:hover,
             QToolButton#SaveCopyTopBtn:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -11166,6 +11335,10 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowTopBtn:pressed,
             QToolButton#TagDescTopBtn:pressed,
+            QToolButton#PhotoGroupingTopBtn:pressed,
+            QToolButton#PhotoGroupingTopBtn:checked,
+            QToolButton#BadgesTopBtn:pressed,
+            QToolButton#BadgesTopBtn:checked,
             QToolButton#MosaicLayoutTopBtn:pressed,
             QToolButton#MosaicLayoutTopBtn:checked,
             QToolButton#SaveCopyTopBtn:pressed {
@@ -11175,6 +11348,8 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowBottomBtn,
             QToolButton#TagDescBottomBtn,
+            QToolButton#PhotoGroupingBottomBtn,
+            QToolButton#BadgesBottomBtn,
             QToolButton#MosaicLayoutBottomBtn,
             QToolButton#SaveCopyBottomBtn {
                 background: transparent;
@@ -11191,6 +11366,8 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowBottomBtn:hover,
             QToolButton#TagDescBottomBtn:hover,
+            QToolButton#PhotoGroupingBottomBtn:hover,
+            QToolButton#BadgesBottomBtn:hover,
             QToolButton#MosaicLayoutBottomBtn:hover,
             QToolButton#SaveCopyBottomBtn:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -11199,6 +11376,8 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowBottomBtn:pressed,
             QToolButton#TagDescBottomBtn:pressed,
+            QToolButton#PhotoGroupingBottomBtn:pressed,
+            QToolButton#BadgesBottomBtn:pressed,
             QToolButton#MosaicLayoutBottomBtn:pressed,
             QToolButton#MosaicLayoutBottomBtn:checked,
             QToolButton#SaveCopyBottomBtn:pressed {
@@ -11208,6 +11387,8 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowBottomBtn::menu-indicator,
             QToolButton#TagDescBottomBtn::menu-indicator,
+            QToolButton#PhotoGroupingBottomBtn::menu-indicator,
+            QToolButton#BadgesBottomBtn::menu-indicator,
             QToolButton#MosaicLayoutBottomBtn::menu-indicator,
             QToolButton#SaveCopyBottomBtn::menu-indicator {
                 image: none;
@@ -11750,6 +11931,8 @@ class RibbonToolbar(QWidget):
             }
             QWidget#SlideshowSplitContainer,
             QWidget#TagDescSplitContainer,
+            QWidget#PhotoGroupingSplitContainer,
+            QWidget#BadgesSplitContainer,
             QWidget#MosaicLayoutSplitContainer,
             QWidget#SaveCopySplitContainer {
                 background: transparent;
@@ -11758,6 +11941,8 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowTopBtn,
             QToolButton#TagDescTopBtn,
+            QToolButton#PhotoGroupingTopBtn,
+            QToolButton#BadgesTopBtn,
             QToolButton#MosaicLayoutTopBtn,
             QToolButton#SaveCopyTopBtn {
                 background: transparent;
@@ -11769,6 +11954,10 @@ class RibbonToolbar(QWidget):
             QToolButton#SlideshowBottomBtn:hover,
             QToolButton#TagDescTopBtn:hover,
             QToolButton#TagDescBottomBtn:hover,
+            QToolButton#PhotoGroupingTopBtn:hover,
+            QToolButton#PhotoGroupingBottomBtn:hover,
+            QToolButton#BadgesTopBtn:hover,
+            QToolButton#BadgesBottomBtn:hover,
             QToolButton#MosaicLayoutTopBtn:hover,
             QToolButton#MosaicLayoutBottomBtn:hover,
             QToolButton#SaveCopyTopBtn:hover,
@@ -11776,6 +11965,8 @@ class RibbonToolbar(QWidget):
                 background: #2A323D;
                 border: 1px solid #475569;
             }
+            QToolButton#PhotoGroupingTopBtn:checked,
+            QToolButton#BadgesTopBtn:checked,
             QToolButton#MosaicLayoutTopBtn:checked,
             QToolButton#MosaicLayoutBottomBtn:checked {
                 background: #2A3A50;
@@ -11783,6 +11974,8 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowBottomBtn,
             QToolButton#TagDescBottomBtn,
+            QToolButton#PhotoGroupingBottomBtn,
+            QToolButton#BadgesBottomBtn,
             QToolButton#MosaicLayoutBottomBtn,
             QToolButton#SaveCopyBottomBtn {
                 background: transparent;
@@ -11796,6 +11989,8 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowBottomBtn::menu-indicator,
             QToolButton#TagDescBottomBtn::menu-indicator,
+            QToolButton#PhotoGroupingBottomBtn::menu-indicator,
+            QToolButton#BadgesBottomBtn::menu-indicator,
             QToolButton#MosaicLayoutBottomBtn::menu-indicator,
             QToolButton#SaveCopyBottomBtn::menu-indicator {
                 image: none;
@@ -12279,6 +12474,8 @@ class RibbonToolbar(QWidget):
                 bottom: 2px;
             }
             QWidget#TagDescSplitContainer,
+            QWidget#PhotoGroupingSplitContainer,
+            QWidget#BadgesSplitContainer,
             QWidget#SlideshowSplitContainer,
             QWidget#MosaicLayoutSplitContainer,
             QWidget#SaveCopySplitContainer {
@@ -12288,6 +12485,8 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowTopBtn,
             QToolButton#TagDescTopBtn,
+            QToolButton#PhotoGroupingTopBtn,
+            QToolButton#BadgesTopBtn,
             QToolButton#MosaicLayoutTopBtn,
             QToolButton#SaveCopyTopBtn {
                 background: transparent;
@@ -12300,6 +12499,8 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowTopBtn:hover,
             QToolButton#TagDescTopBtn:hover,
+            QToolButton#PhotoGroupingTopBtn:hover,
+            QToolButton#BadgesTopBtn:hover,
             QToolButton#MosaicLayoutTopBtn:hover,
             QToolButton#SaveCopyTopBtn:hover {
                 background: #E5E7EB;
@@ -12307,11 +12508,15 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowTopBtn:pressed,
             QToolButton#TagDescTopBtn:pressed,
+            QToolButton#PhotoGroupingTopBtn:pressed,
+            QToolButton#BadgesTopBtn:pressed,
             QToolButton#MosaicLayoutTopBtn:pressed,
             QToolButton#SaveCopyTopBtn:pressed {
                 background: #D1D5DB;
                 border: 1px solid #9CA3AF;
             }
+            QToolButton#PhotoGroupingTopBtn:checked,
+            QToolButton#BadgesTopBtn:checked,
             QToolButton#MosaicLayoutTopBtn:checked,
             QToolButton#MosaicLayoutBottomBtn:checked {
                 background: #DBEAFE;
@@ -12319,6 +12524,8 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowBottomBtn,
             QToolButton#TagDescBottomBtn,
+            QToolButton#PhotoGroupingBottomBtn,
+            QToolButton#BadgesBottomBtn,
             QToolButton#MosaicLayoutBottomBtn,
             QToolButton#SaveCopyBottomBtn {
                 background: transparent;
@@ -12335,6 +12542,8 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowBottomBtn:hover,
             QToolButton#TagDescBottomBtn:hover,
+            QToolButton#PhotoGroupingBottomBtn:hover,
+            QToolButton#BadgesBottomBtn:hover,
             QToolButton#MosaicLayoutBottomBtn:hover,
             QToolButton#SaveCopyBottomBtn:hover {
                 background: #E5E7EB;
@@ -12342,6 +12551,8 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowBottomBtn:pressed,
             QToolButton#TagDescBottomBtn:pressed,
+            QToolButton#PhotoGroupingBottomBtn:pressed,
+            QToolButton#BadgesBottomBtn:pressed,
             QToolButton#MosaicLayoutBottomBtn:pressed,
             QToolButton#SaveCopyBottomBtn:pressed {
                 background: #D1D5DB;

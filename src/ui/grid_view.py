@@ -543,6 +543,9 @@ class MediaCardDelegate(QStyledItemDelegate):
         self.thumb_repo: Any | None = None
         self.dark_mode: bool = False
         self.favourites_enabled: bool = True
+        self.show_flag_badges: bool = True
+        self.show_favourite_badges: bool = True
+        self.show_group_badges: bool = True
         self._face_crop_cache: dict[tuple[int, int], QPixmap] = {}
         self._person_face_rects: dict[tuple[int, int], tuple[float, float, float, float]] = {}
         self._scaled_pixmap_cache: dict[tuple[int, int, int], QPixmap] = {}
@@ -656,18 +659,24 @@ class MediaCardDelegate(QStyledItemDelegate):
         return QRect(card_rect.right() - 28, card_rect.top() + 4, 24, 24)
 
     def heart_rect(self, card_rect: QRect, img_box: QRect | None = None) -> QRect:
-        if not getattr(self, "favourites_enabled", True):
+        if not getattr(self, "favourites_enabled", True) or not getattr(self, "show_favourite_badges", True):
             return QRect()
         box = img_box if img_box is not None else self._estimate_img_box(card_rect)
         sz = 26
         return QRect(box.right() - sz - 4, box.bottom() - sz - 4, sz, sz)
 
-    def stack_badge_rect(self, card_rect: QRect, *, wide: bool = False, inset_deck: bool = False) -> QRect:
-        fl = self.flag_rect(card_rect)
-        w = 54 if wide else 42
-        dx = -6 if inset_deck else 0
-        dy = 6 if inset_deck else 0
-        return QRect(fl.left() - w - 4 + dx, fl.top() + 3 + dy, w, 17)
+    def stack_badge_rect(
+        self,
+        card_rect: QRect,
+        img_box: QRect | None = None,
+        *,
+        wide: bool = False,
+        inset_deck: bool = False,
+    ) -> QRect:
+        box = img_box if img_box is not None else self._estimate_img_box(card_rect)
+        h = 26
+        w = 64 if wide else 44
+        return QRect(box.left() + 4, box.bottom() - h - 4, w, h)
 
     @staticmethod
     def _draw_vector_stack_icon(painter: QPainter, x: float, y: float, color: QColor) -> None:
@@ -701,7 +710,7 @@ class MediaCardDelegate(QStyledItemDelegate):
             painter.fillRect(img_box, QColor(15, 23, 42, 115))
 
         # Top-Right WLPG Flag (Pick = 1 shaded red pennant + silver pole / Reject = -1 hollow with strike / Unreviewed = 0 on hover)
-        if "flag" in self._visible_details or "all" in self._visible_details:
+        if getattr(self, "show_flag_badges", True):
             if flag == -1:
                 fl_rect = self.flag_rect(card_rect)
                 pole_x = fl_rect.left() + 6
@@ -757,7 +766,7 @@ class MediaCardDelegate(QStyledItemDelegate):
         # Option A: Bottom-right squircle pill
         # - In Mosaic mode: Lap-style star-turns-into-heart when favourited (+ rating digit)
         # - In Standard Grid mode: Centered heart squircle (solid rose when fav, outline on hover)
-        fav_enabled = bool(getattr(self, "favourites_enabled", True))
+        fav_enabled = bool(getattr(self, "favourites_enabled", True)) and bool(getattr(self, "show_favourite_badges", True))
         is_fav = bool(getattr(rec_meta, "is_favourite", 0)) if fav_enabled else False
         rating_val = int(getattr(rec_meta, "rating", 0) or 0)
         is_mosaic = (getattr(self, "_layout_mode", "wlpg_grid") in ("tiles", "mosaic", "masonry"))
@@ -847,11 +856,54 @@ class MediaCardDelegate(QStyledItemDelegate):
         is_live = bool(getattr(rec_meta, "is_live_photo", 0))
         is_offline = bool(getattr(rec_meta, "is_offline", 0))
         stack_cnt = int(getattr(rec_meta, "stack_count", 1) or 1)
-        if is_live or is_offline or stack_cnt > 1:
+        show_grp = bool(getattr(self, "show_group_badges", True)) and stack_cnt > 1
+        if is_live or is_offline or show_grp:
             painter.save()
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            group_rect: QRect | None = None
+            if show_grp:
+                stack_pos = int(getattr(rec_meta, "stack_pos", 0) or 0)
+                is_rj = bool(getattr(rec_meta, "is_raw_jpg_stack", False))
+                is_wide = bool((is_rj and stack_pos == 0) or stack_pos > 0 or stack_cnt >= 10)
+                st_rect = self.stack_badge_rect(card_rect, img_box, wide=is_wide)
+                group_rect = st_rect
+                # Match Favourite bottom-right squircle aesthetic (frosted dark pill + subtle white rim)
+                if stack_pos > 0:
+                    pill_bg = QColor(14, 116, 144, 210)
+                    pill_bd = QColor(125, 211, 252, 140)
+                elif is_rj:
+                    pill_bg = QColor(15, 23, 42, 195)
+                    pill_bd = QColor(245, 158, 11, 140)
+                else:
+                    pill_bg = QColor(15, 23, 42, 190)
+                    pill_bd = QColor(255, 255, 255, 65)
+                painter.setBrush(pill_bg)
+                painter.setPen(QPen(pill_bd, 1.0))
+                painter.drawRoundedRect(QRectF(st_rect).adjusted(0.5, 0.5, -0.5, -0.5), 6.0, 6.0)
+                painter.setFont(QFont("Segoe UI", 8.5 if not is_rj else 7.5, QFont.Weight.Bold))
+                if stack_pos > 0:
+                    self._draw_vector_stack_icon(painter, st_rect.left() + 6.5, st_rect.top() + 8.0, QColor("#E0F2FE"))
+                    painter.setPen(QColor("#F8FAFC"))
+                    painter.drawText(
+                        QRect(st_rect.left() + 19, st_rect.top(), st_rect.width() - 22, st_rect.height()),
+                        Qt.AlignCenter,
+                        f"{stack_pos}/{stack_cnt}",
+                    )
+                elif is_rj:
+                    painter.setPen(QColor("#FDE68A"))
+                    painter.drawText(st_rect, Qt.AlignCenter, "RAW+JPG")
+                else:
+                    self._draw_vector_stack_icon(painter, st_rect.left() + 7.0, st_rect.top() + 8.0, QColor("#E2E8F0"))
+                    painter.setPen(QColor("#F8FAFC"))
+                    painter.drawText(
+                        QRect(st_rect.left() + 19, st_rect.top(), st_rect.width() - 22, st_rect.height()),
+                        Qt.AlignCenter,
+                        str(stack_cnt),
+                    )
             painter.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
             if is_live:
-                live_rect = QRect(img_box.left() + 4, img_box.bottom() - 20, 36, 15)
+                lx = (group_rect.right() + 4) if group_rect is not None else (img_box.left() + 4)
+                live_rect = QRect(lx, img_box.bottom() - 20, 36, 15)
                 painter.setPen(QPen(QColor(255, 255, 255, 160), 1))
                 painter.setBrush(QColor(15, 23, 42, 200))
                 painter.drawRoundedRect(live_rect, 3, 3)
@@ -864,45 +916,6 @@ class MediaCardDelegate(QStyledItemDelegate):
                 painter.drawRoundedRect(off_rect, 3, 3)
                 painter.setPen(QColor("#FEF3C7"))
                 painter.drawText(off_rect, Qt.AlignCenter, "OFFLINE")
-            if stack_cnt > 1:
-                stack_pos = int(getattr(rec_meta, "stack_pos", 0) or 0)
-                is_rj = bool(getattr(rec_meta, "is_raw_jpg_stack", False))
-                is_mosaic_deck = (
-                    self._layout_mode in ("tiles", "mosaic", "masonry")
-                    and stack_pos == 0
-                )
-                if stack_pos > 0:
-                    badge_txt = f"{stack_pos}/{stack_cnt}"
-                    st_rect = self.stack_badge_rect(card_rect, wide=(len(badge_txt) >= 4))
-                    painter.setPen(QPen(QColor("#38BDF8"), 1))
-                    painter.setBrush(QColor(14, 116, 144, 230))
-                    painter.drawRoundedRect(st_rect, 4, 4)
-                    self._draw_vector_stack_icon(painter, st_rect.left() + 4.5, st_rect.top() + 3.5, QColor("#E0F2FE"))
-                    painter.setPen(QColor("#F8FAFC"))
-                    painter.drawText(
-                        QRect(st_rect.left() + 16, st_rect.top(), st_rect.width() - 18, st_rect.height()),
-                        Qt.AlignCenter,
-                        badge_txt,
-                    )
-                elif is_rj:
-                    st_rect = self.stack_badge_rect(card_rect, wide=True, inset_deck=is_mosaic_deck)
-                    painter.setPen(QPen(QColor("#F59E0B"), 1))
-                    painter.setBrush(QColor(15, 23, 42, 230))
-                    painter.drawRoundedRect(st_rect, 4, 4)
-                    painter.setPen(QColor("#FDE68A"))
-                    painter.drawText(st_rect, Qt.AlignCenter, "RAW+JPG")
-                else:
-                    st_rect = self.stack_badge_rect(card_rect, wide=(stack_cnt >= 10), inset_deck=is_mosaic_deck)
-                    painter.setPen(QPen(QColor("#38BDF8"), 1))
-                    painter.setBrush(QColor(15, 23, 42, 225))
-                    painter.drawRoundedRect(st_rect, 4, 4)
-                    self._draw_vector_stack_icon(painter, st_rect.left() + 5.0, st_rect.top() + 3.5, QColor("#7DD3FC"))
-                    painter.setPen(QColor("#F8FAFC"))
-                    painter.drawText(
-                        QRect(st_rect.left() + 16, st_rect.top(), st_rect.width() - 18, st_rect.height()),
-                        Qt.AlignCenter,
-                        str(stack_cnt),
-                    )
             painter.restore()
 
     def stars_bar_rect(self, card_rect: QRect) -> QRect:
@@ -1700,26 +1713,26 @@ class MediaCardDelegate(QStyledItemDelegate):
                     return True
 
                 # 2. Check top-right flag pin hit (cycles: Unreviewed 0 -> Pick 1 -> Reject -1 -> Unreviewed 0)
-                if self.flag_rect(card_rect).contains(pos):
+                if getattr(self, "show_flag_badges", True) and self.flag_rect(card_rect).contains(pos):
                     curr_flag = int(index.data(CatalogRoles.FlagRole) or 0)
                     new_flag = 1 if curr_flag == 0 else (-1 if curr_flag == 1 else 0)
                     self.flag_toggled.emit(int(media_id), new_flag)
                     return True
 
-                # 2b. Check stack badge [stack N] / [RAW+JPG] / [i/N] hit
+                # 2b. Check bottom-left photo group badge hit
                 rec_meta = index.data(CatalogRoles.RecordRole)
-                if rec_meta is not None and int(getattr(rec_meta, "stack_count", 1) or 1) > 1:
+                if (
+                    getattr(self, "show_group_badges", True)
+                    and rec_meta is not None
+                    and int(getattr(rec_meta, "stack_count", 1) or 1) > 1
+                ):
                     st_pos = int(getattr(rec_meta, "stack_pos", 0) or 0)
                     is_wide = bool(
-                        getattr(rec_meta, "is_raw_jpg_stack", False)
+                        (getattr(rec_meta, "is_raw_jpg_stack", False) and st_pos == 0)
                         or st_pos > 0
                         or int(getattr(rec_meta, "stack_count", 1) or 1) >= 10
                     )
-                    is_mosaic_deck = (
-                        self._layout_mode in ("tiles", "mosaic", "masonry")
-                        and st_pos == 0
-                    )
-                    if self.stack_badge_rect(card_rect, wide=is_wide, inset_deck=is_mosaic_deck).contains(pos):
+                    if self.stack_badge_rect(card_rect, wide=is_wide).contains(pos):
                         self.stack_badge_clicked.emit(int(media_id))
                         return True
 
@@ -3699,40 +3712,6 @@ class ThumbnailGridView(QListView):
             act_res = menu.addAction("Export / Resize...")
             if is_mw:
                 act_res.triggered.connect(main_win.open_resize_dialog)
-
-            if is_mw and hasattr(main_win, "group_selection_as_stack"):
-                stack_menu = menu.addMenu("Stacks")
-                stack_menu.setFont(QFont("Segoe UI", 9))
-                act_grp = stack_menu.addAction("Group Selected as Stack")
-                act_grp.setShortcut("Ctrl+G")
-                act_grp.setEnabled(len(target_mids) >= 2)
-                act_grp.triggered.connect(main_win.group_selection_as_stack)
-                act_ungrp = stack_menu.addAction("Unstack")
-                act_ungrp.setShortcut("Ctrl+Shift+G")
-                act_ungrp.triggered.connect(main_win.unstack_selection)
-                lead_mid = int(target_mids[0]) if target_mids else (int(media_id) if media_id is not None else None)
-                lead_members = main_win.catalog_repo.get_stack_member_ids(lead_mid) if lead_mid is not None else []
-                has_stack = len(lead_members) > 1
-                if hasattr(main_win, "toggle_selected_stack_expanded"):
-                    act_toggle = stack_menu.addAction("Expand / Collapse Stack")
-                    act_toggle.setShortcut("S")
-                    act_toggle.setEnabled(has_stack)
-                    act_toggle.triggered.connect(main_win.toggle_selected_stack_expanded)
-                act_cmp_stack = stack_menu.addAction("Compare Stack")
-                act_cmp_stack.setShortcut("C")
-                act_cmp_stack.setEnabled(has_stack)
-                act_cmp_stack.triggered.connect(
-                    lambda _c=False, tids=list(lead_members): main_win.open_compare_view(tids)
-                )
-                if hasattr(main_win, "set_as_stack_cover") and lead_mid is not None:
-                    act_cover = stack_menu.addAction("Set as Stack Cover")
-                    act_cover.setEnabled(has_stack and lead_members[0] != lead_mid)
-                    act_cover.triggered.connect(lambda _c=False, m=lead_mid: main_win.set_as_stack_cover(m))
-                stack_menu.addSeparator()
-                act_raw_jpg = stack_menu.addAction("Auto-Stack RAW + JPEG Pairs")
-                act_raw_jpg.triggered.connect(main_win.auto_stack_raw_jpeg_pairs)
-                act_bursts = stack_menu.addAction("Auto-Stack Bursts (<= 2s)")
-                act_bursts.triggered.connect(main_win.auto_stack_bursts)
 
             menu.addSeparator()
 
