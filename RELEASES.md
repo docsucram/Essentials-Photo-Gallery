@@ -18,11 +18,18 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 ### Quick Preview & Updated Filmstrip
 
 - **Borderless Fullscreen Quick Preview (`Space`):** Press `Space` in Grid View for an instant borderless full-screen lightbox over a dimmed backdrop with floating filename, star rating, and vector Pick/Reject/Favourite HUD (`Enter` to open full view, `←`/`→` to browse, `0–5` to rate, `P` Pick, `X` Reject, `U` Unflag, `F` Favourite, `Space`/`Esc` or backdrop click to dismiss; auto-repeat `Space` ignored). Hold `Shift` with `0–5`, `P`, `X`, `U`, or `F` in Grid or Single Image View to apply and auto-advance.
+
+![Borderless Fullscreen Spacebar Quick Preview with floating rating and cull HUD](docs/images/release-0.16.0/quick-preview-spacebar.jpg)
+
 - **Updated Draggable Filmstrip & Flush Pull-Tab:** Headerless `BottomFilmstripDock` with smooth slide-up/down animation, translucent edge scroll buttons, and a welded bottom-left viewer pull-tab (`⌄` / `⌃`) aligned flush against the filmstrip border. Drag the filmstrip taller (up to `148px`) to scale thumbnails proportionally, with its height remembered across hide/show toggles and app restarts, and unified bottom-right squircle star/heart + rating pills.
+
+![Updated draggable Filmstrip with squircle rating pills and Zoom Minimap in Single Image View](docs/images/release-0.16.0/filmstrip-updated.jpg)
 
 ### Upgraded Export / Resize & Photographer Culling Toolkit
 
 - **Overhauled Export / Resize Dialog:** Defaults cleanly to **Original size (No resize)** with an always-visible **Customize dimensions & scaling** toggle (housing **Fit within**, **Exact W × H**, **Percentage**, **Do not enlarge smaller photos**, and **+ Save Preset**), customizable **File name** patterns (`Auto`, `name_export`, `name_size`, `name_edited`, `Keep original name`, `Custom...`) with live italic `Filename:` preview, plain `Original → Output` readout, and in-session settings memory.
+
+![Overhauled Export / Resize dialog with Original size default and italic Filename preview](docs/images/release-0.16.0/export-resize-dialog.png)
 - **Zoom Minimap Navigator + Sharpness Heatmap Grid:** Floating bottom-right minimap in Single Image View and Compare Mode when zoomed beyond fit (`> 100%`), with click/drag panning, quick zoom controls, and an optional **Sharpness** (`16×12` Laplacian variance heatmap) overlay.
 - **Batch Rename (`F2`) & Camera AF Area Overlay (`A`):** Template-driven batch renaming (`{name}`, `{date}`, `{seq}`, `{camera}`, etc.) with two-phase atomic staging and `.xmp` / `.OriginalFiles` syncing, plus on-demand EXIF/MakerNote AF focus point overlay (`A`) for Nikon, Canon, Sony, and Fujifilm.
 
