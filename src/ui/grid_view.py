@@ -662,10 +662,31 @@ class MediaCardDelegate(QStyledItemDelegate):
         sz = 26
         return QRect(box.right() - sz - 4, box.bottom() - sz - 4, sz, sz)
 
-    def stack_badge_rect(self, card_rect: QRect, *, wide: bool = False) -> QRect:
+    def stack_badge_rect(self, card_rect: QRect, *, wide: bool = False, inset_deck: bool = False) -> QRect:
         fl = self.flag_rect(card_rect)
         w = 54 if wide else 42
-        return QRect(fl.left() - w - 4, fl.top() + 3, w, 17)
+        dx = -6 if inset_deck else 0
+        dy = 6 if inset_deck else 0
+        return QRect(fl.left() - w - 4 + dx, fl.top() + 3 + dy, w, 17)
+
+    @staticmethod
+    def _draw_vector_stack_icon(painter: QPainter, x: float, y: float, color: QColor) -> None:
+        """Draw a razor-sharp 2-card mini stack icon (replaces blurry Unicode ⧉ glyph)."""
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        # Back card (top-right offset)
+        back_col = QColor(color)
+        back_col.setAlpha(155)
+        painter.setPen(QPen(back_col, 1.1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(QRectF(x + 3.0, y + 0.5, 7.0, 6.5), 1.2, 1.2)
+        # Front card (solid crisp outline + subtle fill)
+        fill_col = QColor(color)
+        fill_col.setAlpha(45)
+        painter.setPen(QPen(color, 1.2))
+        painter.setBrush(fill_col)
+        painter.drawRoundedRect(QRectF(x + 0.5, y + 3.0, 7.0, 6.5), 1.2, 1.2)
+        painter.restore()
 
     def _paint_cull_and_status_badges(
         self,
@@ -846,28 +867,42 @@ class MediaCardDelegate(QStyledItemDelegate):
             if stack_cnt > 1:
                 stack_pos = int(getattr(rec_meta, "stack_pos", 0) or 0)
                 is_rj = bool(getattr(rec_meta, "is_raw_jpg_stack", False))
+                is_mosaic_deck = (
+                    self._layout_mode in ("tiles", "mosaic", "masonry")
+                    and stack_pos == 0
+                )
                 if stack_pos > 0:
-                    badge_txt = f"⧉ {stack_pos}/{stack_cnt}"
-                    st_rect = self.stack_badge_rect(card_rect, wide=(stack_cnt >= 10 or stack_pos >= 10 or len(badge_txt) >= 6))
+                    badge_txt = f"{stack_pos}/{stack_cnt}"
+                    st_rect = self.stack_badge_rect(card_rect, wide=(len(badge_txt) >= 4))
                     painter.setPen(QPen(QColor("#38BDF8"), 1))
-                    painter.setBrush(QColor(14, 116, 144, 225))
-                    painter.drawRoundedRect(st_rect, 3, 3)
+                    painter.setBrush(QColor(14, 116, 144, 230))
+                    painter.drawRoundedRect(st_rect, 4, 4)
+                    self._draw_vector_stack_icon(painter, st_rect.left() + 4.5, st_rect.top() + 3.5, QColor("#E0F2FE"))
                     painter.setPen(QColor("#F8FAFC"))
-                    painter.drawText(st_rect, Qt.AlignCenter, badge_txt)
+                    painter.drawText(
+                        QRect(st_rect.left() + 16, st_rect.top(), st_rect.width() - 18, st_rect.height()),
+                        Qt.AlignCenter,
+                        badge_txt,
+                    )
                 elif is_rj:
-                    st_rect = self.stack_badge_rect(card_rect, wide=True)
+                    st_rect = self.stack_badge_rect(card_rect, wide=True, inset_deck=is_mosaic_deck)
                     painter.setPen(QPen(QColor("#F59E0B"), 1))
-                    painter.setBrush(QColor(15, 23, 42, 225))
-                    painter.drawRoundedRect(st_rect, 3, 3)
+                    painter.setBrush(QColor(15, 23, 42, 230))
+                    painter.drawRoundedRect(st_rect, 4, 4)
                     painter.setPen(QColor("#FDE68A"))
                     painter.drawText(st_rect, Qt.AlignCenter, "RAW+JPG")
                 else:
-                    st_rect = self.stack_badge_rect(card_rect, wide=(stack_cnt >= 10))
+                    st_rect = self.stack_badge_rect(card_rect, wide=(stack_cnt >= 10), inset_deck=is_mosaic_deck)
                     painter.setPen(QPen(QColor("#38BDF8"), 1))
-                    painter.setBrush(QColor(15, 23, 42, 215))
-                    painter.drawRoundedRect(st_rect, 3, 3)
+                    painter.setBrush(QColor(15, 23, 42, 225))
+                    painter.drawRoundedRect(st_rect, 4, 4)
+                    self._draw_vector_stack_icon(painter, st_rect.left() + 5.0, st_rect.top() + 3.5, QColor("#7DD3FC"))
                     painter.setPen(QColor("#F8FAFC"))
-                    painter.drawText(st_rect, Qt.AlignCenter, f"⧉ {stack_cnt}")
+                    painter.drawText(
+                        QRect(st_rect.left() + 16, st_rect.top(), st_rect.width() - 18, st_rect.height()),
+                        Qt.AlignCenter,
+                        str(stack_cnt),
+                    )
             painter.restore()
 
     def stars_bar_rect(self, card_rect: QRect) -> QRect:
@@ -1399,9 +1434,15 @@ class MediaCardDelegate(QStyledItemDelegate):
             sh_rect = QRect(head_cx - int(box_side * 0.28), head_cy + head_r + 2, int(box_side * 0.56), int(box_side * 0.38))
             painter.drawPie(sh_rect, 0, 180 * 16)
         if pixmap is not None and not pixmap.isNull() and img_box.width() > 8 and img_box.height() > 8:
+            rec_meta = index.data(CatalogRoles.RecordRole)
+            stack_cnt = int(getattr(rec_meta, "stack_count", 1) or 1)
+            stack_pos = int(getattr(rec_meta, "stack_pos", 0) or 0)
+            is_collapsed_stack = (stack_cnt > 1 and stack_pos == 0)
+
             if is_mosaic:
-                scaled_sz = pixmap.size().scaled(img_box.size(), Qt.KeepAspectRatioByExpanding)
-                target_rect = img_box
+                front_box = img_box.adjusted(0, 6, -6, 0) if (is_collapsed_stack and img_box.width() > 28 and img_box.height() > 28) else img_box
+                scaled_sz = pixmap.size().scaled(front_box.size(), Qt.KeepAspectRatioByExpanding)
+                target_rect = front_box
             else:
                 scaled_sz = pixmap.size().scaled(img_box.size(), Qt.KeepAspectRatio)
                 # Align photo toward the bottom of img_box (right above the 5 stars, like WLPG!)
@@ -1420,21 +1461,22 @@ class MediaCardDelegate(QStyledItemDelegate):
                 painter.setBrush(QColor(0, 0, 0, 120 if self.dark_mode else 48))
                 painter.drawRect(target_rect.adjusted(1, 1, 2, 2))
 
-            rec_meta = index.data(CatalogRoles.RecordRole)
-            stack_cnt = int(getattr(rec_meta, "stack_count", 1) or 1)
-            stack_pos = int(getattr(rec_meta, "stack_pos", 0) or 0)
-            if stack_cnt > 1 and stack_pos == 0 and not is_mosaic:
-                # Visual stacked-deck offset cards peeking behind collapsed stack head
-                deck_fill_2 = QColor("#1E2430") if self.dark_mode else QColor("#E2E8F0")
-                deck_pen_2 = QColor("#475569") if self.dark_mode else QColor("#94A3B8")
-                deck_fill_1 = QColor("#283040") if self.dark_mode else QColor("#F1F5F9")
-                deck_pen_1 = QColor("#64748B") if self.dark_mode else QColor("#7C8EA3")
-                painter.setPen(QPen(deck_pen_2, 1))
+            if is_collapsed_stack:
+                # Visual 2-layer stacked-deck cards peeking behind top-right of collapsed stack head
+                # Works across Tiles, Mosaic, Masonry, and Classic Grid views
+                deck_fill_2 = QColor("#222938") if self.dark_mode else QColor("#DCE4EE")
+                deck_pen_2 = QColor("#64748B") if self.dark_mode else QColor("#94A3B8")
+                deck_fill_1 = QColor("#303A4D") if self.dark_mode else QColor("#EDF2F7")
+                deck_pen_1 = QColor("#94A3B8") if self.dark_mode else QColor("#64748B")
+                r2 = QRectF(img_box.adjusted(6, 0, 0, -6)) if is_mosaic else QRectF(target_rect.adjusted(6, -6, 6, -6))
+                r1 = QRectF(img_box.adjusted(3, 3, -3, -3)) if is_mosaic else QRectF(target_rect.adjusted(3, -3, 3, -3))
+                rad = 4.0 if is_tiles else 1.5
+                painter.setPen(QPen(deck_pen_2, 1.1))
                 painter.setBrush(deck_fill_2)
-                painter.drawRect(target_rect.adjusted(4, -4, 4, -4))
-                painter.setPen(QPen(deck_pen_1, 1))
+                painter.drawRoundedRect(r2, rad, rad)
+                painter.setPen(QPen(deck_pen_1, 1.1))
                 painter.setBrush(deck_fill_1)
-                painter.drawRect(target_rect.adjusted(2, -2, 2, -2))
+                painter.drawRoundedRect(r1, rad, rad)
 
             s_key = (int(pixmap.cacheKey()), scaled_sz.width(), scaled_sz.height())
             scaled_pix = self._scaled_pixmap_cache.get(s_key)
@@ -1664,15 +1706,20 @@ class MediaCardDelegate(QStyledItemDelegate):
                     self.flag_toggled.emit(int(media_id), new_flag)
                     return True
 
-                # 2b. Check stack badge [⧉ N] / [RAW+JPG] / [⧉ i/N] hit
+                # 2b. Check stack badge [stack N] / [RAW+JPG] / [i/N] hit
                 rec_meta = index.data(CatalogRoles.RecordRole)
                 if rec_meta is not None and int(getattr(rec_meta, "stack_count", 1) or 1) > 1:
+                    st_pos = int(getattr(rec_meta, "stack_pos", 0) or 0)
                     is_wide = bool(
                         getattr(rec_meta, "is_raw_jpg_stack", False)
-                        or int(getattr(rec_meta, "stack_pos", 0) or 0) > 0
+                        or st_pos > 0
                         or int(getattr(rec_meta, "stack_count", 1) or 1) >= 10
                     )
-                    if self.stack_badge_rect(card_rect, wide=is_wide).contains(pos):
+                    is_mosaic_deck = (
+                        self._layout_mode in ("tiles", "mosaic", "masonry")
+                        and st_pos == 0
+                    )
+                    if self.stack_badge_rect(card_rect, wide=is_wide, inset_deck=is_mosaic_deck).contains(pos):
                         self.stack_badge_clicked.emit(int(media_id))
                         return True
 
@@ -3213,6 +3260,7 @@ class ThumbnailGridView(QListView):
                             or self.card_delegate.checkbox_rect(card_rect).contains(pos)
                             or self.card_delegate.stars_bar_rect(card_rect).contains(pos)
                             or self.card_delegate.stack_badge_rect(card_rect, wide=True).contains(pos)
+                            or self.card_delegate.stack_badge_rect(card_rect, wide=True, inset_deck=True).contains(pos)
                         ):
                             event.accept()
                             return

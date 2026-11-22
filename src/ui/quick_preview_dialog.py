@@ -6,13 +6,232 @@ P flag toggle, Enter to open full Single View, and Space/Esc or backdrop click t
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
+from typing import Any
 
-from PySide6.QtCore import QEvent, QObject, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QImageReader, QKeyEvent, QPainter, QPixmap
-from PySide6.QtWidgets import QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QWidget
+from PySide6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QObject,
+    QPointF,
+    QPropertyAnimation,
+    QRect,
+    QRectF,
+    Qt,
+    QTimer,
+    Signal,
+)
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QImageReader,
+    QKeyEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QPolygonF,
+)
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QFrame,
+    QGraphicsOpacityEffect,
+    QHBoxLayout,
+    QLabel,
+    QWidget,
+)
 
 from src.utils.paths import is_cloud_only_file
+
+
+class CullFlashHud(QWidget):
+    """
+    Brief (~500 ms) translucent center-screen confirmation HUD for rapid culling
+    (star rating, favourite heart, Pick / Reject / Unflag) alongside instant auto-advance.
+    """
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("CullFlashHud")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        self._kind: str = ""
+        self._value: Any = None
+        self._label_text: str = ""
+
+        self._opacity = QGraphicsOpacityEffect(self)
+        self._opacity.setOpacity(1.0)
+        self.setGraphicsEffect(self._opacity)
+
+        self._hold_timer = QTimer(self)
+        self._hold_timer.setSingleShot(True)
+        self._hold_timer.setInterval(240)
+        self._hold_timer.timeout.connect(self._start_fade_out)
+
+        self._fade_anim = QPropertyAnimation(self._opacity, b"opacity", self)
+        self._fade_anim.setDuration(260)
+        self._fade_anim.setStartValue(1.0)
+        self._fade_anim.setEndValue(0.0)
+        self._fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade_anim.finished.connect(self.hide)
+
+        self.hide()
+
+    def flash(self, kind: str, value: Any) -> None:
+        self._kind = str(kind)
+        self._value = value
+        if self._kind == "rating":
+            r = max(0, min(5, int(value or 0)))
+            self._value = r
+            self._label_text = f"{r} Star{'s' if r != 1 else ''}" if r > 0 else "Unrated"
+            pill_w = 186 if r > 0 else 148
+            pill_h = 64 if r > 0 else 54
+        elif self._kind == "favourite":
+            fav = bool(value)
+            self._value = fav
+            self._label_text = "Favourited" if fav else "Unfavourited"
+            pill_w = 176
+            pill_h = 56
+        elif self._kind == "flag":
+            fl = int(value or 0)
+            self._value = fl
+            self._label_text = "Picked" if fl == 1 else ("Rejected" if fl == -1 else "Unflagged")
+            pill_w = 160
+            pill_h = 56
+        else:
+            self._label_text = str(value or "")
+            fm = QFontMetrics(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
+            pill_w = max(140, fm.horizontalAdvance(self._label_text) + 48)
+            pill_h = 54
+
+        self.setFixedSize(pill_w, pill_h)
+        self.recenter()
+        self._hold_timer.stop()
+        self._fade_anim.stop()
+        self._opacity.setOpacity(1.0)
+        self.show()
+        self.raise_()
+        self.update()
+        self._hold_timer.start()
+
+    def flash_rating(self, rating: int) -> None:
+        self.flash("rating", int(rating))
+
+    def flash_favourite(self, is_fav: bool) -> None:
+        self.flash("favourite", bool(is_fav))
+
+    def flash_flag(self, flag: int) -> None:
+        self.flash("flag", int(flag))
+
+    def recenter(self) -> None:
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        pw = parent.width()
+        ph = parent.height()
+        if pw <= 0 or ph <= 0:
+            return
+        x = max(8, (pw - self.width()) // 2)
+        y = max(8, (ph - self.height()) // 2)
+        self.move(x, y)
+
+    def _start_fade_out(self) -> None:
+        if not self.isVisible():
+            return
+        self._fade_anim.stop()
+        self._fade_anim.setStartValue(1.0)
+        self._fade_anim.setEndValue(0.0)
+        self._fade_anim.start()
+
+    @staticmethod
+    def _star_poly(cx: float, cy: float, r_outer: float, r_inner: float) -> QPolygonF:
+        pts: list[QPointF] = []
+        for i in range(10):
+            ang = math.radians(-90.0 + i * 36.0)
+            rad = r_outer if (i % 2 == 0) else r_inner
+            pts.append(QPointF(cx + rad * math.cos(ang), cy + rad * math.sin(ang)))
+        return QPolygonF(pts)
+
+    def paintEvent(self, _event: Any) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
+        p.setPen(QPen(QColor(148, 163, 184, 110), 1.2))
+        p.setBrush(QColor(15, 23, 42, 226))
+        p.drawRoundedRect(rect, 15.0, 15.0)
+
+        if self._kind == "rating" and int(self._value or 0) > 0:
+            r = int(self._value)
+            total_w = 5 * 26.0
+            start_x = (self.width() - total_w) / 2.0 + 13.0
+            cy = self.height() / 2.0 - 6.0
+            for idx in range(1, 6):
+                cx = start_x + (idx - 1) * 26.0
+                poly = self._star_poly(cx, cy, 10.0, 4.4)
+                if idx <= r:
+                    p.setPen(QPen(QColor("#F59E0B"), 1.0))
+                    p.setBrush(QColor("#FBBF24"))
+                else:
+                    p.setPen(QPen(QColor("#64748B"), 1.0))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawPolygon(poly)
+            p.setPen(QColor("#E2E8F0"))
+            p.setFont(QFont("Segoe UI", 8.5, QFont.Weight.DemiBold))
+            p.drawText(QRect(0, self.height() - 22, self.width(), 16), Qt.AlignmentFlag.AlignCenter, self._label_text)
+        elif self._kind == "favourite":
+            fav = bool(self._value)
+            hcx = 34.0
+            hcy = self.height() / 2.0
+            hp = QPainterPath()
+            hp.moveTo(hcx, hcy + 9.0)
+            hp.cubicTo(hcx - 12.0, hcy + 1.0, hcx - 11.0, hcy - 9.0, hcx - 5.0, hcy - 9.0)
+            hp.cubicTo(hcx - 1.5, hcy - 9.0, hcx, hcy - 5.5, hcx, hcy - 4.0)
+            hp.cubicTo(hcx, hcy - 5.5, hcx + 1.5, hcy - 9.0, hcx + 5.0, hcy - 9.0)
+            hp.cubicTo(hcx + 11.0, hcy - 9.0, hcx + 12.0, hcy + 1.0, hcx, hcy + 9.0)
+            if fav:
+                p.setPen(QPen(QColor("#FB7185"), 1.2))
+                p.setBrush(QColor("#F43F5E"))
+            else:
+                p.setPen(QPen(QColor("#CBD5E1"), 1.6))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(hp)
+            p.setPen(QColor("#F8FAFC" if fav else "#CBD5E1"))
+            p.setFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
+            p.drawText(QRect(52, 0, self.width() - 62, self.height()), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._label_text)
+        elif self._kind == "flag":
+            fl = int(self._value or 0)
+            fx = 26.0
+            fy = self.height() / 2.0 - 10.0
+            if fl == 1:
+                p.setPen(QPen(QColor("#F87171"), 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(fx, fy), QPointF(fx, fy + 20.0))
+                poly = QPolygonF([QPointF(fx, fy), QPointF(fx + 15.0, fy + 5.0), QPointF(fx, fy + 10.5)])
+                p.setPen(QPen(QColor("#EF4444"), 1.0))
+                p.setBrush(QColor("#EF4444"))
+                p.drawPolygon(poly)
+            elif fl == -1:
+                p.setPen(QPen(QColor("#EF4444"), 2.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(fx, fy + 3.0), QPointF(fx + 14.0, fy + 17.0))
+                p.drawLine(QPointF(fx + 14.0, fy + 3.0), QPointF(fx, fy + 17.0))
+            else:
+                p.setPen(QPen(QColor("#94A3B8"), 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(fx, fy), QPointF(fx, fy + 20.0))
+                poly = QPolygonF([QPointF(fx, fy), QPointF(fx + 14.0, fy + 5.0), QPointF(fx, fy + 10.0)])
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawPolygon(poly)
+            p.setPen(QColor("#F8FAFC" if fl != 0 else "#CBD5E1"))
+            p.setFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
+            p.drawText(QRect(52, 0, self.width() - 60, self.height()), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._label_text)
+        else:
+            p.setPen(QColor("#E2E8F0"))
+            p.setFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._label_text)
+        p.end()
 
 
 class QuickPreviewDialog(QDialog):
@@ -104,6 +323,8 @@ class QuickPreviewDialog(QDialog):
         )
         self.lbl_hint.setStyleSheet("color: #CBD5E1; font-size: 8.5pt; border: none; background: transparent;")
         hint_lay.addWidget(self.lbl_hint)
+
+        self._cull_flash_hud = CullFlashHud(self)
 
     def _make_badge_pixmap(self, kind: str) -> QPixmap:
         from PySide6.QtCore import QPointF
@@ -316,6 +537,8 @@ class QuickPreviewDialog(QDialog):
         super().resizeEvent(event)
         self._position_floating_overlays()
         self._update_scaled_pixmap()
+        if hasattr(self, "_cull_flash_hud"):
+            self._cull_flash_hud.recenter()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -386,6 +609,7 @@ class QuickPreviewDialog(QDialog):
         if rating_val is not None and self._current_media_id is not None:
             self._rating = rating_val
             self._update_header()
+            self._cull_flash_hud.flash_rating(self._rating)
             self.rate_requested.emit(self._current_media_id, self._rating)
             if shift_held:
                 self.navigate_requested.emit(1)
@@ -394,6 +618,7 @@ class QuickPreviewDialog(QDialog):
         if key == Qt.Key.Key_P and self._current_media_id is not None:
             self._flag = 0 if self._flag == 1 else 1
             self._update_header()
+            self._cull_flash_hud.flash_flag(self._flag)
             self.flag_set_requested.emit(self._current_media_id, self._flag)
             self.flag_requested.emit(self._current_media_id)
             if shift_held:
@@ -403,6 +628,7 @@ class QuickPreviewDialog(QDialog):
         if key == Qt.Key.Key_X and self._current_media_id is not None:
             self._flag = 0 if self._flag == -1 else -1
             self._update_header()
+            self._cull_flash_hud.flash_flag(self._flag)
             self.flag_set_requested.emit(self._current_media_id, self._flag)
             if shift_held:
                 self.navigate_requested.emit(1)
@@ -411,6 +637,7 @@ class QuickPreviewDialog(QDialog):
         if key == Qt.Key.Key_U and self._current_media_id is not None:
             self._flag = 0
             self._update_header()
+            self._cull_flash_hud.flash_flag(0)
             self.flag_set_requested.emit(self._current_media_id, 0)
             if shift_held:
                 self.navigate_requested.emit(1)
@@ -419,6 +646,7 @@ class QuickPreviewDialog(QDialog):
         if key == Qt.Key.Key_F and self._favourites_enabled and self._current_media_id is not None:
             self._is_favourite = not self._is_favourite
             self._update_header()
+            self._cull_flash_hud.flash_favourite(self._is_favourite)
             self.favourite_requested.emit(self._current_media_id)
             if shift_held:
                 self.navigate_requested.emit(1)

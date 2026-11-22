@@ -4729,6 +4729,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.undo_stack.push(cmd)
         lbl = f"{rating} star{'s' if rating != 1 else ''}" if rating > 0 else "Unrated"
         self.show_status_message(f"✓ Rated {len(target_ids)} item(s): {lbl}", 3000)
+        if self.central_stack.currentWidget() == self.media_viewer and hasattr(self.media_viewer, "flash_cull_hud"):
+            self.media_viewer.flash_cull_hud("rating", int(rating))
         if advance:
             self._advance_after_cull()
 
@@ -4757,6 +4759,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         else:
             lbl = "Unflagged"
         self.show_status_message(f"✓ {lbl} {len(target_ids)} item(s)", 3000)
+        if self.central_stack.currentWidget() == self.media_viewer and hasattr(self.media_viewer, "flash_cull_hud"):
+            self.media_viewer.flash_cull_hud("flag", int(flag))
         if advance:
             self._advance_after_cull()
 
@@ -4779,6 +4783,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             f"{'♥ Added' if is_fav else '♡ Removed'} {len(ids)} item(s) {'to' if is_fav else 'from'} Favourites",
             3000,
         )
+        if self.central_stack.currentWidget() == self.media_viewer and hasattr(self.media_viewer, "flash_cull_hud"):
+            self.media_viewer.flash_cull_hud("favourite", bool(is_fav))
         if advance:
             self._advance_after_cull()
 

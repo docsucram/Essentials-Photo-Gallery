@@ -2705,6 +2705,19 @@ class SingleMediaViewer(QWidget):
         super().resizeEvent(event)
         self._position_floating_toolbars()
         self._update_filmstrip_toggle()
+        hud = getattr(self, "_cull_flash_hud", None)
+        if hud is not None:
+            hud.recenter()
+
+    def flash_cull_hud(self, kind: str, value: Any) -> None:
+        """Show a brief (~500 ms) center-screen HUD flash for rating / favourite / flag changes."""
+        hud = getattr(self, "_cull_flash_hud", None)
+        if hud is None:
+            from src.ui.quick_preview_dialog import CullFlashHud
+
+            hud = CullFlashHud(self)
+            self._cull_flash_hud = hud
+        hud.flash(kind, value)
 
     @staticmethod
     def _make_checkerboard_brush(dark_mode: bool) -> QBrush:
