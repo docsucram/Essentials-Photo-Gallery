@@ -535,7 +535,7 @@ class MediaCardDelegate(QStyledItemDelegate):
         self.pixmap_cache = pixmap_cache
         self._cell_size = QSize(182, 204)
         self._visible_details: set[str] = {"rating", "flag"}
-        self._layout_mode: Literal["wlpg_grid", "mosaic"] = "wlpg_grid"
+        self._layout_mode: Literal["wlpg_grid", "tiles", "mosaic", "masonry"] = "wlpg_grid"
         self._hover_row: int = -1
         self._hover_star: int = 0
         self._hover_caption: bool = False
@@ -598,13 +598,13 @@ class MediaCardDelegate(QStyledItemDelegate):
     def set_visible_details(self, details: set[str]) -> None:
         self._visible_details = set(details)
 
-    def set_layout_mode(self, mode: Literal["wlpg_grid", "mosaic"]) -> None:
+    def set_layout_mode(self, mode: Literal["wlpg_grid", "tiles", "mosaic", "masonry"]) -> None:
         self._layout_mode = mode
 
     @property
     def is_horizontal_card(self) -> bool:
         """WLPG Card Presentation: When choosing more than 2 details under photo, switch to horizontal card view."""
-        if self._layout_mode == "mosaic":
+        if self._layout_mode in ("tiles", "mosaic", "masonry"):
             return False
         under_photo_keys = {"rating", "caption", "filename", "size", "dimensions", "date_taken", "date_modified"}
         if "all" in self._visible_details:
@@ -642,8 +642,9 @@ class MediaCardDelegate(QStyledItemDelegate):
             if k in self._visible_details or "all" in self._visible_details:
                 extra_cnt += 1
         bottom_reserve += extra_cnt * 14
-        if self._layout_mode == "mosaic":
-            return card_rect.adjusted(3, 3, -3, -bottom_reserve)
+        if self._layout_mode in ("tiles", "mosaic", "masonry"):
+            b_pad = 1 if bottom_reserve <= 6 else bottom_reserve
+            return card_rect.adjusted(1, 1, -1, -b_pad)
         return card_rect.adjusted(10, 10, -10, -bottom_reserve)
 
     def flag_rect(self, card_rect: QRect) -> QRect:
@@ -737,7 +738,7 @@ class MediaCardDelegate(QStyledItemDelegate):
         fav_enabled = bool(getattr(self, "favourites_enabled", True))
         is_fav = bool(getattr(rec_meta, "is_favourite", 0)) if fav_enabled else False
         rating_val = int(getattr(rec_meta, "rating", 0) or 0)
-        is_mosaic = (getattr(self, "_layout_mode", "wlpg_grid") == "mosaic")
+        is_mosaic = (getattr(self, "_layout_mode", "wlpg_grid") in ("tiles", "mosaic", "masonry"))
 
         if is_mosaic:
             show_pill = is_fav or rating_val > 0 or (fav_enabled and is_hovered)
@@ -906,7 +907,7 @@ class MediaCardDelegate(QStyledItemDelegate):
     ) -> QSize:
         if index.data(CatalogRoles.IsGroupHeaderRole):
             return QSize(option.rect.width() or 800, CatalogListModel.HEADER_HEIGHT)
-        if self._layout_mode == "mosaic":
+        if self._layout_mode in ("mosaic", "masonry"):
             mrect: QRect | None = index.data(CatalogRoles.MosaicRectRole)
             if isinstance(mrect, QRect) and mrect.isValid():
                 return mrect.size()
@@ -1245,7 +1246,8 @@ class MediaCardDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
-        is_mosaic = (self._layout_mode == "mosaic")
+        is_mosaic = (self._layout_mode in ("tiles", "mosaic", "masonry"))
+        is_tiles = (self._layout_mode == "tiles")
         card_rect = option.rect if is_mosaic else option.rect.adjusted(2, 2, -2, -2)
         if self.is_horizontal_card:
             self._paint_horizontal_media_card(painter, option, index, card_rect)
@@ -1378,7 +1380,7 @@ class MediaCardDelegate(QStyledItemDelegate):
             sh_rect = QRect(head_cx - int(box_side * 0.28), head_cy + head_r + 2, int(box_side * 0.56), int(box_side * 0.38))
             painter.drawPie(sh_rect, 0, 180 * 16)
         if pixmap is not None and not pixmap.isNull() and img_box.width() > 8 and img_box.height() > 8:
-            if self._layout_mode == "mosaic":
+            if is_mosaic:
                 scaled_sz = pixmap.size().scaled(img_box.size(), Qt.KeepAspectRatioByExpanding)
                 target_rect = img_box
             else:
@@ -1412,9 +1414,14 @@ class MediaCardDelegate(QStyledItemDelegate):
                     self._scaled_pixmap_cache.clear()
                 self._scaled_pixmap_cache[s_key] = scaled_pix
 
-            if self._layout_mode == "mosaic":
+            if is_mosaic:
                 painter.save()
-                painter.setClipRect(target_rect)
+                if is_tiles:
+                    clip_p = QPainterPath()
+                    clip_p.addRoundedRect(QRectF(target_rect), 4.0, 4.0)
+                    painter.setClipPath(clip_p)
+                else:
+                    painter.setClipRect(target_rect)
                 src_x = max(0, (scaled_sz.width() - target_rect.width()) // 2)
                 src_y = max(0, (scaled_sz.height() - target_rect.height()) // 2)
                 painter.drawPixmap(
@@ -1430,14 +1437,23 @@ class MediaCardDelegate(QStyledItemDelegate):
             if is_mosaic and is_selected:
                 sel_col = QColor("#60A5FA") if self.dark_mode else QColor("#2563EB")
                 painter.setPen(QPen(sel_col, 2.6))
-                painter.drawRect(target_rect.adjusted(1, 1, -1, -1))
+                if is_tiles:
+                    painter.drawRoundedRect(QRectF(target_rect).adjusted(1.0, 1.0, -1.0, -1.0), 4.0, 4.0)
+                else:
+                    painter.drawRect(target_rect.adjusted(1, 1, -1, -1))
             elif is_mosaic and is_hovered:
                 hov_col = QColor("#94A3B8") if self.dark_mode else QColor("#60A5FA")
                 painter.setPen(QPen(hov_col, 1.5))
-                painter.drawRect(target_rect)
+                if is_tiles:
+                    painter.drawRoundedRect(QRectF(target_rect).adjusted(0.5, 0.5, -0.5, -0.5), 4.0, 4.0)
+                else:
+                    painter.drawRect(target_rect)
             else:
                 painter.setPen(QPen(QColor("#3E4656") if self.dark_mode else QColor("#B8B8B8"), 1))
-                painter.drawRect(target_rect)
+                if is_tiles:
+                    painter.drawRoundedRect(QRectF(target_rect).adjusted(0.5, 0.5, -0.5, -0.5), 4.0, 4.0)
+                else:
+                    painter.drawRect(target_rect)
         else:
             # Subtle placeholder while worker decodes WebP
             painter.setBrush(QColor("#22262E") if self.dark_mode else QColor("#F4F6F9"))
@@ -1580,7 +1596,7 @@ class MediaCardDelegate(QStyledItemDelegate):
                 if media_id is None:
                     return False
 
-                is_mosaic = (self._layout_mode == "mosaic")
+                is_mosaic = (self._layout_mode in ("tiles", "mosaic", "masonry"))
                 card_rect = option.rect if is_mosaic else option.rect.adjusted(2, 2, -2, -2)
 
                 # 1. Check top-left checkbox hit
@@ -1970,6 +1986,9 @@ class ThumbnailGridView(QListView):
         self.schedule_viewport_update()
 
     def _cell_dimensions(self) -> tuple[int, int]:
+        if self.card_delegate and self.card_delegate._layout_mode == "tiles":
+            side = max(72, int(self._thumb_size))
+            return side, side
         if self.card_delegate and self.card_delegate.is_horizontal_card:
             thumb_side = max(70, min(self._thumb_size, 115))
             cell_w = max(280, thumb_side + 220 + (self._cell_padding * 2))
@@ -1997,14 +2016,20 @@ class ThumbnailGridView(QListView):
         cell_w, cell_h = self._cell_dimensions()
         self.card_delegate.set_cell_size(QSize(cell_w, cell_h))
         vw = max(240, self.viewport().width())
+        is_tiles = (self.card_delegate._layout_mode == "tiles")
         uniform_rows = bool(
-            self.card_delegate.is_horizontal_card
+            is_tiles
+            or self.card_delegate.is_horizontal_card
             or self.card_delegate.face_crop_person_id is not None
         )
         chrome_h = (
-            None
-            if uniform_rows
-            else max(0, cell_h - self._thumb_size - (self._cell_padding * 2) + 14)
+            0
+            if is_tiles
+            else (
+                None
+                if uniform_rows
+                else max(0, cell_h - self._thumb_size - (self._cell_padding * 2) + 14)
+            )
         )
         self.catalog_model.set_grid_metrics(
             viewport_width=vw,
@@ -2182,14 +2207,16 @@ class ThumbnailGridView(QListView):
         self._scroll_debounce.start()
         self.thumbnail_size_changed.emit(self._thumb_size)
 
-    def set_layout_mode(self, mode: Literal["wlpg_grid", "mosaic"]) -> None:
+    def set_layout_mode(
+        self, mode: Literal["wlpg_grid", "tiles", "mosaic", "masonry"]
+    ) -> None:
         if self.catalog_model is None or self.card_delegate is None:
             return
-        if mode == "mosaic":
+        if mode in ("tiles", "mosaic", "masonry"):
             if not hasattr(self, "_stashed_visible_details"):
                 self._stashed_visible_details = set(self.card_delegate._visible_details)
             self.card_delegate.set_visible_details(set())
-            self._grid_spacing = 2
+            self._grid_spacing = 2 if mode == "mosaic" else 4
         else:
             if hasattr(self, "_stashed_visible_details"):
                 self.card_delegate.set_visible_details(self._stashed_visible_details)

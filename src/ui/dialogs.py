@@ -362,6 +362,8 @@ class AppSettingsDialog(QDialog):
         show_ratings: bool = True,
         show_places: bool = True,
         show_albums: bool = True,
+        show_cameras: bool = False,
+        show_subjects: bool = False,
         favourites_enabled: bool = True,
         find_people_enabled: bool = False,
         tooltip_previews: bool = True,
@@ -476,6 +478,14 @@ class AppSettingsDialog(QDialog):
         self.chk_show_albums = QCheckBox("Show Albums", tab_general)
         self.chk_show_albums.setChecked(show_albums)
         nav_grid.addWidget(self.chk_show_albums, 2, 1)
+
+        self.chk_show_cameras = QCheckBox("Show Cameras", tab_general)
+        self.chk_show_cameras.setChecked(show_cameras)
+        nav_grid.addWidget(self.chk_show_cameras, 3, 0)
+
+        self.chk_show_subjects = QCheckBox("Show Subjects (AI)", tab_general)
+        self.chk_show_subjects.setChecked(show_subjects)
+        nav_grid.addWidget(self.chk_show_subjects, 3, 1)
 
         v_gen.addLayout(nav_grid)
 
@@ -1055,10 +1065,40 @@ class AppSettingsDialog(QDialog):
         v_ocr.addLayout(tess_row)
 
         v_ai.addWidget(grp_ocr)
+
+        # Group 3: Optional Semantic Search & Subjects (MobileCLIP-S1 ONNX ~82 MB)
+        grp_sem = QGroupBox("Semantic Search && Subjects (MobileCLIP-S1 ONNX)", tab_ai)
+        v_sem = QVBoxLayout(grp_sem)
+        v_sem.setSpacing(8)
+        lbl_sem_desc = QLabel(
+            "Enables optional natural-language photo search ('dog on beach') and the calibrated "
+            "Subjects navigation section (~82 MB offline ONNX Runtime download; runs only on cached thumbnails).",
+            grp_sem,
+        )
+        lbl_sem_desc.setWordWrap(True)
+        lbl_sem_desc.setStyleSheet("font-size: 11px;")
+        v_sem.addWidget(lbl_sem_desc)
+
+        self.lbl_opt_semantic_status = QLabel("Checking MobileCLIP-S1 add-on...", grp_sem)
+        self.lbl_opt_semantic_status.setWordWrap(True)
+        self.lbl_opt_semantic_status.setStyleSheet("font-weight: 600;")
+        v_sem.addWidget(self.lbl_opt_semantic_status)
+
+        sem_btn_row = QHBoxLayout()
+        self.btn_opt_semantic_download = QPushButton("Download MobileCLIP-S1 (~82 MB)", grp_sem)
+        self.btn_opt_semantic_uninstall = QPushButton("Uninstall", grp_sem)
+        self.btn_opt_semantic_download.clicked.connect(self._on_opt_semantic_download)
+        self.btn_opt_semantic_uninstall.clicked.connect(self._on_opt_semantic_uninstall)
+        sem_btn_row.addWidget(self.btn_opt_semantic_download)
+        sem_btn_row.addWidget(self.btn_opt_semantic_uninstall)
+        sem_btn_row.addStretch(1)
+        v_sem.addLayout(sem_btn_row)
+        v_ai.addWidget(grp_sem)
         v_ai.addStretch(1)
 
         self._opt_lama_dl_thread = None
         self._opt_rapid_dl_thread = None
+        self._opt_semantic_dl_thread = None
         self._refresh_ai_downloads_tab()
 
         self.addons_tab = tab_ai
@@ -1354,6 +1394,29 @@ class AppSettingsDialog(QDialog):
         except Exception as exc:
             self.lbl_opt_ocr_status.setText(f"OCR status unavailable: {exc}")
 
+        try:
+            from src.core.semantic_engine import get_semantic_addon_status
+
+            sem_st = get_semantic_addon_status()
+            sem_installed = bool(sem_st.get("installed"))
+            sem_mb = sem_st.get("size_mb", 82)
+            if sem_installed:
+                self.lbl_opt_semantic_status.setText(f"MobileCLIP-S1 Add-on: Installed ({sem_mb} MB)")
+                self.lbl_opt_semantic_status.setStyleSheet("color: #1B6E2D; font-size: 11px;")
+                self.btn_opt_semantic_download.setText("Reinstall / Repair")
+                self.btn_opt_semantic_uninstall.setVisible(True)
+                self.btn_opt_semantic_uninstall.setEnabled(True)
+            else:
+                self.lbl_opt_semantic_status.setText(
+                    f"MobileCLIP-S1 Add-on: Not installed (~{sem_mb} MB optional download)"
+                )
+                self.lbl_opt_semantic_status.setStyleSheet("color: #666; font-size: 11px;")
+                self.btn_opt_semantic_download.setText(f"Download MobileCLIP-S1 (~{sem_mb} MB)")
+                self.btn_opt_semantic_uninstall.setVisible(False)
+                self.btn_opt_semantic_uninstall.setEnabled(False)
+        except Exception as exc:
+            self.lbl_opt_semantic_status.setText(f"Semantic status unavailable: {exc}")
+
     def _on_opt_lama_enabled_toggled(self, checked: bool) -> None:
         from src.imaging.creative_effects import set_lama_enabled
 
@@ -1521,6 +1584,58 @@ class AppSettingsDialog(QDialog):
 
         if uninstall_rapidocr_models():
             QMessageBox.information(self, "Uninstalled", "RapidOCR models removed from AppData.")
+        self._refresh_ai_downloads_tab()
+
+    def _on_opt_semantic_download(self) -> None:
+        if self._opt_semantic_dl_thread is not None and self._opt_semantic_dl_thread.isRunning():
+            return
+        from PySide6.QtCore import QThread, Signal as QtSignal
+
+        class _SemOptDlWorker(QThread):
+            progress = QtSignal(int, int)
+            finished_ok = QtSignal(bool)
+
+            def run(self) -> None:
+                from src.core.semantic_engine import download_semantic_models
+
+                path = download_semantic_models(
+                    progress_cb=lambda d, t: self.progress.emit(int(d), int(t))
+                )
+                self.finished_ok.emit(path is not None)
+
+        self.btn_opt_semantic_download.setEnabled(False)
+        self.btn_opt_semantic_download.setText("Downloading...")
+        self.btn_opt_semantic_uninstall.setVisible(False)
+        worker = _SemOptDlWorker(self)
+
+        def _on_prog(done: int, total: int) -> None:
+            if total > 0:
+                pct = int(min(99, (done * 100) // total))
+                self.btn_opt_semantic_download.setText(f"Downloading {pct}%...")
+            else:
+                self.btn_opt_semantic_download.setText(f"Downloading {done // (1024 * 1024)} MB...")
+
+        def _on_done(ok: bool) -> None:
+            self._opt_semantic_dl_thread = None
+            self.btn_opt_semantic_download.setEnabled(True)
+            self._refresh_ai_downloads_tab()
+            if not ok:
+                QMessageBox.warning(
+                    self,
+                    "Download Failed",
+                    "Could not download MobileCLIP-S1 models. Check your internet connection and try again.",
+                )
+
+        worker.progress.connect(_on_prog)
+        worker.finished_ok.connect(_on_done)
+        self._opt_semantic_dl_thread = worker
+        worker.start()
+
+    def _on_opt_semantic_uninstall(self) -> None:
+        from src.core.semantic_engine import uninstall_semantic_models
+
+        if uninstall_semantic_models():
+            QMessageBox.information(self, "Uninstalled", "MobileCLIP-S1 models removed from AppData.")
         self._refresh_ai_downloads_tab()
 
     def _refresh_db_stats(self) -> None:
@@ -1739,6 +1854,12 @@ class AppSettingsDialog(QDialog):
 
     def show_albums(self) -> bool:
         return self.chk_show_albums.isChecked()
+
+    def show_cameras(self) -> bool:
+        return self.chk_show_cameras.isChecked()
+
+    def show_subjects(self) -> bool:
+        return self.chk_show_subjects.isChecked()
 
     def favourites_enabled(self) -> bool:
         return self.chk_favourites_enabled.isChecked()

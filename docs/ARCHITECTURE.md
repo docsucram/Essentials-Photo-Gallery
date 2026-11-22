@@ -52,7 +52,8 @@ Gallery/
 │   │   ├── gazetteer_data.py                    # Built-in offline gazetteer (3,500+ world cities & UK settlements)
 │   │   ├── geotag_resolver.py                   # Offline reverse geocoding, KD-tree nearest search & Nominatim SQLite cache
 │   │   ├── gps_matcher.py                       # Companion phone/GPX timestamp-to-GPS correlation & Δt clock-drift calibration
-│   │   └── ocr_engine.py                        # Multi-backend offline OCR (Tesseract, RapidOCR, Windows OCR)
+│   │   ├── ocr_engine.py                        # Multi-backend offline OCR (Tesseract, RapidOCR, Windows OCR)
+│   │   └── semantic_engine.py                   # Optional MobileCLIP-S1 INT8 ONNX semantic vector engine, Subject presets & RRF fusion
 │   ├── db/
 │   │   ├── __init__.py
 │   │   ├── connection.py                        # DualDatabaseEngine: WAL connections, schema migrations, online backups
@@ -94,12 +95,13 @@ Gallery/
 │   │   ├── ribbon_toolbar.py                    # RibbonToolbar: Integrated Title Bar, QAT, Home/Edit/Find/Create/View & contextual Map tab
 │   │   ├── right_tag_dock.py                    # TagAndCaptionDock: Info (Ctrl+I), Fine Tune (Ctrl+F), Depth & Light
 │   │   ├── search_scope_bar.py                  # Breadcrumb path/album/map chip bar, Find Similar threshold slider & search box
+│   │   ├── shortcuts_dialog.py                  # KeyboardShortcutsDialog: searchable F1 shortcut sheet & Alt+1..9 Quick-Tag configurator
 │   │   ├── slideshow_view.py                    # FullscreenSlideshowDialog: Ken Burns Pan/Zoom, Cross-fade & HUD
 │   │   ├── smart_album_dialog.py                # SmartAlbumDialog: Interactive Boolean rule builder with live match preview
 │   │   ├── tag_hierarchy_dialog.py              # Interactive tag tree editor & Duplicate Root Tags merger
 │   │   ├── tag_someone_dialog.py                # Autocomplete face-tagging dialog with fade-out & click-outside dismissal
 │   │   ├── win32_frame.py                       # Windows 11 DWM frameless window & custom title bar integration
-│   │   └── zoom_minimap.py                      # ZoomMinimapOverlay + 16×12 Laplacian sharpness heatmap grid
+│   │   └── zoom_minimap.py                      # ZoomMinimapOverlay: corner viewport navigator (>100% zoom)
 │   ├── utils/
 │   │   ├── __init__.py
 │   │   ├── geotag_resolver.py                   # Compatibility bridge to src.core.geotag_resolver
@@ -111,7 +113,8 @@ Gallery/
 │       ├── face_worker.py                       # 3-stage ONNX face detector, 96x96 WebP crop extractor & backfill
 │       ├── folder_watcher.py                    # QFileSystemWatcher & startup delta reconciliation
 │       ├── ocr_worker.py                        # Background OCR FTS5 indexing worker respecting per-folder policies
-│       ├── scanner_thumb_worker.py              # FolderSyncWorker & ThumbnailDecodeWorker (QImageReader, Tier-0 RAW, Next-Gen, OpenCV)
+│       ├── scanner_thumb_worker.py              # FolderSyncWorker & ThumbnailDecodeWorker (QImageReader, Tier-0 RAW, Next-Gen, OpenCV, signatures)
+│       ├── semantic_worker.py                   # Background MobileCLIP-S1 worker embedding cached thumbnails.db BLOBs into semantic_vectors.db
 │       ├── thumb_scheduler.py                   # Two-tier viewport-center priority scheduler & ThumbnailWriteCoalescer
 │       └── xmp_sync_worker.py                   # MetadataSyncDaemon: Non-destructive XML-patching XMP/EXIF write-back & mtime preservation
 └── tests/                                       # Automated pytest regression suites (70+ suites) & scale benchmark harness
@@ -119,29 +122,27 @@ Gallery/
 
 ---
 
-## 2. Dual-Database Storage Architecture (`catalog.db` & `thumbnails.db`)
+## 2. Dual-Database Storage Architecture (`catalog.db` & `thumbnails.db`, + Optional `semantic_vectors.db`)
 
-SQLite WAL mode (`PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;`) isolates bulk thumbnail BLOB caching from sub-10ms relational, spatial, and Boolean Smart Album metadata queries. See complete DDL in [`db/schema.sql`](../db/schema.sql).
+SQLite WAL mode (`PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;`) isolates bulk thumbnail BLOB caching and optional AI vectors from sub-10ms relational, spatial, and Boolean Smart Album metadata queries. See complete DDL in [`db/schema.sql`](../db/schema.sql).
 
 ```text
-+-----------------------------------------------------------------+
-|                        User Application                         |
-+-------------------------------+---------------------------------+
-                                |
-              +-----------------+-----------------+
-              |                                   |
-              v                                   v
-+---------------------------+       +-----------------------------+
-|        catalog.db         |       |        thumbnails.db        |
-| (Metadata, Vectors, Rules)|       |     (Fast WebP BLOBs)       |
-+---------------------------+       +-----------------------------+
-| - folders                 |       | - thumbnails                |
-| - media (incl. camera/geo)|       |   (256x256 PG64THMB WebP)   |
-| - albums & album_items    |       | - face_thumbnails           |
-| - smart_albums            |       |   (96x96 portrait crops)    |
-| - tags & tag_closure      |       +-----------------------------+
-| - media_tags              |
-| - people & media_people   |
++-----------------------------------------------------------------------------------------+
+|                                    User Application                                     |
++------------------------+-------------------------------+--------------------------------+
+                         |                               |
+                         v                               v
++---------------------------+       +-----------------------------+       +-------------------------------+
+|        catalog.db         |       |        thumbnails.db        |       |  semantic_vectors.db (Opt.)   |
+| (Metadata, Vectors, Rules)|       |  (WebP BLOBs & Signatures)  |       |  (MobileCLIP-S1 Float16 AI)   |
++---------------------------+       +-----------------------------+       +-------------------------------+
+| - folders                 |       | - thumbnails                |       | - semantic_vectors            |
+| - media (incl. camera/geo)|       |   (256x256 PG64THMB WebP)   |       |   (512-d float16 embeddings)  |
+| - albums & album_items    |       | - face_thumbnails           |       | - subject_vectors             |
+| - smart_albums            |       |   (96x96 portrait crops)    |       |   (calibrated concept cache)  |
+| - tags & tag_closure      |       | - media_signatures          |       +-------------------------------+
+| - media_tags              |       |   (pHash/dHash/sharp/Haar)  |
+| - people & media_people   |       +-----------------------------+
 | - face_rejected_sugg.     |
 | - saved_places            |
 | - media_rtree (Spatial)   |
@@ -216,9 +217,10 @@ CREATE INDEX idx_album_items_media ON album_items(media_id);
 - **Date Taken & Places:** `Year -> Month -> Day` counts and `Country -> State / County -> City / Town` hierarchy.
 - **Descriptive Tags:** Drag-and-drop reparenting, live counts, 3-state Boolean checkboxes (`Checked = Include`, `Right-click/Alt = Exclude`), and *Clean Up Duplicate Root Tags*.
 - **People & Ratings:** Circular person avatars with counts, plus 5-star to 1-star and Unrated filters.
+- **Optional Sections (Default Off in `File → Options → General`):** Collapsible **Cameras** tree (deduplicated camera models with unrecorded `"No Camera Recorded"` filter via `FilterQuerySpec.camera_model`) and AI **Subjects** section (12 built-in visual concepts scored against cached `MobileCLIP-S1` embeddings).
 
 ### 3.3 Center Area (`QStackedWidget`)
-1. **Thumbnail Grid View (`grid_view.py`, `grid_model.py`):** Virtualized `QListView` in `IconMode`, $O(\log G)$ binary-searched collapsible section headers (all 19 `Group by` / `Arrange by` modes), Polaroid cards with interactive inline stars/flags, `Add to Album ▸` / `Remove from Album` context menu, self-healing paint queue, and browser-style `Alt+Left`/`Alt+Right` navigation history.
+1. **Thumbnail Grid View (`grid_view.py`, `grid_model.py`):** Virtualized `QListView` in `IconMode`, $O(\log G)$ binary-searched collapsible section headers (all 19 `Group by` / `Arrange by` modes), four layout modes (**Grid** `"wlpg_grid"`, uniform 4px-rounded **Tiles** `"tiles"`, row-justified landscape **Mosaic** `"mosaic"`, and portrait-priority shortest-first column **Masonry** `"masonry"` waterfall) with inline stars/flags, bottom-right `[♥/★ N]` squircle pills, `Add to Album ▸` / `Remove from Album` + undoable **Auto-Stack Bursts / RAW+JPEG Pairs**, self-healing paint queue, and browser-style `Alt+Left`/`Alt+Right` navigation history.
 2. **Albums View (`albums_view.py`):** Visual stack preview cards displaying multi-photo fan/stack thumbnails for both static and smart albums with fast creation buttons (`New Album +`, `New Smart Album +`).
 3. **Multi-Photo Compare / Light Table View (`compare_view.py`):** Multi-pane split workspace (2-Up, 3-Up, 4-Up Quad, interactive Before/After Wipe Slider), candidate filmstrip with status badges (`P`, `⚑`, `★N`), synchronized normalized pan/zoom, 1-click zoom to face cycling, focus peaking, highlight/shadow clipping warnings, camera RAW decoding via `rawpy`, non-destructive ratings/flags/rotation, and auto-advance culling.
 4. **Single Media Viewer (`media_viewer.py`):** Hardware-accelerated full-res viewer + integrated video player (with click-to-jump `_ClickJumpSeekSlider` seek bar), 1920px interactive proxy / full-res master adjustment pipeline, hover/click-to-rename face tagging overlay, Crop/Uncrop, Spot Fix, Markup toolbars, and Immersive Mode (`F4`, preserving the regular draggable title bar).
@@ -227,9 +229,10 @@ CREATE INDEX idx_album_items_media ON album_items(media_id);
 7. **World Map View (`map_view.py`):** Full-height `QWebEngineView` Leaflet canvas driven by contextual Map Ribbon controls, R*Tree bounding-box clustering, drag-rectangle zoom, persistent disk tile caching (`Clean`, `Street`, `Satellite`), offline vector canvas fallback, and status bar geotagged/cluster reporting.
 8. **Fullscreen Slideshow (`slideshow_view.py`):** Ken Burns Pan/Zoom, cross-fades, and floating HUD controls.
 
-### 3.4 Specialized Dialogs (`dialogs.py`, `smart_album_dialog.py`, `options_dialog.py`, `duplicate_finder_dialog.py`, `print_dialog.py`, `tag_hierarchy_dialog.py`, `map_view.py`)
+### 3.4 Specialized Dialogs (`dialogs.py`, `smart_album_dialog.py`, `shortcuts_dialog.py`, `options_dialog.py`, `duplicate_finder_dialog.py`, `print_dialog.py`, `tag_hierarchy_dialog.py`, `map_view.py`)
 - **`SmartAlbumDialog`:** Name + Match Mode (`ALL`/`ANY`), scrollable dynamic condition rows across all 17+ dimensions with database-backed autocomplete and real-time `"Live Preview: X matching items"`.
-- **`AppSettingsDialog`:** Theme & icon set pairing, Safe Mode write-back toggle, face sensitivity sliders & InsightFace model lifecycle controls (`Download` / `Verify & Repair` / `Remove`), `.OriginalFiles` retention, online catalog backups, **Fresh Start** catalog/thumbnail reset (`DualDatabaseEngine.reset_all_databases()` with empty-library `EmptyStateWidget` folder prompt), Save/Copy naming presets, and the **Add-ons** manager (`File → Options → Add-ons`) for optional AI/CV models (`Depth & Light`, `LaMa Generative Inpainting`, `RapidOCR`, `LightGlue`).
+- **`KeyboardShortcutsDialog` (`src/ui/shortcuts_dialog.py`):** Searchable modal opened via `F1` / **File → Keyboard Shortcuts...** grouping navigation, culling, viewer, Compare Mode, and face confirmation hotkeys alongside an interactive **`Alt+1` .. `Alt+9` Quick-Tag** hotkey configurator working in Grid View, Single Media Viewer, and Spacebar Quick Preview.
+- **`AppSettingsDialog`:** Theme & icon set pairing, Safe Mode write-back toggle, optional **Cameras** / **Subjects (AI)** left-nav toggles, face sensitivity sliders & InsightFace model lifecycle controls (`Download` / `Verify & Repair` / `Remove`), `.OriginalFiles` retention, online catalog backups, **Fresh Start** catalog/thumbnail reset (`DualDatabaseEngine.reset_all_databases()` with empty-library `EmptyStateWidget` folder prompt), Save/Copy naming presets, and the **Add-ons** manager (`File → Options → Add-ons`) for optional AI/CV models (`Depth & Light`, `LaMa Generative Inpainting`, `RapidOCR`, `LightGlue`, `MobileCLIP-S1` semantic search with HTTP `Range` resumable downloads).
 - **`FolderManagerDialog` & Private Mode:** Per-folder scan & privacy matrix (`Scan Faces`, `Scan OCR Text`, `Private Folder`) inheritable down subfolder trees, optimized with grouped `media_count` queries, `update_folders_policy_batch`, cached icons, in-place tree updates, and deferred main-window refresh on close. Paired with `View → Show Private Folders` (`Ctrl+Shift+P`), PBKDF2-HMAC-SHA256 PIN lock (`120,000` iterations), and automatic idle lock timer (`QTimer` on `QEvent.UserInput`). When locked, private folders are excluded from the folder tree, Grid/Mosaic views, search results, Smart Albums, People faces, and World Map pins.
 - **`AdjustLocationDialog`:** Interactive Leaflet / offline fallback map pin-picker for single or multi-photo selections (`Home → Geotag ▾ → Adjust Location on Map...` or the focus-only pin icon in the Tag & Caption pane), supporting place search, click/drag pin placement, English-normalized reverse geocoding, and custom place labels.
 - **`GpsMatchDialog` (`src/ui/gps_match_dialog.py`, `src/core/gps_matcher.py`):** Companion Phone GPS Matching workflow accessible from **Home → Geotag ▾ → Match Locations from Timed Photos...** and the contextual **Map** Ribbon tab. Features in-dialog bounded Scope selection (**Selected Photos**, **Current Folder / View**, **Map Area**), `.gpx` track loading (`parse_gpx_file`), side-by-side **Destination ← GPS Source** `96×96` thumbnails with `260×195` hover preview cards (`_HoverPhotoPreviewPopup`), sortable columns, collapsible **Clock & Time Window** controls (`_CalibrateClockDialog` + optional `apply_relative_time_shift`), `15 min` same-spot clamping, speed-guarded (`<= 250 km/h`) linear interpolation, offline reverse geocoding (`resolve_missing_place_names`), and single-step `Ctrl+Z` undo (`_BatchGpsMatchUndoCommand`).

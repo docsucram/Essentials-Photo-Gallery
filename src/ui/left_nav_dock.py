@@ -474,6 +474,7 @@ class LeftNavigationDock(QDockWidget):
     section_order_changed = Signal(list)
     tag_hierarchy_changed = Signal()
     place_selected = Signal(str, str, str)  # country, state, city
+    subject_selected = Signal(str, str)     # subject_key, display_label
     new_album_requested = Signal()
     rename_album_requested = Signal(int, str)
     delete_album_requested = Signal(int, str)
@@ -520,6 +521,9 @@ class LeftNavigationDock(QDockWidget):
         self._location_country: str | None = None
         self._location_state: str | None = None
         self._location_city: str | None = None
+        self._camera_model: str | None = None
+        self._active_subject_key: str | None = None
+        self._active_subject_label: str = ""
         self._album_id: int | None = None
         self._album_name: str = ""
         self._smart_album_id: int | None = None
@@ -534,6 +538,8 @@ class LeftNavigationDock(QDockWidget):
         self._show_people: bool = True
         self._show_ratings: bool = True
         self._show_places: bool = True
+        self._show_cameras: bool = False
+        self._show_subjects: bool = False
         self._favourites_enabled: bool = True
         self._show_smart_favourites: bool = True
         self._show_smart_picked: bool = True
@@ -547,6 +553,8 @@ class LeftNavigationDock(QDockWidget):
             "section_tags",
             "section_ratings",
             "section_places",
+            "section_cameras",
+            "section_subjects",
         )
         self._section_order: list[str] = list(self._default_section_order)
 
@@ -557,6 +565,9 @@ class LeftNavigationDock(QDockWidget):
         self._tag_items: dict[int, QTreeWidgetItem] = {}
         self._person_items: dict[int, QTreeWidgetItem] = {}
         self._rating_items: dict[int, QTreeWidgetItem] = {}
+        self._camera_items: dict[str, QTreeWidgetItem] = {}
+        self._subject_items: dict[str, QTreeWidgetItem] = {}
+        self._subject_counts: dict[str, int] = {}
         self._person_avatar_icon_cache: dict[tuple[int, int], QIcon] = {}
         self._current_theme_mode: str = "wlpg_aero"
         self._updating_tree: bool = False
@@ -819,6 +830,8 @@ class LeftNavigationDock(QDockWidget):
             star_icon = make_wlpg_icon("star_filled", 16)
             empty_star_icon = make_wlpg_icon("star_empty", 16)
             places_icon = make_wlpg_icon("geotag", 16)
+            cam_icon = make_wlpg_icon("camera", 16)
+            subj_icon = make_wlpg_icon("subjects", 16)
 
             if hasattr(self, "root_all") and self.root_all is not None:
                 self.root_all.setIcon(0, make_wlpg_icon("all_media", 16))
@@ -832,6 +845,10 @@ class LeftNavigationDock(QDockWidget):
                 self.root_ratings.setIcon(0, star_icon)
             if hasattr(self, "root_places") and self.root_places is not None:
                 self.root_places.setIcon(0, places_icon)
+            if hasattr(self, "root_cameras") and self.root_cameras is not None:
+                self.root_cameras.setIcon(0, cam_icon)
+            if hasattr(self, "root_subjects") and self.root_subjects is not None:
+                self.root_subjects.setIcon(0, subj_icon)
 
             for item in self._folder_items.values():
                 fname_lower = (item.data(0, _OLD_NAME_ROLE) or item.text(0) or "").lower()
@@ -866,6 +883,10 @@ class LeftNavigationDock(QDockWidget):
 
             if hasattr(self, "root_places") and self.root_places is not None:
                 _update_recursive_icons(self.root_places, places_icon)
+            if hasattr(self, "root_cameras") and self.root_cameras is not None:
+                _update_recursive_icons(self.root_cameras, cam_icon)
+            if hasattr(self, "root_subjects") and self.root_subjects is not None:
+                _update_recursive_icons(self.root_subjects, subj_icon)
         except RuntimeError:
             return
         finally:
@@ -964,6 +985,22 @@ class LeftNavigationDock(QDockWidget):
                 self.root_places.setForeground(0, section_color)
                 self.root_places.setExpanded(False)
 
+            def _build_cameras() -> None:
+                self.root_cameras = QTreeWidgetItem(self.tree, ["Cameras"])
+                self.root_cameras.setData(0, _NODE_TYPE_ROLE, "section_cameras")
+                self.root_cameras.setIcon(0, make_wlpg_icon("camera", 16))
+                self.root_cameras.setFont(0, sec_font)
+                self.root_cameras.setForeground(0, section_color)
+                self.root_cameras.setExpanded(False)
+
+            def _build_subjects() -> None:
+                self.root_subjects = QTreeWidgetItem(self.tree, ["Subjects"])
+                self.root_subjects.setData(0, _NODE_TYPE_ROLE, "section_subjects")
+                self.root_subjects.setIcon(0, make_wlpg_icon("subjects", 16))
+                self.root_subjects.setFont(0, sec_font)
+                self.root_subjects.setForeground(0, section_color)
+                self.root_subjects.setExpanded(False)
+
             builders = {
                 "all_media": _build_all,
                 "section_albums": _build_albums,
@@ -972,6 +1009,8 @@ class LeftNavigationDock(QDockWidget):
                 "section_tags": _build_tags,
                 "section_ratings": _build_ratings,
                 "section_places": _build_places,
+                "section_cameras": _build_cameras,
+                "section_subjects": _build_subjects,
             }
             for key in self._section_order:
                 if key in builders:
@@ -993,6 +1032,10 @@ class LeftNavigationDock(QDockWidget):
                 self.root_ratings.setHidden(not self._show_ratings)
             if hasattr(self, "_show_places"):
                 self.root_places.setHidden(not self._show_places)
+            if hasattr(self, "root_cameras"):
+                self.root_cameras.setHidden(not getattr(self, "_show_cameras", False))
+            if hasattr(self, "root_subjects"):
+                self.root_subjects.setHidden(not getattr(self, "_show_subjects", False))
         finally:
             self.tree.blockSignals(False)
 
@@ -1004,6 +1047,8 @@ class LeftNavigationDock(QDockWidget):
         show_ratings: bool = True,
         show_places: bool = True,
         show_albums: bool = True,
+        show_cameras: bool | None = None,
+        show_subjects: bool | None = None,
     ) -> None:
         """Shows or hides top-level navigation sections per Photo Gallery Options dialog."""
         self._show_albums = bool(show_albums)
@@ -1012,6 +1057,10 @@ class LeftNavigationDock(QDockWidget):
         self._show_people = bool(show_people)
         self._show_ratings = bool(show_ratings)
         self._show_places = bool(show_places)
+        if show_cameras is not None:
+            self._show_cameras = bool(show_cameras)
+        if show_subjects is not None:
+            self._show_subjects = bool(show_subjects)
         if hasattr(self, "root_albums"):
             self.root_albums.setHidden(not self._show_albums)
         if hasattr(self, "root_dates"):
@@ -1024,9 +1073,13 @@ class LeftNavigationDock(QDockWidget):
             self.root_ratings.setHidden(not self._show_ratings)
         if hasattr(self, "root_places"):
             self.root_places.setHidden(not self._show_places)
+        if hasattr(self, "root_cameras"):
+            self.root_cameras.setHidden(not getattr(self, "_show_cameras", False))
+        if hasattr(self, "root_subjects"):
+            self.root_subjects.setHidden(not getattr(self, "_show_subjects", False))
 
     def set_section_visible(self, section_name: str, visible: bool) -> None:
-        """Toggles visibility of an individual section by name ('albums', 'dates', 'tags', 'people', 'ratings', 'places')."""
+        """Toggles visibility of an individual section by name."""
         sec = section_name.lower()
         if "album" in sec:
             self._show_albums = bool(visible)
@@ -1052,6 +1105,14 @@ class LeftNavigationDock(QDockWidget):
             self._show_places = bool(visible)
             if hasattr(self, "root_places"):
                 self.root_places.setHidden(not self._show_places)
+        elif "camera" in sec:
+            self._show_cameras = bool(visible)
+            if hasattr(self, "root_cameras"):
+                self.root_cameras.setHidden(not self._show_cameras)
+        elif "subject" in sec:
+            self._show_subjects = bool(visible)
+            if hasattr(self, "root_subjects"):
+                self.root_subjects.setHidden(not self._show_subjects)
 
     def get_section_order(self) -> list[str]:
         """Return the current top-level navigation section order."""
@@ -1100,6 +1161,8 @@ class LeftNavigationDock(QDockWidget):
             "section_tags": getattr(self, "root_tags", None),
             "section_ratings": getattr(self, "root_ratings", None),
             "section_places": getattr(self, "root_places", None),
+            "section_cameras": getattr(self, "root_cameras", None),
+            "section_subjects": getattr(self, "root_subjects", None),
         }
         self.tree.blockSignals(True)
         try:
@@ -1139,6 +1202,8 @@ class LeftNavigationDock(QDockWidget):
             had_existing_folders = bool(self._folder_items)
             was_people_expanded = self.root_people.isExpanded() if hasattr(self, "root_people") else False
             was_places_expanded = self.root_places.isExpanded() if hasattr(self, "root_places") else False
+            was_cameras_expanded = self.root_cameras.isExpanded() if hasattr(self, "root_cameras") else False
+            was_subjects_expanded = self.root_subjects.isExpanded() if hasattr(self, "root_subjects") else False
             was_albums_expanded = self.root_albums.isExpanded() if hasattr(self, "root_albums") else True
             was_my_albums_expanded = self.root_my_albums.isExpanded() if hasattr(self, "root_my_albums") else True
             was_smart_albums_expanded = (
@@ -1396,11 +1461,31 @@ class LeftNavigationDock(QDockWidget):
                                 ct_item.setIcon(0, places_icon)
                                 parent_for_city.addChild(ct_item)
 
+            # 7. Populate Cameras (Optional section, default hidden)
+            self._camera_items.clear()
+            if hasattr(self, "root_cameras") and self.root_cameras is not None and hasattr(repo, "query_camera_counts"):
+                cam_icon = make_wlpg_icon("camera", 16)
+                for cam_name, cam_cnt in repo.query_camera_counts():
+                    disp_name = "No camera info" if cam_name == "__NO_CAMERA__" else cam_name
+                    c_item = QTreeWidgetItem([f"{disp_name} ({cam_cnt})"])
+                    c_item.setData(0, _NODE_TYPE_ROLE, "camera_item")
+                    c_item.setData(0, _NODE_PAYLOAD_ROLE, cam_name)
+                    c_item.setIcon(0, cam_icon)
+                    if self._camera_model and self._camera_model.lower() == cam_name.lower():
+                        c_item.setSelected(True)
+                    self.root_cameras.addChild(c_item)
+                    self._camera_items[cam_name.lower()] = c_item
+
             self.root_folders.setExpanded(True)
             self.root_tags.setExpanded(True)
             self.root_people.setExpanded(was_people_expanded)
             if hasattr(self, "root_places"):
                 self.root_places.setExpanded(was_places_expanded)
+            if hasattr(self, "root_cameras"):
+                self.root_cameras.setExpanded(was_cameras_expanded or bool(self._camera_model))
+            self._populate_subjects_children(self._subject_counts)
+            if hasattr(self, "root_subjects"):
+                self.root_subjects.setExpanded(was_subjects_expanded or bool(self._active_subject_key))
             if getattr(self, "_dark_mode", False):
                 self._sync_tree_item_colors()
             self._sync_tree_selection()
@@ -1408,6 +1493,46 @@ class LeftNavigationDock(QDockWidget):
             self.tree.blockSignals(False)
             self.tree.setUpdatesEnabled(True)
             self._updating_tree = False
+        self._update_summary_label()
+
+    def _populate_subjects_children(self, counts: dict[str, int] | None = None) -> None:
+        if not hasattr(self, "root_subjects") or self.root_subjects is None:
+            return
+        from src.core.semantic_engine import SUBJECT_PRESETS
+
+        self.root_subjects.takeChildren()
+        self._subject_items.clear()
+        subj_icon = make_wlpg_icon("subjects", 16)
+        cnt_map = counts if counts is not None else self._subject_counts
+        for key, label, _prompts, _thr in SUBJECT_PRESETS:
+            cnt = int(cnt_map.get(key, 0))
+            s_item = QTreeWidgetItem([f"{label} ({cnt})"])
+            s_item.setData(0, _NODE_TYPE_ROLE, "subject_item")
+            s_item.setData(0, _NODE_PAYLOAD_ROLE, (key, label))
+            s_item.setIcon(0, subj_icon)
+            if self._active_subject_key == key:
+                s_item.setSelected(True)
+            self.root_subjects.addChild(s_item)
+            self._subject_items[key] = s_item
+
+    def refresh_subjects(self, counts: dict[str, int] | None = None) -> None:
+        """Update the optional AI Subjects tree items with real calibrated counts."""
+        if counts is not None:
+            self._subject_counts = {str(k): int(v) for k, v in counts.items()}
+        if not hasattr(self, "root_subjects") or self.root_subjects is None:
+            return
+        self._updating_tree = True
+        self.tree.blockSignals(True)
+        try:
+            self._populate_subjects_children(self._subject_counts)
+        finally:
+            self.tree.blockSignals(False)
+            self._updating_tree = False
+
+    def set_active_subject(self, subject_key: str | None, label: str = "") -> None:
+        self._active_subject_key = subject_key
+        self._active_subject_label = str(label or "")
+        self._sync_tree_selection()
         self._update_summary_label()
 
     def refresh_people_only(self, repo: CatalogRepository) -> list[dict[str, Any]]:
@@ -1797,12 +1922,35 @@ class LeftNavigationDock(QDockWidget):
                     self.tree.scrollToItem(matched_place)
                     has_place = True
 
+            # 6c. Cameras & Subjects
+            has_camera = False
+            if self._camera_model and self._camera_items:
+                cam_item = self._camera_items.get(self._camera_model.lower())
+                if cam_item is not None:
+                    cam_item.setSelected(True)
+                    self.tree.setCurrentItem(cam_item)
+                    if hasattr(self, "root_cameras") and self.root_cameras is not None:
+                        self.root_cameras.setExpanded(True)
+                    has_camera = True
+
+            has_subject = False
+            if self._active_subject_key and self._subject_items:
+                subj_item = self._subject_items.get(self._active_subject_key)
+                if subj_item is not None:
+                    subj_item.setSelected(True)
+                    self.tree.setCurrentItem(subj_item)
+                    if hasattr(self, "root_subjects") and self.root_subjects is not None:
+                        self.root_subjects.setExpanded(True)
+                    has_subject = True
+
             # 7. All photos and videos (highlighted whenever no specific facet filter is active)
             is_all_media = (
                 not has_album
                 and not has_folder
                 and not has_date
                 and not has_place
+                and not has_camera
+                and not has_subject
                 and not self._include_tag_ids
                 and not self._exclude_tag_ids
                 and not self._untagged_only
@@ -1849,6 +1997,8 @@ class LeftNavigationDock(QDockWidget):
         date_tuple: tuple | None = None
         album_tuple: tuple[int, str] | None = None
         smart_album_tuple: tuple[int, str] | None = None
+        camera_val: str | None = None
+        subject_tuple: tuple[str, str] | None = None
         all_media = False
 
         for it in selected:
@@ -1868,6 +2018,10 @@ class LeftNavigationDock(QDockWidget):
                 album_tuple = (int(payload[0]), str(payload[1]))
             elif ntype == "smart_album" and isinstance(payload, tuple):
                 smart_album_tuple = (int(payload[0]), str(payload[1]))
+            elif ntype == "camera_item" and payload is not None:
+                camera_val = str(payload)
+            elif ntype == "subject_item" and isinstance(payload, tuple):
+                subject_tuple = (str(payload[0]), str(payload[1]))
             elif ntype == "favourites":
                 self.flag_filter_requested.emit(None)
                 self.favourite_filter_requested.emit(True)
@@ -1906,8 +2060,22 @@ class LeftNavigationDock(QDockWidget):
             sid, sname = smart_album_tuple
             self._select_smart_album_scope(smart_album_id=sid, smart_album_name=sname)
             return
+        if subject_tuple is not None:
+            skey, slabel = subject_tuple
+            self._active_subject_key = skey
+            self._active_subject_label = slabel
+            self._camera_model = None
+            if hasattr(self, "root_all") and self.root_all is not None:
+                self.root_all.setSelected(False)
+            self._update_summary_label()
+            self.subject_selected.emit(skey, slabel)
+            return
 
         changed = False
+        if self._active_subject_key is not None:
+            self._active_subject_key = None
+            self._active_subject_label = ""
+            changed = True
         if self._album_id is not None or self._smart_album_id is not None or self._smart_album_rules is not None:
             self._album_id = None
             self._album_name = ""
@@ -1951,6 +2119,17 @@ class LeftNavigationDock(QDockWidget):
             changed = True
         if self._person_ids != person_ids:
             self._person_ids = person_ids
+            changed = True
+        if camera_val is not None:
+            if hasattr(self, "root_all") and self.root_all is not None and self.root_all.isSelected():
+                self.root_all.setSelected(False)
+            if self._camera_model != camera_val:
+                self._camera_model = camera_val
+                changed = True
+        elif not ctrl_held and self._camera_model is not None and (
+            folder_tuple is not None or date_tuple is not None or tag_ids or person_ids or untagged_sel
+        ):
+            self._camera_model = None
             changed = True
 
         if tag_ids or person_ids or untagged_sel:
@@ -2043,7 +2222,7 @@ class LeftNavigationDock(QDockWidget):
         if ntype == "section_ratings":
             self.select_ratings([])
             return
-        if ntype == "section_places":
+        if ntype in ("section_places", "section_cameras", "section_subjects"):
             item.setExpanded(not item.isExpanded())
             return
         if ntype == "place":
@@ -2813,6 +2992,9 @@ class LeftNavigationDock(QDockWidget):
         self._location_country = None
         self._location_state = None
         self._location_city = None
+        self._camera_model = None
+        self._active_subject_key = None
+        self._active_subject_label = ""
         self._sync_tree_selection()
         self._update_summary_label()
         if emit_signal:
@@ -2976,6 +3158,9 @@ class LeftNavigationDock(QDockWidget):
         self._location_country = None
         self._location_state = None
         self._location_city = None
+        self._camera_model = None
+        self._active_subject_key = None
+        self._active_subject_label = ""
         self._include_tag_ids.clear()
         self._exclude_tag_ids.clear()
         self._untagged_only = False
@@ -3078,6 +3263,11 @@ class LeftNavigationDock(QDockWidget):
         if self._location_country or self._location_state or self._location_city:
             loc_parts = [p for p in (self._location_city, self._location_state, self._location_country) if p]
             parts.append(f"Place: {', '.join(loc_parts)}")
+        if self._camera_model:
+            cam_disp = "No camera info" if self._camera_model == "__NO_CAMERA__" else self._camera_model
+            parts.append(f"Camera: {cam_disp}")
+        if self._active_subject_key:
+            parts.append(f"Subject: {self._active_subject_label or self._active_subject_key}")
         if self._ratings:
             parts.append(f"Ratings: {sorted(self._ratings, reverse=True)}")
         if self._flagged_only:
@@ -3129,6 +3319,9 @@ class LeftNavigationDock(QDockWidget):
             "location_country": self._location_country,
             "location_state": self._location_state,
             "location_city": self._location_city,
+            "camera_model": self._camera_model,
+            "active_subject_key": self._active_subject_key,
+            "active_subject_label": self._active_subject_label,
         }
 
     def restore_filter_state(self, state: dict[str, Any]) -> None:
@@ -3158,6 +3351,9 @@ class LeftNavigationDock(QDockWidget):
         self._location_country = state.get("location_country")
         self._location_state = state.get("location_state")
         self._location_city = state.get("location_city")
+        self._camera_model = state.get("camera_model")
+        self._active_subject_key = state.get("active_subject_key")
+        self._active_subject_label = str(state.get("active_subject_label") or "")
 
         self._updating_tree = True
         try:
@@ -3223,6 +3419,7 @@ class LeftNavigationDock(QDockWidget):
             location_country=self._location_country,
             location_state=self._location_state,
             location_city=self._location_city,
+            camera_model=self._camera_model,
             arrange_by=arrange_by,
             reverse_sort=reverse_sort,
             group_by=group_by,

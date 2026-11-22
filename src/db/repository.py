@@ -234,6 +234,7 @@ class FilterQuerySpec:
     location_country: str | None = None
     location_state: str | None = None
     location_city: str | None = None
+    camera_model: str | None = None
     group_by: str = "month"  # "month", "year", "date", "rating", "folder", "media_type", "flag", "size", "none"
     sort_by: str = "date"  # "date", "name", "rating", "size", "media_type"
     sort_reverse: bool = False
@@ -1270,6 +1271,25 @@ class CatalogRepository:
                 where_clauses.append("TRIM(COALESCE(m.location_city, '')) = ?")
                 params.append(loc_city)
 
+        # 6d. Camera Make / Model filter (from optional Cameras nav section)
+        cam_filter = (getattr(spec, "camera_model", None) or "").strip()
+        if cam_filter:
+            if cam_filter == "__NO_CAMERA__":
+                where_clauses.append(
+                    "(COALESCE(TRIM(m.camera_make), '') = '' AND COALESCE(TRIM(m.camera_model), '') = '')"
+                )
+            else:
+                norm_cam_expr = (
+                    "TRIM(CASE "
+                    "WHEN COALESCE(TRIM(m.camera_make), '') != '' AND COALESCE(TRIM(m.camera_model), '') != '' "
+                    "AND LOWER(TRIM(m.camera_model)) NOT LIKE LOWER(TRIM(m.camera_make)) || '%' "
+                    "THEN TRIM(m.camera_make) || ' ' || TRIM(m.camera_model) "
+                    "WHEN COALESCE(TRIM(m.camera_model), '') != '' THEN TRIM(m.camera_model) "
+                    "ELSE COALESCE(TRIM(m.camera_make), '') END)"
+                )
+                where_clauses.append(f"LOWER({norm_cam_expr}) = LOWER(?)")
+                params.append(cam_filter)
+
         # 7. World Map Bounding Box filter (via media_rtree virtual table or media.lat/lon fallback)
         if spec.bbox is not None:
             min_lat, max_lat, min_lon, max_lon = spec.bbox
@@ -1938,7 +1958,108 @@ class CatalogRepository:
         ).fetchall()
         return [int(r[0]) for r in rows] or [int(media_id)]
 
-    def auto_stack_raw_jpeg_pairs(self, folder_id: int | None = None) -> int:
+    def get_stack_parent_map(
+        self, media_ids: Sequence[int] | None = None
+    ) -> dict[int, int | None]:
+        """Returns `{media_id: stack_parent_id}` for given IDs (or all non-companion items)."""
+        conn = self.engine.catalog_conn()
+        cur = conn.cursor()
+        out: dict[int, int | None] = {}
+        if media_ids is not None:
+            ids = [int(m) for m in media_ids]
+            for chunk in _iter_id_chunks(ids, 900):
+                ph = ",".join("?" for _ in chunk)
+                rows = cur.execute(
+                    f"SELECT id, stack_parent_id FROM media WHERE id IN ({ph});",
+                    list(chunk),
+                ).fetchall()
+                for mid, sp in rows:
+                    out[int(mid)] = int(sp) if sp is not None else None
+        else:
+            rows = cur.execute(
+                "SELECT id, stack_parent_id FROM media WHERE live_companion_for_id IS NULL;"
+            ).fetchall()
+            for mid, sp in rows:
+                out[int(mid)] = int(sp) if sp is not None else None
+        return out
+
+    def restore_stack_parent_map(self, mapping: dict[int, int | None]) -> None:
+        """Restores `stack_parent_id` values in a single catalog transaction (for Undo/Redo)."""
+        if not mapping:
+            return
+        with self.engine.catalog_transaction() as tx_conn:
+            tx_conn.executemany(
+                "UPDATE media SET stack_parent_id = ? WHERE id = ?;",
+                [(int(sp) if sp is not None else None, int(mid)) for mid, sp in mapping.items()],
+            )
+
+    def reconcile_stack_after_delete(self, deleted_id: int) -> None:
+        """Promotes a clean survivor head (or unstacks a lone survivor) after deleting a stack member."""
+        did = int(deleted_id)
+        conn = self.engine.catalog_conn()
+        cur = conn.cursor()
+        rows = cur.execute(
+            """
+            SELECT id, LOWER(COALESCE(ext, '')), COALESCE(rating, 0), COALESCE(flag, 0)
+            FROM media
+            WHERE stack_parent_id = ? AND id != ? AND live_companion_for_id IS NULL
+            ORDER BY id ASC;
+            """,
+            (did, did),
+        ).fetchall()
+        if not rows:
+            # Check if deleted_id belonged to another head and left only 1 item in that stack
+            other_rows = cur.execute(
+                """
+                SELECT stack_parent_id FROM media
+                WHERE stack_parent_id IS NOT NULL AND live_companion_for_id IS NULL
+                GROUP BY stack_parent_id HAVING COUNT(*) = 1;
+                """
+            ).fetchall()
+            lone_heads = [int(r[0]) for r in other_rows if r[0] is not None]
+            if lone_heads:
+                with self.engine.catalog_transaction() as tx_conn:
+                    for lh in lone_heads:
+                        tx_conn.execute(
+                            "UPDATE media SET stack_parent_id = NULL WHERE stack_parent_id = ?;",
+                            (lh,),
+                        )
+            return
+
+        if len(rows) == 1:
+            surv_id = int(rows[0][0])
+            with self.engine.catalog_transaction() as tx_conn:
+                tx_conn.execute(
+                    "UPDATE media SET stack_parent_id = NULL WHERE id = ?;",
+                    (surv_id,),
+                )
+            return
+
+        raw_exts = {".nef", ".cr2", ".cr3", ".arw", ".dng", ".raf", ".orf", ".rw2", ".pef", ".srw",
+                    "nef", "cr2", "cr3", "arw", "dng", "raf", "orf", "rw2", "pef", "srw"}
+        best_row = max(
+            rows,
+            key=lambda r: (
+                0 if str(r[1]) in raw_exts else 1,
+                1 if int(r[3]) == 1 else 0,
+                int(r[2]),
+                -int(r[0]),
+            ),
+        )
+        new_head = int(best_row[0])
+        with self.engine.catalog_transaction() as tx_conn:
+            tx_conn.executemany(
+                "UPDATE media SET stack_parent_id = ? WHERE id = ?;",
+                [(new_head, int(r[0])) for r in rows],
+            )
+
+    def auto_stack_raw_jpeg_pairs(
+        self,
+        folder_id: int | None = None,
+        *,
+        skip_existing_stacks: bool = True,
+        capture_undo_out: dict[int, int | None] | None = None,
+    ) -> int:
         """Pairs RAW + JPEG files with matching `(folder_id, stem)` into stacks with JPEG as head."""
         raw_exts = {"nef", "cr2", "cr3", "arw", "dng", "raf", "orf", "rw2", "pef", "srw"}
         jpg_exts = {"jpg", "jpeg"}
@@ -1950,30 +2071,36 @@ class CatalogRepository:
             where += " AND folder_id = ?"
             params.append(int(folder_id))
         rows = cur.execute(
-            f"SELECT id, folder_id, filename, LOWER(COALESCE(ext, '')) FROM media {where};",
+            f"SELECT id, folder_id, filename, LOWER(COALESCE(ext, '')), stack_parent_id FROM media {where};",
             params,
         ).fetchall()
 
-        groups: dict[tuple[int, str], dict[str, list[int]]] = {}
-        for mid, fid, fname, ext in rows:
+        groups: dict[tuple[int, str], dict[str, list[tuple[int, int | None]]]] = {}
+        for mid, fid, fname, ext, cur_sp in rows:
+            if skip_existing_stacks and cur_sp is not None:
+                continue
             clean_ext = ext.lstrip(".")
             if clean_ext not in raw_exts and clean_ext not in jpg_exts:
                 continue
             stem = Path(str(fname)).stem.lower()
             bucket = groups.setdefault((int(fid), stem), {"jpg": [], "raw": []})
+            sp_val = int(cur_sp) if cur_sp is not None else None
             if clean_ext in jpg_exts:
-                bucket["jpg"].append(int(mid))
+                bucket["jpg"].append((int(mid), sp_val))
             else:
-                bucket["raw"].append(int(mid))
+                bucket["raw"].append((int(mid), sp_val))
 
         updates: list[tuple[int, int]] = []
         stacks_created = 0
         for bucket in groups.values():
             if bucket["jpg"] and bucket["raw"]:
-                head_id = bucket["jpg"][0]
+                head_id = bucket["jpg"][0][0]
                 members = bucket["jpg"] + bucket["raw"]
-                for m in members:
-                    updates.append((head_id, m))
+                for m_id, prev_sp in members:
+                    if prev_sp != head_id:
+                        if capture_undo_out is not None and m_id not in capture_undo_out:
+                            capture_undo_out[m_id] = prev_sp
+                        updates.append((head_id, m_id))
                 stacks_created += 1
 
         if updates:
@@ -1984,9 +2111,20 @@ class CatalogRepository:
         return stacks_created
 
     def auto_stack_bursts(
-        self, folder_id: int | None = None, max_gap_sec: float = 2.0
+        self,
+        folder_id: int | None = None,
+        max_gap_sec: float = 2.0,
+        *,
+        max_span_sec: float = 30.0,
+        thumb_repo: Any | None = None,
+        max_dhash_hamming: int = 16,
+        skip_existing_stacks: bool = True,
+        capture_undo_out: dict[int, int | None] | None = None,
     ) -> int:
-        """Groups consecutive photos in the same folder taken within `max_gap_sec` seconds."""
+        """
+        Groups visually similar consecutive photos in the same folder taken within `max_gap_sec`
+        seconds (capped at `max_span_sec`), picking the sharpest/highest-rated item as head.
+        """
         conn = self.engine.catalog_conn()
         cur = conn.cursor()
         where = "WHERE is_video = 0 AND live_companion_for_id IS NULL AND date_taken IS NOT NULL AND date_taken > 0"
@@ -1995,32 +2133,85 @@ class CatalogRepository:
             where += " AND folder_id = ?"
             params.append(int(folder_id))
         rows = cur.execute(
-            f"SELECT id, folder_id, date_taken FROM media {where} ORDER BY folder_id ASC, date_taken ASC, id ASC;",
+            f"""
+            SELECT id, folder_id, date_taken, COALESCE(rating, 0), COALESCE(flag, 0),
+                   COALESCE(is_favourite, 0), stack_parent_id, filename
+            FROM media {where}
+            ORDER BY folder_id ASC, date_taken ASC, id ASC;
+            """,
             params,
         ).fetchall()
 
+        filtered_rows = [
+            r for r in rows if not (skip_existing_stacks and r[6] is not None)
+        ]
+        sigs: dict[int, tuple[int, int, int, float, bytes]] = {}
+        if thumb_repo is not None and filtered_rows and hasattr(thumb_repo, "get_signatures_batch"):
+            sigs = thumb_repo.get_signatures_batch([int(r[0]) for r in filtered_rows])
+
         stacks_created = 0
         updates: list[tuple[int, int]] = []
-        cur_group: list[int] = []
+        cur_group: list[tuple[int, int, int, int, int, int | None, str]] = []
         prev_fid: int | None = None
         prev_dt: int | None = None
+        anchor_id: int | None = None
+        anchor_dt: int | None = None
 
-        def _flush_group(grp: list[int]) -> None:
+        def _flush_group(grp: list[tuple[int, int, int, int, int, int | None, str]]) -> None:
             nonlocal stacks_created
-            if len(grp) >= 2:
-                head = grp[0]
-                for m in grp:
-                    updates.append((head, m))
-                stacks_created += 1
+            if len(grp) < 2:
+                return
+            # A single RAW+JPEG pair shares one stem; leave 1-stem pairs to auto_stack_raw_jpeg_pairs
+            if len({stem for *_rest, stem in grp}) < 2:
+                return
+            best_pos = 0
+            best_score: tuple[int, int, float, int] | None = None
+            for idx, (m_id, _rating, flag, is_fav, _dt, _sp, _stem) in enumerate(grp):
+                sig = sigs.get(m_id)
+                sharp = float(sig[3]) if sig is not None else 0.0
+                cand = (1 if (flag == 1 or is_fav) else 0, _rating, sharp, -idx)
+                if best_score is None or cand > best_score:
+                    best_score = cand
+                    best_pos = idx
+            head = grp[best_pos][0]
+            for m_id, _r, _f, _fav, _dt, prev_sp, _stem in grp:
+                if prev_sp != head:
+                    if capture_undo_out is not None and m_id not in capture_undo_out:
+                        capture_undo_out[m_id] = prev_sp
+                    updates.append((head, m_id))
+            stacks_created += 1
 
-        for mid, fid, dt in rows:
-            if prev_fid == fid and prev_dt is not None and (int(dt) - int(prev_dt)) <= max_gap_sec:
-                cur_group.append(int(mid))
+        for mid, fid, dt, rating, flag, is_fav, cur_sp, fname in filtered_rows:
+            imid = int(mid)
+            ifid = int(fid)
+            idt = int(dt)
+            sp_val = int(cur_sp) if cur_sp is not None else None
+            stem_l = Path(str(fname or "")).stem.lower()
+            same_burst = False
+            if (
+                prev_fid == ifid
+                and prev_dt is not None
+                and anchor_dt is not None
+                and (idt - prev_dt) <= max_gap_sec
+                and (idt - anchor_dt) <= max_span_sec
+            ):
+                same_burst = True
+                if anchor_id is not None and anchor_id in sigs and imid in sigs:
+                    dh_a = sigs[anchor_id][2]
+                    dh_b = sigs[imid][2]
+                    if dh_a != 0 and dh_b != 0:
+                        ham = ((dh_a ^ dh_b) & 0xFFFFFFFFFFFFFFFF).bit_count()
+                        if ham > max_dhash_hamming:
+                            same_burst = False
+            if same_burst:
+                cur_group.append((imid, int(rating), int(flag), int(is_fav), idt, sp_val, stem_l))
             else:
                 _flush_group(cur_group)
-                cur_group = [int(mid)]
-            prev_fid = int(fid)
-            prev_dt = int(dt)
+                cur_group = [(imid, int(rating), int(flag), int(is_fav), idt, sp_val, stem_l)]
+                anchor_id = imid
+                anchor_dt = idt
+            prev_fid = ifid
+            prev_dt = idt
         _flush_group(cur_group)
 
         if updates:
@@ -6670,6 +6861,43 @@ class CatalogRepository:
             """
         ).fetchall()
         return [str(r[0]) for r in rows if r[0]]
+
+    def query_camera_counts(self) -> list[tuple[str, int]]:
+        """Return `[(normalized_camera_name, count), ...]` ordered by count desc, plus '__NO_CAMERA__' if any."""
+        conn = self.engine.catalog_conn()
+        priv_clause = self._private_folder_clause("f")
+        norm_cam_expr = (
+            "TRIM(CASE "
+            "WHEN COALESCE(TRIM(m.camera_make), '') != '' AND COALESCE(TRIM(m.camera_model), '') != '' "
+            "AND LOWER(TRIM(m.camera_model)) NOT LIKE LOWER(TRIM(m.camera_make)) || '%' "
+            "THEN TRIM(m.camera_make) || ' ' || TRIM(m.camera_model) "
+            "WHEN COALESCE(TRIM(m.camera_model), '') != '' THEN TRIM(m.camera_model) "
+            "ELSE COALESCE(TRIM(m.camera_make), '') END)"
+        )
+        rows = conn.execute(
+            f"""
+            SELECT {norm_cam_expr} AS cam, COUNT(*) AS cnt
+            FROM media m
+            JOIN folders f ON f.id = m.folder_id
+            WHERE COALESCE(m.is_missing, 0) = 0 AND m.live_companion_for_id IS NULL AND {priv_clause}
+              AND (COALESCE(TRIM(m.camera_make), '') != '' OR COALESCE(TRIM(m.camera_model), '') != '')
+            GROUP BY LOWER({norm_cam_expr})
+            ORDER BY cnt DESC, cam COLLATE NOCASE ASC;
+            """
+        ).fetchall()
+        out = [(str(r[0]), int(r[1])) for r in rows if str(r[0] or "").strip()]
+        no_cam_row = conn.execute(
+            f"""
+            SELECT COUNT(*) FROM media m
+            JOIN folders f ON f.id = m.folder_id
+            WHERE COALESCE(m.is_missing, 0) = 0 AND m.live_companion_for_id IS NULL AND {priv_clause}
+              AND COALESCE(TRIM(m.camera_make), '') = '' AND COALESCE(TRIM(m.camera_model), '') = '';
+            """
+        ).fetchone()
+        no_cnt = int(no_cam_row[0]) if no_cam_row else 0
+        if no_cnt > 0:
+            out.append(("__NO_CAMERA__", no_cnt))
+        return out
 
     def get_distinct_places(self, limit: int = 200) -> list[str]:
         """Return distinct non-empty place strings for Smart Album autocomplete."""

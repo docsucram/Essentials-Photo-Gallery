@@ -1735,6 +1735,30 @@ class ThumbnailDecodeWorker(QRunnable):
                         height=qimg.height(),
                     )
 
+            # 5. Populate persistent visual signatures from the in-memory thumbnail (zero extra I/O)
+            if not self.is_video and not self.cancel_flag.is_set:
+                try:
+                    from src.core.duplicate_finder import compute_signatures_from_qimage
+
+                    sig = compute_signatures_from_qimage(qimg)
+                    if sig is not None:
+                        phash64, dhash64, sharpness, lab_haar = sig
+                        if self.write_coalescer is not None and hasattr(self.write_coalescer, "enqueue_signature"):
+                            self.write_coalescer.enqueue_signature(
+                                self.media_id,
+                                self.mtime,
+                                phash64,
+                                dhash64,
+                                sharpness,
+                                lab_haar,
+                            )
+                        else:
+                            thumb_repo.upsert_signatures_batch(
+                                [(self.media_id, self.mtime, phash64, dhash64, sharpness, lab_haar)]
+                            )
+                except Exception:
+                    pass
+
         except Exception as exc:
             from src.utils.scan_logger import log_scan_error
             log_scan_error("ThumbnailDecodeWorker", self.file_path, exc)

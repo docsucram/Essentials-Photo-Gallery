@@ -141,6 +141,7 @@ class ThumbnailWriteCoalescer(QObject):
         self.batch_size = max(1, int(batch_size))
         self._lock = threading.Lock()
         self._pending: dict[int, tuple[int, bytes, int, int, int]] = {}
+        self._pending_sigs: dict[int, tuple[int, int, int, int, float, bytes]] = {}
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(max(20, int(flush_ms)))
@@ -172,6 +173,33 @@ class ThumbnailWriteCoalescer(QObject):
             # Arm single-shot flush timer safely from any thread
             QTimer.singleShot(0, self._arm_timer)
 
+    def enqueue_signature(
+        self,
+        media_id: int,
+        mtime: int,
+        phash64: int,
+        dhash64: int,
+        sharpness: float,
+        lab_haar: bytes,
+    ) -> None:
+        """Queues precomputed visual signatures alongside thumbnails for batched SQLite commit."""
+        should_flush_now = False
+        with self._lock:
+            self._pending_sigs[int(media_id)] = (
+                int(media_id),
+                int(mtime),
+                int(phash64),
+                int(dhash64),
+                float(sharpness),
+                bytes(lab_haar) if lab_haar else b"",
+            )
+            if len(self._pending_sigs) >= self.batch_size:
+                should_flush_now = True
+        if should_flush_now:
+            self.flush()
+        else:
+            QTimer.singleShot(0, self._arm_timer)
+
     @Slot()
     def _arm_timer(self) -> None:
         if not self._timer.isActive():
@@ -179,16 +207,25 @@ class ThumbnailWriteCoalescer(QObject):
 
     @Slot()
     def flush(self) -> int:
-        """Commits all buffered WebP thumbnails in one batched SQLite transaction."""
+        """Commits all buffered WebP thumbnails and visual signatures in batched SQLite transactions."""
         with self._lock:
-            if not self._pending:
+            if not self._pending and not self._pending_sigs:
                 return 0
             batch = list(self._pending.values())
+            sig_batch = list(self._pending_sigs.values())
             self._pending.clear()
+            self._pending_sigs.clear()
+        committed = 0
         try:
             thumb_repo = ThumbnailRepository(self.engine)
-            thumb_repo.put_webp_blobs_batch(batch)
-            return len(batch)
+            if batch:
+                thumb_repo.put_webp_blobs_batch(batch)
+                committed += len(batch)
+            if sig_batch:
+                thumb_repo.upsert_signatures_batch(sig_batch)
+                if not batch:
+                    committed += len(sig_batch)
+            return committed
         except Exception:
             return 0
 

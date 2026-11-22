@@ -156,7 +156,7 @@ class CatalogListModel(QAbstractListModel):
         self._column_count: int = 4
         self._chrome_height: int | None = None
         self._uniform_row_heights: bool = False
-        self._layout_mode: Literal["wlpg_grid", "mosaic"] = "wlpg_grid"
+        self._layout_mode: Literal["wlpg_grid", "tiles", "mosaic", "masonry"] = "wlpg_grid"
 
         self._selected_ids: set[int] = set()
         self._group_record_starts: list[int] = []
@@ -166,7 +166,7 @@ class CatalogListModel(QAbstractListModel):
         self._mosaic_total_height: int = 0
 
     @property
-    def layout_mode(self) -> Literal["wlpg_grid", "mosaic"]:
+    def layout_mode(self) -> Literal["wlpg_grid", "tiles", "mosaic", "masonry"]:
         return self._layout_mode
 
     @property
@@ -179,7 +179,7 @@ class CatalogListModel(QAbstractListModel):
 
     @property
     def total_content_height(self) -> int:
-        if self._layout_mode == "mosaic":
+        if self._layout_mode in ("mosaic", "masonry"):
             return self._mosaic_total_height
         return self._total_content_height
 
@@ -396,6 +396,12 @@ class CatalogListModel(QAbstractListModel):
                 target_row_height=max(80, self._cell_height - 36),
                 spacing=self._spacing,
             )
+        elif self._layout_mode == "masonry":
+            self.compute_masonry_geometry(
+                self._viewport_width,
+                target_col_width=max(110, self._cell_width),
+                spacing=max(2, self._spacing),
+            )
 
     def set_grid_metrics(
         self,
@@ -426,7 +432,7 @@ class CatalogListModel(QAbstractListModel):
         ):
             if vw == self._viewport_width:
                 return
-            if self._layout_mode == "wlpg_grid":
+            if self._layout_mode in ("wlpg_grid", "tiles"):
                 # Pure viewport resize that keeps column_count identical doesn't alter row Y-offsets.
                 self._viewport_width = vw
                 return
@@ -449,8 +455,10 @@ class CatalogListModel(QAbstractListModel):
         self._rebuild_virtual_row_offsets()
         self.endResetModel()
 
-    def set_layout_mode(self, mode: Literal["wlpg_grid", "mosaic"]) -> None:
-        if mode not in ("wlpg_grid", "mosaic") or mode == self._layout_mode:
+    def set_layout_mode(
+        self, mode: Literal["wlpg_grid", "tiles", "mosaic", "masonry"]
+    ) -> None:
+        if mode not in ("wlpg_grid", "tiles", "mosaic", "masonry") or mode == self._layout_mode:
             return
         self.beginResetModel()
         self._layout_mode = mode
@@ -509,7 +517,7 @@ class CatalogListModel(QAbstractListModel):
 
         rec: MediaItemRecord | None = None
         if g.record_count > 0:
-            if self._layout_mode == "mosaic":
+            if self._layout_mode in ("mosaic", "masonry"):
                 raw = self._mosaic_raw
                 for vrow in range(g.vrow_items_start, g.vrow_end):
                     mt = raw.get(vrow)
@@ -641,7 +649,7 @@ class CatalogListModel(QAbstractListModel):
         if vrow < 0 or vrow >= self._total_vrows or not self._groups:
             return QRect()
 
-        if self._layout_mode == "mosaic":
+        if self._layout_mode in ("mosaic", "masonry"):
             t = self._mosaic_raw.get(vrow)
             return QRect(t[0], t[1], t[2], t[3]) if t is not None else QRect()
 
@@ -682,7 +690,7 @@ class CatalogListModel(QAbstractListModel):
         if py < 0:
             return -1
 
-        if self._layout_mode == "mosaic":
+        if self._layout_mode in ("mosaic", "masonry"):
             if self._group_y_ends:
                 g_idx = bisect.bisect_right(self._group_y_ends, py)
                 cand_groups = [self._groups[g_idx]] if g_idx < len(self._groups) else []
@@ -761,7 +769,7 @@ class CatalogListModel(QAbstractListModel):
             return []
 
         result: list[int] = []
-        if self._layout_mode == "mosaic":
+        if self._layout_mode in ("mosaic", "masonry"):
             start_g = (
                 bisect.bisect_left(self._group_y_ends, max(0, top_y))
                 if self._group_y_ends
@@ -921,6 +929,67 @@ class CatalogListModel(QAbstractListModel):
 
         if self._layout_mode == "mosaic":
             self._group_y_ends = mosaic_group_y_ends
+        self._mosaic_total_height = y_cursor + self.GRID_MARGIN_TOP
+        return self._mosaic_rects
+
+    def compute_masonry_geometry(
+        self, viewport_width: int, target_col_width: int = 190, spacing: int = 4
+    ) -> _LazyMosaicRectMap:
+        """
+        Packs portrait and landscape images into equal-width shortest-first waterfall columns
+        (portrait-priority masonry layout) across `viewport_width`, storing (x, y, w, h) tuples.
+        """
+        self._viewport_width = max(200, int(viewport_width))
+        avail_w = max(200, self._viewport_width - (self.GRID_MARGIN_X * 2))
+        gap = max(2, int(spacing))
+        col_target = max(80, int(target_col_width))
+        cols = max(1, (avail_w + gap) // (col_target + gap))
+        col_w = max(60, (avail_w - (cols - 1) * gap) // cols)
+        header_h = self.HEADER_HEIGHT
+        margin_x = self.GRID_MARGIN_X
+        section_gap = self.SECTION_BOTTOM_GAP
+
+        raw = self._mosaic_raw
+        raw.clear()
+        y_cursor = self.GRID_MARGIN_TOP
+        masonry_group_y_ends: list[int] = []
+        records = self._records
+        headers_on = self._group_headers_enabled
+
+        for g in self._groups:
+            if headers_on and g.vrow_header >= 0:
+                raw[g.vrow_header] = (margin_x, y_cursor, avail_w, header_h)
+                y_cursor += header_h + gap
+
+            if g.collapsed or g.record_count == 0:
+                masonry_group_y_ends.append(y_cursor)
+                continue
+
+            col_ys = [y_cursor] * cols
+            vrow_base = g.vrow_items_start
+            rec_base = g.record_start
+
+            for offset in range(g.record_count):
+                vrow = vrow_base + offset
+                rec = records[rec_base + offset]
+                w = rec.width
+                h = rec.height
+                if w > 0 and h > 0:
+                    ar = max(0.42, min(2.5, w / h))
+                else:
+                    ar = 1.333
+                tile_h = max(48, int(round(col_w / ar)))
+                best_col = min(range(cols), key=lambda c: col_ys[c])
+                x = margin_x + best_col * (col_w + gap)
+                y = col_ys[best_col]
+                raw[vrow] = (x, y, col_w, tile_h)
+                col_ys[best_col] = y + tile_h + gap
+
+            y_cursor = max(col_ys) + section_gap
+            masonry_group_y_ends.append(y_cursor)
+
+        if self._layout_mode == "masonry":
+            self._group_y_ends = masonry_group_y_ends
         self._mosaic_total_height = y_cursor + self.GRID_MARGIN_TOP
         return self._mosaic_rects
 

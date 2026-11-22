@@ -4,6 +4,26 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 
 ---
 
+## Essentials Photo Gallery v0.17.0 (Pre-Release)
+
+> **Highlights:** Thumbnail-time Visual Signatures & undoable hardened Auto-Stacking, **Tiles** & portrait-priority **Masonry** grid layouts, optional **Cameras** & AI **Subjects** nav sections, `F1` Keyboard Shortcuts modal + `Alt+1..9` Quick-Tag hotkeys, and optional **MobileCLIP-S1** local semantic search (`File → Options → Add-ons`).
+
+### Key Additions
+- **Thumbnail-Time Visual Signatures & Undoable Hardened Auto-Stacking:**
+  - `ThumbnailDecodeWorker` now computes `phash64`, `dhash64`, `laplacian_sharpness`, and `lab_haar` directly from the decoded in-memory `QImage` during thumbnail generation and coalesces writes into `thumbnails.db` (`media_signatures`) without re-opening source files.
+  - Hardened `auto_stack_raw_jpeg_pairs()` and `auto_stack_bursts()` skip existing stacks, enforce `30.0s` burst windows + `dhash64` anchor Hamming distance checks, exclude single-stem RAW+JPEG pairs from burst clustering, pick the sharpest/best-rated/flagged head, support single-step `Ctrl+Z` undo/redo (`_StackMutationUndoCommand`), and automatically promote a new head via `reconcile_stack_after_delete()` if a stack head is deleted.
+- **Additional Photo Layouts (`Tiles` & `Masonry`):**
+  - Added **Tiles** (`"tiles"`, uniform square 4px-rounded tiles) and portrait-priority **Masonry** (`"masonry"`, shortest-first column waterfall) alongside existing **Grid** (`"wlpg_grid"`) and landscape **Mosaic** (`"mosaic"`) views, with dedicated Ribbon buttons/vector icons, `[♥/★ N]` squircle badges, and `QSettings` persistence.
+- **Optional Left Nav `Cameras` Section (Default Off):**
+  - Added an optional **Cameras** collapsible section (toggled in **File → Options → General → Show Cameras**, default off) with live camera model counts, Make prefix deduplication, `__NO_CAMERA__` filter support, and `FilterQuerySpec.camera_model` SQL filtering.
+- **Keyboard Ergonomics & Discoverability (`F1` & `Alt+1..9`):**
+  - Added `KeyboardShortcutsDialog` (`F1` / **File → Keyboard Shortcuts...**) featuring a searchable shortcut catalog across navigation, rating/culling, viewer, Compare Mode, and batch face confirmation, plus configurable `Alt+1..Alt+9` Quick-Tag hotkeys working across Grid View, Single Media Viewer, and Spacebar Quick Preview.
+- **Optional `MobileCLIP-S1` Semantic Search & AI Subjects Add-On:**
+  - Added `SemanticEngine`, `SemanticVectorRepository` (`semantic_vectors.db` with float16 vectors + cached L2-normalized search matrix), and background `SemanticIndexWorker` (reading strictly from cached `thumbnails.db` blobs) alongside HTTP `Range` resumable model download in **File → Options → Add-ons**.
+  - Powers hybrid Reciprocal Rank Fusion (`fuse_semantic_and_fts_scores`) in the Search Box and an optional **Subjects** left-nav section (`Show Subjects (AI)`, default off) covering 12 built-in visual concepts (`Family`, `Kids`, `Pets`, `Portraits`, `Food`, `Sports`, `Landscape`, `Night`, etc.).
+
+---
+
 ## Essentials Photo Gallery v0.16.0
 
 **Essentials Photo Gallery 0.16.0** delivers major **speed & responsiveness improvements** across World Map View and the thumbnail grid, a **borderless fullscreen Quick Preview (`Space`)**, a **redesigned draggable Filmstrip**, an **overhauled Export / Resize** workflow, **Favourites & Tri-State Culling Flags**, and an **auto-detecting Google Picasa importer**.

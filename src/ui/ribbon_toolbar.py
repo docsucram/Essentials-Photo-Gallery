@@ -1015,6 +1015,56 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawRect(QRectF(s * 0.12, s * 0.54, s * 0.26, s * 0.32))
         p.drawRect(QRectF(s * 0.44, s * 0.54, s * 0.44, s * 0.32))
 
+    elif kind == "layout_tiles":
+        p.setPen(QPen(QColor("#2B6299"), 1.0))
+        p.setBrush(QColor("#69ACEA"))
+        for r_i in range(3):
+            for c_i in range(3):
+                p.drawRoundedRect(
+                    QRectF(s * (0.12 + c_i * 0.27), s * (0.12 + r_i * 0.27), s * 0.22, s * 0.22),
+                    1.5,
+                    1.5,
+                )
+
+    elif kind == "layout_masonry":
+        p.setPen(QPen(QColor("#2B6299"), 1.1))
+        p.setBrush(QColor("#69ACEA"))
+        # Portrait-priority staggered vertical columns
+        p.drawRect(QRectF(s * 0.12, s * 0.12, s * 0.22, s * 0.46))
+        p.drawRect(QRectF(s * 0.12, s * 0.64, s * 0.22, s * 0.24))
+        p.drawRect(QRectF(s * 0.40, s * 0.12, s * 0.22, s * 0.26))
+        p.drawRect(QRectF(s * 0.40, s * 0.44, s * 0.22, s * 0.44))
+        p.drawRect(QRectF(s * 0.68, s * 0.12, s * 0.20, s * 0.40))
+        p.drawRect(QRectF(s * 0.68, s * 0.58, s * 0.20, s * 0.30))
+
+    elif kind == "camera":
+        p.setPen(QPen(QColor("#334155"), 1.2))
+        p.setBrush(QColor("#64748B"))
+        p.drawRoundedRect(QRectF(s * 0.10, s * 0.28, s * 0.80, s * 0.54), 2.5, 2.5)
+        p.drawPolygon(QPolygonF([
+            QPointF(s * 0.32, s * 0.28),
+            QPointF(s * 0.40, s * 0.16),
+            QPointF(s * 0.60, s * 0.16),
+            QPointF(s * 0.68, s * 0.28),
+        ]))
+        p.setBrush(QColor("#E2E8F0"))
+        p.drawEllipse(QPointF(s * 0.50, s * 0.55), s * 0.19, s * 0.19)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#38BDF8"))
+        p.drawEllipse(QPointF(s * 0.50, s * 0.55), s * 0.10, s * 0.10)
+
+    elif kind == "subjects":
+        p.setPen(QPen(QColor("#2563EB"), 1.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(QColor("#60A5FA"))
+        p.drawPolygon(QPolygonF([
+            QPointF(s * 0.55, s * 0.12),
+            QPointF(s * 0.24, s * 0.54),
+            QPointF(s * 0.48, s * 0.54),
+            QPointF(s * 0.40, s * 0.88),
+            QPointF(s * 0.76, s * 0.44),
+            QPointF(s * 0.50, s * 0.44),
+        ]))
+
     elif kind in ("all_media", "all_photos_videos"):
         p.setPen(QPen(QColor("#356B9E"), 1.0))
         p.setBrush(QColor("#FFFFFF"))
@@ -5905,6 +5955,7 @@ class RibbonToolbar(QWidget):
         file_menu.addAction(self.act_pause_write_back)
         file_menu.addSeparator()
         file_menu.addAction(make_wlpg_icon("options", 16), "Options...", lambda: self.action_triggered.emit("open_settings"))
+        file_menu.addAction(make_wlpg_icon("properties", 16), "Keyboard Shortcuts...\tF1", lambda: self.action_triggered.emit("show_shortcuts"))
         file_menu.addAction(make_wlpg_icon("app_logo", 16), "About Essentials Photo Gallery", lambda: self.action_triggered.emit("about_photo_gallery"))
         file_menu.addSeparator()
         file_menu.addAction(make_wlpg_icon("cross", 16), "Exit", lambda: self.action_triggered.emit("exit_app"))
@@ -6732,7 +6783,9 @@ class RibbonToolbar(QWidget):
             getattr(self, "btn_toggle_nav_pane", None),
             getattr(self, "btn_toggle_tag_pane", None),
             getattr(self, "btn_layout_grid", None),
+            getattr(self, "btn_layout_tiles", None),
             getattr(self, "btn_layout_mosaic", None),
+            getattr(self, "btn_layout_masonry", None),
         ):
             if btn is not None:
                 self._set_button_compact(btn, width < 920)
@@ -8871,26 +8924,49 @@ class RibbonToolbar(QWidget):
             "Grid", "layout_grid", grp_layout, large=True, checkable=True
         )
         self.btn_layout_grid.setChecked(True)
+        self.btn_layout_grid.setToolTip("Classic Gallery Grid with details under photos")
+        self.btn_layout_tiles = self._make_btn(
+            "Tiles", "layout_tiles", grp_layout, large=True, checkable=True
+        )
+        self.btn_layout_tiles.setToolTip("Uniform edge-to-edge square tiles")
         self.btn_layout_mosaic = self._make_btn(
             "Mosaic", "layout_mosaic", grp_layout, large=True, checkable=True
         )
+        self.btn_layout_mosaic.setToolTip("Justified horizontal rows (landscape-priority)")
+        self.btn_layout_masonry = self._make_btn(
+            "Masonry", "layout_masonry", grp_layout, large=True, checkable=True
+        )
+        self.btn_layout_masonry.setToolTip("Waterfall vertical columns (portrait-priority)")
 
         self._layout_btn_group = QButtonGroup(self)
         self._layout_btn_group.setExclusive(True)
-        self._layout_btn_group.addButton(self.btn_layout_grid)
-        self._layout_btn_group.addButton(self.btn_layout_mosaic)
+        for l_btn in (
+            self.btn_layout_grid,
+            self.btn_layout_tiles,
+            self.btn_layout_mosaic,
+            self.btn_layout_masonry,
+        ):
+            self._layout_btn_group.addButton(l_btn)
 
         self.btn_layout_grid.clicked.connect(
             lambda: self.layout_mode_changed.emit("wlpg_grid")
         )
+        self.btn_layout_tiles.clicked.connect(
+            lambda: self.layout_mode_changed.emit("tiles")
+        )
         self.btn_layout_mosaic.clicked.connect(
             lambda: self.layout_mode_changed.emit("mosaic")
+        )
+        self.btn_layout_masonry.clicked.connect(
+            lambda: self.layout_mode_changed.emit("masonry")
         )
         l_hbox = QHBoxLayout()
         l_hbox.setContentsMargins(0, 0, 0, 0)
         l_hbox.setSpacing(3)
         l_hbox.addWidget(self.btn_layout_grid)
+        l_hbox.addWidget(self.btn_layout_tiles)
         l_hbox.addWidget(self.btn_layout_mosaic)
+        l_hbox.addWidget(self.btn_layout_masonry)
         grp_layout.content_layout.addLayout(l_hbox)
         hbox.addWidget(grp_layout)
 
@@ -9111,10 +9187,17 @@ class RibbonToolbar(QWidget):
             self.chk_all_details.blockSignals(False)
         self.details_overlay_changed.emit(set(active))
 
-    def set_layout_mode(self, mode: Literal["wlpg_grid", "mosaic"]) -> None:
+    def set_layout_mode(
+        self, mode: Literal["wlpg_grid", "tiles", "mosaic", "masonry"]
+    ) -> None:
         if mode == "mosaic":
             self.btn_layout_mosaic.setChecked(True)
+        elif mode == "tiles":
+            self.btn_layout_tiles.setChecked(True)
+        elif mode == "masonry":
+            self.btn_layout_masonry.setChecked(True)
         else:
+            mode = "wlpg_grid"
             self.btn_layout_grid.setChecked(True)
         self.layout_mode_changed.emit(mode)
 

@@ -210,6 +210,36 @@ def compute_lab_haar_signature(img_bgr: np.ndarray) -> bytes:
     return lab.astype(np.uint8).tobytes()
 
 
+def compute_signatures_from_qimage(qimg: Any) -> tuple[int, int, float, bytes] | None:
+    """
+    Extracts `(phash64, dhash64, sharpness, lab_haar)` directly from an in-memory
+    `QImage` (no extra disk read or WebP re-decode), returning None on invalid/tiny inputs.
+    """
+    if qimg is None or qimg.isNull() or qimg.width() < 16 or qimg.height() < 16:
+        return None
+    from PySide6.QtGui import QImage
+
+    rgb = (
+        qimg
+        if qimg.format() == QImage.Format.Format_RGB888
+        else qimg.convertToFormat(QImage.Format.Format_RGB888)
+    )
+    w, h = rgb.width(), rgb.height()
+    bpl = rgb.bytesPerLine()
+    raw = bytes(rgb.constBits())
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    if arr.size < h * bpl:
+        return None
+    rgb_arr = arr[: h * bpl].reshape((h, bpl))[:, : w * 3].reshape((h, w, 3))
+    bgr = np.ascontiguousarray(rgb_arr[:, :, ::-1])
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    phash64 = compute_image_phash(gray)
+    dhash64 = compute_image_dhash(gray)
+    sharpness = compute_sharpness_score(gray)
+    lab_haar = compute_lab_haar_signature(bgr)
+    return (phash64, dhash64, sharpness, lab_haar)
+
+
 def hamming_distance(h1: int, h2: int) -> int:
     """Returns the bitwise Hamming distance between two 64-bit integer hashes."""
     return (h1 ^ h2).bit_count()

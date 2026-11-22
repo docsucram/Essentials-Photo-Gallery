@@ -163,6 +163,36 @@ class _RatingUndoCommand(QUndoCommand):
             self.main_win.right_tag_dock.bind_selection(active_ids, summary)
 
 
+class _StackMutationUndoCommand(QUndoCommand):
+    """Reversible stack grouping command (auto-stack bursts / RAW+JPEG pairs) for QUndoStack."""
+
+    def __init__(
+        self,
+        main_win: PhotoGalleryMainWindow,
+        before_map: dict[int, int | None],
+        after_map: dict[int, int | None],
+        description: str,
+    ) -> None:
+        super().__init__(description)
+        self.main_win = main_win
+        self.before_map = dict(before_map)
+        self.after_map = dict(after_map)
+        self._first_redo = True
+
+    def redo(self) -> None:
+        if self._first_redo:
+            self._first_redo = False
+            return
+        self.main_win.catalog_repo.restore_stack_parent_map(self.after_map)
+        self.main_win._expanded_stack_ids.clear()
+        self.main_win.rebuild_and_run_query()
+
+    def undo(self) -> None:
+        self.main_win.catalog_repo.restore_stack_parent_map(self.before_map)
+        self.main_win._expanded_stack_ids.clear()
+        self.main_win.rebuild_and_run_query()
+
+
 class _FlagUndoCommand(QUndoCommand):
     """Reversible flag modification command for QUndoStack."""
 
@@ -1114,6 +1144,20 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._filmstrip_viewer_enabled: bool = False
         self._active_create_workspace: Any = None
         self._create_ws_snapshot: dict[str, Any] | None = None
+        self._active_subject_ids: list[int] | None = None
+        self._active_subject_label: str = ""
+        self.nav_show_cameras: bool = False
+        self.nav_show_subjects: bool = False
+        try:
+            from src.core.semantic_engine import SemanticEngine, SemanticVectorRepository
+
+            self.semantic_repo: Any = SemanticVectorRepository(
+                self.engine.catalog_path.parent / "semantic_vectors.db"
+            )
+            self.semantic_engine: Any = SemanticEngine()
+        except Exception:
+            self.semantic_repo = None
+            self.semantic_engine = None
 
         # 4. WLPG Bottom Status Bar
         self._build_status_bar()
@@ -1446,6 +1490,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.left_nav_dock.files_dropped_on_folder.connect(self._on_files_dropped_on_folder)
         self.left_nav_dock.tag_hierarchy_changed.connect(self.refresh_navigation_and_autocomplete)
         self.left_nav_dock.place_selected.connect(self._on_place_selected)
+        self.left_nav_dock.subject_selected.connect(self._on_subject_selected)
         self.left_nav_dock.new_album_requested.connect(self._on_new_album_requested)
         self.left_nav_dock.rename_album_requested.connect(self._on_rename_album_requested)
         self.left_nav_dock.delete_album_requested.connect(self._on_delete_album_requested)
@@ -1877,6 +1922,15 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.sc_properties_ret.activated.connect(self.open_file_properties)
         self.sc_properties_enter = QShortcut(QKeySequence("Alt+Enter"), self)
         self.sc_properties_enter.activated.connect(self.open_file_properties)
+
+        # F1: Keyboard Shortcuts Cheat-Sheet & Quick-Tag Hotkeys (Alt+1..Alt+9)
+        self.sc_shortcuts = QShortcut(QKeySequence(Qt.Key_F1), self)
+        self.sc_shortcuts.activated.connect(lambda: self.open_keyboard_shortcuts_dialog(0))
+        self._quick_tag_shortcuts: list[QShortcut] = []
+        for slot in range(1, 10):
+            sc_qt = QShortcut(QKeySequence(f"Alt+{slot}"), self)
+            sc_qt.activated.connect(lambda s=slot: self._on_quick_tag_hotkey(s))
+            self._quick_tag_shortcuts.append(sc_qt)
 
         # SingleMediaViewer
         self.media_viewer.closed.connect(self.show_grid_view)
@@ -2870,6 +2924,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 break
         self.ribbon.populate_face_carousel(people)
         self.ribbon.populate_tags_menu(tags)
+        self._refresh_subjects_nav_counts()
         self.right_tag_dock.set_autocomplete_lists(
             all_tag_paths,
             [str(p["name"]) for p in people],
@@ -3307,6 +3362,9 @@ class PhotoGalleryMainWindow(QMainWindow):
 
     def _on_nav_filter_changed(self) -> None:
         self._active_bbox = None
+        if not getattr(self, "_preserving_subject_on_nav_change", False):
+            self._active_subject_ids = None
+            self._active_subject_label = ""
         if not getattr(self, "_preserving_favourites_on_nav_change", False):
             self._favourites_only = False
         if not self._is_navigating_history:
@@ -3901,43 +3959,27 @@ class PhotoGalleryMainWindow(QMainWindow):
             group_reverse=self._group_reverse,
         )
         if self._active_date_range is not None:
-            spec = FilterQuerySpec(
-                folder_id=spec.folder_id,
-                include_subfolders=spec.include_subfolders,
+            from dataclasses import replace as _dc_replace
+
+            spec = _dc_replace(
+                spec,
                 date_from=self._active_date_range[0],
                 date_to=self._active_date_range[1],
-                include_tag_ids=spec.include_tag_ids,
-                tag_boolean_mode=spec.tag_boolean_mode,
-                exclude_tag_ids=spec.exclude_tag_ids,
-                untagged_only=spec.untagged_only,
-                person_ids=spec.person_ids,
-                person_boolean_mode=spec.person_boolean_mode,
-                ratings=spec.ratings,
-                flagged_only=spec.flagged_only,
-                edited_filter=spec.edited_filter,
-                media_type=spec.media_type,
-                orientation_filter=spec.orientation_filter,
-                search_text=spec.search_text,
-                bbox=spec.bbox,
-                media_ids=spec.media_ids,
-                location_country=spec.location_country,
-                location_state=spec.location_state,
-                location_city=spec.location_city,
-                album_id=spec.album_id,
-                smart_album_id=spec.smart_album_id,
-                arrange_by=spec.arrange_by,
-                reverse_sort=spec.reverse_sort,
-                group_by=spec.group_by,
-                sort_by=spec.sort_by,
-                sort_reverse=spec.sort_reverse,
-                group_reverse=spec.group_reverse,
             )
         sim_order = getattr(self, "_active_similar_order", None)
+        subj_order = getattr(self, "_active_subject_ids", None)
         if sim_order:
             # Find Similar searches catalog-wide; don't intersect with the current folder filter
             spec = FilterQuerySpec(
                 media_ids=tuple(sim_order),
                 search_text=spec.search_text,
+            )
+        elif subj_order is not None:
+            spec = FilterQuerySpec(
+                media_ids=tuple(subj_order) if subj_order else (-1,),
+                arrange_by=spec.arrange_by,
+                reverse_sort=spec.reverse_sort,
+                group_by="none",
             )
         exp_stack = tuple(sorted(getattr(self, "_expanded_stack_ids", set())))
         fav_only = bool(getattr(self, "_favourites_only", False))
@@ -3946,8 +3988,42 @@ class PhotoGalleryMainWindow(QMainWindow):
 
             spec = _dc_replace(spec, expanded_stack_ids=exp_stack, favourites_only=fav_only)
         records = self.catalog_repo.query_media_records(spec)
+
+        # Fuse semantic text matches with FTS5 keyword matches when MobileCLIP-S1 is installed
+        if (
+            not sim_order
+            and subj_order is None
+            and self._search_text
+            and self._search_text.strip()
+            and getattr(self, "semantic_engine", None) is not None
+            and getattr(self, "semantic_repo", None) is not None
+            and self.semantic_engine.is_available()
+        ):
+            try:
+                from src.core.semantic_engine import fuse_semantic_and_fts_scores
+
+                qvec = self.semantic_engine.encode_text(self._search_text.strip())
+                if qvec is not None:
+                    sem_hits = self.semantic_engine.query_by_vector(self.semantic_repo, qvec, threshold=0.22, limit=400)
+                    if sem_hits:
+                        fts_ids = [int(r.id) for r in records]
+                        fused_ids = fuse_semantic_and_fts_scores(fts_ids, sem_hits)
+                        missing_ids = [mid for mid in fused_ids if mid not in set(fts_ids)]
+                        if missing_ids:
+                            extra_recs = self.catalog_repo.query_media_records(
+                                FilterQuerySpec(media_ids=tuple(missing_ids), group_by="none")
+                            )
+                            rec_by_id = {int(r.id): r for r in (records + extra_recs)}
+                            records = [rec_by_id[mid] for mid in fused_ids if mid in rec_by_id]
+            except Exception:
+                pass
+
         if sim_order:
             rank_map = {int(mid): idx for idx, mid in enumerate(sim_order)}
+            records.sort(key=lambda r: rank_map.get(int(r.id), len(rank_map)))
+            headers_enabled = False
+        elif subj_order:
+            rank_map = {int(mid): idx for idx, mid in enumerate(subj_order)}
             records.sort(key=lambda r: rank_map.get(int(r.id), len(rank_map)))
             headers_enabled = False
         self.catalog_model.set_records(records, group_headers_enabled=headers_enabled)
@@ -3971,6 +4047,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             or spec.location_country
             or spec.location_state
             or spec.location_city
+            or spec.camera_model
+            or (subj_order is not None)
         )
         is_library_empty = False
         if is_empty and not is_search and not is_scoped:
@@ -4866,13 +4944,29 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.show_status_message(f"✓ Unstacked {changed} item(s)", 3000)
 
     def auto_stack_raw_jpeg_pairs(self) -> None:
-        count = self.catalog_repo.auto_stack_raw_jpeg_pairs()
+        before_map: dict[int, int | None] = {}
+        count = self.catalog_repo.auto_stack_raw_jpeg_pairs(capture_undo_out=before_map)
+        if before_map:
+            after_map = self.catalog_repo.get_stack_parent_map(list(before_map.keys()))
+            self.undo_stack.push(
+                _StackMutationUndoCommand(self, before_map, after_map, "Auto-Stack RAW + JPEG Pairs")
+            )
         self._expanded_stack_ids.clear()
         self.rebuild_and_run_query()
         self.show_status_message(f"✓ Paired {count} RAW + JPEG stack(s)", 3500)
 
     def auto_stack_bursts(self) -> None:
-        count = self.catalog_repo.auto_stack_bursts(max_gap_sec=2.0)
+        before_map: dict[int, int | None] = {}
+        count = self.catalog_repo.auto_stack_bursts(
+            max_gap_sec=2.0,
+            thumb_repo=self.thumb_repo,
+            capture_undo_out=before_map,
+        )
+        if before_map:
+            after_map = self.catalog_repo.get_stack_parent_map(list(before_map.keys()))
+            self.undo_stack.push(
+                _StackMutationUndoCommand(self, before_map, after_map, "Auto-Stack Bursts")
+            )
         self._expanded_stack_ids.clear()
         self.rebuild_and_run_query()
         self.show_status_message(f"✓ Grouped {count} burst stack(s)", 3500)
@@ -7504,6 +7598,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 with self.engine.write_lock:
                     conn.execute("DELETE FROM media WHERE id = ?;", (mid,))
                     conn.commit()
+                self.catalog_repo.reconcile_stack_after_delete(mid)
                 deleted_count += 1
                 last_deleted_name = str(detail["filename"])
             except Exception:
@@ -8773,8 +8868,127 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.backup_catalog_dialog()
         elif action_id == "open_settings":
             self._open_settings_dialog()
+        elif action_id == "show_shortcuts":
+            self.open_keyboard_shortcuts_dialog(0)
         elif action_id in ("about_photo_gallery", "about_app"):
             self._open_about_dialog()
+
+    def open_keyboard_shortcuts_dialog(self, initial_tab: int = 0) -> None:
+        from src.ui.shortcuts_dialog import KeyboardShortcutsDialog
+
+        try:
+            tags = [str(t["full_path"]) for t in self.catalog_repo.get_tag_tree()]
+        except Exception:
+            tags = []
+        dlg = KeyboardShortcutsDialog(
+            available_tags=tags,
+            is_dark=(getattr(self, "current_theme", "wlpg_aero") == "dark"),
+            initial_tab=initial_tab,
+            parent=self,
+        )
+        dlg.exec()
+
+    def _on_quick_tag_hotkey(self, slot: int) -> None:
+        if getattr(self, "_active_create_workspace", None) is not None:
+            return
+        focused = QApplication.focusWidget()
+        if isinstance(focused, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            return
+        from src.ui.shortcuts_dialog import load_quick_tag_hotkeys
+
+        tag_name = load_quick_tag_hotkeys().get(int(slot))
+        if not tag_name:
+            self.show_status_message(
+                f"Alt+{slot} is not assigned — press F1 to configure Quick-Tag hotkeys.",
+                3500,
+            )
+            return
+        qp = getattr(self, "_quick_preview_dialog", None)
+        if qp is not None and qp.isVisible() and getattr(qp, "_current_media_id", None) is not None:
+            mid = int(qp._current_media_id)
+            tid = None
+            existing = self.catalog_repo.find_tag_by_leaf_name(tag_name)
+            if existing is not None:
+                tid = int(existing["id"])
+            if tid is None:
+                tid = self.catalog_repo.create_tag(tag_name)
+            self.catalog_repo.assign_tag([mid], tid)
+            self.show_status_message(f"✓ Tagged photo with '{tag_name}' (Alt+{slot})", 3000)
+            self._schedule_tag_nav_refresh()
+            return
+        target_ids = self.get_active_target_ids()
+        if target_ids:
+            self.on_selection_tag_added(tag_name)
+
+    def _refresh_subjects_nav_counts(self) -> None:
+        if (
+            getattr(self, "semantic_repo", None) is None
+            or getattr(self, "semantic_engine", None) is None
+            or not hasattr(self, "left_nav_dock")
+        ):
+            return
+        try:
+            if not getattr(self, "nav_show_subjects", False) and self.semantic_repo.count_indexed() == 0:
+                return
+            subj_vecs = self.semantic_repo.get_subject_vectors()
+            if not subj_vecs and self.semantic_engine.is_available():
+                from src.core.semantic_engine import SUBJECT_PRESETS
+
+                computed: dict[str, Any] = {}
+                for key, _lbl, prompts, _thr in SUBJECT_PRESETS:
+                    vecs = [self.semantic_engine.encode_text(p) for p in prompts]
+                    valid_v = [v for v in vecs if v is not None]
+                    if valid_v:
+                        computed[key] = sum(valid_v) / float(len(valid_v))
+                if computed:
+                    self.semantic_repo.put_subject_vectors(computed)
+                    subj_vecs = self.semantic_repo.get_subject_vectors()
+            counts = (
+                self.semantic_engine.compute_subject_counts(self.semantic_repo, subj_vecs)
+                if subj_vecs
+                else {}
+            )
+            self.left_nav_dock.refresh_subjects(counts)
+        except Exception:
+            pass
+
+    def _on_subject_selected(self, subject_key: str, label: str) -> None:
+        if getattr(self, "semantic_repo", None) is None or getattr(self, "semantic_engine", None) is None:
+            return
+        from src.core.semantic_engine import SUBJECT_PRESETS
+
+        if self.semantic_repo.count_indexed() == 0:
+            self._active_subject_ids = []
+            self._active_subject_label = label
+            self.rebuild_and_run_query()
+            self.show_status_message(
+                f"Subject '{label}': download MobileCLIP-S1 & index photos in Options → Add-ons.",
+                4500,
+            )
+            return
+
+        subj_vecs = self.semantic_repo.get_subject_vectors()
+        qvec = subj_vecs.get(subject_key)
+        if qvec is None:
+            for key, _lbl, prompts, _thr in SUBJECT_PRESETS:
+                if key == subject_key and self.semantic_engine.is_available():
+                    vecs = [self.semantic_engine.encode_text(p) for p in prompts]
+                    valid_v = [v for v in vecs if v is not None]
+                    if valid_v:
+                        qvec = sum(valid_v) / float(len(valid_v))
+                        self.semantic_repo.put_subject_vectors({subject_key: qvec})
+                    break
+        if qvec is None:
+            self.show_status_message(f"Subject preset '{label}' vector unavailable.", 3500)
+            return
+        thr = next((t for k, _l, _p, t in SUBJECT_PRESETS if k == subject_key), 0.24)
+        hits = self.semantic_engine.query_by_vector(self.semantic_repo, qvec, threshold=thr, limit=2000)
+        self._active_subject_ids = [mid for mid, _sc in hits]
+        self._active_subject_label = label
+        if self.central_stack.currentWidget() != self.grid_view:
+            self.show_grid_view()
+        self.rebuild_and_run_query()
+        self.show_status_message(f"✓ Subject '{label}': {len(self._active_subject_ids):,} match(es)", 3500)
 
     def open_print_dialog(self) -> None:
         """Opens the fully-featured Print Pictures dialog for active/selected photos."""
@@ -9328,6 +9542,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             show_ratings=getattr(self.left_nav_dock, "_show_ratings", True),
             show_places=getattr(self.left_nav_dock, "_show_places", True),
             show_albums=getattr(self.left_nav_dock, "_show_albums", True),
+            show_cameras=getattr(self.left_nav_dock, "_show_cameras", False),
+            show_subjects=getattr(self.left_nav_dock, "_show_subjects", False),
             favourites_enabled=getattr(self, "favourites_enabled", True),
             find_people_enabled=getattr(self, "find_people_enabled", True),
             tooltip_previews=getattr(self, "tooltip_previews", True),
@@ -9371,6 +9587,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.nav_show_ratings = dlg.show_ratings()
             self.nav_show_places = dlg.show_places()
             self.nav_show_albums = dlg.show_albums()
+            self.nav_show_cameras = dlg.show_cameras()
+            self.nav_show_subjects = dlg.show_subjects()
             self.left_nav_dock.set_navigation_sections_visibility(
                 show_dates=self.nav_show_dates,
                 show_tags=self.nav_show_tags,
@@ -9378,7 +9596,11 @@ class PhotoGalleryMainWindow(QMainWindow):
                 show_ratings=self.nav_show_ratings,
                 show_places=self.nav_show_places,
                 show_albums=self.nav_show_albums,
+                show_cameras=self.nav_show_cameras,
+                show_subjects=self.nav_show_subjects,
             )
+            if self.nav_show_subjects:
+                self._refresh_subjects_nav_counts()
 
             self.set_favourites_enabled(dlg.favourites_enabled())
 
@@ -9406,6 +9628,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             settings.setValue("nav_show_ratings", self.nav_show_ratings)
             settings.setValue("nav_show_places", self.nav_show_places)
             settings.setValue("nav_show_albums", self.nav_show_albums)
+            settings.setValue("nav_show_cameras", self.nav_show_cameras)
+            settings.setValue("nav_show_subjects", self.nav_show_subjects)
             settings.setValue("favourites_enabled", self.favourites_enabled)
             settings.setValue("find_people_enabled", self.find_people_enabled)
             settings.setValue("tooltip_previews", self.tooltip_previews)
@@ -11297,6 +11521,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             settings.setValue("group_by", self._group_by)
             settings.setValue("sort_by", self._sort_by)
             settings.setValue("zoom_val", self.slider_status_zoom.value())
+            if hasattr(self, "grid_view") and hasattr(self.grid_view, "catalog_model"):
+                settings.setValue("layout_mode", getattr(self.grid_view.catalog_model, "_layout_mode", "wlpg_grid"))
             settings.setValue("view_mode", current_view)
 
             lead_id = (
@@ -11313,6 +11539,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             settings.setValue("nav_show_ratings", getattr(self.left_nav_dock, "_show_ratings", True))
             settings.setValue("nav_show_places", getattr(self.left_nav_dock, "_show_places", True))
             settings.setValue("nav_show_albums", getattr(self.left_nav_dock, "_show_albums", True))
+            settings.setValue("nav_show_cameras", getattr(self.left_nav_dock, "_show_cameras", False))
+            settings.setValue("nav_show_subjects", getattr(self.left_nav_dock, "_show_subjects", False))
             settings.setValue("favourites_enabled", getattr(self, "favourites_enabled", True))
             settings.setValue("smart_show_favourites", getattr(self.left_nav_dock, "_show_smart_favourites", True))
             settings.setValue("smart_show_picked", getattr(self.left_nav_dock, "_show_smart_picked", True))
@@ -11345,6 +11573,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                     "nav_show_people": getattr(self.left_nav_dock, "_show_people", True),
                     "nav_show_ratings": getattr(self.left_nav_dock, "_show_ratings", True),
                     "nav_show_places": getattr(self.left_nav_dock, "_show_places", True),
+                    "nav_show_cameras": getattr(self.left_nav_dock, "_show_cameras", False),
+                    "nav_show_subjects": getattr(self.left_nav_dock, "_show_subjects", False),
                     "find_people_enabled": getattr(self, "find_people_enabled", True),
                     "tooltip_previews": getattr(self, "tooltip_previews", True),
                     "jpeg_quality": getattr(self, "jpeg_quality", 83),
@@ -11407,6 +11637,11 @@ class PhotoGalleryMainWindow(QMainWindow):
                 zoom_val = 150
             self.slider_status_zoom.setValue(zoom_val)
 
+            saved_layout = settings.value("layout_mode", type=str)
+            if saved_layout in ("wlpg_grid", "tiles", "mosaic", "masonry"):
+                self.ribbon.set_layout_mode(saved_layout)
+                self.grid_view.set_layout_mode(saved_layout)
+
             arr_by = settings.value("arrange_by", type=str)
             rev_sort = settings.value("reverse_sort", type=bool)
             if arr_by:
@@ -11460,6 +11695,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.nav_show_ratings = _to_bool(_get_val("nav_show_ratings", True), True)
             self.nav_show_places = _to_bool(_get_val("nav_show_places", True), True)
             self.nav_show_albums = _to_bool(_get_val("nav_show_albums", True), True)
+            self.nav_show_cameras = _to_bool(_get_val("nav_show_cameras", False), False)
+            self.nav_show_subjects = _to_bool(_get_val("nav_show_subjects", False), False)
             raw_order = _get_val("nav_section_order", None)
             if raw_order:
                 try:
@@ -11487,6 +11724,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                 show_ratings=self.nav_show_ratings,
                 show_places=self.nav_show_places,
                 show_albums=self.nav_show_albums,
+                show_cameras=self.nav_show_cameras,
+                show_subjects=self.nav_show_subjects,
             )
             self.left_nav_dock.set_builtin_smart_albums_visibility(
                 favourites=_to_bool(_get_val("smart_show_favourites", True), True),

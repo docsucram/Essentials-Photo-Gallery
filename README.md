@@ -36,8 +36,8 @@ Standalone 64-bit Windows installers (`EssentialsPhotoGallery_Setup_x64.exe`) ar
 
 ## Highlights & Features
 
-- **Classic WLPG Ribbon Look & Feel (with Modern Themes & Integrated QAT)**
-  Recreates the authentic ribbon layout (*Home*, *Edit*, *Find*, *Create*, *View*) plus contextual tabs (*Edit* in Single Image View, *Map* in World Map View), integrated title bar with Quick Access Toolbar (QAT), left navigation tree, and right-hand tag/information pane. Supports three themes: **Classic Aero (Light)**, modern **Microsoft Fluent (Windows 11)** with vector icons and dynamic tab indicator, and **Dark Studio**.
+- **Classic WLPG Ribbon Look & Feel (with Modern Themes, 4 Layouts & Integrated QAT)**
+  Recreates the authentic ribbon layout (*Home*, *Edit*, *Find*, *Create*, *View*) plus contextual tabs (*Edit* in Single Image View, *Map* in World Map View), integrated title bar with Quick Access Toolbar (QAT), optional left navigation sections (*Albums*, *Folders*, *Date Taken*, *Places*, *Tags*, *People*, *Ratings*, plus optional *Cameras* and AI *Subjects*), and right-hand tag/information pane. Supports three themes (**Classic Aero (Light)**, **Microsoft Fluent (Windows 11)**, and **Dark Studio**), four gallery layout modes (**Grid**, uniform **Tiles**, row-justified **Mosaic**, and portrait-priority **Masonry**), a searchable `F1` Keyboard Shortcuts modal, and custom `Alt+1..9` Quick-Tag hotkeys.
 
 - **Built for Large Libraries (64-Bit Architecture)**
   WLPG was a 32-bit app that would frequently hit out-of-memory errors on large collections or high-megapixel cameras. Essentials Photo Gallery is native 64-bit with virtualised grid scrolling and separate SQLite catalog and thumbnail databases, designed to stay snappy even with **500,000+ photos and videos**.
@@ -68,8 +68,8 @@ Standalone 64-bit Windows installers (`EssentialsPhotoGallery_Setup_x64.exe`) ar
   - **Portrait Depth Blur, Relighting & Colour Pop** alongside Crop/Uncrop, Straighten, Spot Fix (Retouch & Red Eye), Exposure, Colour, Effects, and Vector Markup & Privacy Redaction
   - **Contact Sheet & Photo Printing**
 
-- **Duplicate & Burst Photo Finder + Find Similar**
-  Finds exact file duplicates, resized/re-saved copies (via perceptual hashing), rapid burst sequences (with face/eye Laplacian sharpness scoring), and visually similar photos via LAB Haar + palette matching, with side-by-side comparison and safe Recycle Bin cleanup.
+- **Duplicate & Burst Photo Finder, Find Similar & Optional `MobileCLIP-S1` Semantic Search**
+  Extracts perceptual signatures (`pHash`, `dHash`, `Laplacian` sharpness, and `LAB Haar`) directly during thumbnail generation into `thumbnails.db`, powers undoable Auto-Stacking for RAW+JPEG pairs and burst sequences, and finds exact duplicates or visually similar photos with safe Recycle Bin cleanup. Optionally install the `MobileCLIP-S1` ONNX add-on in **File → Options → Add-ons** for offline natural-language photo search (fused with FTS5) and **Subjects** filtering.
 
 ---
 
