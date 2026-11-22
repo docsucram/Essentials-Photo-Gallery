@@ -475,6 +475,7 @@ class LeftNavigationDock(QDockWidget):
     tag_hierarchy_changed = Signal()
     place_selected = Signal(str, str, str)  # country, state, city
     subject_selected = Signal(str, str)     # subject_key, display_label
+    subjects_section_clicked = Signal()
     new_album_requested = Signal()
     rename_album_requested = Signal(int, str)
     delete_album_requested = Signal(int, str)
@@ -1430,7 +1431,7 @@ class LeftNavigationDock(QDockWidget):
                         countries.setdefault(c, {}).setdefault(s, {}).get(city, 0) + cnt
                     )
 
-                for c_name in sorted(countries.keys()):
+                for c_name in sorted(countries.keys(), key=str.casefold):
                     states = countries[c_name]
                     c_total = sum(cnt for s_cities in states.values() for cnt in s_cities.values())
                     c_label = c_name or "Unknown Country"
@@ -1440,7 +1441,7 @@ class LeftNavigationDock(QDockWidget):
                     c_item.setIcon(0, places_icon)
                     self.root_places.addChild(c_item)
 
-                    for s_name in sorted(states.keys()):
+                    for s_name in sorted(states.keys(), key=str.casefold):
                         cities = states[s_name]
                         if s_name:
                             s_total = sum(cities.values())
@@ -1453,7 +1454,7 @@ class LeftNavigationDock(QDockWidget):
                         else:
                             parent_for_city = c_item
 
-                        for city_name, city_cnt in sorted(cities.items()):
+                        for city_name, city_cnt in sorted(cities.items(), key=lambda kv: kv[0].casefold()):
                             if city_name:
                                 ct_item = QTreeWidgetItem([f"{city_name} ({city_cnt})"])
                                 ct_item.setData(0, _NODE_TYPE_ROLE, "place")
@@ -2065,6 +2066,9 @@ class LeftNavigationDock(QDockWidget):
             self._active_subject_key = skey
             self._active_subject_label = slabel
             self._camera_model = None
+            self._location_country = None
+            self._location_state = None
+            self._location_city = None
             if hasattr(self, "root_all") and self.root_all is not None:
                 self.root_all.setSelected(False)
             self._update_summary_label()
@@ -2084,6 +2088,13 @@ class LeftNavigationDock(QDockWidget):
             self._smart_album_rules = None
             changed = True
         ctrl_held = bool(QGuiApplication.keyboardModifiers() & Qt.ControlModifier)
+        if not ctrl_held and (self._location_country or self._location_state or self._location_city) and (
+            folder_tuple is not None or date_tuple is not None or camera_val is not None
+        ):
+            self._location_country = None
+            self._location_state = None
+            self._location_city = None
+            changed = True
         if folder_tuple is not None:
             if hasattr(self, "root_all") and self.root_all is not None and self.root_all.isSelected():
                 self.root_all.setSelected(False)
@@ -2222,8 +2233,12 @@ class LeftNavigationDock(QDockWidget):
         if ntype == "section_ratings":
             self.select_ratings([])
             return
-        if ntype in ("section_places", "section_cameras", "section_subjects"):
+        if ntype in ("section_places", "section_cameras"):
             item.setExpanded(not item.isExpanded())
+            return
+        if ntype == "section_subjects":
+            item.setExpanded(not item.isExpanded())
+            self.subjects_section_clicked.emit()
             return
         if ntype == "place":
             country, state, city = payload if isinstance(payload, tuple) else (str(payload), "", "")
@@ -2977,6 +2992,9 @@ class LeftNavigationDock(QDockWidget):
         self._location_country = (country or "").strip() or None
         self._location_state = (state or "").strip() or None
         self._location_city = (city or "").strip() or None
+        self._camera_model = None
+        self._active_subject_key = None
+        self._active_subject_label = ""
         self._sync_tree_selection()
         self._update_summary_label()
         self.filter_changed.emit()

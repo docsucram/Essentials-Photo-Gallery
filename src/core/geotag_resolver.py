@@ -652,6 +652,66 @@ def reverse_geocode(
     return best_rec.to_dict()
 
 
+def resolve_location_hierarchy(
+    lat: float | None,
+    lon: float | None,
+    location_name: str | None = None,
+    *,
+    db_engine: Any = None,
+    cache: dict[tuple[float, float], tuple[str | None, str | None, str | None, str | None]] | None = None,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """
+    Resolve `(country, state, city, formatted_address)` from `(lat, lon)` via offline
+    `reverse_geocode()`, falling back to comma-separated components of `location_name`.
+    Reuses `_normalize_admin()` to normalize UK/regional codes and strip numeric admin IDs.
+    """
+    country: str = ""
+    state: str = ""
+    city: str = ""
+    fmt: str = str(location_name or "").strip()
+
+    if lat is not None and lon is not None:
+        try:
+            f_lat = float(lat)
+            f_lon = float(lon)
+            cache_key = (round(f_lat, 3), round(f_lon, 3))
+            cached_val = cache.get(cache_key) if cache is not None else None
+            if cached_val is not None:
+                c_co, c_st, c_ct, c_fm = cached_val
+                return (c_co, c_st, c_ct, fmt or c_fm)
+            rev = reverse_geocode(f_lat, f_lon, db_engine=db_engine)
+            if rev:
+                country = str(rev.get("country") or "").strip()
+                raw_state = str(rev.get("state") or rev.get("admin1") or "").strip()
+                city = str(rev.get("city") or rev.get("name") or "").strip()
+                _, state = _normalize_admin(city, "", raw_state, country, str(rev.get("cc") or ""))
+                if not fmt:
+                    fmt = str(rev.get("formatted_address") or "").strip()
+            if cache is not None:
+                cache[cache_key] = (country or None, state or None, city or None, fmt or None)
+        except Exception:
+            pass
+
+    if not country and not state and not city and fmt:
+        parts = [p.strip() for p in fmt.split(",") if p.strip()]
+        if len(parts) >= 3:
+            city = parts[0]
+            country = parts[-1]
+            _, state = _normalize_admin(city, "", parts[-2], country, "")
+        elif len(parts) == 2:
+            city = parts[0]
+            country = parts[1]
+        elif len(parts) == 1:
+            country = parts[0]
+
+    return (
+        country or None,
+        state or None,
+        city or None,
+        fmt or None,
+    )
+
+
 def resolve_location_query(
     query: str,
     allow_network: bool = True,

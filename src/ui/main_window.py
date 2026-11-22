@@ -1494,6 +1494,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.left_nav_dock.tag_hierarchy_changed.connect(self.refresh_navigation_and_autocomplete)
         self.left_nav_dock.place_selected.connect(self._on_place_selected)
         self.left_nav_dock.subject_selected.connect(self._on_subject_selected)
+        self.left_nav_dock.subjects_section_clicked.connect(self._on_subjects_section_clicked)
         self.left_nav_dock.new_album_requested.connect(self._on_new_album_requested)
         self.left_nav_dock.rename_album_requested.connect(self._on_rename_album_requested)
         self.left_nav_dock.delete_album_requested.connect(self._on_delete_album_requested)
@@ -9105,18 +9106,54 @@ class PhotoGalleryMainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _ensure_semantic_addon_with_prompt(self) -> bool:
+        """
+        Ensure MobileCLIP-S1 ONNX add-on is installed; if missing, prompt the user
+        to download it (~85 MB) or open Options -> Add-ons.
+        """
+        if getattr(self, "semantic_engine", None) is not None and self.semantic_engine.is_available():
+            return True
+        from src.ui.dialogs import prompt_and_download_semantic_addon
+
+        ok = prompt_and_download_semantic_addon(
+            self,
+            on_more_options=lambda: self._open_settings_dialog(initial_tab="addons"),
+        )
+        if ok:
+            self._start_semantic_worker(force=True)
+            self._refresh_subjects_nav_counts()
+            self.show_status_message(
+                "✓ MobileCLIP-S1 installed — indexing photos for AI Subjects...",
+                4500,
+            )
+            return True
+        return False
+
+    def _on_subjects_section_clicked(self) -> None:
+        if getattr(self, "semantic_engine", None) is not None and not self.semantic_engine.is_available():
+            self._ensure_semantic_addon_with_prompt()
+
     def _on_subject_selected(self, subject_key: str, label: str) -> None:
         if getattr(self, "semantic_repo", None) is None or getattr(self, "semantic_engine", None) is None:
             return
         from src.core.semantic_engine import SUBJECT_PRESETS
 
+        if not self.semantic_engine.is_available():
+            if self._ensure_semantic_addon_with_prompt():
+                self.show_status_message(
+                    f"✓ MobileCLIP-S1 installed — indexing photos for '{label}'...",
+                    4500,
+                )
+            return
+
         if self.semantic_repo.count_indexed() == 0:
+            self._start_semantic_worker(force=True)
             self._active_subject_ids = []
             self._active_subject_label = label
             self._update_scope_bar_visibility()
             self.rebuild_and_run_query()
             self.show_status_message(
-                f"Subject '{label}': download MobileCLIP-S1 & index photos in Options → Add-ons.",
+                f"Indexing photos for AI Subject '{label}' in the background...",
                 4500,
             )
             return
@@ -9746,6 +9783,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.nav_show_places = dlg.show_places()
             self.nav_show_albums = dlg.show_albums()
             self.nav_show_cameras = dlg.show_cameras()
+            old_show_subjects = bool(getattr(self, "nav_show_subjects", False))
             self.nav_show_subjects = dlg.show_subjects()
             self.left_nav_dock.set_navigation_sections_visibility(
                 show_dates=self.nav_show_dates,
@@ -9758,6 +9796,14 @@ class PhotoGalleryMainWindow(QMainWindow):
                 show_subjects=self.nav_show_subjects,
             )
             if self.nav_show_subjects:
+                if (
+                    not old_show_subjects
+                    and not getattr(dlg, "_semantic_prompted_in_dialog", False)
+                    and getattr(self, "semantic_engine", None) is not None
+                    and not self.semantic_engine.is_available()
+                ):
+                    dlg._semantic_prompted_in_dialog = True
+                    self._ensure_semantic_addon_with_prompt()
                 self._refresh_subjects_nav_counts()
                 if (
                     getattr(self, "semantic_engine", None) is not None

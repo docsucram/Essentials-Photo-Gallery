@@ -936,8 +936,11 @@ class CatalogRepository:
         """Batch-inserts or updates media records in a single transaction, returning their IDs."""
         if not rows:
             return []
+        from src.core.geotag_resolver import resolve_location_hierarchy
+
         ids: list[int] = []
         dim_changed_ids: list[int] = []
+        coord_cache: dict[tuple[float, float], tuple[str | None, str | None, str | None, str | None]] = {}
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
             cur = conn.cursor()
@@ -955,20 +958,33 @@ class CatalogRepository:
                         if (new_w, new_h) != (prev_w, prev_h):
                             dim_changed_ids.append(int(prev_id))
 
+                loc_country = r.get("location_country")
+                loc_state = r.get("location_state")
+                loc_city = r.get("location_city")
+                loc_name = r.get("location_name")
+                if not (loc_country or loc_state or loc_city) and (
+                    (r.get("lat") is not None and r.get("lon") is not None) or loc_name
+                ):
+                    loc_country, loc_state, loc_city, resolved_fmt = resolve_location_hierarchy(
+                        r.get("lat"), r.get("lon"), loc_name, cache=coord_cache
+                    )
+                    if not loc_name and resolved_fmt:
+                        loc_name = resolved_fmt
+
                 res = cur.execute(
                     """
                     INSERT INTO media (
                         folder_id, filename, ext, size, mtime, date_taken,
                         rating, flag, width, height, orientation,
-                        lat, lon, location_name, caption,
-                        camera_make, camera_model, author, exposure_time,
+                        lat, lon, location_name, location_country, location_state, location_city,
+                        caption, camera_make, camera_model, author, exposure_time,
                         f_number, focal_length, iso, published,
                         is_video, duration_ms, video_codec, video_fps, metadata_dirty
                     ) VALUES (
                         :folder_id, :filename, :ext, :size, :mtime, :date_taken,
                         :rating, :flag, :width, :height, :orientation,
-                        :lat, :lon, :location_name, :caption,
-                        :camera_make, :camera_model, :author, :exposure_time,
+                        :lat, :lon, :location_name, :location_country, :location_state, :location_city,
+                        :caption, :camera_make, :camera_model, :author, :exposure_time,
                         :f_number, :focal_length, :iso, :published,
                         :is_video, :duration_ms, :video_codec, :video_fps, :metadata_dirty
                     )
@@ -998,6 +1014,9 @@ class CatalogRepository:
                         lat = COALESCE(excluded.lat, media.lat),
                         lon = COALESCE(excluded.lon, media.lon),
                         location_name = COALESCE(excluded.location_name, media.location_name),
+                        location_country = COALESCE(excluded.location_country, media.location_country),
+                        location_state = COALESCE(excluded.location_state, media.location_state),
+                        location_city = COALESCE(excluded.location_city, media.location_city),
                         caption = COALESCE(NULLIF(excluded.caption, ''), media.caption),
                         camera_make = COALESCE(excluded.camera_make, media.camera_make),
                         camera_model = COALESCE(excluded.camera_model, media.camera_model),
@@ -1025,7 +1044,10 @@ class CatalogRepository:
                         "orientation": r.get("orientation", 1),
                         "lat": r.get("lat"),
                         "lon": r.get("lon"),
-                        "location_name": r.get("location_name"),
+                        "location_name": loc_name,
+                        "location_country": loc_country,
+                        "location_state": loc_state,
+                        "location_city": loc_city,
                         "caption": r.get("caption", ""),
                         "camera_make": r.get("camera_make"),
                         "camera_model": r.get("camera_model"),
@@ -2361,7 +2383,8 @@ class CatalogRepository:
         location_name: str | None = None,
     ) -> None:
         """
-        Updates GPS coordinates and optional location name for the specified media items.
+        Updates GPS coordinates, resolved Places hierarchy (country/state/city), and
+        optional location name for the specified media items.
         Automatically updates SQLite's media_rtree spatial index via triggers.
         Marks metadata_dirty = 1 for background XMP write-back.
         """
@@ -2370,6 +2393,14 @@ class CatalogRepository:
         lat_val = float(lat) if lat is not None else None
         lon_val = float(lon) if lon is not None else None
         loc_val = str(location_name).strip() if location_name else None
+        if lat_val is None and lon_val is None and not loc_val:
+            country = state = city = None
+        else:
+            from src.core.geotag_resolver import resolve_location_hierarchy
+
+            country, state, city, resolved_fmt = resolve_location_hierarchy(lat_val, lon_val, loc_val)
+            if not loc_val and resolved_fmt:
+                loc_val = resolved_fmt
 
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
@@ -2381,10 +2412,13 @@ class CatalogRepository:
                     SET lat = ?,
                         lon = ?,
                         location_name = ?,
+                        location_country = ?,
+                        location_state = ?,
+                        location_city = ?,
                         metadata_dirty = 1
                     WHERE id IN ({placeholders});
                     """,
-                    [lat_val, lon_val, loc_val, *chunk],
+                    [lat_val, lon_val, loc_val, country, state, city, *chunk],
                 )
             conn.commit()
 
@@ -2413,13 +2447,19 @@ class CatalogRepository:
     def restore_geotag_map(
         self, geotag_map: dict[int, tuple[float | None, float | None, str | None]]
     ) -> None:
-        """Restores previously snapshotted (lat, lon, location_name) values during undo."""
+        """Restores previously snapshotted `(lat, lon, location_name)` and Place hierarchy during undo."""
         if not geotag_map:
             return
-        items = [
-            (lat, lon, loc, mid)
-            for mid, (lat, lon, loc) in geotag_map.items()
-        ]
+        from src.core.geotag_resolver import resolve_location_hierarchy
+
+        coord_cache: dict[tuple[float, float], tuple[str | None, str | None, str | None, str | None]] = {}
+        items: list[tuple[Any, ...]] = []
+        for mid, (lat, lon, loc) in geotag_map.items():
+            if lat is None and lon is None and not (loc or "").strip():
+                country = state = city = None
+            else:
+                country, state, city, _ = resolve_location_hierarchy(lat, lon, loc, cache=coord_cache)
+            items.append((lat, lon, loc, country, state, city, mid))
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
             conn.executemany(
@@ -2428,12 +2468,60 @@ class CatalogRepository:
                 SET lat = ?,
                     lon = ?,
                     location_name = ?,
+                    location_country = ?,
+                    location_state = ?,
+                    location_city = ?,
                     metadata_dirty = 1
                 WHERE id = ?;
                 """,
                 items,
             )
             conn.commit()
+
+    def backfill_missing_places(self) -> int:
+        """Populate missing `(location_country, location_state, location_city)` from lat/lon or location_name."""
+        from src.core.geotag_resolver import resolve_location_hierarchy
+
+        with self.engine.write_lock:
+            conn = self.engine.catalog_conn()
+            rows = conn.execute(
+                """
+                SELECT id, lat, lon, location_name
+                FROM media
+                WHERE (
+                    (lat IS NOT NULL AND lon IS NOT NULL)
+                    OR (location_name IS NOT NULL AND TRIM(location_name) != '')
+                )
+                AND COALESCE(TRIM(location_country), '') = ''
+                AND COALESCE(TRIM(location_state), '') = ''
+                AND COALESCE(TRIM(location_city), '') = '';
+                """
+            ).fetchall()
+            if not rows:
+                return 0
+            coord_cache: dict[tuple[float, float], tuple[str | None, str | None, str | None, str | None]] = {}
+            updates: list[tuple[str | None, str | None, str | None, str | None, int]] = []
+            for r in rows:
+                country, state, city, fmt = resolve_location_hierarchy(
+                    r["lat"], r["lon"], r["location_name"], cache=coord_cache
+                )
+                if country or state or city or fmt:
+                    updates.append((country, state, city, fmt, int(r["id"])))
+            if not updates:
+                return 0
+            conn.executemany(
+                """
+                UPDATE media
+                SET location_country = ?,
+                    location_state = ?,
+                    location_city = ?,
+                    location_name = COALESCE(NULLIF(TRIM(location_name), ''), ?)
+                WHERE id = ?;
+                """,
+                updates,
+            )
+            conn.commit()
+            return len(updates)
 
     def get_gps_matching_candidates(
         self,
@@ -6863,7 +6951,7 @@ class CatalogRepository:
         return [str(r[0]) for r in rows if r[0]]
 
     def query_camera_counts(self) -> list[tuple[str, int]]:
-        """Return `[(normalized_camera_name, count), ...]` ordered by count desc, plus '__NO_CAMERA__' if any."""
+        """Return `[(normalized_camera_name, count), ...]` sorted alphabetically, plus '__NO_CAMERA__' if any."""
         conn = self.engine.catalog_conn()
         priv_clause = self._private_folder_clause("f")
         norm_cam_expr = (
@@ -6882,7 +6970,7 @@ class CatalogRepository:
             WHERE COALESCE(m.is_missing, 0) = 0 AND m.live_companion_for_id IS NULL AND {priv_clause}
               AND (COALESCE(TRIM(m.camera_make), '') != '' OR COALESCE(TRIM(m.camera_model), '') != '')
             GROUP BY LOWER({norm_cam_expr})
-            ORDER BY cnt DESC, cam COLLATE NOCASE ASC;
+            ORDER BY cam COLLATE NOCASE ASC;
             """
         ).fetchall()
         out = [(str(r[0]), int(r[1])) for r in rows if str(r[0] or "").strip()]

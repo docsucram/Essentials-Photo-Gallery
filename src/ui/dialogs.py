@@ -486,6 +486,8 @@ class AppSettingsDialog(QDialog):
 
         self.chk_show_subjects = QCheckBox("Show Subjects (AI)", tab_general)
         self.chk_show_subjects.setChecked(show_subjects)
+        self._semantic_prompted_in_dialog: bool = False
+        self.chk_show_subjects.clicked.connect(self._on_show_subjects_clicked)
         nav_grid.addWidget(self.chk_show_subjects, 3, 1)
 
         v_gen.addLayout(nav_grid)
@@ -1667,6 +1669,26 @@ class AppSettingsDialog(QDialog):
         if uninstall_semantic_models():
             QMessageBox.information(self, "Uninstalled", "MobileCLIP-S1 models removed from AppData.")
         self._refresh_ai_downloads_tab()
+
+    def _on_show_subjects_clicked(self, checked: bool) -> None:
+        if not checked:
+            return
+        from src.core.semantic_engine import get_semantic_addon_status
+
+        if bool(get_semantic_addon_status().get("installed", False)):
+            return
+        self._semantic_prompted_in_dialog = True
+        ok = prompt_and_download_semantic_addon(
+            self,
+            on_more_options=lambda: (
+                self.tab_widget.setCurrentWidget(self.ai_downloads_tab)
+                if hasattr(self, "ai_downloads_tab")
+                else None
+            ),
+        )
+        if ok:
+            self._refresh_ai_downloads_tab()
+            self.semantic_addon_downloaded.emit()
 
     def _refresh_db_stats(self) -> None:
         if not hasattr(self, "lbl_db_stats"):
@@ -3637,5 +3659,92 @@ def prompt_and_download_rapidocr_addon(
         )
         return False
     return result_holder["dir"] is not None
+
+
+def prompt_and_download_semantic_addon(
+    parent: QWidget | None = None,
+    on_more_options: Any = None,
+) -> bool:
+    """
+    When Subjects (AI) is enabled or selected and the optional MobileCLIP-S1 ONNX add-on
+    is not yet installed, prompt to download it (~85 MB), open Add-ons settings, or Cancel.
+    Returns True if MobileCLIP-S1 is ready (or was downloaded), False if cancelled.
+    """
+    from PySide6.QtCore import QThread, Signal as QtSignal
+    from PySide6.QtWidgets import QProgressDialog
+    from src.core.semantic_engine import (
+        SEMANTIC_ADDON_SIZE_MB,
+        download_semantic_models,
+        get_semantic_addon_status,
+    )
+
+    if bool(get_semantic_addon_status().get("installed", False)):
+        return True
+
+    box = QMessageBox(parent)
+    box.setWindowTitle("Enable AI Subjects & Semantic Search")
+    box.setIcon(QMessageBox.Question)
+    box.setText(
+        f"Download MobileCLIP-S1 (~{SEMANTIC_ADDON_SIZE_MB} MB) for offline AI Subjects and semantic search?"
+    )
+    box.setInformativeText(
+        "The optional MobileCLIP-S1 ONNX add-on is not installed yet.\n\n"
+        "It downloads once to AppData, runs 100% locally offline from cached thumbnails, "
+        "and can be managed anytime in Options → Add-ons."
+    )
+    btn_dl = box.addButton(f"Download MobileCLIP-S1 (~{SEMANTIC_ADDON_SIZE_MB} MB)", QMessageBox.AcceptRole)
+    btn_more = box.addButton("Open Add-ons...", QMessageBox.ActionRole)
+    box.addButton(QMessageBox.Cancel)
+    box.exec()
+    clicked = box.clickedButton()
+
+    if clicked == btn_more:
+        if callable(on_more_options):
+            on_more_options()
+        else:
+            dlg = AppSettingsDialog(initial_tab="addons", parent=parent)
+            dlg.exec()
+        return bool(get_semantic_addon_status().get("installed", False))
+
+    if clicked != btn_dl:
+        return False
+
+    prog = QProgressDialog(
+        f"Downloading MobileCLIP-S1 (~{SEMANTIC_ADDON_SIZE_MB} MB)...", "Cancel", 0, 100, parent
+    )
+    prog.setWindowTitle("Downloading AI Subjects Add-on")
+    prog.setWindowModality(Qt.WindowModal)
+    prog.setMinimumDuration(0)
+    prog.show()
+
+    cancelled = {"v": False}
+    prog.canceled.connect(lambda: cancelled.__setitem__("v", True))
+    result_holder: dict[str, Any] = {"dir": None}
+
+    class _SemDlThread(QThread):
+        progress = QtSignal(int, int)
+
+        def run(self) -> None:
+            result_holder["dir"] = download_semantic_models(
+                progress_cb=lambda d, t: self.progress.emit(int(d), int(t)),
+                cancel_cb=lambda: cancelled["v"],
+            )
+
+    t = _SemDlThread(parent)
+    t.progress.connect(lambda d, tot: prog.setValue(int(min(99, (d * 100) // tot))) if tot > 0 else None)
+    t.start()
+    while t.isRunning():
+        QApplication.processEvents()
+        t.wait(30)
+    prog.close()
+
+    if result_holder["dir"] is None and not cancelled["v"]:
+        QMessageBox.warning(
+            parent,
+            "Download Failed",
+            "Could not download MobileCLIP-S1 models. Check your internet connection and try again.",
+        )
+        return False
+    return bool(get_semantic_addon_status().get("installed", False))
 
 

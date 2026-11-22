@@ -475,42 +475,52 @@ class DualDatabaseEngine:
                     "CREATE INDEX IF NOT EXISTS idx_media_places ON media(location_country, location_state, location_city) WHERE location_country IS NOT NULL;"
                 )
 
-            # One-time startup migration: auto-populate location_country, location_state, location_city
-            # for all existing geotagged rows where lat IS NOT NULL
-            cur.execute("CREATE TABLE IF NOT EXISTS schema_flags (name TEXT PRIMARY KEY);")
-            mig_done = cur.execute(
-                "SELECT 1 FROM schema_flags WHERE name = 'places_location_migration_v1';"
-            ).fetchone()
-            if not mig_done and media_cols:
-                from src.core.geotag_resolver import reverse_geocode
-                geotagged_rows = cur.execute(
-                    "SELECT id, lat, lon, location_name FROM media WHERE lat IS NOT NULL AND lon IS NOT NULL;"
+            # Idempotent startup backfill: populate location_country, location_state, location_city
+            # for any geotagged rows (or rows with location_name) whose hierarchy fields are still empty.
+            if media_cols:
+                missing_place_rows = cur.execute(
+                    """
+                    SELECT id, lat, lon, location_name
+                    FROM media
+                    WHERE (
+                        (lat IS NOT NULL AND lon IS NOT NULL)
+                        OR (location_name IS NOT NULL AND TRIM(location_name) != '')
+                    )
+                    AND COALESCE(TRIM(location_country), '') = ''
+                    AND COALESCE(TRIM(location_state), '') = ''
+                    AND COALESCE(TRIM(location_city), '') = '';
+                    """
                 ).fetchall()
-                for row in geotagged_rows:
-                    m_id = int(row[0])
-                    m_lat = float(row[1])
-                    m_lon = float(row[2])
-                    m_loc = row[3]
-                    rev = reverse_geocode(m_lat, m_lon)
-                    if rev:
-                        rev_city = rev.get("city") or rev.get("name")
-                        rev_state = rev.get("state") or rev.get("admin1")
-                        rev_country = rev.get("country")
-                        rev_fmt = rev.get("formatted_address")
-                        cur.execute(
+                if missing_place_rows:
+                    from src.core.geotag_resolver import resolve_location_hierarchy
+
+                    coord_cache: dict[
+                        tuple[float, float],
+                        tuple[str | None, str | None, str | None, str | None],
+                    ] = {}
+                    updates: list[tuple[str | None, str | None, str | None, str | None, int]] = []
+                    for row in missing_place_rows:
+                        c_country, c_state, c_city, c_fmt = resolve_location_hierarchy(
+                            row[1], row[2], row[3], cache=coord_cache
+                        )
+                        if c_country or c_state or c_city or c_fmt:
+                            updates.append((c_country, c_state, c_city, c_fmt, int(row[0])))
+                    if updates:
+                        cur.executemany(
                             """
                             UPDATE media
-                            SET location_country = COALESCE(location_country, ?),
-                                location_state = COALESCE(location_state, ?),
-                                location_city = COALESCE(location_city, ?),
-                                location_name = COALESCE(location_name, ?)
+                            SET location_country = ?,
+                                location_state = ?,
+                                location_city = ?,
+                                location_name = COALESCE(NULLIF(TRIM(location_name), ''), ?)
                             WHERE id = ?;
                             """,
-                            (rev_country, rev_state, rev_city, rev_fmt, m_id),
+                            updates,
                         )
-                cur.execute(
-                    "INSERT OR IGNORE INTO schema_flags(name) VALUES ('places_location_migration_v1');"
-                )
+            cur.execute("CREATE TABLE IF NOT EXISTS schema_flags (name TEXT PRIMARY KEY);")
+            cur.execute(
+                "INSERT OR IGNORE INTO schema_flags(name) VALUES ('places_location_migration_v1');"
+            )
         except Exception as exc:
             logger.warning("Error in places_location_migration_v1: %s", exc)
 
