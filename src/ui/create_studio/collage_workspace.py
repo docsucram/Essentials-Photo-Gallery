@@ -979,6 +979,18 @@ class CollageWorkspace(CreateWorkspaceBase):
         self._build_canvas_ui()
         self._build_inspector_ui()
         self._build_bottom_tray_ui()
+
+        # Filter out any unreadable photos and cap at 30 so tray, canvas, and grid slots stay 1:1 synced
+        valid_photos: list[dict[str, Any]] = []
+        for d in self.photos_data:
+            if self._ensure_preview_proxy(d) is not None:
+                valid_photos.append(d)
+                if len(valid_photos) >= 30:
+                    break
+        if valid_photos:
+            self.photos_data = valid_photos
+            self._rebuild_grid_layout_combo()
+
         self._refresh_order_tray()
         self.apply_theme_mode("wlpg_aero")
         self._render_preview()
@@ -1554,7 +1566,7 @@ class CollageWorkspace(CreateWorkspaceBase):
         added = False
         for f in files:
             p = Path(f)
-            if p.is_file() and len(self.photos_data) < 20:
+            if p.is_file() and len(self.photos_data) < 30:
                 img = load_bgr_exif_safe(p)
                 if img is not None:
                     self.photos_data.append({"file_path": str(p), "filename": p.name, "image_bgr": img})

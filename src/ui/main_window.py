@@ -992,9 +992,10 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self._rhi_surface_anchor = QQuickWidget(self)
                 self._rhi_surface_anchor.setClearColor(Qt.transparent)
                 self._rhi_surface_anchor.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-                self._rhi_surface_anchor.setFixedSize(0, 0)
-                self._rhi_surface_anchor.move(-100, -100)
+                self._rhi_surface_anchor.setFixedSize(1, 1)
+                self._rhi_surface_anchor.move(-1000, -1000)
                 self._rhi_surface_anchor.lower()
+                QTimer.singleShot(250, self._rhi_surface_anchor.hide)
             except Exception:
                 pass
 
@@ -9870,9 +9871,17 @@ class PhotoGalleryMainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Collage",
-                "Please select 1 to 20 photos to generate a collage.",
+                "Please select 1 to 30 photos to generate a collage.",
             )
             return
+
+        if len(details) > 30:
+            total_sel = len(details)
+            details = details[:30]
+            self.show_status_message(
+                f"Collage capped at 30 photos (using first 30 of {total_sel} selected).",
+                4500,
+            )
 
         ws = CollageWorkspace(details, self)
         self.open_create_workspace(ws)

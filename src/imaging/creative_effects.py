@@ -52,16 +52,31 @@ def load_bgr_exif_safe(path: str | Path) -> np.ndarray | None:
     """
     if not path:
         return None
+    p = Path(path)
+    if not p.is_file():
+        return None
     try:
-        with Image.open(str(path)) as img:
+        with Image.open(str(p)) as img:
             img = ImageOps.exif_transpose(img)
             rgb = np.array(img.convert("RGB"), dtype=np.uint8)
             return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     except Exception:
         try:
-            return cv2.imread(str(path), cv2.IMREAD_COLOR)
+            img = cv2.imread(str(p), cv2.IMREAD_COLOR)
+            if img is not None:
+                return img
         except Exception:
-            return None
+            pass
+        if p.suffix.lower() in {".cr2", ".cr3", ".nef", ".nrw", ".arw", ".dng", ".orf", ".rw2", ".pef", ".raf", ".srw"}:
+            try:
+                import rawpy
+
+                with rawpy.imread(str(p)) as raw:
+                    rgb = raw.postprocess(use_camera_wb=True, half_size=True, no_auto_bright=False)
+                    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            except Exception:
+                return None
+        return None
 
 
 def guided_filter_matte(

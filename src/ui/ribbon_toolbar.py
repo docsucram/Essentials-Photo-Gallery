@@ -11141,6 +11141,9 @@ class RibbonToolbar(QWidget):
         arrow_drop_down = (get_icons_dir() / "arrow_dropdown_mini.svg").as_posix()
         self.setStyleSheet(
             """
+            RibbonToolbar {
+                background: #E3EDF8;
+            }
             QTabWidget#RibbonTabs {
                 border: none;
                 background: transparent;
@@ -11390,15 +11393,26 @@ class RibbonToolbar(QWidget):
             QToolButton#SlideshowTopBtn:pressed,
             QToolButton#TagDescTopBtn:pressed,
             QToolButton#PhotoGroupingTopBtn:pressed,
-            QToolButton#PhotoGroupingTopBtn:checked,
             QToolButton#BadgesTopBtn:pressed,
-            QToolButton#BadgesTopBtn:checked,
             QToolButton#MosaicLayoutTopBtn:pressed,
-            QToolButton#MosaicLayoutTopBtn:checked,
             QToolButton#SaveCopyTopBtn:pressed {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #FCE293, stop:1 #F7CE65);
                 border: 1px solid #C28B10;
+            }
+            QToolButton#PhotoGroupingTopBtn:checked,
+            QToolButton#BadgesTopBtn:checked,
+            QToolButton#MosaicLayoutTopBtn:checked {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #EAF3FD, stop:0.5 #D2E7FA, stop:1 #BBDDF7);
+                border: 1px solid #7DA2CE;
+            }
+            QToolButton#PhotoGroupingTopBtn:checked:hover,
+            QToolButton#BadgesTopBtn:checked:hover,
+            QToolButton#MosaicLayoutTopBtn:checked:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #F3F8FE, stop:0.5 #DCECFB, stop:1 #C7E3F9);
+                border: 1px solid #5B8BC2;
             }
             QToolButton#SlideshowBottomBtn,
             QToolButton#TagDescBottomBtn,
@@ -11803,6 +11817,9 @@ class RibbonToolbar(QWidget):
         arrow_drop_down = (get_icons_dir() / "arrow_dropdown_mini_dark.svg").as_posix()
         self.setStyleSheet(
             """
+            RibbonToolbar {
+                background: #1F242D;
+            }
             QTabWidget#RibbonTabs {
                 border: none;
                 background: transparent;
@@ -12291,6 +12308,9 @@ class RibbonToolbar(QWidget):
             QPushButton#WinCloseBtn:pressed {
                 background: #C42B1C;
                 color: #FFFFFF;
+            }
+            RibbonToolbar {
+                background: #F3F4F6;
             }
             QTabWidget#RibbonTabs {
                 border: none;
