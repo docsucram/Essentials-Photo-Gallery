@@ -147,6 +147,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.scan_folder is not None and args.scan_folder.exists():
         window.scan_folder(args.scan_folder, include_subfolders=True)
 
+    from src.utils.freeze_watchdog import install_freeze_watchdog
+
+    install_freeze_watchdog(app)
     return app.exec()
 
 
