@@ -2309,24 +2309,67 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawPolygon(mtn)
 
     elif kind == "badges":
-        # Miniature photo frame with 3 crisp overlay corner badges (flag, heart, group pill)
-        card = QRectF(s * 0.12, s * 0.14, s * 0.76, s * 0.72)
-        bg = QLinearGradient(card.topLeft(), card.bottomRight())
-        bg.setColorAt(0.0, QColor("#DCEBFA"))
-        bg.setColorAt(1.0, QColor("#B7D4F2"))
-        p.setPen(QPen(QColor("#3E6B99"), 1.2))
-        p.setBrush(bg)
-        p.drawRoundedRect(card, 3.0, 3.0)
-        # Top-right red flag pill
+        # Authentic WLPG Classic Aero glossy photo frame with red pennant flag & ruby heart badge
+        # Outer white photo border + subtle Aero drop shadow
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#DC2626"))
-        p.drawRoundedRect(QRectF(card.right() - s * 0.24, card.top() + s * 0.08, s * 0.18, s * 0.16), 2.0, 2.0)
-        # Bottom-right rose heart dot
-        p.setBrush(QColor("#F43F5E"))
-        p.drawEllipse(QRectF(card.right() - s * 0.23, card.bottom() - s * 0.25, s * 0.17, s * 0.17))
-        # Bottom-left cyan group squircle
-        p.setBrush(QColor("#0284C7"))
-        p.drawRoundedRect(QRectF(card.left() + s * 0.08, card.bottom() - s * 0.24, s * 0.28, s * 0.16), 2.5, 2.5)
+        p.setBrush(QColor(0, 0, 0, 34))
+        p.drawRoundedRect(QRectF(s * 0.11, s * 0.17, s * 0.72, s * 0.66), 2.5, 2.5)
+        frame = QRectF(s * 0.09, s * 0.14, s * 0.72, s * 0.66)
+        frame_grad = QLinearGradient(frame.topLeft(), frame.bottomLeft())
+        frame_grad.setColorAt(0.0, QColor("#FFFFFF"))
+        frame_grad.setColorAt(1.0, QColor("#E2ECF7"))
+        p.setPen(QPen(QColor("#5B82AB"), 1.0))
+        p.setBrush(frame_grad)
+        p.drawRoundedRect(frame, 2.2, 2.2)
+
+        # Inner glossy sky + meadow landscape
+        inner = frame.adjusted(s * 0.07, s * 0.07, -s * 0.07, -s * 0.09)
+        sky = QLinearGradient(inner.topLeft(), inner.bottomLeft())
+        sky.setColorAt(0.0, QColor("#6BB6F5"))
+        sky.setColorAt(0.60, QColor("#B9E0FC"))
+        sky.setColorAt(0.62, QColor("#6BBF59"))
+        sky.setColorAt(1.0, QColor("#3D8B37"))
+        p.setPen(QPen(QColor("#7EA6CF"), 0.7))
+        p.setBrush(sky)
+        p.drawRect(inner)
+
+        # Glossy Aero top sheen
+        p.setPen(Qt.NoPen)
+        sheen = QLinearGradient(inner.topLeft(), QPointF(inner.left(), inner.center().y()))
+        sheen.setColorAt(0.0, QColor(255, 255, 255, 110))
+        sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.setBrush(sheen)
+        p.drawRect(QRectF(inner.left(), inner.top(), inner.width(), inner.height() * 0.45))
+
+        # Top-right classic WLPG glossy red pennant flag on silver pole
+        pole_x = s * 0.66
+        p.setPen(QPen(QColor("#475569"), max(1.2, s * 0.055), Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(pole_x, s * 0.08), QPointF(pole_x, s * 0.48))
+        flag_grad = QLinearGradient(pole_x, s * 0.08, s * 0.94, s * 0.32)
+        flag_grad.setColorAt(0.0, QColor("#FF6B6B"))
+        flag_grad.setColorAt(0.55, QColor("#DC2626"))
+        flag_grad.setColorAt(1.0, QColor("#991B1B"))
+        p.setPen(QPen(QColor("#7F1D1D"), 0.8))
+        p.setBrush(flag_grad)
+        pennant = QPolygonF([
+            QPointF(pole_x + 0.5, s * 0.09),
+            QPointF(s * 0.95, s * 0.21),
+            QPointF(pole_x + 0.5, s * 0.34),
+        ])
+        p.drawPolygon(pennant)
+
+        # Bottom-right glossy ruby heart badge
+        hx, hy, hs = s * 0.75, s * 0.74, s * 0.16
+        heart = QPainterPath()
+        heart.moveTo(hx, hy + hs * 0.85)
+        heart.cubicTo(hx - hs * 1.25, hy + hs * 0.15, hx - hs * 1.15, hy - hs * 0.85, hx, hy - hs * 0.20)
+        heart.cubicTo(hx + hs * 1.15, hy - hs * 0.85, hx + hs * 1.25, hy + hs * 0.15, hx, hy + hs * 0.85)
+        hgrad = QLinearGradient(hx, hy - hs, hx, hy + hs)
+        hgrad.setColorAt(0.0, QColor("#FB7185"))
+        hgrad.setColorAt(1.0, QColor("#BE123C"))
+        p.setPen(QPen(QColor("#FFFFFF"), max(1.0, s * 0.045)))
+        p.setBrush(hgrad)
+        p.drawPath(heart)
 
     else:
         p.setPen(QPen(QColor("#3E6B99"), 1.1))
@@ -5417,6 +5460,7 @@ class _RibbonTitleBar(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("RibbonTopHeader")
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.setFixedHeight(32)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -5635,6 +5679,7 @@ class RibbonToolbar(QWidget):
         self._search_timer.setInterval(180)
         self._search_timer.timeout.connect(self._emit_search_text)
 
+        self.setAttribute(Qt.WA_StyledBackground, True)
         main_vbox = QVBoxLayout(self)
         main_vbox.setContentsMargins(0, 0, 0, 0)
         main_vbox.setSpacing(0)
@@ -7623,7 +7668,16 @@ class RibbonToolbar(QWidget):
 
     def set_write_back_paused(self, paused: bool) -> None:
         if hasattr(self, "act_pause_write_back"):
-            self.act_pause_write_back.setChecked(bool(paused))
+            is_paused = bool(paused)
+            self.act_pause_write_back.blockSignals(True)
+            self.act_pause_write_back.setChecked(is_paused)
+            if is_paused:
+                self.act_pause_write_back.setText("Resume Background File Write-Back (Paused)")
+                self.act_pause_write_back.setIcon(make_wlpg_icon("play", 16))
+            else:
+                self.act_pause_write_back.setText("Pause Background File Write-Back")
+                self.act_pause_write_back.setIcon(make_wlpg_icon("pause", 16))
+            self.act_pause_write_back.blockSignals(False)
 
     def set_slideshow_theme(self, theme_id: str) -> None:
         """Sets the active slideshow theme and syncs action checkmarks."""
@@ -12519,8 +12573,17 @@ class RibbonToolbar(QWidget):
             QToolButton#BadgesTopBtn:checked,
             QToolButton#MosaicLayoutTopBtn:checked,
             QToolButton#MosaicLayoutBottomBtn:checked {
+                background: #EFF6FF;
+                border: 1px solid #BFDBFE;
+                color: #0F6CBD;
+            }
+            QToolButton#PhotoGroupingTopBtn:checked:hover,
+            QToolButton#BadgesTopBtn:checked:hover,
+            QToolButton#MosaicLayoutTopBtn:checked:hover,
+            QToolButton#MosaicLayoutBottomBtn:checked:hover {
                 background: #DBEAFE;
-                border: 1px solid #60A5FA;
+                border: 1px solid #93C5FD;
+                color: #0F6CBD;
             }
             QToolButton#SlideshowBottomBtn,
             QToolButton#TagDescBottomBtn,
@@ -12560,6 +12623,8 @@ class RibbonToolbar(QWidget):
             }
             QToolButton#SlideshowBottomBtn::menu-indicator,
             QToolButton#TagDescBottomBtn::menu-indicator,
+            QToolButton#PhotoGroupingBottomBtn::menu-indicator,
+            QToolButton#BadgesBottomBtn::menu-indicator,
             QToolButton#MosaicLayoutBottomBtn::menu-indicator,
             QToolButton#SaveCopyBottomBtn::menu-indicator {
                 image: none;

@@ -234,7 +234,21 @@ class ColourPopWorkspace(CreateWorkspaceBase):
     def set_zoom_percent(self, pct: int) -> None:
         self._on_slider_zoom_moved(pct)
 
+    def _nudge_brush_radius(self, delta: int) -> None:
+        if hasattr(self, "sld_radius"):
+            nxt = max(self.sld_radius.minimum(), min(self.sld_radius.maximum(), self.brush_radius + int(delta)))
+            self.sld_radius.setValue(nxt)
+
     def handle_key_press(self, event: QKeyEvent) -> bool:
+        if event.key() == Qt.Key.Key_BracketLeft:
+            self._nudge_brush_radius(-6)
+            return True
+        if event.key() == Qt.Key.Key_BracketRight:
+            self._nudge_brush_radius(6)
+            return True
+        if event.key() == Qt.Key.Key_Alt:
+            self.view._sync_brush_cursor_style()
+            return False
         if event.key() == Qt.Key.Key_F:
             self.zoom_fit()
             return True
@@ -273,6 +287,8 @@ class ColourPopWorkspace(CreateWorkspaceBase):
         self.view.color_picked.connect(self._on_color_picked)
         self.view.stroke_started.connect(self._on_stroke_started)
         self.view.zoom_changed.connect(self._on_zoom_changed)
+        self.view.brush_size_delta.connect(self._nudge_brush_radius)
+        self.view.set_brush_action("add")
         self.view.viewport().installEventFilter(self)
 
         self.bg_item = QGraphicsPixmapItem()
@@ -514,12 +530,13 @@ class ColourPopWorkspace(CreateWorkspaceBase):
 
     def _set_brush_mode(self, mode: str) -> None:
         self.brush_mode = mode
+        self.view.set_brush_action("remove" if mode == "make_bw" else "add")
         self.view.set_eyedropper_mode(False)
         self.btn_keep.setChecked(mode == "keep_color")
         self.btn_bw.setChecked(mode == "make_bw")
         self.btn_pick_color.setChecked(False)
         self.lbl_status.setText(
-            f"Active Brush: {'Keep Vibrant Colour (+)' if mode == 'keep_color' else 'Make Black & White (-)'}"
+            f"Active Brush: {'Keep Vibrant Colour (+)' if mode == 'keep_color' else 'Make Black & White (-)'} • [ / ] size • Hold Alt to swap"
         )
         self.ribbon_state_changed.emit()
 
@@ -687,12 +704,16 @@ class ColourPopWorkspace(CreateWorkspaceBase):
     def _on_brush_applied(self, sx: int, sy: int) -> None:
         ph, pw = self.proxy_bgr.shape[:2]
         if 0 <= sx < pw and 0 <= sy < ph:
+            alt_held = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+            effective_mode = self.brush_mode
+            if alt_held and self.brush_mode in ("keep_color", "make_bw"):
+                effective_mode = "make_bw" if self.brush_mode == "keep_color" else "keep_color"
             self.proxy_mask = refine_mask_brush(
                 self.proxy_mask,
                 self.proxy_bgr,
                 (sx, sy),
                 radius=self.brush_radius,
-                mode=self.brush_mode,
+                mode=effective_mode,
                 smart=self.smart_brush,
                 tolerance=self.color_tolerance,
             )

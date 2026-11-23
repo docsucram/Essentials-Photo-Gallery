@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QProgressBar,
     QMessageBox,
+    QGraphicsItem,
     QGraphicsView,
     QGraphicsScene,
     QGraphicsPixmapItem,
@@ -2729,19 +2730,50 @@ class PhotoFuseDialog(QDialog):
 # 4. Google Photos-Style "Colour Pop" (Subject Colour Splash) Dialog & Canvas
 # =============================================================================
 
+class _BrushModeBadgeItem(QGraphicsItem):
+    """Screen-space '+' / '-' badge attached beside the Colour Pop brush ring."""
+
+    def __init__(self, parent: QGraphicsItem | None = None) -> None:
+        super().__init__(parent)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+        self.setZValue(101)
+        self._action: str = "add"
+
+    def set_action(self, action: str) -> None:
+        val = "remove" if action == "remove" else "add"
+        if self._action != val:
+            self._action = val
+            self.update()
+
+    def boundingRect(self) -> QRectF:
+        return QRectF(-8.0, -8.0, 16.0, 16.0)
+
+    def paint(self, painter: QPainter, _option: Any, _widget: Any = None) -> None:
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        bg = QColor(0, 120, 215, 235) if self._action == "add" else QColor(216, 59, 1, 235)
+        painter.setBrush(QBrush(bg))
+        painter.setPen(QPen(QColor(255, 255, 255, 240), 1.4))
+        painter.drawEllipse(QRectF(-7.0, -7.0, 14.0, 14.0))
+        painter.setPen(QPen(QColor(255, 255, 255), 2.0, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(QPointF(-3.2, 0.0), QPointF(3.2, 0.0))
+        if self._action == "add":
+            painter.drawLine(QPointF(0.0, -3.2), QPointF(0.0, 3.2))
+
+
 class ColourPopCanvasView(QGraphicsView):
     """
     High-performance interactive canvas for Colour Pop brush editing:
-    - Real-time circular brush cursor following the pointer.
+    - Real-time circular brush cursor following the pointer with '+' / '-' badge.
     - Continuous stroke interpolation between mouse moves so fast drags do not leave gaps.
     - Eyedropper mode for clicking and sampling colours directly from the image.
-    - Middle-click or Space+Drag for panning, mouse wheel for zoom.
+    - Middle-click or Space+Drag for panning, mouse wheel for zoom, '[' / ']' for size, Alt to swap Add/Remove.
     """
     brush_applied = Signal(int, int)
     color_picked = Signal(int, int, str)
     stroke_started = Signal()
     stroke_finished = Signal()
     zoom_changed = Signal(float)
+    brush_size_delta = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -2754,16 +2786,17 @@ class ColourPopCanvasView(QGraphicsView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
         self.brush_radius: int = 28
+        self._brush_action: str = "add"
         self._is_painting: bool = False
         self._space_pressed: bool = False
         self.eyedropper_mode: bool = False
         self._last_pt: QPointF | None = None
 
         self._cursor_item = QGraphicsEllipseItem()
-        self._cursor_item.setPen(QPen(QColor(0, 160, 255, 230), 1.5, Qt.DashLine))
-        self._cursor_item.setBrush(QBrush(QColor(0, 160, 255, 35)))
         self._cursor_item.setZValue(100)
         self._cursor_item.hide()
+        self._cursor_badge = _BrushModeBadgeItem(self._cursor_item)
+        self._sync_brush_cursor_style()
 
     def _get_eyedropper_cursor(self, mode: str = "normal") -> QCursor:
         pm = QPixmap(32, 32)
@@ -2842,11 +2875,37 @@ class ColourPopCanvasView(QGraphicsView):
             mode = "normal"
         self.setCursor(self._get_eyedropper_cursor(mode))
 
+    def effective_brush_action(self) -> str:
+        """Return 'add' or 'remove', inverting temporarily while Alt is held."""
+        alt_held = bool(QApplication.keyboardModifiers() & Qt.AltModifier)
+        if alt_held:
+            return "remove" if self._brush_action == "add" else "add"
+        return self._brush_action
+
+    def set_brush_action(self, action: str) -> None:
+        self._brush_action = "remove" if action == "remove" else "add"
+        self._sync_brush_cursor_style()
+
+    def _sync_brush_cursor_style(self) -> None:
+        eff = self.effective_brush_action()
+        if eff == "add":
+            self._cursor_item.setPen(QPen(QColor(0, 160, 255, 235), 1.5, Qt.DashLine))
+            self._cursor_item.setBrush(QBrush(QColor(0, 160, 255, 32)))
+        else:
+            self._cursor_item.setPen(QPen(QColor(235, 80, 40, 235), 1.5, Qt.DashLine))
+            self._cursor_item.setBrush(QBrush(QColor(235, 80, 40, 32)))
+        if hasattr(self, "_cursor_badge"):
+            self._cursor_badge.set_action(eff)
+            r = self._cursor_item.rect()
+            offset = self.brush_radius * 0.72
+            self._cursor_badge.setPos(r.center().x() + offset, r.center().y() + offset)
+
     def set_brush_radius(self, r: int) -> None:
         self.brush_radius = max(4, r)
         center = self._cursor_item.rect().center()
         rad = self.brush_radius
         self._cursor_item.setRect(QRectF(center.x() - rad, center.y() - rad, 2 * rad, 2 * rad))
+        self._sync_brush_cursor_style()
 
     def set_eyedropper_mode(self, enabled: bool) -> None:
         self.eyedropper_mode = bool(enabled)
@@ -2855,6 +2914,7 @@ class ColourPopCanvasView(QGraphicsView):
             self._update_eyedropper_cursor()
         else:
             self.setCursor(Qt.BlankCursor)
+            self._sync_brush_cursor_style()
             self._cursor_item.show()
 
     def mousePressEvent(self, event) -> None:
@@ -2896,6 +2956,7 @@ class ColourPopCanvasView(QGraphicsView):
         sp = self.mapToScene(event.pos())
         rad = self.brush_radius
         self._cursor_item.setRect(QRectF(sp.x() - rad, sp.y() - rad, 2 * rad, 2 * rad))
+        self._sync_brush_cursor_style()
 
         if self.scene() and self._cursor_item.scene() != self.scene():
             self.scene().addItem(self._cursor_item)
@@ -2938,6 +2999,17 @@ class ColourPopCanvasView(QGraphicsView):
     def keyPressEvent(self, event) -> None:
         if self.eyedropper_mode:
             self._update_eyedropper_cursor()
+        else:
+            if event.key() == Qt.Key_BracketLeft:
+                self.brush_size_delta.emit(-6)
+                event.accept()
+                return
+            if event.key() == Qt.Key_BracketRight:
+                self.brush_size_delta.emit(6)
+                event.accept()
+                return
+            if event.key() == Qt.Key_Alt:
+                self._sync_brush_cursor_style()
         if event.key() == Qt.Key_Space and not self._space_pressed:
             self._space_pressed = True
             self.setDragMode(QGraphicsView.ScrollHandDrag)
@@ -2949,6 +3021,8 @@ class ColourPopCanvasView(QGraphicsView):
     def keyReleaseEvent(self, event) -> None:
         if self.eyedropper_mode:
             self._update_eyedropper_cursor()
+        elif event.key() == Qt.Key_Alt:
+            self._sync_brush_cursor_style()
         if event.key() == Qt.Key_Space:
             self._space_pressed = False
             self.setDragMode(QGraphicsView.NoDrag)

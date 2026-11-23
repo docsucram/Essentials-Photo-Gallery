@@ -990,7 +990,11 @@ class PhotoGalleryMainWindow(QMainWindow):
             try:
                 from PySide6.QtQuickWidgets import QQuickWidget
                 self._rhi_surface_anchor = QQuickWidget(self)
+                self._rhi_surface_anchor.setClearColor(Qt.transparent)
+                self._rhi_surface_anchor.setAttribute(Qt.WA_TransparentForMouseEvents, True)
                 self._rhi_surface_anchor.setFixedSize(0, 0)
+                self._rhi_surface_anchor.move(-100, -100)
+                self._rhi_surface_anchor.lower()
             except Exception:
                 pass
 
@@ -10284,6 +10288,13 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         self.xmp_daemon.set_paused(self.write_back_paused or getattr(self, "_workers_paused", False))
         self.ribbon.set_write_back_paused(self.write_back_paused)
+        if paused is None:
+            self.show_status_message(
+                "Background file write-back paused (Catalog-only mode)"
+                if self.write_back_paused
+                else "Background file write-back resumed",
+                2800,
+            )
 
         settings = QSettings("PhotoGallery64", "PhotoGallery64")
         settings.setValue("write_back_paused", self.write_back_paused)
