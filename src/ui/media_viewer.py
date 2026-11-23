@@ -1849,9 +1849,11 @@ class SingleMediaViewer(QWidget):
 
         self._live_motion_spec: tuple[Path, int] | None = None
         self._is_playing_live_motion: bool = False
-        self.btn_live_play = QPushButton("▶ LIVE", self.graphics_view)
+        self.btn_live_play = QPushButton(" Motion", self.graphics_view)
+        self.btn_live_play.setIcon(self._make_motion_photo_icon())
+        self.btn_live_play.setIconSize(QSize(18, 18))
         self.btn_live_play.setCursor(Qt.PointingHandCursor)
-        self.btn_live_play.setToolTip("Play Live / Motion Photo (L)")
+        self.btn_live_play.setToolTip("Play Motion Photo (L)")
         self.btn_live_play.setStyleSheet(
             "QPushButton { background-color: rgba(15, 23, 42, 210); color: #F8FAFC; "
             "border: 1px solid #38BDF8; border-radius: 12px; padding: 4px 10px; "
@@ -2960,6 +2962,29 @@ class SingleMediaViewer(QWidget):
             nxt = 1 if cur_flag == 0 else (-1 if cur_flag == 1 else 0)
             mw.apply_flag_to_selection(nxt)
             self._update_cull_hud()
+
+    @staticmethod
+    def _make_motion_photo_icon(size: int = 18, color: str = "#F8FAFC") -> QIcon:
+        """Draw crisp Motion Photo icon (3 staggered horizontal motion lines + circle ring)."""
+        pm = QPixmap(size * 2, size * 2)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        rect = QRectF(2, 2, size * 2 - 4, size * 2 - 4)
+        cx = rect.right() - rect.width() * 0.30
+        cy = rect.center().y()
+        r = min(rect.width(), rect.height()) * 0.28
+        stroke_w = max(2.2, r * 0.28)
+        p.setPen(QPen(QColor(color), stroke_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(QPointF(cx, cy), r, r)
+        x_end = cx - r - stroke_w * 0.85
+        for y_off, length_frac in ((-0.58, 1.45), (0.0, 1.0), (0.58, 0.58)):
+            ly = cy + y_off * r
+            p.drawLine(QPointF(x_end - r * length_frac, ly), QPointF(x_end, ly))
+        p.end()
+        pm.setDevicePixelRatio(2.0)
+        return QIcon(pm)
 
     def _update_live_badge(self) -> None:
         btn = getattr(self, "btn_live_play", None)

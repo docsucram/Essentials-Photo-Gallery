@@ -697,6 +697,24 @@ class MediaCardDelegate(QStyledItemDelegate):
         painter.drawRoundedRect(QRectF(x + 0.5, y + 3.0, 7.0, 6.5), 1.2, 1.2)
         painter.restore()
 
+    @staticmethod
+    def _draw_motion_photo_icon(painter: QPainter, rect: QRectF, color: QColor) -> None:
+        """Draw Motion Photo icon (3 staggered horizontal motion lines + circle ring)."""
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        cx = rect.right() - rect.width() * 0.30
+        cy = rect.center().y()
+        r = min(rect.width(), rect.height()) * 0.27
+        stroke_w = max(1.3, r * 0.28)
+        painter.setPen(QPen(color, stroke_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(QPointF(cx, cy), r, r)
+        x_end = cx - r - stroke_w * 0.85
+        for y_off, length_frac in ((-0.58, 1.45), (0.0, 1.0), (0.58, 0.58)):
+            ly = cy + y_off * r
+            painter.drawLine(QPointF(x_end - r * length_frac, ly), QPointF(x_end, ly))
+        painter.restore()
+
     def _paint_cull_and_status_badges(
         self,
         painter: QPainter,
@@ -903,12 +921,11 @@ class MediaCardDelegate(QStyledItemDelegate):
             painter.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
             if is_live:
                 lx = (group_rect.right() + 4) if group_rect is not None else (img_box.left() + 4)
-                live_rect = QRect(lx, img_box.bottom() - 20, 36, 15)
-                painter.setPen(QPen(QColor(255, 255, 255, 160), 1))
-                painter.setBrush(QColor(15, 23, 42, 200))
-                painter.drawRoundedRect(live_rect, 3, 3)
-                painter.setPen(QColor("#FFFFFF"))
-                painter.drawText(live_rect, Qt.AlignCenter, "LIVE")
+                live_rect = QRect(lx, img_box.bottom() - 30, 26, 26)
+                painter.setPen(QPen(QColor(255, 255, 255, 65), 1.0))
+                painter.setBrush(QColor(15, 23, 42, 190))
+                painter.drawRoundedRect(QRectF(live_rect).adjusted(0.5, 0.5, -0.5, -0.5), 6.0, 6.0)
+                self._draw_motion_photo_icon(painter, QRectF(live_rect).adjusted(3.0, 3.0, -3.0, -3.0), QColor("#F8FAFC"))
             if is_offline:
                 off_rect = QRect(img_box.left() + 4, img_box.top() + 24, 52, 15)
                 painter.setPen(QPen(QColor("#FBBF24"), 1))
@@ -1519,6 +1536,22 @@ class MediaCardDelegate(QStyledItemDelegate):
                     scaled_pix,
                     QRect(src_x, src_y, target_rect.width(), target_rect.height()),
                 )
+                if is_video and target_rect.width() >= 48 and target_rect.height() >= 36:
+                    strip_w = max(8, min(13, int(round(target_rect.width() * 0.07))))
+                    hole_sz = max(4, min(7, int(round(strip_w * 0.58))))
+                    hole_pad = max(3, int(round(hole_sz * 0.6)))
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(QColor("#0B0D12"))
+                    painter.drawRect(QRect(target_rect.left(), target_rect.top(), strip_w, target_rect.height()))
+                    painter.drawRect(QRect(target_rect.right() - strip_w + 1, target_rect.top(), strip_w, target_rect.height()))
+                    painter.setBrush(QColor(205, 210, 218))
+                    lx_h = target_rect.left() + (strip_w - hole_sz) / 2.0
+                    rx_h = target_rect.right() - strip_w + 1 + (strip_w - hole_sz) / 2.0
+                    cy_h = target_rect.top() + hole_pad
+                    while cy_h + hole_sz <= target_rect.bottom() - 2:
+                        painter.drawRect(QRectF(lx_h, cy_h, hole_sz, hole_sz))
+                        painter.drawRect(QRectF(rx_h, cy_h, hole_sz, hole_sz))
+                        cy_h += hole_sz + hole_pad
                 painter.restore()
             else:
                 painter.drawPixmap(target_rect.topLeft(), scaled_pix)

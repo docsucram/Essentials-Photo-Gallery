@@ -609,46 +609,46 @@ class QuickPreviewDialog(QDialog):
         if rating_val is not None and self._current_media_id is not None:
             self._rating = rating_val
             self._update_header()
-            self._cull_flash_hud.flash_rating(self._rating)
             self.rate_requested.emit(self._current_media_id, self._rating)
             if shift_held:
+                self._cull_flash_hud.flash_rating(self._rating)
                 self.navigate_requested.emit(1)
             event.accept()
             return
         if key == Qt.Key.Key_P and self._current_media_id is not None:
             self._flag = 0 if self._flag == 1 else 1
             self._update_header()
-            self._cull_flash_hud.flash_flag(self._flag)
             self.flag_set_requested.emit(self._current_media_id, self._flag)
             self.flag_requested.emit(self._current_media_id)
             if shift_held:
+                self._cull_flash_hud.flash_flag(self._flag)
                 self.navigate_requested.emit(1)
             event.accept()
             return
         if key == Qt.Key.Key_X and self._current_media_id is not None:
             self._flag = 0 if self._flag == -1 else -1
             self._update_header()
-            self._cull_flash_hud.flash_flag(self._flag)
             self.flag_set_requested.emit(self._current_media_id, self._flag)
             if shift_held:
+                self._cull_flash_hud.flash_flag(self._flag)
                 self.navigate_requested.emit(1)
             event.accept()
             return
         if key == Qt.Key.Key_U and self._current_media_id is not None:
             self._flag = 0
             self._update_header()
-            self._cull_flash_hud.flash_flag(0)
             self.flag_set_requested.emit(self._current_media_id, 0)
             if shift_held:
+                self._cull_flash_hud.flash_flag(0)
                 self.navigate_requested.emit(1)
             event.accept()
             return
         if key == Qt.Key.Key_F and self._favourites_enabled and self._current_media_id is not None:
             self._is_favourite = not self._is_favourite
             self._update_header()
-            self._cull_flash_hud.flash_favourite(self._is_favourite)
             self.favourite_requested.emit(self._current_media_id)
             if shift_held:
+                self._cull_flash_hud.flash_favourite(self._is_favourite)
                 self.navigate_requested.emit(1)
             event.accept()
             return

@@ -7770,32 +7770,50 @@ class RibbonToolbar(QWidget):
 
     @staticmethod
     def _make_cull_menu_icon(kind: str) -> QIcon:
-        pm = QPixmap(32, 32)
+        pm = QPixmap(30, 30)
         pm.fill(Qt.transparent)
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing, True)
+        muted = QColor("#94A3B8")
         if kind == "heart":
+            cx, cy, r = 15.0, 15.0, 7.8
+            hpath = QPainterPath()
+            hpath.moveTo(cx, cy + 1.0 * r)
+            hpath.cubicTo(cx - 1.15 * r, cy + 0.30 * r, cx - 1.20 * r, cy - 0.72 * r, cx - 0.64 * r, cy - 0.96 * r)
+            hpath.cubicTo(cx - 0.28 * r, cy - 1.12 * r, cx - 0.06 * r, cy - 0.76 * r, cx, cy - 0.46 * r)
+            hpath.cubicTo(cx + 0.06 * r, cy - 0.76 * r, cx + 0.28 * r, cy - 1.12 * r, cx + 0.64 * r, cy - 0.96 * r)
+            hpath.cubicTo(cx + 1.20 * r, cy - 0.72 * r, cx + 1.15 * r, cy + 0.30 * r, cx, cy + 1.0 * r)
+            hgrad = QLinearGradient(cx, cy - r, cx, cy + r)
+            hgrad.setColorAt(0.0, QColor("#FB7185"))
+            hgrad.setColorAt(1.0, QColor("#E11D48"))
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor("#F43F5E"))
-            path = QPainterPath()
-            path.moveTo(16.0, 26.5)
-            path.cubicTo(5.5, 19.8, 4.0, 11.5, 8.8, 7.2)
-            path.cubicTo(12.2, 4.4, 15.0, 6.6, 16.0, 9.2)
-            path.cubicTo(17.0, 6.6, 19.8, 4.4, 23.2, 7.2)
-            path.cubicTo(28.0, 11.5, 26.5, 19.8, 16.0, 26.5)
-            p.drawPath(path)
+            p.setBrush(hgrad)
+            p.drawPath(hpath)
         elif kind == "flag_picked":
-            p.setPen(QPen(QColor("#E81123"), 2.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            p.setBrush(QColor("#E81123"))
-            p.drawLine(8, 5, 8, 27)
-            p.drawPolygon(QPolygonF([QPointF(8, 6), QPointF(25, 10.5), QPointF(8, 16)]))
+            banner = QPolygonF([QPointF(9.0, 5.5), QPointF(24.5, 10.5), QPointF(9.0, 16.0)])
+            grad = QLinearGradient(9.0, 5.5, 9.0, 16.5)
+            grad.setColorAt(0.0, QColor("#F87171"))
+            grad.setColorAt(0.5, QColor("#DC2626"))
+            grad.setColorAt(1.0, QColor("#991B1B"))
+            p.setPen(QPen(QColor("#7F1D1D"), 1.1))
+            p.setBrush(grad)
+            p.drawPolygon(banner)
+            p.setPen(QPen(muted, 2.2, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(8, 5, 8, 25)
         elif kind == "flag_rejected":
-            p.setPen(QPen(QColor("#94A3B8"), 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setPen(QPen(muted, 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             p.setBrush(Qt.NoBrush)
-            p.drawLine(8, 5, 8, 27)
-            p.drawPolygon(QPolygonF([QPointF(8, 6), QPointF(25, 10.5), QPointF(8, 16)]))
-            p.setPen(QPen(QColor("#EF4444"), 3.0, Qt.SolidLine, Qt.RoundCap))
-            p.drawLine(5, 25, 27, 6)
+            p.drawLine(8, 5, 8, 25)
+            banner = QPolygonF([QPointF(8.0, 5.5), QPointF(23.5, 10.5), QPointF(8.0, 16.0)])
+            p.drawPolygon(banner)
+            p.setPen(QPen(QColor("#EF4444"), 2.6, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(5, 24, 25, 5)
+        elif kind == "flag_unflagged":
+            p.setPen(QPen(muted, 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(Qt.NoBrush)
+            p.drawLine(8, 5, 8, 25)
+            banner = QPolygonF([QPointF(9.0, 5.5), QPointF(24.5, 10.5), QPointF(9.0, 16.0)])
+            p.drawPolygon(banner)
         p.end()
         pm.setDevicePixelRatio(2.0)
         return QIcon(pm)
@@ -7819,7 +7837,7 @@ class RibbonToolbar(QWidget):
         self._ribbon_fav_actions.append(act_fav)
         act_flagged = menu.addAction(self._make_cull_menu_icon("flag_picked"), "Picked / Flagged")
         act_rejected = menu.addAction(self._make_cull_menu_icon("flag_rejected"), "Rejected")
-        act_unflagged = menu.addAction("Not flagged")
+        act_unflagged = menu.addAction(self._make_cull_menu_icon("flag_unflagged"), "Not flagged")
 
         def _on_all():
             self.favourite_filter_selected.emit(False)
@@ -8139,27 +8157,7 @@ class RibbonToolbar(QWidget):
         self.btn_qf_flagged.setFixedHeight(19)
         self.btn_qf_flagged.setPopupMode(QToolButton.InstantPopup)
         self.btn_qf_flagged.setStyleSheet("font-size: 8pt; padding: 0 10px 0 3px;")
-        flagged_menu = QMenu(self.btn_qf_flagged)
-        act_f_all = flagged_menu.addAction("All items")
-        act_f_flagged = flagged_menu.addAction("Flagged")
-        act_f_unflagged = flagged_menu.addAction("Not flagged")
-
-        def _on_menu_all():
-            self.flag_filter_selected.emit(None)
-            self.flagged_filter_selected.emit(False)
-
-        def _on_menu_flagged():
-            self.flag_filter_selected.emit(1)
-            self.flagged_filter_selected.emit(True)
-
-        def _on_menu_unflagged():
-            self.flag_filter_selected.emit(0)
-            self.flagged_filter_selected.emit(False)
-
-        act_f_all.triggered.connect(_on_menu_all)
-        act_f_flagged.triggered.connect(_on_menu_flagged)
-        act_f_unflagged.triggered.connect(_on_menu_unflagged)
-        self.btn_qf_flagged.setMenu(flagged_menu)
+        self._build_flagged_menu(self.btn_qf_flagged)
 
         qf_filters_col.addWidget(self.btn_qf_months)
         qf_filters_col.addWidget(self.btn_qf_rated)
