@@ -2957,7 +2957,18 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._update_worker_monitor()
 
     def on_face_suggestions_updated(self) -> None:
-        """Refreshes People tree, autocomplete, and BatchPeopleView when new face suggestions or centroids appear."""
+        """Debounced refresh of People tree, carousel, and BatchPeopleView when new face suggestions arrive."""
+        timer = getattr(self, "_face_suggestions_debounce_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._flush_face_suggestions_updated)
+            self._face_suggestions_debounce_timer = timer
+        timer.start(600)
+
+    def _flush_face_suggestions_updated(self) -> None:
+        if getattr(self, "_is_shutting_down", False):
+            return
         if hasattr(self.left_nav_dock, "refresh_people_only"):
             people = self.left_nav_dock.refresh_people_only(self.catalog_repo)
             self.ribbon.populate_face_carousel(people)

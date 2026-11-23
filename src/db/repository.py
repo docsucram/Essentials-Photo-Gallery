@@ -1825,18 +1825,33 @@ class CatalogRepository:
         offline_folders = {
             int(r[0]) for r in cur.execute("SELECT id FROM folders WHERE volume_offline = 1").fetchall()
         }
-        live_ids = {
-            int(r[0]) for r in cur.execute("SELECT id FROM media WHERE is_live_photo = 1").fetchall()
-        }
-        fav_ids = {
-            int(r[0]) for r in cur.execute("SELECT id FROM media WHERE is_favourite = 1").fetchall()
-        }
-        rej_ids = {
-            int(r[0]) for r in cur.execute("SELECT id FROM media WHERE is_rejected = 1").fetchall()
-        }
-        stack_rows = cur.execute(
-            "SELECT id, stack_parent_id, LOWER(COALESCE(ext, '')) FROM media WHERE stack_parent_id IS NOT NULL AND live_companion_for_id IS NULL"
+        # Single pass over flagged/live/stacked rows instead of 4 separate full-table scans
+        meta_rows = cur.execute(
+            """
+            SELECT id, COALESCE(is_live_photo, 0), COALESCE(is_favourite, 0),
+                   COALESCE(is_rejected, 0), stack_parent_id, LOWER(COALESCE(ext, '')),
+                   live_companion_for_id
+            FROM media
+            WHERE COALESCE(is_live_photo, 0) = 1
+               OR COALESCE(is_favourite, 0) = 1
+               OR COALESCE(is_rejected, 0) = 1
+               OR stack_parent_id IS NOT NULL;
+            """
         ).fetchall()
+        live_ids: set[int] = set()
+        fav_ids: set[int] = set()
+        rej_ids: set[int] = set()
+        stack_rows: list[tuple[int, int, str]] = []
+        for mid_raw, lp, fav, rej, sp_raw, ext_raw, live_comp in meta_rows:
+            mid = int(mid_raw)
+            if lp:
+                live_ids.add(mid)
+            if fav:
+                fav_ids.add(mid)
+            if rej:
+                rej_ids.add(mid)
+            if sp_raw is not None and live_comp is None:
+                stack_rows.append((mid, int(sp_raw), str(ext_raw or "")))
         if not offline_folders and not live_ids and not fav_ids and not rej_ids and not stack_rows:
             return records
 
@@ -4232,21 +4247,36 @@ class CatalogRepository:
     def get_people_list(self) -> list[dict[str, Any]]:
         conn = self.engine.catalog_conn()
         priv_clause = self._private_folder_clause("f")
-        # Exclude people who appear ONLY in private/excluded folders when Private Mode is locked
-        leak_guard = (
-            ""
-            if self.include_private
-            else """
-            WHERE COALESCE(c.media_count, 0) > 0
-               OR NOT EXISTS (
-                   SELECT 1 FROM media_people mp2
-                   JOIN media m2 ON m2.id = mp2.media_id
-                   JOIN folders f2 ON f2.id = m2.folder_id
-                   WHERE (mp2.person_id = p.id OR mp2.suggested_person_id = p.id)
-                     AND (COALESCE(f2.is_private, 0) = 1 OR COALESCE(f2.monitor_mode, 'always') = 'excluded')
-               )
-            """
-        )
+        # Fast-path check: only compute private/excluded leak-guard set if restricted folders exist
+        restricted_pids: set[int] = set()
+        if not self.include_private:
+            has_restricted = conn.execute(
+                """
+                SELECT 1 FROM folders
+                WHERE COALESCE(is_private, 0) = 1 OR COALESCE(monitor_mode, 'always') = 'excluded'
+                LIMIT 1;
+                """
+            ).fetchone()
+            if has_restricted is not None:
+                r_rows = conn.execute(
+                    """
+                    SELECT DISTINCT mp.person_id AS pid
+                    FROM media_people mp
+                    JOIN media m ON m.id = mp.media_id
+                    JOIN folders f ON f.id = m.folder_id
+                    WHERE mp.person_id IS NOT NULL
+                      AND (COALESCE(f.is_private, 0) = 1 OR COALESCE(f.monitor_mode, 'always') = 'excluded')
+                    UNION
+                    SELECT DISTINCT mp.suggested_person_id AS pid
+                    FROM media_people mp
+                    JOIN media m ON m.id = mp.media_id
+                    JOIN folders f ON f.id = m.folder_id
+                    WHERE mp.suggested_person_id IS NOT NULL
+                      AND (COALESCE(f.is_private, 0) = 1 OR COALESCE(f.monitor_mode, 'always') = 'excluded');
+                    """
+                ).fetchall()
+                restricted_pids = {int(r[0]) for r in r_rows if r[0] is not None}
+
         rows = conn.execute(
             f"""
             SELECT p.id, p.name, p.thumbnail_blob, p.confirmed_count,
@@ -4261,11 +4291,16 @@ class CatalogRepository:
                   AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
                 GROUP BY mp.person_id
             ) c ON c.person_id = p.id
-            {leak_guard}
             ORDER BY p.name COLLATE NOCASE ASC;
             """
         ).fetchall()
-        return [dict(r) for r in rows]
+        if not restricted_pids:
+            return [dict(r) for r in rows]
+        return [
+            dict(r)
+            for r in rows
+            if int(r["media_count"] or 0) > 0 or int(r["id"]) not in restricted_pids
+        ]
 
     get_all_people = get_people_list
 

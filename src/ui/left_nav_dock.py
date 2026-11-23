@@ -2050,6 +2050,8 @@ class LeftNavigationDock(QDockWidget):
                 self.root_all.setSelected(False)
 
         if all_media:
+            self._last_sel_handled_node = ("all_media", None)
+            self._last_sel_handled_ts = time.monotonic()
             self.clear_all_filters()
             return
 
@@ -2148,6 +2150,13 @@ class LeftNavigationDock(QDockWidget):
                 self.root_all.setSelected(False)
 
         if changed:
+            if folder_tuple is not None:
+                self._last_sel_handled_node = ("folder", int(folder_tuple[0]))
+            elif date_tuple is not None:
+                self._last_sel_handled_node = ("date", tuple(date_tuple))
+            else:
+                self._last_sel_handled_node = None
+            self._last_sel_handled_ts = time.monotonic()
             self._dates_section_active = False
             self._update_summary_label()
             self.filter_changed.emit()
@@ -2164,6 +2173,11 @@ class LeftNavigationDock(QDockWidget):
         ctrl_held = bool(QGuiApplication.keyboardModifiers() & Qt.ControlModifier)
 
         if ntype == "all_media":
+            if (
+                getattr(self, "_last_sel_handled_node", None) == ("all_media", None)
+                and (time.monotonic() - getattr(self, "_last_sel_handled_ts", 0.0)) < 0.35
+            ):
+                return
             self.clear_all_filters()
             return
         if ntype == "section_albums":
@@ -2245,16 +2259,26 @@ class LeftNavigationDock(QDockWidget):
             self.place_selected.emit(country, state, city)
             return
         if ntype == "folder":
+            if item.childCount() > 0:
+                item.setExpanded(True)
+            if (
+                getattr(self, "_last_sel_handled_node", None) == ("folder", int(payload))
+                and (time.monotonic() - getattr(self, "_last_sel_handled_ts", 0.0)) < 0.35
+            ):
+                return
             self._folder_id = int(payload)
             self._folder_name = item.text(0)
             if hasattr(self, "root_all") and self.root_all is not None:
                 self.root_all.setSelected(False)
-            if item.childCount() > 0:
-                item.setExpanded(True)
             self._update_summary_label()
             self.filter_changed.emit()
             return
         if ntype == "date" and isinstance(payload, tuple):
+            if (
+                getattr(self, "_last_sel_handled_node", None) == ("date", tuple(payload))
+                and (time.monotonic() - getattr(self, "_last_sel_handled_ts", 0.0)) < 0.35
+            ):
+                return
             self._date_year, self._date_month, self._date_day = payload
             if hasattr(self, "root_all") and self.root_all is not None:
                 self.root_all.setSelected(False)

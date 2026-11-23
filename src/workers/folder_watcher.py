@@ -680,19 +680,20 @@ class FolderWatcherDaemon(QObject):
         """Synchronizes watcher directories with currently registered library folders in catalog.db."""
         repo = CatalogRepository(self.engine)
         monitored_paths = repo.get_monitored_folder_paths()
-        disk_paths: set[str] = {
-            os.path.normpath(p)
-            for p in monitored_paths
-            if p and os.path.exists(p) and os.path.isdir(p)
-        }
+        monitored_norm: set[str] = {os.path.normpath(p) for p in monitored_paths if p}
 
         current_watched = set(self.watcher.directories())
 
-        to_remove = [p for p in current_watched if p not in disk_paths]
+        to_remove = [p for p in current_watched if p not in monitored_norm]
         if to_remove:
             self.watcher.removePaths(to_remove)
 
-        to_add = [p for p in disk_paths if p not in current_watched]
+        # Only hit disk os.path.isdir() for newly added folders (avoids main-thread stat storm)
+        to_add = [
+            p
+            for p in monitored_norm
+            if p not in current_watched and os.path.isdir(p)
+        ]
         if to_add:
             self.watcher.addPaths(to_add)
 
@@ -760,8 +761,9 @@ class FolderWatcherDaemon(QObject):
     def _on_worker_delta_completed(
         self, folder_path: str, added: int, modified: int, deleted: int, folders_changed: int = 0
     ) -> None:
-        # Also ensure any newly discovered subfolders are added to the watcher
-        self.update_watched_paths()
+        # Only re-sync QFileSystemWatcher paths when folders were actually added/removed
+        if folders_changed > 0:
+            self.update_watched_paths()
         self.delta_completed.emit(folder_path, added, modified, deleted, folders_changed)
 
     def stop(self) -> None:

@@ -4128,13 +4128,6 @@ class _FaceCarouselWidget(QWidget):
             self._update_visible_faces()
 
     def populate(self, people: Sequence[dict[str, Any]]) -> None:
-        while self.strip_layout.count() > 1:
-            item = self.strip_layout.takeAt(0)
-            if item.widget() is not None:
-                item.widget().deleteLater()
-        self._buttons.clear()
-        self._button_list.clear()
-        self._scroll_index = 0
         self._all_people_list = list(people)
 
         # Sort by Top people (highest media count & confirmed count descending)
@@ -4144,8 +4137,36 @@ class _FaceCarouselWidget(QWidget):
             reverse=True,
         )
 
-        card_style = self._face_card_style(getattr(self, "_is_dark", False))
-        for p in self._top_people:
+        # Only build strip buttons for the top 30 people (the dropdown popup shows all people A-Z)
+        # and skip rebuilding widgets/pixmaps if the top 30 signature is unchanged.
+        top_slice = self._top_people[:30]
+        is_dark = bool(getattr(self, "_is_dark", False))
+        new_sig = (
+            is_dark,
+            tuple(
+                (
+                    int(p["id"]),
+                    str(p["name"]),
+                    int(p.get("media_count", 0)),
+                    len(p.get("thumbnail_blob") or b""),
+                )
+                for p in top_slice
+            ),
+        )
+        if getattr(self, "_last_carousel_sig", None) == new_sig and len(self._button_list) == len(top_slice):
+            return
+        self._last_carousel_sig = new_sig
+
+        while self.strip_layout.count() > 1:
+            item = self.strip_layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        self._buttons.clear()
+        self._button_list.clear()
+        self._scroll_index = 0
+
+        card_style = self._face_card_style(is_dark)
+        for p in top_slice:
             pid = int(p["id"])
             name = str(p["name"])
             cnt = int(p.get("media_count", 0))
