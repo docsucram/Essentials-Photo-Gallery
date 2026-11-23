@@ -665,7 +665,7 @@ class SemanticEngine:
 
                 opts = ort.SessionOptions()
                 opts.inter_op_num_threads = 1
-                opts.intra_op_num_threads = max(1, min(4, os.cpu_count() or 2))
+                opts.intra_op_num_threads = max(1, min(2, (os.cpu_count() or 2) // 2))
                 self._img_sess = ort.InferenceSession(
                     str(img_p), sess_options=opts, providers=["CPUExecutionProvider"]
                 )
@@ -689,7 +689,7 @@ class SemanticEngine:
 
                 opts = ort.SessionOptions()
                 opts.inter_op_num_threads = 1
-                opts.intra_op_num_threads = max(1, min(4, os.cpu_count() or 2))
+                opts.intra_op_num_threads = max(1, min(2, (os.cpu_count() or 2) // 2))
                 self._txt_sess = ort.InferenceSession(
                     str(txt_p), sess_options=opts, providers=["CPUExecutionProvider"]
                 )
@@ -774,6 +774,35 @@ class SemanticEngine:
         except Exception as exc:
             logger.debug("Semantic text encoding failed: %s", exc)
             return None
+
+    def ensure_subject_vectors(
+        self,
+        repo: SemanticVectorRepository,
+        *,
+        model_ver: str = MODEL_VERSION_ID,
+    ) -> dict[str, np.ndarray]:
+        """
+        Ensure all 12 SUBJECT_PRESETS text vectors are persisted in `semantic_vectors.db`.
+        Safe to run on a background worker thread so the 64 MB text encoder is never loaded
+        synchronously on the main GUI thread during navigation refresh.
+        """
+        existing = repo.get_subject_vectors(model_ver=model_ver)
+        if existing and len(existing) >= len(SUBJECT_PRESETS):
+            return existing
+        if not self.is_available():
+            return existing
+        computed: dict[str, np.ndarray] = {}
+        for key, _lbl, prompts, _thr in SUBJECT_PRESETS:
+            if key in existing:
+                continue
+            vecs = [self.encode_text(p) for p in prompts]
+            valid_v = [v for v in vecs if v is not None]
+            if valid_v:
+                computed[key] = sum(valid_v) / float(len(valid_v))
+        if computed:
+            repo.put_subject_vectors(computed, model_ver=model_ver)
+            return repo.get_subject_vectors(model_ver=model_ver)
+        return existing
 
     @staticmethod
     def query_by_vector(

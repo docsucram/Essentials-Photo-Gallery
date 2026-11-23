@@ -164,6 +164,8 @@ class _OnnxRapidOcrRunner:
 
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
+        opts.inter_op_num_threads = 1
+        opts.intra_op_num_threads = max(1, min(2, (os.cpu_count() or 2) // 2))
         self.det_sess = ort.InferenceSession(str(det_path), opts, providers=["CPUExecutionProvider"])
         self.rec_sess = ort.InferenceSession(str(rec_path), opts, providers=["CPUExecutionProvider"])
         self.det_in = self.det_sess.get_inputs()[0].name
@@ -412,7 +414,7 @@ class OcrEngine:
             logger.debug("RapidOCR ONNX runner unavailable: %s", exc)
         return False
 
-    def _try_init_winocr(self) -> bool:
+    def _try_init_winocr(self, *, allow_powershell: bool = False) -> bool:
         if sys.platform != "win32":
             return False
         try:
@@ -425,8 +427,8 @@ class OcrEngine:
         except Exception:
             pass
 
-        # Verify PowerShell + Windows.Media.Ocr availability on Windows 10/11
-        if shutil.which("powershell.exe") or shutil.which("pwsh"):
+        # Only use the slow PowerShell subprocess bridge when explicitly requested
+        if allow_powershell and (shutil.which("powershell.exe") or shutil.which("pwsh")):
             self._backend_name = "windows_media_ocr"
             logger.info("OcrEngine initialized with Windows.Media.Ocr PowerShell bridge")
             return True
@@ -469,7 +471,7 @@ class OcrEngine:
             if self._try_init_rapidocr():
                 return "rapidocr"
         elif req in ("winocr", "windows_media_ocr"):
-            if self._try_init_winocr():
+            if self._try_init_winocr(allow_powershell=(req == "windows_media_ocr")):
                 return self._backend_name or "stub"
         elif req in ("pytesseract", "tesseract"):
             if self._try_init_pytesseract():
@@ -478,10 +480,10 @@ class OcrEngine:
             self._backend_name = "stub"
             return "stub"
         else:
-            if self._try_init_winocr():
-                return self._backend_name or "stub"
             if self._try_init_rapidocr():
                 return "rapidocr"
+            if self._try_init_winocr(allow_powershell=False):
+                return self._backend_name or "stub"
             if self._try_init_pytesseract():
                 return "pytesseract"
 

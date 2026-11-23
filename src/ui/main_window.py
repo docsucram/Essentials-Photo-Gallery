@@ -1196,7 +1196,6 @@ class PhotoGalleryMainWindow(QMainWindow):
         QTimer.singleShot(400, self._check_stale_scan_crash_trace)
         QTimer.singleShot(1000, self._start_async_avatar_backfill)
         QTimer.singleShot(1200, self.folder_watcher.start_startup_reconciliation)
-        QTimer.singleShot(3000, self._prewarm_map_view_idle)
 
         from src.utils.scan_logger import mark_startup_stage
         mark_startup_stage("main-window-ready")
@@ -2511,6 +2510,11 @@ class PhotoGalleryMainWindow(QMainWindow):
         """Launch background OCR indexing for unread photos (or forced on-demand media_ids)."""
         if getattr(self, "_workers_paused", False) and not media_ids:
             return
+        if not media_ids:
+            from src.core.ocr_engine import OcrEngine
+
+            if OcrEngine().backend_name in ("stub", "windows_media_ocr"):
+                return
         from src.workers.ocr_worker import OcrScanWorker
 
         if getattr(self, "_active_ocr_worker", None) is not None:
@@ -2676,14 +2680,17 @@ class PhotoGalleryMainWindow(QMainWindow):
         if upserted_count > 0 or was_completed:
             self._media_meta_lookup.clear()
         if was_completed and upserted_count > 0:
+            scope_fids = self._current_stack_scope_folder_ids()
             if getattr(self, "auto_group_raw_jpeg", False):
                 try:
-                    self.catalog_repo.auto_stack_raw_jpeg_pairs()
+                    self.catalog_repo.auto_stack_raw_jpeg_pairs(folder_ids=scope_fids)
                 except Exception:
                     pass
             if getattr(self, "auto_group_bursts", False):
                 try:
-                    self.catalog_repo.auto_stack_bursts(max_gap_sec=2.0, thumb_repo=self.thumb_repo)
+                    self.catalog_repo.auto_stack_bursts(
+                        max_gap_sec=2.0, folder_ids=scope_fids, thumb_repo=self.thumb_repo
+                    )
                 except Exception:
                     pass
         self.refresh_navigation_and_autocomplete()
@@ -2759,9 +2766,6 @@ class PhotoGalleryMainWindow(QMainWindow):
                 and self._are_face_models_installed()
             ):
                 self.start_face_detection()
-            if added > 0:
-                self._start_ocr_worker()
-                self._start_semantic_worker()
         QTimer.singleShot(3500, self._start_ocr_worker)
         QTimer.singleShot(4500, self._start_semantic_worker)
         QTimer.singleShot(5000, self._maybe_start_startup_face_scan)
@@ -6902,16 +6906,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         mv.fly_to_place(query, zoom=13)
 
     def _prewarm_map_view_idle(self) -> None:
-        """Silently initializes WorldMapView QWebEngineView 3s after launch so first Map click is instant."""
-        if getattr(self, "_is_shutting_down", False):
-            return
-        if "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("GALLERY_NO_WEBENGINE") == "1":
-            return
-        if self._map_view is None:
-            try:
-                self._ensure_map_view()
-            except Exception:
-                pass
+        """No-op: WorldMapView initializes on demand when World Map is clicked (avoids 3s post-launch main-thread QWebEngine freeze)."""
+        return
 
     def _has_active_grid_scope_filter(self) -> bool:
         """Returns True if the current Grid view is narrowed by a Folder, Album, Tag, Place, Date, Person, Rating, or Search."""
@@ -9321,28 +9317,16 @@ class PhotoGalleryMainWindow(QMainWindow):
         ):
             return
         try:
-            if not getattr(self, "nav_show_subjects", False) and self.semantic_repo.count_indexed() == 0:
+            if not getattr(self, "nav_show_subjects", False):
                 return
             subj_vecs = self.semantic_repo.get_subject_vectors()
-            if not subj_vecs and self.semantic_engine.is_available():
-                from src.core.semantic_engine import SUBJECT_PRESETS
-
-                computed: dict[str, Any] = {}
-                for key, _lbl, prompts, _thr in SUBJECT_PRESETS:
-                    vecs = [self.semantic_engine.encode_text(p) for p in prompts]
-                    valid_v = [v for v in vecs if v is not None]
-                    if valid_v:
-                        computed[key] = sum(valid_v) / float(len(valid_v))
-                if computed:
-                    self.semantic_repo.put_subject_vectors(computed)
-                    subj_vecs = self.semantic_repo.get_subject_vectors()
+            if not subj_vecs:
+                if self.semantic_engine.is_available() and getattr(self, "_active_semantic_worker", None) is None:
+                    self._start_semantic_worker()
+                return
             scope_ids = self._visible_non_private_media_ids()
-            counts = (
-                self.semantic_engine.compute_subject_counts(
-                    self.semantic_repo, subj_vecs, scope_ids=scope_ids
-                )
-                if subj_vecs
-                else {}
+            counts = self.semantic_engine.compute_subject_counts(
+                self.semantic_repo, subj_vecs, scope_ids=scope_ids
             )
             self.left_nav_dock.refresh_subjects(counts)
         except Exception:

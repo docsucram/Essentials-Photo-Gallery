@@ -6,6 +6,7 @@ full-res files on disk or triggers cloud OneDrive placeholder downloads).
 """
 from __future__ import annotations
 
+import time
 from typing import Any, Sequence
 
 from PySide6.QtCore import QObject, QRunnable, Signal, Slot
@@ -56,6 +57,12 @@ class SemanticIndexWorker(QRunnable):
 
         thumb_repo = ThumbnailRepository(self.db_engine)
         try:
+            # Precompute SUBJECT_PRESETS text vectors on this background thread so the 64 MB
+            # text ONNX encoder is never loaded synchronously on the main GUI thread.
+            if hasattr(self.semantic_engine, "ensure_subject_vectors"):
+                self.semantic_engine.ensure_subject_vectors(
+                    self.semantic_repo, model_ver=self.model_ver
+                )
             existing = self.semantic_repo.get_indexed_mtimes(
                 [m for m, _ in self.candidates], model_ver=self.model_ver
             )
@@ -82,6 +89,7 @@ class SemanticIndexWorker(QRunnable):
                     if vec is not None:
                         to_upsert.append((mid, mtime, self.model_ver, vec))
                         indexed_now += 1
+                    time.sleep(0.012)
                 if to_upsert:
                     self.semantic_repo.upsert_vectors_batch(to_upsert)
                 done = min(total, start + len(chunk))

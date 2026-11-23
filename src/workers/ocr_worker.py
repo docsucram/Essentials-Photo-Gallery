@@ -64,7 +64,17 @@ class OcrScanWorker(QRunnable):
         return self._cancel_event.is_set()
 
     def _load_rgb_proxy(self, media_id: int, file_path: Path) -> np.ndarray | None:
-        """Load up to 1024px RGB proxy from disk, falling back to cached WebP thumbnail."""
+        """Load cached WebP thumbnail proxy first (zero disk I/O), falling back to <=1024px disk decode."""
+        try:
+            blob = self.thumb_repo.get_webp_blob(media_id)
+            if blob:
+                arr = np.frombuffer(blob, dtype=np.uint8)
+                bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if bgr is not None and bgr.size > 0:
+                    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        except Exception:
+            pass
+
         if not is_cloud_only_file(file_path) and file_path.is_file():
             try:
                 raw = np.fromfile(str(file_path), dtype=np.uint8)
@@ -82,17 +92,6 @@ class OcrScanWorker(QRunnable):
                     return rgb
             except Exception as exc:
                 logger.debug("Direct OCR decode failed for %s: %s", file_path, exc)
-
-        # Fallback to cached thumbnail blob if original file is offline/slow
-        try:
-            blob = self.thumb_repo.get_webp_blob(media_id)
-            if blob:
-                arr = np.frombuffer(blob, dtype=np.uint8)
-                bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                if bgr is not None and bgr.size > 0:
-                    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        except Exception:
-            pass
         return None
 
     def run(self) -> None:
@@ -186,11 +185,12 @@ class OcrScanWorker(QRunnable):
                     rgb = self._load_rgb_proxy(mid, fpath)
                     text = self.ocr_engine.extract_text(rgb) if rgb is not None else ""
                     self.repo.update_media_ocr(mid, text)
-                    self.signals.media_updated.emit(mid)
+                    if text or self.media_ids:
+                        self.signals.media_updated.emit(mid)
                     processed += 1
                     self.signals.progressed.emit(min(processed, total), total)
                     # Yield briefly so background OCR never starves UI navigation or thumbnail workers
-                    time.sleep(0.02)
+                    time.sleep(0.035)
 
             self.signals.finished.emit(processed)
         except Exception as exc:
