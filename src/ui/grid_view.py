@@ -2355,6 +2355,30 @@ class ThumbnailGridView(QListView):
     ) -> None:
         if self.catalog_model is None or self.card_delegate is None:
             return
+        # Capture currently focused/selected or top-visible media item so switching
+        # between Grid, Tiles, Mosaic, and Masonry keeps the user on the same photo(s).
+        anchor_mid: int | None = None
+        anchor_rel_y: int | None = None
+        sb = self.verticalScrollBar()
+        old_scroll_y = sb.value() if sb is not None else 0
+        sel_ids = self.selected_media_ids()
+        if sel_ids:
+            lead = self.lead_selected_media_id()
+            anchor_mid = int(lead) if lead is not None and lead >= 0 else int(sel_ids[0])
+        else:
+            vis = self.visible_media_ids(buffer_rows=0)
+            if vis:
+                anchor_mid = int(vis[0])
+        if anchor_mid is not None:
+            old_idx = self.catalog_model.index_for_media_id(anchor_mid)
+            if old_idx.isValid():
+                old_rect = self.catalog_model.item_rect(old_idx.row())
+                if old_rect.isValid():
+                    vp_h = max(1, self.viewport().height())
+                    rel = old_rect.top() - old_scroll_y
+                    if 0 <= rel < vp_h:
+                        anchor_rel_y = rel
+
         if mode in ("tiles", "mosaic", "masonry"):
             if not hasattr(self, "_stashed_visible_details"):
                 self._stashed_visible_details = set(self.card_delegate._visible_details)
@@ -2368,6 +2392,19 @@ class ThumbnailGridView(QListView):
         self.card_delegate.set_layout_mode(mode)
         self.catalog_model.set_layout_mode(mode)
         self._sync_metrics_and_scrollbar()
+
+        if anchor_mid is not None and sb is not None:
+            new_idx = self.catalog_model.index_for_media_id(anchor_mid)
+            if new_idx.isValid():
+                new_rect = self.catalog_model.item_rect(new_idx.row())
+                if new_rect.isValid():
+                    if anchor_rel_y is not None:
+                        target_y = new_rect.top() - anchor_rel_y
+                    else:
+                        vp_h = max(1, self.viewport().height())
+                        target_y = new_rect.center().y() - vp_h // 2
+                    sb.setValue(max(sb.minimum(), min(sb.maximum(), target_y)))
+
         self._scroll_debounce.start()
 
     def set_visible_details(self, details: set[str]) -> None:

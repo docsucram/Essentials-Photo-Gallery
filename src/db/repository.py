@@ -226,7 +226,7 @@ class FilterQuerySpec:
     flag_filter: int | None = None  # 1 = flagged only, 0 = unflagged only, None = all
     edited_only: bool = False
     edited_filter: int | None = None  # 1 = edited only, 0 = unedited only, None = all
-    media_type: Literal["all", "image", "video", "raw"] = "all"
+    media_type: Literal["all", "image", "video", "raw", "motion"] = "all"
     orientation_filter: Literal["all", "landscape", "portrait"] = "all"
     search_text: str = ""
     bbox: tuple[float, float, float, float] | None = None  # (min_lat, max_lat, min_lon, max_lon)
@@ -1233,6 +1233,8 @@ class CatalogRepository:
         elif spec.media_type == "raw":
             raw_clauses = " OR ".join(f"m.filename LIKE '%.{ext}'" for ext in RAW_EXTENSIONS)
             where_clauses.append(f"(m.is_video = 0 AND ({raw_clauses}))")
+        elif spec.media_type == "motion":
+            where_clauses.append("(m.is_video = 0 AND COALESCE(m.is_live_photo, 0) = 1)")
 
         # 6b. Orientation filter (landscape vs portrait)
         # media.width and media.height are already stored in upright display dimensions.

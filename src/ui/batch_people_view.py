@@ -170,6 +170,7 @@ class _FaceCardDelegate(QStyledItemDelegate):
         self.pixmap_cache = pixmap_cache
         self.hovered_row: int = -1
         self.hover_btn: str | None = None  # "confirm" or "reject"
+        self.dark_mode: bool = False
 
     def sizeHint(self, option, index) -> QSize:
         return QSize(TILE_WIDTH, TILE_HEIGHT)
@@ -194,18 +195,33 @@ class _FaceCardDelegate(QStyledItemDelegate):
         is_boxless = bool(getattr(rec, "is_boxless_match", False))
 
         # 1. Background card fill & border (Distinct attention border for outliers, blue for boxless, green for confirmed)
-        if is_outlier:
-            bg_color = QColor("#FEF2F2") if is_selected else (QColor("#FFFBEB") if is_hovered else QColor("#FFFFFF"))
-            border_color = QColor("#DC2626") if is_selected else (QColor("#F59E0B") if is_hovered else QColor("#FCA5A5"))
-        elif is_boxless:
-            bg_color = QColor("#F0F9FF") if is_selected else (QColor("#E0F2FE") if is_hovered else QColor("#FFFFFF"))
-            border_color = QColor("#0284C7") if is_selected else (QColor("#38BDF8") if is_hovered else QColor("#BAE6FD"))
-        elif is_conf:
-            bg_color = QColor("#DDF3E4") if is_selected else (QColor("#EAF7EE") if is_hovered else QColor("#F3FAF5"))
-            border_color = QColor("#2E7D32") if is_selected else (QColor("#4CAF50") if is_hovered else QColor("#81C784"))
+        is_dark = bool(getattr(self, "dark_mode", False))
+        if is_dark:
+            if is_outlier:
+                bg_color = QColor("#3B1E22") if is_selected else (QColor("#332B19") if is_hovered else QColor("#1E232B"))
+                border_color = QColor("#EF4444") if is_selected else (QColor("#F59E0B") if is_hovered else QColor("#B91C1C"))
+            elif is_boxless:
+                bg_color = QColor("#162C46") if is_selected else (QColor("#1B2A3E") if is_hovered else QColor("#1E232B"))
+                border_color = QColor("#38BDF8") if is_selected else (QColor("#0284C7") if is_hovered else QColor("#1E3A5F"))
+            elif is_conf:
+                bg_color = QColor("#143324") if is_selected else (QColor("#182B22") if is_hovered else QColor("#1A2621"))
+                border_color = QColor("#4ADE80") if is_selected else (QColor("#22C55E") if is_hovered else QColor("#166534"))
+            else:
+                bg_color = QColor("#1D3557") if is_selected else (QColor("#252B36") if is_hovered else QColor("#1C212A"))
+                border_color = QColor("#60A5FA") if is_selected else (QColor("#3B82F6") if is_hovered else QColor("#2D3442"))
         else:
-            bg_color = QColor("#E5F1FB") if is_selected else (QColor("#F0F8FF") if is_hovered else QColor("#FFFFFF"))
-            border_color = QColor("#70C0E7") if is_selected else (QColor("#B8D6FB") if is_hovered else QColor("#D9D9D9"))
+            if is_outlier:
+                bg_color = QColor("#FEF2F2") if is_selected else (QColor("#FFFBEB") if is_hovered else QColor("#FFFFFF"))
+                border_color = QColor("#DC2626") if is_selected else (QColor("#F59E0B") if is_hovered else QColor("#FCA5A5"))
+            elif is_boxless:
+                bg_color = QColor("#F0F9FF") if is_selected else (QColor("#E0F2FE") if is_hovered else QColor("#FFFFFF"))
+                border_color = QColor("#0284C7") if is_selected else (QColor("#38BDF8") if is_hovered else QColor("#BAE6FD"))
+            elif is_conf:
+                bg_color = QColor("#DDF3E4") if is_selected else (QColor("#EAF7EE") if is_hovered else QColor("#F3FAF5"))
+                border_color = QColor("#2E7D32") if is_selected else (QColor("#4CAF50") if is_hovered else QColor("#81C784"))
+            else:
+                bg_color = QColor("#E5F1FB") if is_selected else (QColor("#F0F8FF") if is_hovered else QColor("#FFFFFF"))
+                border_color = QColor("#70C0E7") if is_selected else (QColor("#B8D6FB") if is_hovered else QColor("#D9D9D9"))
 
         path = QPainterPath()
         path.addRoundedRect(QRectF(card_rect), 4.0, 4.0)
@@ -937,8 +953,10 @@ class _PersonGroupSectionWidget(QWidget):
         self.list_view.selectAll()
 
     def set_dark_mode(self, is_dark: bool) -> None:
-        """Applies dark or light theme to section header."""
+        """Applies dark or light theme to section header and face cards."""
         self._is_dark = bool(is_dark)
+        if hasattr(self, "delegate"):
+            self.delegate.dark_mode = bool(is_dark)
         if is_dark:
             self.header_frame.setStyleSheet(
                 "QFrame#PersonHeaderFrame { background-color: #1E232B; border: 1px solid #2D333F; border-radius: 4px; padding: 2px; }"
@@ -950,6 +968,8 @@ class _PersonGroupSectionWidget(QWidget):
                 )
             if hasattr(self, "lbl_counts"):
                 self.lbl_counts.setStyleSheet("font-size: 11px; color: #94A3B8; background: transparent; border: none;")
+            elif hasattr(self, "lbl_title"):
+                self.lbl_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #E2E8F0; background: transparent; border: none;")
             self.btn_toggle.setStyleSheet("border: none; font-size: 10px; color: #94A3B8; background: transparent;")
         else:
             self.header_frame.setStyleSheet(
@@ -962,7 +982,11 @@ class _PersonGroupSectionWidget(QWidget):
                 )
             if hasattr(self, "lbl_counts"):
                 self.lbl_counts.setStyleSheet("font-size: 11px; color: #55687C; background: transparent; border: none;")
+            elif hasattr(self, "lbl_title"):
+                self.lbl_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #1E395B; background: transparent; border: none;")
             self.btn_toggle.setStyleSheet("border: none; font-size: 10px; color: #55687C; background: transparent;")
+        if hasattr(self, "list_view") and self.list_view.viewport() is not None:
+            self.list_view.viewport().update()
 
     def remove_face_ids(self, face_ids: set[int]) -> int:
         """Removes face IDs from this section. Returns remaining count."""
@@ -1521,11 +1545,11 @@ class BatchPeopleView(QWidget):
 
         h_banner.addStretch(1)
 
-        btn_dismiss_banner = QToolButton(self.banner)
-        btn_dismiss_banner.setText("✕")
-        btn_dismiss_banner.setStyleSheet("border: none; color: #887000; font-size: 11px;")
-        btn_dismiss_banner.clicked.connect(lambda: self.banner.setVisible(False))
-        h_banner.addWidget(btn_dismiss_banner)
+        self.btn_dismiss_banner = QToolButton(self.banner)
+        self.btn_dismiss_banner.setText("✕")
+        self.btn_dismiss_banner.setStyleSheet("border: none; color: #887000; font-size: 11px;")
+        self.btn_dismiss_banner.clicked.connect(lambda: self.banner.setVisible(False))
+        h_banner.addWidget(self.btn_dismiss_banner)
 
         main_layout.addWidget(self.banner)
 
@@ -1639,6 +1663,16 @@ class BatchPeopleView(QWidget):
         self._is_dark = bool(is_dark)
         if is_dark:
             self.action_bar.setStyleSheet("background-color: #1B1E24; border-bottom: 1px solid #2D323B;")
+            if hasattr(self, "banner"):
+                self.banner.setStyleSheet(
+                    "QFrame { background-color: #1E2430; border-bottom: 1px solid #2E3646; padding: 4px; }"
+                )
+                self.lbl_banner_text.setStyleSheet("color: #CBD5E1; font-size: 11px; background: transparent;")
+                self.chk_include_no_face.setStyleSheet("color: #CBD5E1; font-size: 11px; background: transparent;")
+                if hasattr(self, "btn_dismiss_banner"):
+                    self.btn_dismiss_banner.setStyleSheet(
+                        "border: none; color: #94A3B8; background: transparent; font-size: 11px;"
+                    )
             self.avatar_strip.set_dark_mode(True)
             if hasattr(self, "filter_banner"):
                 self.filter_banner.setStyleSheet(
@@ -1675,6 +1709,16 @@ class BatchPeopleView(QWidget):
             )
         else:
             self.action_bar.setStyleSheet("background-color: #F0F4F8; border-bottom: 1px solid #D0DBE5;")
+            if hasattr(self, "banner"):
+                self.banner.setStyleSheet(
+                    "QFrame { background-color: #FFF9DB; border-bottom: 1px solid #F5E79E; padding: 4px; }"
+                )
+                self.lbl_banner_text.setStyleSheet("color: #665200; font-size: 11px; background: transparent;")
+                self.chk_include_no_face.setStyleSheet("color: #665200; font-size: 11px; background: transparent;")
+                if hasattr(self, "btn_dismiss_banner"):
+                    self.btn_dismiss_banner.setStyleSheet(
+                        "border: none; color: #887000; background: transparent; font-size: 11px;"
+                    )
             self.avatar_strip.set_dark_mode(False)
             if hasattr(self, "filter_banner"):
                 self.filter_banner.setStyleSheet(
@@ -1709,6 +1753,9 @@ class BatchPeopleView(QWidget):
             self.lbl_empty_state.setStyleSheet(
                 "color: #4A6585; font-family: 'Segoe UI'; font-size: 11pt; padding: 48px 24px;"
             )
+        for sec in getattr(self, "_sections", {}).values():
+            if hasattr(sec, "set_dark_mode"):
+                sec.set_dark_mode(self._is_dark)
 
     def set_scan_progress(self, current: int, total: int) -> None:
         """Updates live face detection progress indicator in BatchPeopleView."""
@@ -2045,6 +2092,7 @@ class BatchPeopleView(QWidget):
                 sec.preview_requested.connect(self._open_quick_preview)
                 sec.list_view.selectionModel().selectionChanged.connect(lambda *args: self._on_selection_changed())
 
+                sec.set_dark_mode(bool(getattr(self, "_is_dark", False)))
                 idx = max(0, self.scroll_layout.count() - 1)
                 self.scroll_layout.insertWidget(idx, sec)
                 sec.show()
@@ -2117,6 +2165,7 @@ class BatchPeopleView(QWidget):
                     sec.preview_requested.connect(self._open_quick_preview)
                     sec.list_view.selectionModel().selectionChanged.connect(lambda *args: self._on_selection_changed())
 
+                    sec.set_dark_mode(bool(getattr(self, "_is_dark", False)))
                     idx = max(0, self.scroll_layout.count() - 1)
                     self.scroll_layout.insertWidget(idx, sec)
                     sec.show()

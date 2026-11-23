@@ -706,6 +706,8 @@ class SearchScopeBar(QFrame):
                 m_label = "Photos"
             elif m_val in ("raw", "raws"):
                 m_label = "RAW"
+            elif m_val in ("motion", "live"):
+                m_label = "Motion photos"
             else:
                 m_label = str(media_type).capitalize()
 

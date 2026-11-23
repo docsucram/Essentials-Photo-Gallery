@@ -516,7 +516,7 @@ class LeftNavigationDock(QDockWidget):
         self._flagged_only: bool = False
         self._edited_only: bool = False
         self._edited_filter: int | None = None
-        self._media_type: Literal["all", "image", "video", "raw"] = "all"
+        self._media_type: Literal["all", "image", "video", "raw", "motion"] = "all"
         self._orientation_filter: Literal["all", "landscape", "portrait"] = "all"
         self._favourite_paths: list[str] = []
         self._location_country: str | None = None
@@ -3180,8 +3180,8 @@ class LeftNavigationDock(QDockWidget):
         self._update_summary_label()
         self.filter_changed.emit()
 
-    def set_media_type(self, media_type: Literal["all", "image", "video", "raw"]) -> None:
-        self._media_type = media_type
+    def set_media_type(self, media_type: Literal["all", "image", "video", "raw", "motion"] | None) -> None:
+        self._media_type = media_type or "all"
         self._update_summary_label()
         self.filter_changed.emit()
 
@@ -3324,6 +3324,8 @@ class LeftNavigationDock(QDockWidget):
             parts.append("Videos only")
         elif self._media_type == "raw":
             parts.append("RAW photos only")
+        elif self._media_type == "motion":
+            parts.append("Motion photos only")
         if getattr(self, "_orientation_filter", "all") == "landscape":
             parts.append("Landscape only")
         elif getattr(self, "_orientation_filter", "all") == "portrait":

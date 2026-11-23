@@ -8896,10 +8896,12 @@ class RibbonToolbar(QWidget):
         act_photos = menu.addAction("Photos only")
         act_videos = menu.addAction("Videos only")
         act_raw = menu.addAction("RAW photos only")
+        act_motion = menu.addAction("Motion photos only")
         act_all.triggered.connect(lambda: self.media_type_filter_selected.emit("all"))
         act_photos.triggered.connect(lambda: self.media_type_filter_selected.emit("image"))
         act_videos.triggered.connect(lambda: self.media_type_filter_selected.emit("video"))
         act_raw.triggered.connect(lambda: self.media_type_filter_selected.emit("raw"))
+        act_motion.triggered.connect(lambda: self.media_type_filter_selected.emit("motion"))
         btn.setMenu(menu)
 
     def populate_tags_menu(self, tag_tree: Sequence[dict[str, Any]]) -> None:
