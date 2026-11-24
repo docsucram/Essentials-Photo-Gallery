@@ -504,6 +504,62 @@ def compute_multi_color_similarity_mask(
     return guided_filter_matte(image_bgr, smooth_mask, radius=12, eps=1e-3, subsample=2)
 
 
+def compute_hue_range_mask(
+    image_bgr: np.ndarray,
+    hue_ranges_deg: Sequence[tuple[float, float]],
+    *,
+    min_sat: float = 35.0,
+    min_val: float = 25.0,
+    tolerance: float = 0.25,
+    refine_edges: bool = True,
+    hsv_img: np.ndarray | None = None,
+) -> np.ndarray:
+    """
+    Generates a smooth alpha mask [0.0, 1.0] isolating pixels whose HSV hue falls within
+    any `(low_deg, high_deg)` interval in `hue_ranges_deg` (0..360 deg), independent of lightness.
+    """
+    if image_bgr is None or not hue_ranges_deg:
+        return np.zeros((10, 10) if image_bgr is None else image_bgr.shape[:2], dtype=np.float32)
+
+    if hsv_img is None:
+        hsv_img = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+
+    hue_deg = hsv_img[:, :, 0].astype(np.float32) * 2.0
+    sat = hsv_img[:, :, 1].astype(np.float32)
+    val = hsv_img[:, :, 2].astype(np.float32)
+
+    tol = float(np.clip(tolerance, 0.05, 0.80))
+    hue_feather = 8.0 + tol * 34.0
+    eff_min_sat = max(14.0, float(min_sat) * (1.15 - tol * 1.10))
+
+    min_hue_dist = np.full(hue_deg.shape, 180.0, dtype=np.float32)
+    for lo, hi in hue_ranges_deg:
+        lo_f = float(lo) % 360.0
+        hi_f = float(hi) % 360.0
+        if hi == 360.0:
+            hi_f = 360.0
+        if lo_f <= hi_f:
+            inside = (hue_deg >= lo_f) & (hue_deg <= hi_f)
+            d_lo = np.minimum(np.abs(hue_deg - lo_f), 360.0 - np.abs(hue_deg - lo_f))
+            d_hi = np.minimum(np.abs(hue_deg - hi_f), 360.0 - np.abs(hue_deg - hi_f))
+            dist = np.where(inside, 0.0, np.minimum(d_lo, d_hi))
+        else:
+            inside = (hue_deg >= lo_f) | (hue_deg <= hi_f)
+            d_lo = np.minimum(np.abs(hue_deg - lo_f), 360.0 - np.abs(hue_deg - lo_f))
+            d_hi = np.minimum(np.abs(hue_deg - hi_f), 360.0 - np.abs(hue_deg - hi_f))
+            dist = np.where(inside, 0.0, np.minimum(d_lo, d_hi))
+        np.minimum(min_hue_dist, dist, out=min_hue_dist)
+
+    hue_weight = np.clip(1.0 - (min_hue_dist / hue_feather), 0.0, 1.0)
+    sat_weight = np.clip((sat - eff_min_sat) / 28.0 + 0.35, 0.0, 1.0) * (sat >= eff_min_sat * 0.65)
+    val_weight = np.clip((val - float(min_val)) / 25.0 + 0.35, 0.0, 1.0) * (val >= float(min_val) * 0.65)
+    raw_mask = (hue_weight * sat_weight * val_weight).astype(np.float32)
+
+    if not refine_edges:
+        return raw_mask
+    return guided_filter_matte(image_bgr, raw_mask, radius=12, eps=1e-3, subsample=2)
+
+
 def compute_color_similarity_mask(
     image_bgr: np.ndarray,
     target_bgr: tuple[int, int, int] | np.ndarray,

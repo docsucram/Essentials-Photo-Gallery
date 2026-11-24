@@ -59,6 +59,7 @@ _FLUENT_MAP: dict[str, tuple[str, str]] = {
     "confirm": ("ri.check-line", "#107C41"),
     "cross": ("ri.close-line", "#D83B01"),
     "cancel": ("ri.close-line", "#D83B01"),
+    "clear_filters": ("ri.filter-off-line", "#D83B01"),
     # Find / Dates / Media
     "print": ("ri.printer-line", "#0078D4"),
     "panoramic": ("ri.landscape-line", "#0078D4"),

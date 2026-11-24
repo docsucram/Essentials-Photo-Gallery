@@ -586,6 +586,33 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawLine(QPointF(s * 0.26, s * 0.59), QPointF(s * 0.70, s * 0.59))
         p.drawLine(QPointF(s * 0.26, s * 0.66), QPointF(s * 0.58, s * 0.66))
 
+    elif kind == "clear_filters":
+        # Aero funnel filter icon with a small red 'x' badge (distinct from Close map)
+        funnel = QPolygonF([
+            QPointF(s * 0.14, s * 0.20),
+            QPointF(s * 0.80, s * 0.20),
+            QPointF(s * 0.54, s * 0.52),
+            QPointF(s * 0.54, s * 0.78),
+            QPointF(s * 0.40, s * 0.84),
+            QPointF(s * 0.40, s * 0.52),
+        ])
+        f_grad = QLinearGradient(s * 0.14, s * 0.20, s * 0.80, s * 0.84)
+        f_grad.setColorAt(0.0, QColor("#E2F0FC"))
+        f_grad.setColorAt(0.5, QColor("#78B3E6"))
+        f_grad.setColorAt(1.0, QColor("#3571AD"))
+        p.setPen(QPen(QColor("#1F4E82"), max(1.0, s * 0.036), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(f_grad)
+        p.drawPolygon(funnel)
+
+        bx, by, br = s * 0.73, s * 0.73, s * 0.175
+        p.setPen(QPen(QColor("#991B1B"), max(0.9, s * 0.03)))
+        p.setBrush(QColor("#EF4444"))
+        p.drawEllipse(QPointF(bx, by), br, br)
+        p.setPen(QPen(QColor("#FFFFFF"), max(1.3, s * 0.055), Qt.SolidLine, Qt.RoundCap))
+        d = br * 0.48
+        p.drawLine(QPointF(bx - d, by - d), QPointF(bx + d, by + d))
+        p.drawLine(QPointF(bx + d, by - d), QPointF(bx - d, by + d))
+
     elif kind in ("geotag", "globe", "world_map"):
         grad = QLinearGradient(0, s * 0.1, s, s * 0.9)
         grad.setColorAt(0.0, QColor("#63B8F2"))
@@ -10663,9 +10690,11 @@ class RibbonToolbar(QWidget):
         self.grp_map_filter.content_layout.addWidget(self.btn_map_scope)
 
         self.btn_map_clear_filters = self._make_btn(
-            "Clear\nfilters", "cancel", self.grp_map_filter, large=True
+            "Clear\nfilters", "clear_filters", self.grp_map_filter, large=True
         )
-        self.btn_map_clear_filters.setToolTip("Clear Year, Person, and Rating filters on the map")
+        self.btn_map_clear_filters.setToolTip(
+            "Clear active Year, Person, Rating, and Current view filters on the map"
+        )
         self.btn_map_clear_filters.setEnabled(False)
         self.btn_map_clear_filters.clicked.connect(self.clear_map_filters)
         self.grp_map_filter.content_layout.addWidget(self.btn_map_clear_filters)
@@ -10812,8 +10841,19 @@ class RibbonToolbar(QWidget):
             self._map_filter_year, self._map_filter_person_id, self._map_filter_min_rating
         )
 
+    def _update_map_clear_filters_enabled(self) -> None:
+        has_any = (
+            getattr(self, "_map_filter_year", None) is not None
+            or getattr(self, "_map_filter_person_id", None) is not None
+            or getattr(self, "_map_filter_min_rating", None) is not None
+            or (hasattr(self, "btn_map_scope") and self.btn_map_scope.isChecked())
+        )
+        if hasattr(self, "btn_map_clear_filters"):
+            self.btn_map_clear_filters.setEnabled(has_any)
+
     def _on_map_scope_toggled(self, checked: bool) -> None:
         self._update_map_scope_label(bool(checked), getattr(self, "_map_scope_count", 0))
+        self._update_map_clear_filters_enabled()
         self.map_scope_changed.emit(bool(checked))
 
     def _update_map_scope_label(self, current_view: bool, count: int) -> None:
@@ -10834,11 +10874,17 @@ class RibbonToolbar(QWidget):
         self.btn_map_scope.setChecked(bool(current_view))
         self._update_map_scope_label(bool(current_view), self._map_scope_count)
         self.btn_map_scope.blockSignals(False)
+        self._update_map_clear_filters_enabled()
 
     def clear_map_filters(self) -> None:
-        """Reset all Map ribbon filters and emit map_filters_changed."""
+        """Reset all Map ribbon filters (Year, Person, Rating, and Current view scope)."""
         self.set_map_filter_ui(None, None, None)
         self.map_filters_changed.emit(None, None, None)
+        if hasattr(self, "btn_map_scope") and self.btn_map_scope.isChecked():
+            self.set_map_scope_ui(False, 0)
+            self.map_scope_changed.emit(False)
+        else:
+            self._update_map_clear_filters_enabled()
 
     def set_map_filter_ui(
         self,
@@ -10894,13 +10940,7 @@ class RibbonToolbar(QWidget):
                     continue
                 act.setChecked(act.data() == self._map_filter_min_rating)
 
-        has_any = (
-            self._map_filter_year is not None
-            or self._map_filter_person_id is not None
-            or self._map_filter_min_rating is not None
-        )
-        if hasattr(self, "btn_map_clear_filters"):
-            self.btn_map_clear_filters.setEnabled(has_any)
+        self._update_map_clear_filters_enabled()
         if hasattr(self, "grp_map_filter"):
             self.grp_map_filter.adjust_to_content()
 

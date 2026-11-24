@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from src.imaging.creative_effects import (
     apply_color_pop,
+    compute_hue_range_mask,
     compute_multi_color_similarity_mask,
     estimate_subject_mask,
     guided_filter_matte,
@@ -100,6 +101,8 @@ class ColourPopWorkspace(CreateWorkspaceBase):
         self._is_tol_sliding = False
         self.smart_brush = True
         self._active_quick_style: str | None = None
+        self._active_quick_style_params: dict[str, Any] | None = None
+        self._proxy_hsv = cv2.cvtColor(self.proxy_bgr, cv2.COLOR_BGR2HSV)
 
         self.proxy_bw: np.ndarray | None = None
         self._precompute_proxy_bw()
@@ -174,19 +177,44 @@ class ColourPopWorkspace(CreateWorkspaceBase):
             self._invert_mask()
         elif action_id == "style_red":
             self._active_quick_style = "style_red"
-            self._apply_quick_hue_preset([(30, 30, 220), (45, 25, 175)], "Red Pop")
+            self._apply_quick_hue_preset(
+                [(332.0, 360.0), (0.0, 22.0)],
+                [(30, 30, 220)],
+                "Red Pop",
+                min_sat=45.0,
+            )
         elif action_id == "style_blue":
             self._active_quick_style = "style_blue"
-            self._apply_quick_hue_preset([(220, 95, 25), (210, 150, 50)], "Blue Pop")
+            self._apply_quick_hue_preset(
+                [(195.0, 255.0)],
+                [(220, 95, 25)],
+                "Blue Pop",
+                min_sat=35.0,
+            )
         elif action_id == "style_green":
             self._active_quick_style = "style_green"
-            self._apply_quick_hue_preset([(45, 195, 45), (55, 150, 75)], "Green Pop")
+            self._apply_quick_hue_preset(
+                [(75.0, 162.0)],
+                [(45, 195, 45)],
+                "Green Pop",
+                min_sat=35.0,
+            )
         elif action_id == "style_warm":
             self._active_quick_style = "style_warm"
-            self._apply_quick_hue_preset([(30, 50, 230), (25, 140, 240), (35, 200, 240)], "Warm Tones")
+            self._apply_quick_hue_preset(
+                [(335.0, 360.0), (0.0, 62.0)],
+                [(30, 50, 230), (35, 200, 240)],
+                "Warm Tones",
+                min_sat=38.0,
+            )
         elif action_id == "style_cool":
             self._active_quick_style = "style_cool"
-            self._apply_quick_hue_preset([(230, 120, 30), (210, 180, 45), (190, 95, 115)], "Cool Tones")
+            self._apply_quick_hue_preset(
+                [(165.0, 275.0)],
+                [(230, 120, 30), (210, 180, 45)],
+                "Cool Tones",
+                min_sat=35.0,
+            )
         elif action_id == "show_mask":
             self.chk_overlay.setChecked(not self.chk_overlay.isChecked())
         elif action_id == "compare_orig":
@@ -508,12 +536,22 @@ class ColourPopWorkspace(CreateWorkspaceBase):
             self._proxy_lab_f32 = cv2.cvtColor(self.proxy_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
 
     def _apply_quick_hue_preset(
-        self, bgr: tuple[int, int, int] | list[tuple[int, int, int]], name: str
+        self,
+        hue_ranges_deg: list[tuple[float, float]],
+        swatch_bgrs: list[tuple[int, int, int]],
+        name: str,
+        *,
+        min_sat: float = 35.0,
+        min_val: float = 25.0,
     ) -> None:
         self._on_stroke_started()
-        colors = list(bgr) if isinstance(bgr, list) else [bgr]
-        self.picked_colors = colors
-        self.last_picked_color = colors[0] if colors else None
+        self._active_quick_style_params = {
+            "hue_ranges_deg": list(hue_ranges_deg),
+            "min_sat": float(min_sat),
+            "min_val": float(min_val),
+        }
+        self.picked_colors = list(swatch_bgrs)
+        self.last_picked_color = swatch_bgrs[0] if swatch_bgrs else None
         self.btn_pick_color.setChecked(True)
         self.brush_mode = "eyedropper"
         self.view.set_eyedropper_mode(True)
@@ -571,7 +609,18 @@ class ColourPopWorkspace(CreateWorkspaceBase):
         self.lbl_status.setText(f"{action_desc} • Active colours: {len(self.picked_colors)}")
 
     def _recompute_picked_colors_mask(self, refine_edges: bool = True) -> None:
-        if not self.picked_colors:
+        style_params = getattr(self, "_active_quick_style_params", None)
+        if style_params is not None and self._active_quick_style is not None:
+            self.proxy_mask = compute_hue_range_mask(
+                self.proxy_bgr,
+                style_params["hue_ranges_deg"],
+                min_sat=style_params["min_sat"],
+                min_val=style_params["min_val"],
+                tolerance=self.color_tolerance,
+                refine_edges=refine_edges,
+                hsv_img=getattr(self, "_proxy_hsv", None),
+            )
+        elif not self.picked_colors:
             self.proxy_mask = np.zeros(self.proxy_bgr.shape[:2], dtype=np.float32)
         else:
             self.proxy_mask = compute_multi_color_similarity_mask(
@@ -626,10 +675,13 @@ class ColourPopWorkspace(CreateWorkspaceBase):
             self._update_color_swatches_ui()
 
     def _clear_picked_colors(self) -> None:
+        self._active_quick_style = None
+        self._active_quick_style_params = None
         self.picked_colors.clear()
         self._on_stroke_started()
         self._recompute_picked_colors_mask()
         self._update_color_swatches_ui()
+        self.ribbon_state_changed.emit()
 
     def _on_tolerance_released(self) -> None:
         self._is_tol_sliding = False
