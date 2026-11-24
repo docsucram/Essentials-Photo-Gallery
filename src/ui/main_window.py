@@ -1141,7 +1141,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.batch_people_view.back_to_gallery_requested.connect(self.close_batch_people_view)
         self.batch_people_view.open_media_requested.connect(self.open_single_viewer)
         self.batch_people_view.card_selection_changed.connect(self._on_batch_card_selection_changed)
-        QShortcut(QKeySequence(Qt.Key_Escape), self.batch_people_view, self.close_batch_people_view)
+        QShortcut(
+            QKeySequence(Qt.Key_Escape),
+            self.batch_people_view,
+            self.close_batch_people_view,
+            context=Qt.WidgetWithChildrenShortcut,
+        )
         self.central_stack.addWidget(self.batch_people_view)
 
         # Immich / Google Photos Inspired People Directory View
@@ -9962,13 +9967,13 @@ class PhotoGalleryMainWindow(QMainWindow):
         return paths, details
 
     def _is_path_in_library(self, folder_path: Path) -> bool:
-        """Checks whether folder_path is an existing library folder or within one."""
+        """Checks whether folder_path is an existing library folder or within one (pure string check, zero disk I/O)."""
         try:
-            target_norm = folder_path.resolve()
-            folders = self.catalog_repo.get_folders()
-            for f in folders:
-                f_path = Path(f["path"]).resolve()
-                if target_norm == f_path or target_norm.is_relative_to(f_path):
+            target_norm = os.path.normcase(os.path.normpath(str(folder_path))).rstrip("\\/")
+            sep = os.sep
+            for f in self.catalog_repo.get_folders():
+                f_norm = os.path.normcase(os.path.normpath(str(f["path"]))).rstrip("\\/")
+                if target_norm == f_norm or target_norm.startswith(f_norm + sep):
                     return True
         except Exception:
             pass
@@ -12879,19 +12884,25 @@ class PhotoGalleryMainWindow(QMainWindow):
                 QApplication.activeModalWidget() is None
                 and QApplication.activePopupWidget() is None
             ):
-                focus_w = QApplication.focusWidget() or self.focusWidget()
-                target_watched = focus_w if focus_w is not None else self
+                app_focus = QApplication.focusWidget()
+                focus_w = app_focus or self.focusWidget()
+                target_watched = app_focus if app_focus is not None else self
                 is_input_w = isinstance(
                     focus_w, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox)
                 )
                 if watched is target_watched and not is_input_w:
-                    if (
-                        self.central_stack.currentWidget() == self.media_viewer
-                        and not getattr(self.media_viewer, "is_crop_mode", False)
-                    ):
-                        if event.key() in (Qt.Key_Left, Qt.Key_Right) and event.modifiers() in (
-                            Qt.NoModifier,
-                            Qt.KeypadModifier,
+                    if self.central_stack.currentWidget() == self.media_viewer:
+                        if event.key() == Qt.Key_Escape and event.modifiers() == Qt.NoModifier:
+                            if hasattr(self.media_viewer, "handle_escape_key"):
+                                self.media_viewer.handle_escape_key()
+                            else:
+                                self.media_viewer.request_close()
+                            event.accept()
+                            return True
+                        if (
+                            not getattr(self.media_viewer, "is_crop_mode", False)
+                            and event.key() in (Qt.Key_Left, Qt.Key_Right)
+                            and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier)
                         ):
                             self.navigate_single_viewer(-1 if event.key() == Qt.Key_Left else 1)
                             event.accept()

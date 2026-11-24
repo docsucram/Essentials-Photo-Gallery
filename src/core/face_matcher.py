@@ -158,6 +158,7 @@ class FaceVectorMatcher:
         embeddings: np.ndarray | Sequence[np.ndarray],
         sim_threshold: float = 0.58,
         min_cluster_size: int = 3,
+        cancel_flag: Any = None,
     ) -> dict[str, list[int]]:
         """
         Clusters unnamed face embeddings by cosine similarity.
@@ -198,6 +199,8 @@ class FaceVectorMatcher:
         clusters: list[list[int]] = []
 
         while True:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", False):
+                return {}
             deg_masked = np.where(active, deg, 0)
             best_idx = int(np.argmax(deg_masked))
             max_deg = deg_masked[best_idx]

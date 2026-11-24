@@ -1468,12 +1468,14 @@ def create_then_and_now_card(
         # Semi-transparent dark pill background
         pill_overlay = Image.new("RGBA", (pill_w, pill_h), (0, 0, 0, 0))
         pill_draw = ImageDraw.Draw(pill_overlay)
-        pill_draw.rounded_rectangle([(0, 0), (pill_w, pill_h)], radius=pill_h // 2, fill=(15, 15, 20, 210))
-        pill_draw.rounded_rectangle([(0, 0), (pill_w, pill_h)], radius=pill_h // 2, outline=(255, 255, 255, 140), width=1)
+        pill_draw.rounded_rectangle([(0, 0), (pill_w - 1, pill_h - 1)], radius=pill_h // 2, fill=(15, 15, 20, 210))
+        pill_draw.rounded_rectangle([(0, 0), (pill_w - 1, pill_h - 1)], radius=pill_h // 2, outline=(255, 255, 255, 140), width=1)
         canvas_pil.paste(pill_overlay, (px, py), pill_overlay)
 
-        # Crisp badge text
-        draw_canvas.text((px + pill_pad_x, py + pill_pad_y - 2), badge_text, fill=(255, 255, 255, 255), font=badge_font)
+        # Center glyph bounding box both horizontally and vertically inside the pill
+        tx = px + (pill_w - tw_text) / 2.0 - bbox[0]
+        ty = py + (pill_h - th_text) / 2.0 - bbox[1]
+        draw_canvas.text((tx, ty), badge_text, fill=(255, 255, 255, 255), font=badge_font)
 
     return cv2.cvtColor(np.array(canvas_pil), cv2.COLOR_RGBA2BGR)
 

@@ -786,6 +786,7 @@ _UnnamedClusterCard = _UnnamedPersonCard  # Backward compatibility alias
 
 class _UnnamedClusterSignals(QObject):
     clusters_ready = Signal(int, list)
+    finished = Signal(int)
 
 
 class _UnnamedClusterWorker(QRunnable):
@@ -798,17 +799,27 @@ class _UnnamedClusterWorker(QRunnable):
         signals: _UnnamedClusterSignals,
         thumb_repo: ThumbnailRepository | None = None,
         min_confidence: float = 0.52,
+        cancel_flag: Any = None,
     ) -> None:
         super().__init__()
+        self.setAutoDelete(False)
         self.repo = repo
         self.gen_id = gen_id
         self.signals = signals
         self.thumb_repo = thumb_repo
         self.min_confidence = float(min_confidence)
+        self.cancel_flag = cancel_flag
 
     def run(self) -> None:
         try:
-            clusters = self.repo.get_unnamed_face_clusters(min_confidence=self.min_confidence)
+            if self.cancel_flag is not None and getattr(self.cancel_flag, "is_set", False):
+                return
+            clusters = self.repo.get_unnamed_face_clusters(
+                min_confidence=self.min_confidence,
+                cancel_flag=self.cancel_flag,
+            )
+            if self.cancel_flag is not None and getattr(self.cancel_flag, "is_set", False):
+                return
             if clusters and self.thumb_repo is not None:
                 rep_fids = [
                     int(c["representative_face_id"])
@@ -826,6 +837,10 @@ class _UnnamedClusterWorker(QRunnable):
             import threading
             if threading.current_thread() is not threading.main_thread():
                 self.repo.engine.close_thread_connections()
+            try:
+                self.signals.finished.emit(self.gen_id)
+            except RuntimeError:
+                pass
 
 
 class PeopleDirectoryView(QWidget):
@@ -851,8 +866,14 @@ class PeopleDirectoryView(QWidget):
         self._all_named_people: list[dict[str, Any]] = []
         self._all_unnamed_clusters: list[dict[str, Any]] = []
         self._cluster_gen_id: int = 0
-        self._cluster_signals = _UnnamedClusterSignals()
+        self._unnamed_cache_ts: float = 0.0
+        self._cluster_pool = QThreadPool(self)
+        self._cluster_pool.setMaxThreadCount(1)
+        self._cluster_cancel: Any = None
+        self._inflight_cluster_workers: dict[int, _UnnamedClusterWorker] = {}
+        self._cluster_signals = _UnnamedClusterSignals(self)
         self._cluster_signals.clusters_ready.connect(self._on_unnamed_clusters_ready)
+        self._cluster_signals.finished.connect(self._on_cluster_worker_finished)
 
         self._setup_ui()
 
@@ -1142,24 +1163,46 @@ class PeopleDirectoryView(QWidget):
 
         # Update Section 1 immediately; Section 2 either stays as-is or updates once worker finishes
         self._render_named_grid()
-        if not recluster_unnamed:
+        import time
+        cache_fresh = (
+            self._unnamed_cache_ts > 0.0
+            and (time.monotonic() - self._unnamed_cache_ts) < 60.0
+        )
+        if not recluster_unnamed or cache_fresh:
             self._render_unnamed_grid()
         self._update_empty_state()
 
-        if recluster_unnamed:
+        if recluster_unnamed and not cache_fresh:
+            if self._cluster_cancel is not None:
+                try:
+                    self._cluster_cancel.set()
+                except Exception:
+                    pass
+            from legacy_reference.imgBrowserv13 import CancellationFlag
+            cflag = CancellationFlag()
+            self._cluster_cancel = cflag
             self._cluster_gen_id += 1
+            gen_id = self._cluster_gen_id
             worker = _UnnamedClusterWorker(
                 self.repo,
-                self._cluster_gen_id,
+                gen_id,
                 self._cluster_signals,
                 thumb_repo=self.thumb_repo,
                 min_confidence=min_conf,
+                cancel_flag=cflag,
             )
-            QThreadPool.globalInstance().start(worker)
+            self._inflight_cluster_workers[gen_id] = worker
+            self._cluster_pool.clear()
+            self._cluster_pool.start(worker)
+
+    def _on_cluster_worker_finished(self, gen_id: int) -> None:
+        self._inflight_cluster_workers.pop(gen_id, None)
 
     def _on_unnamed_clusters_ready(self, gen_id: int, clusters: list[dict[str, Any]]) -> None:
         if gen_id != self._cluster_gen_id:
             return
+        import time
+        self._unnamed_cache_ts = time.monotonic()
         self._all_unnamed_clusters = clusters
         self._render_unnamed_grid()
         self._update_empty_state()

@@ -7921,6 +7921,72 @@ class SingleMediaViewer(QWidget):
         else:
             return False
 
+    def handle_escape_key(self) -> bool:
+        """Handles Escape in Single Image View: cancels active sub-modes/tools first, then returns to gallery."""
+        import time
+        now = time.monotonic()
+        if (now - getattr(self, "_last_esc_consumed_time", 0.0)) < 0.35:
+            return True
+
+        if getattr(self, "is_face_tag_mode", False):
+            self.stop_face_tagging_mode()
+            self._last_esc_consumed_time = now
+            return True
+        if getattr(self, "_inline_text_input", None) is not None:
+            self._cancel_inline_text()
+            self._last_esc_consumed_time = now
+            return True
+        if getattr(self, "_magnify_source_pt", None) is not None:
+            self._magnify_source_pt = None
+            self._last_esc_consumed_time = now
+            self._cleanup_magnify_preview()
+            self._show_status("Magnify callout cancelled", 2000)
+            return True
+        if getattr(self, "_active_movable_element", None) is not None:
+            self._undo_markup()
+            self._last_esc_consumed_time = now
+            self._show_status("Markup cancelled", 2000)
+            return True
+        if getattr(self, "_markup_active", False):
+            self._cleanup_markup_temp_items()
+            self._markup_active = False
+            self._last_esc_consumed_time = now
+            return True
+        if getattr(self, "_retouch_active", False):
+            self._clear_retouch_overlay()
+            self._retouch_active = False
+            self._last_esc_consumed_time = now
+            return True
+        if getattr(self, "_red_eye_active", False):
+            self._clear_retouch_overlay()
+            self._red_eye_active = False
+            self._last_esc_consumed_time = now
+            return True
+        if getattr(self, "is_wb_eyedropper_mode", False):
+            self.set_wb_eyedropper_mode(False)
+            self.wb_eyedropper_finished.emit()
+            self._last_esc_consumed_time = now
+            return True
+        if self.is_crop_mode:
+            self.set_crop_mode(False)
+            self._last_esc_consumed_time = now
+            return True
+        if self.is_retouch_mode or self.is_red_eye_mode:
+            self._close_spot_fix_toolbar()
+            self._last_esc_consumed_time = now
+            return True
+        if getattr(self, "is_markup_mode", False):
+            self.set_markup_mode(False)
+            self._last_esc_consumed_time = now
+            return True
+        if getattr(self, "is_face_adjust_mode", False):
+            self.stop_face_adjust_mode()
+            self._last_esc_consumed_time = now
+            return True
+        self._last_esc_consumed_time = now
+        self.request_close()
+        return True
+
     def request_close(self) -> None:
         """Prompts to save uncommitted edits before closing the single image viewer."""
         if self.prompt_save_changes_if_needed("close"):
@@ -9484,67 +9550,7 @@ class SingleMediaViewer(QWidget):
                     return True
 
             if event.key() == Qt.Key_Escape:
-                import time
-                now = time.monotonic()
-                if (now - getattr(self, "_last_esc_consumed_time", 0.0)) < 0.35:
-                    event.accept()
-                    return True
-
-                if getattr(self, "_inline_text_input", None) is not None:
-                    self._cancel_inline_text()
-                    self._last_esc_consumed_time = now
-                    event.accept()
-                    return True
-                if getattr(self, "_magnify_source_pt", None) is not None:
-                    self._magnify_source_pt = None
-                    self._last_esc_consumed_time = now
-                    self._cleanup_magnify_preview()
-                    self._show_status("Magnify callout cancelled", 2000)
-                    event.accept()
-                    return True
-                if getattr(self, "_active_movable_element", None) is not None:
-                    self._undo_markup()
-                    self._last_esc_consumed_time = now
-                    self._show_status("Markup cancelled", 2000)
-                    event.accept()
-                    return True
-                if getattr(self, "_markup_active", False):
-                    self._cleanup_markup_temp_items()
-                    self._markup_active = False
-                    event.accept()
-                    return True
-                if getattr(self, "_retouch_active", False):
-                    self._clear_retouch_overlay()
-                    self._retouch_active = False
-                    event.accept()
-                    return True
-                if getattr(self, "_red_eye_active", False):
-                    self._clear_retouch_overlay()
-                    self._red_eye_active = False
-                    event.accept()
-                    return True
-                if getattr(self, "is_wb_eyedropper_mode", False):
-                    self.set_wb_eyedropper_mode(False)
-                    self.wb_eyedropper_finished.emit()
-                    event.accept()
-                    return True
-                if self.is_crop_mode:
-                    self.set_crop_mode(False)
-                    event.accept()
-                    return True
-                if self.is_retouch_mode or self.is_red_eye_mode:
-                    self._close_spot_fix_toolbar()
-                    event.accept()
-                    return True
-                if getattr(self, "is_markup_mode", False):
-                    self.set_markup_mode(False)
-                    event.accept()
-                    return True
-                if getattr(self, "is_face_adjust_mode", False):
-                    self.stop_face_adjust_mode()
-                    event.accept()
-                    return True
-                self.request_close()
+                self.handle_escape_key()
                 event.accept()
                 return True
 

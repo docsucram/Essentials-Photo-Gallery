@@ -1883,19 +1883,35 @@ class CatalogRepository:
         offline_folders = {
             int(r[0]) for r in cur.execute("SELECT id FROM folders WHERE volume_offline = 1").fetchall()
         }
-        # Single pass over flagged/live/stacked rows instead of 4 separate full-table scans
-        meta_rows = cur.execute(
-            """
-            SELECT id, COALESCE(is_live_photo, 0), COALESCE(is_favourite, 0),
-                   COALESCE(is_rejected, 0), stack_parent_id, LOWER(COALESCE(ext, '')),
-                   live_companion_for_id
-            FROM media
-            WHERE COALESCE(is_live_photo, 0) = 1
-               OR COALESCE(is_favourite, 0) = 1
-               OR COALESCE(is_rejected, 0) = 1
-               OR stack_parent_id IS NOT NULL;
-            """
-        ).fetchall()
+        # Fast-path: for compact result sets (<=500 items), look up only those IDs via PK index
+        if len(records) <= 500:
+            rec_ids = [int(r.id) for r in records]
+            placeholders = ",".join("?" for _ in rec_ids)
+            meta_rows = cur.execute(
+                f"""
+                SELECT id, COALESCE(is_live_photo, 0), COALESCE(is_favourite, 0),
+                       COALESCE(is_rejected, 0), stack_parent_id, LOWER(COALESCE(ext, '')),
+                       live_companion_for_id
+                FROM media
+                WHERE id IN ({placeholders})
+                  AND (is_live_photo = 1 OR is_favourite = 1 OR is_rejected = 1 OR stack_parent_id IS NOT NULL);
+                """,
+                rec_ids,
+            ).fetchall()
+        else:
+            # Avoid COALESCE() wrapper on filter predicates so SQLite can evaluate/index directly
+            meta_rows = cur.execute(
+                """
+                SELECT id, COALESCE(is_live_photo, 0), COALESCE(is_favourite, 0),
+                       COALESCE(is_rejected, 0), stack_parent_id, LOWER(COALESCE(ext, '')),
+                       live_companion_for_id
+                FROM media
+                WHERE is_live_photo = 1
+                   OR is_favourite = 1
+                   OR is_rejected = 1
+                   OR stack_parent_id IS NOT NULL;
+                """
+            ).fetchall()
         live_ids: set[int] = set()
         fav_ids: set[int] = set()
         rej_ids: set[int] = set()
@@ -4342,38 +4358,57 @@ class CatalogRepository:
             conn.commit()
         return True
 
+    def _get_restricted_person_ids(self, conn: sqlite3.Connection) -> set[int]:
+        """Returns person IDs appearing in private/excluded folders using indexed folder_id lookup."""
+        if self.include_private:
+            return set()
+        restricted_fids = [
+            int(r[0])
+            for r in conn.execute(
+                """
+                SELECT id FROM folders
+                WHERE COALESCE(is_private, 0) = 1
+                   OR COALESCE(monitor_mode, 'always') = 'excluded';
+                """
+            ).fetchall()
+        ]
+        if not restricted_fids:
+            return set()
+        restricted_pids: set[int] = set()
+        for chunk in _iter_id_chunks(restricted_fids, 900):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT mp.person_id, mp.suggested_person_id
+                FROM media m
+                JOIN media_people mp ON mp.media_id = m.id
+                WHERE m.folder_id IN ({placeholders})
+                  AND (mp.person_id IS NOT NULL OR mp.suggested_person_id IS NOT NULL);
+                """,
+                list(chunk),
+            ).fetchall()
+            for pid, spid in rows:
+                if pid is not None:
+                    restricted_pids.add(int(pid))
+                if spid is not None:
+                    restricted_pids.add(int(spid))
+        return restricted_pids
+
+    def get_person_names(self) -> list[str]:
+        """Lightweight (<1ms) person name list for autocomplete widgets without BLOBs or face joins."""
+        conn = self.engine.catalog_conn()
+        restricted_pids = self._get_restricted_person_ids(conn)
+        rows = conn.execute(
+            "SELECT id, name FROM people ORDER BY name COLLATE NOCASE ASC;"
+        ).fetchall()
+        if not restricted_pids:
+            return [str(r[1]) for r in rows if r[1]]
+        return [str(r[1]) for r in rows if r[1] and int(r[0]) not in restricted_pids]
+
     def get_people_list(self) -> list[dict[str, Any]]:
         conn = self.engine.catalog_conn()
         priv_clause = self._private_folder_clause("f")
-        # Fast-path check: only compute private/excluded leak-guard set if restricted folders exist
-        restricted_pids: set[int] = set()
-        if not self.include_private:
-            has_restricted = conn.execute(
-                """
-                SELECT 1 FROM folders
-                WHERE COALESCE(is_private, 0) = 1 OR COALESCE(monitor_mode, 'always') = 'excluded'
-                LIMIT 1;
-                """
-            ).fetchone()
-            if has_restricted is not None:
-                r_rows = conn.execute(
-                    """
-                    SELECT DISTINCT mp.person_id AS pid
-                    FROM media_people mp
-                    JOIN media m ON m.id = mp.media_id
-                    JOIN folders f ON f.id = m.folder_id
-                    WHERE mp.person_id IS NOT NULL
-                      AND (COALESCE(f.is_private, 0) = 1 OR COALESCE(f.monitor_mode, 'always') = 'excluded')
-                    UNION
-                    SELECT DISTINCT mp.suggested_person_id AS pid
-                    FROM media_people mp
-                    JOIN media m ON m.id = mp.media_id
-                    JOIN folders f ON f.id = m.folder_id
-                    WHERE mp.suggested_person_id IS NOT NULL
-                      AND (COALESCE(f.is_private, 0) = 1 OR COALESCE(f.monitor_mode, 'always') = 'excluded');
-                    """
-                ).fetchall()
-                restricted_pids = {int(r[0]) for r in r_rows if r[0] is not None}
+        restricted_pids = self._get_restricted_person_ids(conn)
 
         rows = conn.execute(
             f"""
@@ -4409,21 +4444,7 @@ class CatalogRepository:
         conn = self.engine.catalog_conn()
         thresh = float(min_confidence)
         priv_clause = self._private_folder_clause("f")
-        leak_guard = (
-            ""
-            if self.include_private
-            else """
-            WHERE COALESCE(c.photo_count, 0) > 0
-               OR COALESCE(s.suggestion_count, 0) > 0
-               OR NOT EXISTS (
-                   SELECT 1 FROM media_people mp2
-                   JOIN media m2 ON m2.id = mp2.media_id
-                   JOIN folders f2 ON f2.id = m2.folder_id
-                   WHERE (mp2.person_id = p.id OR mp2.suggested_person_id = p.id)
-                     AND (COALESCE(f2.is_private, 0) = 1 OR COALESCE(f2.monitor_mode, 'always') = 'excluded')
-               )
-            """
-        )
+        restricted_pids = self._get_restricted_person_ids(conn)
         named_rows = conn.execute(
             f"""
             SELECT p.id, p.name, p.thumbnail_blob, p.confirmed_count,
@@ -4449,7 +4470,6 @@ class CatalogRepository:
                   AND (? <= 0.0 OR COALESCE(mp.similarity_score, 1.0) >= ?)
                 GROUP BY mp.suggested_person_id
             ) s ON s.suggested_person_id = p.id
-            {leak_guard}
             ORDER BY photo_count DESC, p.name COLLATE NOCASE ASC;
             """,
             (thresh, thresh),
@@ -4457,17 +4477,30 @@ class CatalogRepository:
 
         named_people: list[dict[str, Any]] = []
         for r in named_rows:
+            pid = int(r["id"])
+            pc = int(r["photo_count"] or 0)
+            sc = int(r["suggestion_count"] or 0)
+            if restricted_pids and pc == 0 and sc == 0 and pid in restricted_pids:
+                continue
             named_people.append({
-                "id": int(r["id"]),
+                "id": pid,
                 "name": str(r["name"]),
                 "thumbnail_blob": bytes(r["thumbnail_blob"]) if r["thumbnail_blob"] else None,
-                "photo_count": int(r["photo_count"] or 0),
-                "suggestion_count": int(r["suggestion_count"] or 0),
+                "photo_count": pc,
+                "suggestion_count": sc,
             })
         return named_people
 
-    def get_unnamed_face_clusters(self, min_confidence: float = 0.52) -> list[dict[str, Any]]:
+    def get_unnamed_face_clusters(
+        self,
+        min_confidence: float = 0.52,
+        *,
+        max_faces: int = 4000,
+        cancel_flag: Any = None,
+    ) -> list[dict[str, Any]]:
         """Clusters unassigned face embeddings without a confident suggestion into recurring unnamed groups."""
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", False):
+            return []
         conn = self.engine.catalog_conn()
         priv_clause = self._private_folder_clause("f")
         unassigned_rows = conn.execute(
@@ -4480,9 +4513,11 @@ class CatalogRepository:
             WHERE mp.state = 0
               AND mp.embedding IS NOT NULL
               AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
-              AND (mp.suggested_person_id IS NULL OR COALESCE(mp.similarity_score, 0.0) < ?);
+              AND (mp.suggested_person_id IS NULL OR COALESCE(mp.similarity_score, 0.0) < ?)
+            ORDER BY mp.id DESC
+            LIMIT ?;
             """,
-            (float(min_confidence),),
+            (float(min_confidence), max(100, int(max_faces))),
         ).fetchall()
 
         unnamed_clusters: list[dict[str, Any]] = []
@@ -4494,6 +4529,8 @@ class CatalogRepository:
             emb_list: list[np.ndarray] = []
             face_suggestions: dict[int, str] = {}
             for r in unassigned_rows:
+                if cancel_flag is not None and getattr(cancel_flag, "is_set", False):
+                    return []
                 raw_emb = bytes(r["embedding"]) if r["embedding"] else None
                 if raw_emb and len(raw_emb) >= 2048:
                     fid = int(r["id"])
@@ -4504,7 +4541,11 @@ class CatalogRepository:
 
             if len(valid_fids) >= 3 and len(emb_list) >= 3:
                 clusters = FaceVectorMatcher.cluster_unnamed_faces(
-                    valid_fids, np.stack(emb_list, axis=0), sim_threshold=0.58, min_cluster_size=3
+                    valid_fids,
+                    np.stack(emb_list, axis=0),
+                    sim_threshold=0.58,
+                    min_cluster_size=3,
+                    cancel_flag=cancel_flag,
                 )
                 for cluster_name, fids in clusters.items():
                     if cluster_name != "Other Unnamed Faces" and len(fids) >= 3:

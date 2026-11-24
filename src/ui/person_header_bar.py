@@ -675,11 +675,18 @@ class PersonHeaderBar(QFrame):
         if not self.repo:
             return
         try:
-            people_rows = self.repo.get_people_list()
-            names = [
-                str(p["name"]) for p in people_rows
-                if p.get("name") and str(p["name"]).strip() and str(p["name"]) != self.current_person_name
-            ]
+            if hasattr(self.repo, "get_person_names"):
+                all_names = self.repo.get_person_names()
+                names = [
+                    str(nm) for nm in all_names
+                    if nm and str(nm).strip() and str(nm) != self.current_person_name
+                ]
+            else:
+                people_rows = self.repo.get_people_list()
+                names = [
+                    str(p["name"]) for p in people_rows
+                    if p.get("name") and str(p["name"]).strip() and str(p["name"]) != self.current_person_name
+                ]
             if names:
                 comp = QCompleter(names, self.txt_name)
                 comp.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
