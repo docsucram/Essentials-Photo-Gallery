@@ -1614,6 +1614,7 @@ class ThumbnailDecodeWorkerSignals(QObject):
 
     thumbnail_ready = Signal(int, QImage)   # media_id, 256x256 QImage
     error = Signal(int, str)                # media_id, error_message
+    finished = Signal(int)                  # media_id (always emitted on run exit)
 
 
 class ThumbnailDecodeWorker(QRunnable):
@@ -1650,12 +1651,12 @@ class ThumbnailDecodeWorker(QRunnable):
 
     @Slot()
     def run(self) -> None:
-        if self.cancel_flag.is_set:
-            return
-        thumb_repo = ThumbnailRepository(self.engine)
         from src.utils.scan_logger import clear_active_decode, record_active_decode
         decoded_from_disk = False
         try:
+            if self.cancel_flag.is_set:
+                return
+            thumb_repo = ThumbnailRepository(self.engine)
             # 1. Check thumbnails.db for an up-to-date WebP blob (unless caller already batch-checked)
             if not self.skip_cache_lookup:
                 cached_blob = thumb_repo.get_webp_blob(self.media_id, expected_mtime=self.mtime)
@@ -1776,6 +1777,10 @@ class ThumbnailDecodeWorker(QRunnable):
         finally:
             if decoded_from_disk:
                 clear_active_decode()
+            try:
+                self.signals.finished.emit(self.media_id)
+            except RuntimeError:
+                pass
 
     def _decode_nextgen_thumbnail(self) -> QImage | None:
         """Decodes next-generation formats (HEIC, HEIF, HIF, AVIF, JXL) via Pillow + LittleCMS2."""

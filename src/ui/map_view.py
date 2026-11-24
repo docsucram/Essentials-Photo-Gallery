@@ -1510,6 +1510,7 @@ class WorldMapView(QWidget):
         self._failed_thumb_ids: set[int] = set()
         self._active_thumb_workers: dict[int, Any] = {}
         self._active_thumb_flags: dict[int, Any] = {}
+        self._inflight_workers: set[Any] = set()
         self._thumb_pool: Any = None
         self._is_paused_fn: Any = None
         self._scheme_handler: Any = None
@@ -1679,7 +1680,11 @@ class WorldMapView(QWidget):
             min_rating=self._filter_min_rating,
             scope_media_ids=self._scope_media_ids,
         )
+        self._retain_pool_worker(worker)
         worker.signals.loaded.connect(self._on_overview_loaded)
+        worker.signals.loaded.connect(
+            lambda *_args, w=worker: self._release_pool_worker(w)
+        )
         self._active_overview_worker = worker
         pool = self._thumb_pool if self._thumb_pool is not None else None
         if pool is not None:
@@ -1916,8 +1921,12 @@ class WorldMapView(QWidget):
                 orientation=int(row.get("orientation") or 1),
                 cancel_flag=cflag,
             )
+            self._retain_pool_worker(worker)
             worker.signals.thumbnail_ready.connect(self._on_cluster_thumbnail_ready)
             worker.signals.error.connect(self._on_cluster_thumbnail_error)
+            worker.signals.finished.connect(
+                lambda mid_done, w=worker: self._on_cluster_thumbnail_finished(mid_done, w)
+            )
             self._active_thumb_workers[mid] = worker
             pool.start(worker)
 
@@ -1967,6 +1976,23 @@ class WorldMapView(QWidget):
         if updated and not self._thumb_refresh_timer.isActive():
             self._thumb_refresh_timer.start()
 
+    def _retain_pool_worker(self, worker: Any) -> None:
+        worker.setAutoDelete(False)
+        sig = getattr(worker, "signals", None)
+        if sig is not None and sig.parent() is None:
+            sig.setParent(self)
+        self._inflight_workers.add(worker)
+
+    def _release_pool_worker(self, worker: Any) -> None:
+        if hasattr(self, "_inflight_workers"):
+            self._inflight_workers.discard(worker)
+        sig = getattr(worker, "signals", None)
+        if sig is not None:
+            try:
+                sig.deleteLater()
+            except RuntimeError:
+                pass
+
     @Slot(int, str)
     def _on_cluster_thumbnail_error(self, media_id: int, _msg: str) -> None:
         mid_int = int(media_id)
@@ -1974,6 +2000,14 @@ class WorldMapView(QWidget):
         self._active_thumb_workers.pop(mid_int, None)
         self._active_thumb_flags.pop(mid_int, None)
         self._failed_thumb_ids.add(mid_int)
+
+    def _on_cluster_thumbnail_finished(self, media_id: int, worker: Any) -> None:
+        mid_int = int(media_id)
+        if self._active_thumb_workers.get(mid_int) is worker:
+            self._pending_thumb_ids.discard(mid_int)
+            self._active_thumb_workers.pop(mid_int, None)
+            self._active_thumb_flags.pop(mid_int, None)
+        self._release_pool_worker(worker)
 
     def _push_updated_cluster_thumbnails(self) -> None:
         if not self._current_clusters:

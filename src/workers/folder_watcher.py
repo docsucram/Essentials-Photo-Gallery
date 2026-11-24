@@ -53,6 +53,7 @@ class StartupReconciliationSignals(QObject):
     reconciliation_completed = Signal(int, int, int, int)  # added, modified, deleted, folders_changed
     missing_roots_detected = Signal(list)                  # list[{"id": int, "path": str, "name": str}]
     error = Signal(str)
+    finished = Signal()
 
 
 def _enrich_and_upsert_media(
@@ -244,17 +245,17 @@ class DeltaSyncWorker(QRunnable):
 
     @Slot()
     def run(self) -> None:
-        if self.cancel_flag.is_set:
-            return
-
-        p = Path(self.folder_path)
-        if not p.exists() or not p.is_dir():
-            return
-
-        repo = CatalogRepository(self.engine)
-        thumb_repo = ThumbnailRepository(self.engine)
-
         try:
+            if self.cancel_flag.is_set:
+                return
+
+            p = Path(self.folder_path)
+            if not p.exists() or not p.is_dir():
+                return
+
+            repo = CatalogRepository(self.engine)
+            thumb_repo = ThumbnailRepository(self.engine)
+
             # 1. Resolve folder_id in catalog.db
             conn = self.engine.catalog_conn()
             frow = conn.execute(
@@ -490,18 +491,18 @@ class StartupReconciliationWorker(QRunnable):
 
     @Slot()
     def run(self) -> None:
-        if self.cancel_flag.is_set:
-            return
-
-        repo = CatalogRepository(self.engine)
-        thumb_repo = ThumbnailRepository(self.engine)
-
-        total_added = 0
-        total_modified = 0
-        total_deleted = 0
-        folders_changed = 0
-
         try:
+            if self.cancel_flag.is_set:
+                return
+
+            repo = CatalogRepository(self.engine)
+            thumb_repo = ThumbnailRepository(self.engine)
+
+            total_added = 0
+            total_modified = 0
+            total_deleted = 0
+            folders_changed = 0
+
             conn = self.engine.catalog_conn()
             folder_rows = conn.execute(
                 """
@@ -636,6 +637,10 @@ class StartupReconciliationWorker(QRunnable):
         finally:
             if threading.current_thread() is not threading.main_thread():
                 self.engine.close_thread_connections()
+            try:
+                self.signals.finished.emit()
+            except RuntimeError:
+                pass
 
 
 class FolderWatcherDaemon(QObject):
@@ -668,6 +673,8 @@ class FolderWatcherDaemon(QObject):
 
         self._cancel_flag = CancellationFlag()
         self._active_workers: list[DeltaSyncWorker] = []
+        self._active_worker_map: dict[str, DeltaSyncWorker] = {}
+        self._reconcile_worker: StartupReconciliationWorker | None = None
         self._sync_pool = QThreadPool(self)
         self._sync_pool.setMaxThreadCount(1)
         self._inflight_paths: set[str] = set()
@@ -676,9 +683,23 @@ class FolderWatcherDaemon(QObject):
     def start_startup_reconciliation(self) -> None:
         """Launches non-blocking background startup reconciliation for offline filesystem changes."""
         worker = StartupReconciliationWorker(self.engine, cancel_flag=self._cancel_flag)
+        worker.setAutoDelete(False)
+        worker.signals.setParent(self)
+        self._reconcile_worker = worker
         worker.signals.missing_roots_detected.connect(self.missing_roots_detected.emit)
         worker.signals.reconciliation_completed.connect(self._on_reconciliation_completed)
+        worker.signals.finished.connect(self._on_reconciliation_finished)
         QThreadPool.globalInstance().start(worker)
+
+    @Slot()
+    def _on_reconciliation_finished(self) -> None:
+        w = getattr(self, "_reconcile_worker", None)
+        self._reconcile_worker = None
+        if w is not None:
+            try:
+                w.signals.deleteLater()
+            except RuntimeError:
+                pass
 
     @Slot(int, int, int, int)
     def _on_reconciliation_completed(
@@ -770,6 +791,10 @@ class FolderWatcherDaemon(QObject):
                 folder_path,
                 cancel_flag=self._cancel_flag,
             )
+            worker.setAutoDelete(False)
+            worker.signals.setParent(self)
+            self._active_workers.append(worker)
+            self._active_worker_map[key] = worker
             worker.signals.delta_completed.connect(self._on_worker_delta_completed)
             worker.signals.finished.connect(self._on_worker_finished)
             self._sync_pool.start(worker)
@@ -778,6 +803,16 @@ class FolderWatcherDaemon(QObject):
     def _on_worker_finished(self, folder_path: str) -> None:
         key = os.path.normcase(os.path.normpath(folder_path))
         self._inflight_paths.discard(key)
+        w = self._active_worker_map.pop(key, None)
+        if w is not None:
+            try:
+                self._active_workers.remove(w)
+            except ValueError:
+                pass
+            try:
+                w.signals.deleteLater()
+            except RuntimeError:
+                pass
         requeued = self._requeue_paths.pop(key, None)
         if requeued and not self._cancel_flag.is_set:
             self._pending_changed_paths.add(requeued)

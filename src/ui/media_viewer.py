@@ -112,18 +112,21 @@ class _MasterRenderRunnable(QRunnable):
         master_alpha: np.ndarray | None,
         recipe: PhotoAdjustmentRecipe,
         mask_overlay: bool,
+        signals_parent: QObject | None = None,
     ) -> None:
         super().__init__()
-        self.setAutoDelete(True)
+        self.setAutoDelete(False)
         self.gen = gen
         self.media_id = media_id
         self.master_rgb = master_rgb
         self.master_alpha = master_alpha
         self.recipe = recipe
         self.mask_overlay = mask_overlay
-        self.signals = _MasterRenderSignals()
+        self.signals = _MasterRenderSignals(signals_parent)
 
     def run(self) -> None:
+        rendered_np = None
+        rendered_alpha = None
         try:
             rendered_np = render_adjusted_image(
                 self.master_rgb, self.recipe, media_id=self.media_id
@@ -134,11 +137,16 @@ class _MasterRenderRunnable(QRunnable):
                 if self.master_alpha is not None
                 else None
             )
-            self.signals.finished.emit(
-                self.gen, self.media_id, rendered_np, rendered_alpha, self.mask_overlay
-            )
         except Exception:
-            pass
+            rendered_np = None
+            rendered_alpha = None
+        finally:
+            try:
+                self.signals.finished.emit(
+                    self.gen, self.media_id, rendered_np, rendered_alpha, self.mask_overlay
+                )
+            except RuntimeError:
+                pass
 
 from legacy_reference.imgBrowserv13 import (
     ClickableVideoWidget,
@@ -1723,6 +1731,7 @@ class SingleMediaViewer(QWidget):
         self._is_sliding: bool = False
         self._master_render_gen: int = 0
         self._master_render_dirty: bool = False
+        self._inflight_master_renders: set[QRunnable] = set()
         self._master_render_timer = QTimer(self)
         self._master_render_timer.setSingleShot(True)
         self._master_render_timer.setInterval(250)
@@ -6303,16 +6312,26 @@ class SingleMediaViewer(QWidget):
         self,
         gen: int,
         media_id: Any,
-        rendered_np: np.ndarray,
+        rendered_np: np.ndarray | None,
         rendered_alpha: np.ndarray | None,
         mask_overlay: bool,
     ) -> None:
+        if rendered_np is None:
+            return
         if gen != self._master_render_gen or media_id != self.current_media_id:
             return
         if self.master_np_rgb is None or self.current_is_video:
             return
         self._master_render_dirty = False
         self._apply_rendered_master_to_viewport(rendered_np, rendered_alpha, mask_overlay)
+
+    def _retire_master_render(self, runnable: _MasterRenderRunnable) -> None:
+        if hasattr(self, "_inflight_master_renders"):
+            self._inflight_master_renders.discard(runnable)
+        try:
+            runnable.signals.deleteLater()
+        except RuntimeError:
+            pass
 
     def ensure_master_rendered(self) -> None:
         """Synchronously ensures current_pil_image reflects the full-res master render before Save/Export."""
@@ -6383,8 +6402,13 @@ class SingleMediaViewer(QWidget):
             master_alpha=self.master_alpha,
             recipe=self.current_recipe.copy(),
             mask_overlay=getattr(self, "_mask_overlay_preview", False),
+            signals_parent=self,
         )
+        self._inflight_master_renders.add(runnable)
         runnable.signals.finished.connect(self._on_master_render_finished)
+        runnable.signals.finished.connect(
+            lambda *_args, r=runnable: self._retire_master_render(r)
+        )
         QThreadPool.globalInstance().start(runnable)
 
     def set_exposure_parameters(

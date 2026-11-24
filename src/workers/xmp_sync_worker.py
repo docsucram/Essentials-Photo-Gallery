@@ -1330,6 +1330,7 @@ class MetadataSyncDaemon(QObject):
         self.stop_requested = threading.Event()
         self._lock = threading.Lock()
         self._is_flushing = False
+        self._active_flush_worker: _AsyncFlushWorker | None = None
         self._timer: QTimer | None = None
         self._thread_pool = QThreadPool(self)
         self._thread_pool.setMaxThreadCount(1)
@@ -1369,15 +1370,24 @@ class MetadataSyncDaemon(QObject):
         if not self._running or self._is_flushing or self._paused or self.stop_requested.is_set():
             return
         self._is_flushing = True
-        signals = _AsyncFlushSignals()
+        signals = _AsyncFlushSignals(self)
         signals.batch_synced.connect(self.batch_synced.emit)
         signals.sync_error.connect(self.sync_error.emit)
         signals.finished.connect(self._on_flush_finished)
         worker = _AsyncFlushWorker(self.engine, batch_limit=25, signals=signals, stop_requested=self.stop_requested)
+        worker.setAutoDelete(False)
+        self._active_flush_worker = worker
         self._thread_pool.start(worker)
 
     def _on_flush_finished(self, has_more: bool = False) -> None:
         self._is_flushing = False
+        w = getattr(self, "_active_flush_worker", None)
+        self._active_flush_worker = None
+        if w is not None:
+            try:
+                w.signals.deleteLater()
+            except RuntimeError:
+                pass
         if has_more and self._running and not self._paused and not self.stop_requested.is_set():
             QTimer.singleShot(50, self._on_timer_tick)
 

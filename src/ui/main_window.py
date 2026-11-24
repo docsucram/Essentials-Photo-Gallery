@@ -664,16 +664,19 @@ class _AvatarBackfillWorker(QRunnable):
         self.signals = signals
 
     def run(self) -> None:
+        updated = 0
         try:
             repo = CatalogRepository(self.engine)
             updated = repo.backfill_missing_people_thumbnails()
-            if updated > 0:
-                self.signals.finished.emit(updated)
         except Exception:
-            pass
+            updated = 0
         finally:
             if threading.current_thread() is not threading.main_thread():
                 self.engine.close_thread_connections()
+            try:
+                self.signals.finished.emit(updated)
+            except RuntimeError:
+                pass
 
 
 class _FaceCropPreloadSignals(QObject):
@@ -1002,6 +1005,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.engine, batch_size=16, flush_ms=150, parent=self
         )
         self._active_thumb_flags: dict[int, CancellationFlag] = {}
+        self._inflight_workers: set[QRunnable] = set()
         self._media_meta_lookup: dict[int, tuple[str, int, bool, int]] = {}
         self._failed_thumb_ids: set[int] = set()
         self._pending_visible_media_ids: list[int] = []
@@ -2421,6 +2425,10 @@ class PhotoGalleryMainWindow(QMainWindow):
         if blocking:
             worker.run()
         else:
+            self._retain_pool_worker(worker)
+            worker.signals.finished.connect(
+                lambda *_args, w=worker: self._release_pool_worker(w)
+            )
             self.scanner_pool.start(worker, -1)
 
     def _on_sync_stage1_completed(self, discovered_count: int) -> None:
@@ -2641,6 +2649,10 @@ class PhotoGalleryMainWindow(QMainWindow):
         worker.signals.finished.connect(_on_ocr_finished)
         worker.signals.error.connect(_on_ocr_error)
         self._active_ocr_worker = worker
+        self._retain_pool_worker(worker)
+        worker.signals.finished.connect(
+            lambda *_args, w=worker: self._release_pool_worker(w)
+        )
         QThreadPool.globalInstance().start(worker)
 
     def _visible_non_private_media_ids(self) -> set[int] | None:
@@ -2729,6 +2741,13 @@ class PhotoGalleryMainWindow(QMainWindow):
         worker.signals.finished_stats.connect(_on_sem_finished)
         worker.signals.error.connect(_on_sem_error)
         self._active_semantic_worker = worker
+        self._retain_pool_worker(worker)
+        worker.signals.finished_stats.connect(
+            lambda *_args, w=worker: self._release_pool_worker(w)
+        )
+        worker.signals.error.connect(
+            lambda *_args, w=worker: self._release_pool_worker(w)
+        )
         QThreadPool.globalInstance().start(worker)
 
     def on_sync_progress(self, count: int, folder_name: str) -> None:
@@ -3006,6 +3025,10 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._face_phase = "init"
         self._face_status_text = "Faces: Starting face scan..."
         self._update_worker_monitor()
+        self._retain_pool_worker(worker)
+        worker.signals.worker_finished.connect(
+            lambda *_args, w=worker: self._release_pool_worker(w)
+        )
         self.face_pool.start(worker)
 
     def stop_face_detection(self) -> None:
@@ -4033,11 +4056,15 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.card_delegate.set_face_crop_person_id(pid)
             if pid is not None:
                 self._face_crop_cancel = CancellationFlag()
-                signals = _FaceCropPreloadSignals()
+                signals = _FaceCropPreloadSignals(self)
                 signals.crop_ready.connect(self._on_face_crop_ready)
                 signals.progress.connect(self._on_face_crop_progress)
                 signals.finished.connect(self._on_face_crop_finished)
                 worker = _FaceCropPreloadWorker(self.engine, pid, signals, self._face_crop_cancel)
+                self._retain_pool_worker(worker, signals)
+                signals.finished.connect(
+                    lambda *_args, w=worker, s=signals: self._release_pool_worker(w, s)
+                )
                 self.thumbnail_pool.start(worker)
         else:
             self._face_crop_status_text = ""
@@ -4096,12 +4123,16 @@ class PhotoGalleryMainWindow(QMainWindow):
         if active_crop_pid is not None and self.central_stack.currentWidget() == self.grid_view:
             self._face_crop_cancel.set()
             self._face_crop_cancel = CancellationFlag()
-            signals = _FaceCropPreloadSignals()
+            signals = _FaceCropPreloadSignals(self)
             signals.crop_ready.connect(self._on_face_crop_ready)
             signals.progress.connect(self._on_face_crop_progress)
             signals.finished.connect(self._on_face_crop_finished)
             worker = _FaceCropPreloadWorker(
                 self.engine, int(active_crop_pid), signals, self._face_crop_cancel
+            )
+            self._retain_pool_worker(worker, signals)
+            signals.finished.connect(
+                lambda *_args, w=worker, s=signals: self._release_pool_worker(w, s)
             )
             self.thumbnail_pool.start(worker)
         if hasattr(self, "grid_view"):
@@ -4570,7 +4601,11 @@ class PhotoGalleryMainWindow(QMainWindow):
                 fc_worker = BatchFaceCropWorker(
                     self.engine, self._face_crop_token, pid, missing_crops[:256]
                 )
+                self._retain_pool_worker(fc_worker)
                 fc_worker.signals.crops_ready.connect(self._on_face_crop_batch_ready)
+                fc_worker.signals.crops_ready.connect(
+                    lambda *_args, w=fc_worker: self._release_pool_worker(w)
+                )
                 self._active_face_crop_worker = fc_worker
                 self.thumb_cache_pool.start(fc_worker)
 
@@ -4598,7 +4633,11 @@ class PhotoGalleryMainWindow(QMainWindow):
             check_batch,
             expected_mtimes=expected_mtimes,
         )
+        self._retain_pool_worker(cache_worker)
         cache_worker.signals.batch_ready.connect(self._on_thumb_cache_batch_ready)
+        cache_worker.signals.batch_ready.connect(
+            lambda *_args, w=cache_worker: self._release_pool_worker(w)
+        )
         self._active_thumb_cache_worker = cache_worker
         self.thumb_cache_pool.start(cache_worker)
 
@@ -4692,9 +4731,38 @@ class PhotoGalleryMainWindow(QMainWindow):
                 write_coalescer=coalescer,
                 skip_cache_lookup=using_miss_queue,
             )
+            self._retain_pool_worker(worker)
             worker.signals.thumbnail_ready.connect(self.on_thumbnail_decoded)
             worker.signals.error.connect(self.on_thumbnail_decode_error)
+            worker.signals.finished.connect(
+                lambda mid_done, w=worker: self._on_thumb_decode_finished(mid_done, w)
+            )
             self.thumbnail_pool.start(worker)
+
+    def _retain_pool_worker(self, worker: QRunnable, signals: QObject | None = None) -> None:
+        """Prevents QThreadPool from deleting a worker/signals on a worker thread before slot delivery."""
+        worker.setAutoDelete(False)
+        sig = signals if signals is not None else getattr(worker, "signals", None)
+        if sig is not None and sig.parent() is None:
+            sig.setParent(self)
+        self._inflight_workers.add(worker)
+
+    def _release_pool_worker(self, worker: QRunnable, signals: QObject | None = None) -> None:
+        """Drops the main-thread worker reference and schedules signal QObject deletion."""
+        if hasattr(self, "_inflight_workers"):
+            self._inflight_workers.discard(worker)
+        sig = signals if signals is not None else getattr(worker, "signals", None)
+        if sig is not None:
+            try:
+                sig.deleteLater()
+            except RuntimeError:
+                pass
+
+    def _on_thumb_decode_finished(self, media_id: int, worker: QRunnable) -> None:
+        """Retires a finished ThumbnailDecodeWorker safely on the GUI thread."""
+        if self._active_thumb_flags.get(media_id) is getattr(worker, "cancel_flag", None):
+            self._active_thumb_flags.pop(media_id, None)
+        self._release_pool_worker(worker)
 
     def on_thumbnail_decode_error(self, media_id: int, error_msg: str) -> None:
         """Handles thumbnail decode failures cleanly without wedging active flags or stalling the queue."""
@@ -4769,6 +4837,10 @@ class PhotoGalleryMainWindow(QMainWindow):
         signals = _AvatarBackfillSignals(self)
         signals.finished.connect(self._on_avatar_backfill_completed)
         worker = _AvatarBackfillWorker(self.engine, signals)
+        self._retain_pool_worker(worker, signals)
+        signals.finished.connect(
+            lambda *_args, w=worker, s=signals: self._release_pool_worker(w, s)
+        )
         self.scanner_pool.start(worker)
 
     def _on_avatar_backfill_completed(self, updated_count: int) -> None:
@@ -7778,9 +7850,13 @@ class PhotoGalleryMainWindow(QMainWindow):
             target_media_ids=mids,
             batch_size=len(mids),
         )
+        self._retain_pool_worker(worker)
         worker.signals.media_faces_ready.connect(self._on_targeted_face_scan_ready)
         worker.signals.worker_finished.connect(
             lambda total_faces: self._on_targeted_face_scan_finished(len(mids), total_faces)
+        )
+        worker.signals.worker_finished.connect(
+            lambda *_args, w=worker: self._release_pool_worker(w)
         )
         self.priority_face_pool.start(worker)
 
@@ -9589,8 +9665,12 @@ class PhotoGalleryMainWindow(QMainWindow):
                         self._subjects_count_dirty = False
                         QTimer.singleShot(0, self._refresh_subjects_nav_counts)
 
+                self._retain_pool_worker(worker)
                 worker.signals.counts_ready.connect(_on_counts)
                 worker.signals.finished.connect(_on_done)
+                worker.signals.finished.connect(
+                    lambda *_args, w=worker: self._release_pool_worker(w)
+                )
                 QThreadPool.globalInstance().start(worker)
                 return
 
@@ -12728,6 +12808,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         if hasattr(self, "xmp_daemon"):
             self.xmp_daemon.stop()
         QThreadPool.globalInstance().waitForDone(1000)
+        if hasattr(self, "_inflight_workers"):
+            self._inflight_workers.clear()
         if getattr(self, "semantic_repo", None) is not None:
             try:
                 self.semantic_repo.close()

@@ -288,59 +288,65 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawRoundedRect(QRectF(s * 0.10, s * 0.32, s * 0.62, s * 0.18), 2.0, 2.0)
 
     elif kind in ("text_search", "binoculars"):
-        # Angled 3/4 Aero glossy binoculars (avoid vertical cylinder silhouette)
-        # Left & right angled barrels converging toward eyepieces at top-right
-        barrels = (
-            QPolygonF([
-                QPointF(s * 0.36, s * 0.16),
-                QPointF(s * 0.50, s * 0.22),
-                QPointF(s * 0.38, s * 0.68),
-                QPointF(s * 0.14, s * 0.62),
-            ]),
-            QPolygonF([
-                QPointF(s * 0.54, s * 0.20),
-                QPointF(s * 0.68, s * 0.26),
-                QPointF(s * 0.78, s * 0.68),
-                QPointF(s * 0.52, s * 0.68),
-            ]),
+        # Glossy Windows Aero magnifying glass
+        cx, cy = s * 0.41, s * 0.41
+        r_outer = s * 0.27
+        r_inner = s * 0.205
+
+        # Subtle drop shadow
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(15, 35, 65, 42))
+        p.drawEllipse(QPointF(cx + s * 0.025, cy + s * 0.03), r_outer, r_outer)
+        shadow_pen = QPen(QColor(15, 35, 65, 42), max(2.2, s * 0.125), Qt.SolidLine, Qt.RoundCap)
+        p.setPen(shadow_pen)
+        p.drawLine(QPointF(s * 0.62, s * 0.63), QPointF(s * 0.87, s * 0.88))
+
+        # Metallic handle collar (ferrule) joining bezel and grip
+        p.setPen(QPen(QColor("#7D9BBF"), max(2.0, s * 0.115), Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.57, s * 0.57), QPointF(s * 0.66, s * 0.66))
+
+        # Handle grip with dark navy bevel + glossy top highlight
+        p.setPen(QPen(QColor("#1A3557"), max(2.4, s * 0.135), Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.65, s * 0.65), QPointF(s * 0.86, s * 0.86))
+        grip_grad = QLinearGradient(s * 0.63, s * 0.63, s * 0.86, s * 0.86)
+        grip_grad.setColorAt(0.0, QColor("#5F98D6"))
+        grip_grad.setColorAt(0.45, QColor("#2D63A3"))
+        grip_grad.setColorAt(1.0, QColor("#173B66"))
+        p.setPen(QPen(grip_grad, max(1.6, s * 0.095), Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.65, s * 0.65), QPointF(s * 0.86, s * 0.86))
+
+        # Silver-blue Aero metallic rim
+        rim_grad = QLinearGradient(cx - r_outer, cy - r_outer, cx + r_outer, cy + r_outer)
+        rim_grad.setColorAt(0.0, QColor("#F3F8FF"))
+        rim_grad.setColorAt(0.45, QColor("#9EC0E6"))
+        rim_grad.setColorAt(1.0, QColor("#3D6A9E"))
+        p.setPen(QPen(QColor("#204978"), max(1.0, s * 0.036)))
+        p.setBrush(rim_grad)
+        p.drawEllipse(QPointF(cx, cy), r_outer, r_outer)
+
+        # Aqua convex Aero lens interior
+        lens_grad = QRadialGradient(cx - r_inner * 0.28, cy - r_inner * 0.28, r_inner * 1.45)
+        lens_grad.setColorAt(0.0, QColor("#FFFFFF"))
+        lens_grad.setColorAt(0.35, QColor("#D5F2FF"))
+        lens_grad.setColorAt(0.78, QColor("#74C4F4"))
+        lens_grad.setColorAt(1.0, QColor("#2E82C7"))
+        p.setPen(QPen(QColor("#285E94"), max(0.9, s * 0.03)))
+        p.setBrush(lens_grad)
+        p.drawEllipse(QPointF(cx, cy), r_inner, r_inner)
+
+        # Glossy curved top-left specular crescent inside lens
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 195))
+        sheen = QPainterPath()
+        sheen.addEllipse(
+            QRectF(cx - r_inner * 0.72, cy - r_inner * 0.76, r_inner * 1.15, r_inner * 0.68)
         )
-        grad_barrel = QLinearGradient(0, s * 0.16, 0, s * 0.72)
-        grad_barrel.setColorAt(0.0, QColor("#6BA8DE"))
-        grad_barrel.setColorAt(0.45, QColor("#2D6EB0"))
-        grad_barrel.setColorAt(1.0, QColor("#173D68"))
-        p.setPen(QPen(QColor("#133256"), 1.1))
-        p.setBrush(grad_barrel)
-        for barrel in barrels:
-            p.drawPolygon(barrel)
-
-        # Center bridge & knurled focus wheel
-        p.setBrush(QColor("#244A75"))
-        p.drawRoundedRect(QRectF(s * 0.38, s * 0.36, s * 0.24, s * 0.12), 2.0, 2.0)
-        p.setBrush(QColor("#8EC0EC"))
-        p.drawRoundedRect(QRectF(s * 0.45, s * 0.29, s * 0.10, s * 0.16), 2.0, 2.0)
-
-        # Eyepiece cuffs at top
-        p.setBrush(QColor("#1A3554"))
-        p.drawEllipse(QRectF(s * 0.34, s * 0.12, s * 0.16, s * 0.10))
-        p.drawEllipse(QRectF(s * 0.52, s * 0.16, s * 0.16, s * 0.10))
-
-        # Prominent circular front objective lenses (Aero glass bezels)
-        for cx, cy in ((s * 0.26, s * 0.70), (s * 0.65, s * 0.70)):
-            r_outer = s * 0.175
-            r_inner = s * 0.125
-            p.setPen(QPen(QColor("#133256"), 1.2))
-            p.setBrush(QColor("#5B97CF"))
-            p.drawEllipse(QPointF(cx, cy), r_outer, r_outer)
-            grad_lens = QLinearGradient(cx - r_inner, cy - r_inner, cx + r_inner, cy + r_inner)
-            grad_lens.setColorAt(0.0, QColor("#9BE2FF"))
-            grad_lens.setColorAt(0.5, QColor("#2572B4"))
-            grad_lens.setColorAt(1.0, QColor("#0E2F54"))
-            p.setPen(QPen(QColor("#D6EEFF"), 0.8))
-            p.setBrush(grad_lens)
-            p.drawEllipse(QPointF(cx, cy), r_inner, r_inner)
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(255, 255, 255, 210))
-            p.drawEllipse(QPointF(cx - r_inner * 0.34, cy - r_inner * 0.34), r_inner * 0.26, r_inner * 0.20)
+        p.save()
+        clip_lens = QPainterPath()
+        clip_lens.addEllipse(QPointF(cx, cy), r_inner * 0.90, r_inner * 0.90)
+        p.setClipPath(clip_lens)
+        p.drawPath(sheen)
+        p.restore()
 
     elif kind == "edited":
         p.setPen(QPen(QColor("#6B5218"), 1.0))
@@ -1457,15 +1463,87 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawRoundedRect(QRectF(s * 0.65, s * 0.38, s * 0.14, s * 0.10), 1.5, 1.5)
 
     elif kind == "depth_light":
-        p.setPen(QPen(QColor("#0078D7"), 1.2))
-        p.setBrush(QColor("#EAF4FD"))
-        p.drawEllipse(QPointF(s * 0.44, s * 0.52), s * 0.32, s * 0.32)
-        p.setPen(QPen(QColor("#FFA000"), 1.2))
-        p.setBrush(QColor("#FFD54F"))
-        p.drawEllipse(QPointF(s * 0.72, s * 0.26), s * 0.12, s * 0.12)
-        p.setPen(QPen(QColor("#005A9E"), 1.5))
-        p.setBrush(QColor("#29B6F6"))
-        p.drawEllipse(QPointF(s * 0.38, s * 0.56), s * 0.16, s * 0.16)
+        # Aero Depth & Light: defocused bokeh back plane + sharp relit foreground portrait plane + golden key light
+        # 1. Far-plane frosted glass depth card with subtle bokeh discs
+        back_rect = QRectF(s * 0.11, s * 0.20, s * 0.48, s * 0.54)
+        back_grad = QLinearGradient(back_rect.topLeft(), back_rect.bottomRight())
+        back_grad.setColorAt(0.0, QColor("#E2F0FC"))
+        back_grad.setColorAt(1.0, QColor("#95BFE6"))
+        p.setPen(QPen(QColor("#5B87B8"), max(0.9, s * 0.032)))
+        p.setBrush(back_grad)
+        p.drawRoundedRect(back_rect, max(1.5, s * 0.075), max(1.5, s * 0.075))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 165))
+        p.drawEllipse(QPointF(s * 0.25, s * 0.34), s * 0.075, s * 0.075)
+        p.setBrush(QColor(255, 255, 255, 115))
+        p.drawEllipse(QPointF(s * 0.38, s * 0.46), s * 0.055, s * 0.055)
+
+        # 2. Foreground sharp focal card illuminated by warm upper-right studio light
+        front_rect = QRectF(s * 0.26, s * 0.34, s * 0.50, s * 0.54)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(15, 35, 65, 42))
+        p.drawRoundedRect(
+            front_rect.translated(s * 0.025, s * 0.03),
+            max(1.5, s * 0.075),
+            max(1.5, s * 0.075),
+        )
+        fg_grad = QRadialGradient(s * 0.72, s * 0.36, s * 0.62)
+        fg_grad.setColorAt(0.0, QColor("#FFE89E"))
+        fg_grad.setColorAt(0.32, QColor("#5CB3EE"))
+        fg_grad.setColorAt(0.75, QColor("#2874BA"))
+        fg_grad.setColorAt(1.0, QColor("#174780"))
+        p.setPen(QPen(QColor("#174780"), max(1.0, s * 0.036)))
+        p.setBrush(fg_grad)
+        p.drawRoundedRect(front_rect, max(1.5, s * 0.075), max(1.5, s * 0.075))
+
+        # Crisp white foreground portrait silhouette clipped to front card
+        p.save()
+        clip_fg = QPainterPath()
+        clip_fg.addRoundedRect(front_rect.adjusted(1.0, 1.0, -1.0, -1.0), max(1.0, s * 0.06), max(1.0, s * 0.06))
+        p.setClipPath(clip_fg)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 235))
+        p.drawEllipse(QPointF(s * 0.51, s * 0.54), s * 0.095, s * 0.095)
+        shoulders = QPainterPath()
+        shoulders.addEllipse(QRectF(s * 0.34, s * 0.66, s * 0.34, s * 0.30))
+        p.drawPath(shoulders)
+        p.restore()
+
+        # Crisp inner bevel gloss on front card
+        p.setPen(QPen(QColor(255, 255, 255, 130), max(0.75, s * 0.025)))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(
+            front_rect.adjusted(s * 0.025, s * 0.025, -s * 0.025, -s * 0.025),
+            max(1.0, s * 0.05),
+            max(1.0, s * 0.05),
+        )
+
+        # 3. Golden directional key light orb + rays at top-right
+        sx, sy = s * 0.77, s * 0.21
+        halo = QRadialGradient(sx, sy, s * 0.24)
+        halo.setColorAt(0.0, QColor(255, 226, 110, 180))
+        halo.setColorAt(0.55, QColor(255, 193, 45, 75))
+        halo.setColorAt(1.0, QColor(255, 180, 0, 0))
+        p.setPen(Qt.NoPen)
+        p.setBrush(halo)
+        p.drawEllipse(QPointF(sx, sy), s * 0.24, s * 0.24)
+
+        ray_pen = QPen(QColor("#F59E0B"), max(1.0, s * 0.042), Qt.SolidLine, Qt.RoundCap)
+        p.setPen(ray_pen)
+        for angle_deg in (125.0, 150.0, 175.0):
+            rad = math.radians(angle_deg)
+            p.drawLine(
+                QPointF(sx + math.cos(rad) * s * 0.135, sy + math.sin(rad) * s * 0.135),
+                QPointF(sx + math.cos(rad) * s * 0.225, sy + math.sin(rad) * s * 0.225),
+            )
+
+        sun_grad = QRadialGradient(sx - s * 0.03, sy - s * 0.03, s * 0.15)
+        sun_grad.setColorAt(0.0, QColor("#FFFCE0"))
+        sun_grad.setColorAt(0.55, QColor("#FFCA3A"))
+        sun_grad.setColorAt(1.0, QColor("#E07B00"))
+        p.setPen(QPen(QColor("#B45309"), max(0.9, s * 0.032)))
+        p.setBrush(sun_grad)
+        p.drawEllipse(QPointF(sx, sy), s * 0.105, s * 0.105)
 
     elif kind == "save":
         p.setPen(QPen(QColor("#2B579A"), 1.2))
