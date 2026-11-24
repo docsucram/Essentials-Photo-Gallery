@@ -3414,21 +3414,45 @@ class CatalogRepository:
         ).fetchone()
         return dict(row) if row else None
 
-    def assign_tag(self, media_ids: Sequence[int], tag_id: int) -> None:
+    def assign_tag(
+        self,
+        media_ids: Sequence[int],
+        tag_id: int,
+        *,
+        mark_dirty: bool = True,
+    ) -> None:
         if not media_ids:
             return
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
+            clean_ids: list[int] = []
+            if not mark_dirty:
+                for chunk in _iter_id_chunks(media_ids, 900):
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows = conn.execute(
+                        f"SELECT id FROM media WHERE id IN ({placeholders}) AND metadata_dirty = 0;",
+                        list(chunk),
+                    ).fetchall()
+                    clean_ids.extend(int(r[0]) for r in rows)
             conn.executemany(
                 "INSERT OR IGNORE INTO media_tags (media_id, tag_id) VALUES (?, ?);",
                 [(mid, tag_id) for mid in media_ids],
             )
-            for chunk in _iter_id_chunks(media_ids, 900):
-                placeholders = ",".join("?" for _ in chunk)
-                conn.execute(
-                    f"UPDATE media SET metadata_dirty = 1 WHERE id IN ({placeholders});",
-                    list(chunk),
-                )
+            if mark_dirty:
+                for chunk in _iter_id_chunks(media_ids, 900):
+                    placeholders = ",".join("?" for _ in chunk)
+                    conn.execute(
+                        f"UPDATE media SET metadata_dirty = 1 WHERE id IN ({placeholders});",
+                        list(chunk),
+                    )
+            elif clean_ids:
+                # Reset any AFTER INSERT trigger dirtiness atomically before commit
+                for chunk in _iter_id_chunks(clean_ids, 900):
+                    placeholders = ",".join("?" for _ in chunk)
+                    conn.execute(
+                        f"UPDATE media SET metadata_dirty = 0 WHERE id IN ({placeholders});",
+                        list(chunk),
+                    )
             conn.commit()
 
     def remove_tag(self, media_ids: Sequence[int], tag_id: int) -> None:
@@ -3824,6 +3848,9 @@ class CatalogRepository:
         person_name: str | int,
         rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0),
         thumbnail_blob: bytes | None = None,
+        *,
+        mark_dirty: bool = True,
+        extract_crop: bool = True,
     ) -> int:
         """
         Assigns a person tag to media_id.
@@ -3867,14 +3894,14 @@ class CatalogRepository:
 
         # 2. Extract face thumbnail crop OUTSIDE write_lock if needed
         face_crop_blob: bytes | None = None
-        if not is_video and (rw > 0.005 and rh > 0.005):
+        if extract_crop and not is_video and (rw > 0.005 and rh > 0.005):
             full_img_path = os.path.join(
                 str(media_row["folder_path"]), str(media_row["filename"])
             )
             face_crop_blob = self.extract_face_crop_blob(
                 full_img_path, (rx, ry, rw, rh), orientation=orient
             )
-        if thumbnail_blob is None and not is_video:
+        if extract_crop and thumbnail_blob is None and not is_video:
             existing_p = conn_read.execute(
                 "SELECT thumbnail_blob FROM people WHERE name = ?;",
                 (clean_name,),
@@ -3895,6 +3922,12 @@ class CatalogRepository:
         mp_id: int = 0
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
+            was_clean = False
+            if not mark_dirty:
+                d_row = conn.execute(
+                    "SELECT metadata_dirty FROM media WHERE id = ?;", (media_id,)
+                ).fetchone()
+                was_clean = d_row is not None and int(d_row[0] or 0) == 0
             cur = conn.execute(
                 """
                 INSERT INTO people (name, thumbnail_blob)
@@ -3969,10 +4002,17 @@ class CatalogRepository:
                     "UPDATE people SET avatar_media_people_id = COALESCE(avatar_media_people_id, ?) WHERE id = ?;",
                     (mp_id, person_id),
                 )
-            conn.execute(
-                "UPDATE media SET metadata_dirty = 1 WHERE id = ?;",
-                (media_id,),
-            )
+            if mark_dirty:
+                conn.execute(
+                    "UPDATE media SET metadata_dirty = 1 WHERE id = ?;",
+                    (media_id,),
+                )
+            elif was_clean:
+                # Reset any AFTER INSERT/UPDATE trigger dirtiness atomically before commit
+                conn.execute(
+                    "UPDATE media SET metadata_dirty = 0 WHERE id = ?;",
+                    (media_id,),
+                )
             conn.commit()
 
         if mp_id > 0 and face_crop_blob is not None:

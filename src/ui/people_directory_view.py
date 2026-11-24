@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from PySide6.QtCore import QObject, QPoint, QRect, QRunnable, QSettings, QSize, Qt, QThreadPool, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRunnable, QSettings, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -603,26 +603,31 @@ class _UnnamedPersonCard(QFrame):
         thumb_blob: bytes | None,
         existing_names: list[str] | None = None,
         parent: QWidget | None = None,
+        *,
+        is_dark: bool = False,
     ) -> None:
         super().__init__(parent)
         self.cluster_name = cluster_name
         self.face_ids = face_ids
         self.face_count = face_count
         self.thumb_blob = thumb_blob
+        self._existing_names: list[str] = list(existing_names) if existing_names else []
+        self._completer_installed: bool = False
 
         self.setFixedSize(self.CARD_WIDTH, self.CARD_HEIGHT)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setObjectName("UnnamedPersonCard")
+        hover_bg = "#242A36" if is_dark else "#F1F5F9"
         self.setStyleSheet(
-            """
-            #UnnamedPersonCard {
+            f"""
+            #UnnamedPersonCard {{
                 background-color: transparent;
                 border: 1px solid transparent;
                 border-radius: 12px;
-            }
-            #UnnamedPersonCard:hover {
-                background-color: #F1F5F9;
-            }
+            }}
+            #UnnamedPersonCard:hover {{
+                background-color: {hover_bg};
+            }}
             """
         )
 
@@ -639,39 +644,55 @@ class _UnnamedPersonCard(QFrame):
         self.lbl_avatar.setPixmap(pix)
         v_layout.addWidget(self.lbl_avatar, 0, Qt.AlignmentFlag.AlignCenter)
 
-        # 2. Inline "Add a name" input (Immich pill style with instant click-to-suggest)
+        # 2. Inline "Add a name" input (Immich pill style with lazy autocomplete on focus)
         self.txt_name = _AutoPopupLineEdit(self)
         self.txt_name.setPlaceholderText("Add a name")
         self.txt_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.txt_name.setFont(QFont("Segoe UI", 9))
         self.txt_name.setFixedWidth(146)
-        self.txt_name.setStyleSheet(
-            """
-            QLineEdit {
-                border: 1px solid #E2E8F0;
-                border-radius: 11px;
-                padding: 2px 6px;
-                background-color: #FFFFFF;
-                color: #0F172A;
-            }
-            QLineEdit:hover {
-                border-color: #94A3B8;
-            }
-            QLineEdit:focus {
-                border-color: #2563EB;
-                background-color: #FFFFFF;
-                font-weight: bold;
-            }
-            """
-        )
+        if is_dark:
+            self.txt_name.setStyleSheet(
+                """
+                QLineEdit {
+                    border: 1px solid #333A45;
+                    border-radius: 11px;
+                    padding: 2px 6px;
+                    background-color: #14171B;
+                    color: #E2E8F0;
+                }
+                QLineEdit:hover {
+                    border-color: #475569;
+                }
+                QLineEdit:focus {
+                    border-color: #3B82F6;
+                    background-color: #1B1E24;
+                    font-weight: bold;
+                }
+                """
+            )
+        else:
+            self.txt_name.setStyleSheet(
+                """
+                QLineEdit {
+                    border: 1px solid #E2E8F0;
+                    border-radius: 11px;
+                    padding: 2px 6px;
+                    background-color: #FFFFFF;
+                    color: #0F172A;
+                }
+                QLineEdit:hover {
+                    border-color: #94A3B8;
+                }
+                QLineEdit:focus {
+                    border-color: #2563EB;
+                    background-color: #FFFFFF;
+                    font-weight: bold;
+                }
+                """
+            )
 
-        # Autocomplete suggestions matching existing people
-        if existing_names:
-            completer = QCompleter(existing_names, self)
-            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-            completer.setFilterMode(Qt.MatchFlag.MatchContains)
-            self.txt_name.setCompleter(completer)
-            completer.activated.connect(self._on_completer_activated)
+        if self._existing_names:
+            self.txt_name.installEventFilter(self)
 
         self.txt_name.returnPressed.connect(self._on_name_entered)
         v_layout.addWidget(self.txt_name)
@@ -683,6 +704,24 @@ class _UnnamedPersonCard(QFrame):
         self.lbl_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_count.setStyleSheet("color: #94A3B8;")
         v_layout.addWidget(self.lbl_count)
+
+    def _ensure_completer(self) -> None:
+        if self._completer_installed or not self._existing_names:
+            return
+        self._completer_installed = True
+        completer = QCompleter(self._existing_names, self)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.txt_name.setCompleter(completer)
+        completer.activated.connect(self._on_completer_activated)
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if obj is self.txt_name and event.type() in (
+            QEvent.Type.FocusIn,
+            QEvent.Type.MouseButtonPress,
+        ):
+            self._ensure_completer()
+        return super().eventFilter(obj, event)
 
     def _on_completer_activated(self, text: str) -> None:
         self.txt_name.setText(text)
@@ -1210,20 +1249,23 @@ class PeopleDirectoryView(QWidget):
         search_filter = self.txt_search.text().strip().lower()
         cols = self._calc_cols()
         self._last_rendered_cols = cols
+        self._unnamed_render_gen = getattr(self, "_unnamed_render_gen", 0) + 1
+        render_gen = self._unnamed_render_gen
 
         self.sec2_container.setUpdatesEnabled(False)
         try:
             self._clear_layout(self.grid_unnamed)
 
-            self.sec2_container.setVisible(bool(self._all_unnamed_clusters) and not search_filter)
-            if self._all_unnamed_clusters and not search_filter:
-                self.lbl_sec2_title.setText(f"People to Name ({len(self._all_unnamed_clusters)})")
+            clusters = list(self._all_unnamed_clusters) if (self._all_unnamed_clusters and not search_filter) else []
+            self.sec2_container.setVisible(bool(clusters))
+            if clusters:
+                self.lbl_sec2_title.setText(f"People to Name ({len(clusters)})")
                 existing_names = [p["name"] for p in self._all_named_people if p.get("name")]
 
                 # Batch-fetch any missing representative blobs once instead of querying per-card
                 missing_rep_fids = [
                     int(c["representative_face_id"])
-                    for c in self._all_unnamed_clusters
+                    for c in clusters
                     if c.get("representative_face_id") and "thumb_blob" not in c and self.thumb_repo
                 ]
                 fallback_thumbs = (
@@ -1232,75 +1274,116 @@ class PeopleDirectoryView(QWidget):
                     else {}
                 )
 
-                for idx, c in enumerate(self._all_unnamed_clusters):
-                    rep_fid = c.get("representative_face_id")
-                    if "thumb_blob" in c:
-                        thumb_blob = c["thumb_blob"]
-                    elif rep_fid:
-                        thumb_blob = fallback_thumbs.get(int(rep_fid))
-                        c["thumb_blob"] = thumb_blob
-                    else:
-                        thumb_blob = None
-
-                    card_names = list(existing_names)
-                    sugg_nm = c.get("suggested_person_name")
-                    if sugg_nm and sugg_nm in card_names:
-                        card_names.remove(sugg_nm)
-                        card_names.insert(0, sugg_nm)
-                    elif sugg_nm:
-                        card_names.insert(0, sugg_nm)
-
-                    card_u = _UnnamedPersonCard(
-                        cluster_name=c["cluster_name"],
-                        face_ids=c["face_ids"],
-                        face_count=c["face_count"],
-                        thumb_blob=thumb_blob,
-                        existing_names=card_names,
-                        parent=self.sec2_container,
-                    )
-                    if getattr(self, "_is_dark", False):
-                        card_u.setStyleSheet(
-                            """
-                            #UnnamedPersonCard {
-                                background-color: transparent;
-                                border: 1px solid transparent;
-                                border-radius: 12px;
-                            }
-                            #UnnamedPersonCard:hover {
-                                background-color: #242A36;
-                            }
-                            """
-                        )
-                        card_u.txt_name.setStyleSheet(
-                            """
-                            QLineEdit {
-                                border: 1px solid #333A45;
-                                border-radius: 11px;
-                                padding: 2px 6px;
-                                background-color: #14171B;
-                                color: #E2E8F0;
-                            }
-                            QLineEdit:hover {
-                                border-color: #475569;
-                            }
-                            QLineEdit:focus {
-                                border-color: #3B82F6;
-                                background-color: #1B1E24;
-                                font-weight: bold;
-                            }
-                            """
-                        )
-                    card_u.clicked.connect(lambda fids, tb: self.unnamed_selected.emit(fids, tb))
-                    card_u.named.connect(self._on_name_cluster)
-                    card_u.ignore_requested.connect(self._on_ignore_cluster_faces)
-                    row = idx // cols
-                    col = idx % cols
-                    self.grid_unnamed.addWidget(card_u, row, col)
-
                 for c in range(cols):
                     self.grid_unnamed.setColumnMinimumWidth(c, _UnnamedPersonCard.CARD_WIDTH)
+
+                initial_batch = 36
+                self._append_unnamed_cards_batch(
+                    clusters,
+                    start_idx=0,
+                    batch_size=initial_batch,
+                    cols=cols,
+                    existing_names=existing_names,
+                    fallback_thumbs=fallback_thumbs,
+                )
+                if len(clusters) > initial_batch:
+                    QTimer.singleShot(
+                        15,
+                        lambda: self._continue_unnamed_cards_batch(
+                            render_gen,
+                            clusters,
+                            initial_batch,
+                            cols,
+                            existing_names,
+                            fallback_thumbs,
+                        ),
+                    )
         finally:
             self.sec2_container.setUpdatesEnabled(True)
+
+    def _append_unnamed_cards_batch(
+        self,
+        clusters: list[dict[str, Any]],
+        *,
+        start_idx: int,
+        batch_size: int,
+        cols: int,
+        existing_names: list[str],
+        fallback_thumbs: dict[int, bytes],
+    ) -> int:
+        is_dark = bool(getattr(self, "_is_dark", False))
+        end_idx = min(len(clusters), start_idx + batch_size)
+        for idx in range(start_idx, end_idx):
+            c = clusters[idx]
+            rep_fid = c.get("representative_face_id")
+            if "thumb_blob" in c:
+                thumb_blob = c["thumb_blob"]
+            elif rep_fid:
+                thumb_blob = fallback_thumbs.get(int(rep_fid))
+                c["thumb_blob"] = thumb_blob
+            else:
+                thumb_blob = None
+
+            card_names = list(existing_names)
+            sugg_nm = c.get("suggested_person_name")
+            if sugg_nm and sugg_nm in card_names:
+                card_names.remove(sugg_nm)
+                card_names.insert(0, sugg_nm)
+            elif sugg_nm:
+                card_names.insert(0, sugg_nm)
+
+            card_u = _UnnamedPersonCard(
+                cluster_name=c["cluster_name"],
+                face_ids=c["face_ids"],
+                face_count=c["face_count"],
+                thumb_blob=thumb_blob,
+                existing_names=card_names,
+                parent=self.sec2_container,
+                is_dark=is_dark,
+            )
+            card_u.clicked.connect(lambda fids, tb: self.unnamed_selected.emit(fids, tb))
+            card_u.named.connect(self._on_name_cluster)
+            card_u.ignore_requested.connect(self._on_ignore_cluster_faces)
+            row = idx // cols
+            col = idx % cols
+            self.grid_unnamed.addWidget(card_u, row, col)
+        return end_idx
+
+    def _continue_unnamed_cards_batch(
+        self,
+        render_gen: int,
+        clusters: list[dict[str, Any]],
+        start_idx: int,
+        cols: int,
+        existing_names: list[str],
+        fallback_thumbs: dict[int, bytes],
+    ) -> None:
+        if render_gen != getattr(self, "_unnamed_render_gen", 0):
+            return
+        self.sec2_container.setUpdatesEnabled(False)
+        try:
+            next_idx = self._append_unnamed_cards_batch(
+                clusters,
+                start_idx=start_idx,
+                batch_size=24,
+                cols=cols,
+                existing_names=existing_names,
+                fallback_thumbs=fallback_thumbs,
+            )
+        finally:
+            self.sec2_container.setUpdatesEnabled(True)
+        if next_idx < len(clusters):
+            QTimer.singleShot(
+                15,
+                lambda: self._continue_unnamed_cards_batch(
+                    render_gen,
+                    clusters,
+                    next_idx,
+                    cols,
+                    existing_names,
+                    fallback_thumbs,
+                ),
+            )
 
     def _clear_layout(self, layout: QGridLayout) -> None:
         while layout.count() > 0:

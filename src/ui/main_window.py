@@ -2808,10 +2808,14 @@ class PhotoGalleryMainWindow(QMainWindow):
             pend["folders_changed"] += int(folders_changed)
             if folder_path and folder_path not in pend["folders"]:
                 pend["folders"].append(folder_path)
-            self._watcher_delta_timer.start(750)
+            self._watcher_delta_timer.start(1800)
 
     def _flush_folder_watcher_delta(self) -> None:
         if getattr(self, "_is_shutting_down", False):
+            return
+        # Never block an open modal dialog (e.g. Tag Hierarchy / Options) with a full nav+grid refresh
+        if QApplication.activeModalWidget() is not None:
+            self._watcher_delta_timer.start(1500)
             return
         pend = self._pending_watcher_delta
         added = int(pend["added"])

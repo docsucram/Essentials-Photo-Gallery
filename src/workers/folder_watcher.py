@@ -689,7 +689,7 @@ class FolderWatcherDaemon(QObject):
         worker.signals.missing_roots_detected.connect(self.missing_roots_detected.emit)
         worker.signals.reconciliation_completed.connect(self._on_reconciliation_completed)
         worker.signals.finished.connect(self._on_reconciliation_finished)
-        QThreadPool.globalInstance().start(worker)
+        self._sync_pool.start(worker)
 
     @Slot()
     def _on_reconciliation_finished(self) -> None:

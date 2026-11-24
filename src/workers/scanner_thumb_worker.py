@@ -1214,7 +1214,13 @@ def _assign_tags_and_people_for_media(
     for p_entry in people_list:
         p_name = str(p_entry.get("name") or "").strip()
         if p_name:
-            repo.assign_person(mid, p_name, rect=p_entry.get("rect", (0, 0, 0, 0)))
+            repo.assign_person(
+                mid,
+                p_name,
+                rect=p_entry.get("rect", (0, 0, 0, 0)),
+                mark_dirty=False,
+                extract_crop=False,
+            )
             assigned_people_names.add(p_name.lower())
 
     # Collect hierarchical and flat tags
@@ -1227,7 +1233,13 @@ def _assign_tags_and_people_for_media(
             parts = [p.strip() for p in norm_path.split("/") if p.strip()]
             person_name = _resolve_person_name_from_tag(repo, parts)
             if person_name and person_name.lower() not in assigned_people_names:
-                repo.assign_person(mid, person_name, rect=(0.0, 0.0, 0.0, 0.0))
+                repo.assign_person(
+                    mid,
+                    person_name,
+                    rect=(0.0, 0.0, 0.0, 0.0),
+                    mark_dirty=False,
+                    extract_crop=False,
+                )
                 assigned_people_names.add(person_name.lower())
             continue
         valid_tag_paths.append(norm_path)
@@ -1245,10 +1257,10 @@ def _assign_tags_and_people_for_media(
         if "/" not in norm_path and hasattr(repo, "find_tag_by_leaf_name"):
             existing_match = repo.find_tag_by_leaf_name(norm_path)
             if existing_match is not None and existing_match.get("parent_id") is not None:
-                repo.assign_tag([mid], int(existing_match["id"]))
+                repo.assign_tag([mid], int(existing_match["id"]), mark_dirty=False)
                 continue
         tid = repo.create_tag(norm_path)
-        repo.assign_tag([mid], tid)
+        repo.assign_tag([mid], tid, mark_dirty=False)
 
 
 
