@@ -1573,7 +1573,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.left_nav_dock.files_dropped_on_folder.connect(self._on_files_dropped_on_folder)
         self.left_nav_dock.tag_hierarchy_changed.connect(self.refresh_navigation_and_autocomplete)
         self.left_nav_dock.place_selected.connect(self._on_place_selected)
-        self.left_nav_dock.subject_selected.connect(self._on_subject_selected)
+        self.left_nav_dock.subjects_selected.connect(self._on_subjects_selected)
         self.left_nav_dock.subjects_section_clicked.connect(self._on_subjects_section_clicked)
         self.left_nav_dock.new_album_requested.connect(self._on_new_album_requested)
         self.left_nav_dock.rename_album_requested.connect(self._on_rename_album_requested)
@@ -1675,6 +1675,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         )
         self.scope_bar.exclude_tag_remove_requested.connect(
             lambda tid: self.left_nav_dock.set_tag_filter_state(tid, "neutral")
+        )
+        self.scope_bar.camera_clear_requested.connect(
+            lambda: self.left_nav_dock.clear_camera_filter()
         )
 
         # Quick Access Toolbar & Navigation History Signals
@@ -3225,6 +3228,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             or getattr(self, "_favourites_only", False)
             or has_media_filter
             or has_orientation_filter
+            or bool(state.get("dates"))
             or state.get("date_year") is not None
             or state.get("date_month") is not None
             or state.get("date_day") is not None
@@ -3235,10 +3239,13 @@ class PhotoGalleryMainWindow(QMainWindow):
             or self._active_map_location_label is not None
             or getattr(self, "_active_similar_seed_id", None) is not None
             or getattr(self, "_active_similar_order", None) is not None
+            or bool(state.get("locations"))
             or state.get("location_country") is not None
             or state.get("location_state") is not None
             or state.get("location_city") is not None
+            or bool(state.get("camera_models"))
             or state.get("camera_model") is not None
+            or bool(state.get("active_subject_keys"))
             or bool(getattr(self, "_active_subject_label", ""))
             or (getattr(self, "_active_subject_ids", None) is not None)
             or getattr(self, "_active_special_people_filter", None) is not None
@@ -3253,6 +3260,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         folder_name = self.left_nav_dock.selected_folder_name()
         if folder_name:
             return f"Folder: {folder_name}"
+        cams = list(state.get("camera_models") or ())
+        if cams:
+            if len(cams) == 1:
+                c = cams[0]
+                return f"Camera: {'No Camera Recorded' if c == '__NO_CAMERA__' else c}"
+            return f"Cameras: {len(cams)} selected"
         cam = state.get("camera_model")
         if cam:
             return f"Camera: {'No Camera Recorded' if cam == '__NO_CAMERA__' else cam}"
@@ -3264,6 +3277,12 @@ class PhotoGalleryMainWindow(QMainWindow):
     def _active_place_chip_label(self, state: dict[str, Any]) -> str | None:
         if self._active_map_location_label:
             return self._active_map_location_label
+        locs = list(state.get("locations") or ())
+        if len(locs) > 1:
+            labels = [", ".join(p for p in (ci, s, c) if p) for c, s, ci in locs]
+            labels = [lbl for lbl in labels if lbl]
+            if labels:
+                return f"📍 {' + '.join(labels)}"
         parts = [
             p
             for p in (
@@ -3294,7 +3313,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             or self._has_active_filter_facets()
             or getattr(self, "_active_similar_label", None)
             or bool(getattr(self, "_active_subject_label", ""))
-            or bool(state.get("camera_model"))
+            or bool(state.get("camera_models") or state.get("camera_model"))
         ):
             self.scope_bar.show()
         else:
@@ -3378,6 +3397,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             or state.get("flag_filter") is not None
             or state.get("edited_only")
             or state.get("edited_filter") is not None
+            or bool(state.get("dates"))
             or state.get("date_year") is not None
             or state.get("date_month") is not None
             or state.get("date_day") is not None
@@ -3387,10 +3407,13 @@ class PhotoGalleryMainWindow(QMainWindow):
             or self._active_map_location_label is not None
             or getattr(self, "_active_similar_seed_id", None) is not None
             or getattr(self, "_active_similar_order", None) is not None
+            or bool(state.get("locations"))
             or state.get("location_country") is not None
             or state.get("location_state") is not None
             or state.get("location_city") is not None
+            or bool(state.get("camera_models"))
             or state.get("camera_model") is not None
+            or bool(state.get("active_subject_keys"))
             or bool(getattr(self, "_active_subject_label", ""))
             or (getattr(self, "_active_subject_ids", None) is not None)
             or getattr(self, "_active_special_people_filter", None) is not None
@@ -4401,12 +4424,14 @@ class PhotoGalleryMainWindow(QMainWindow):
         is_search = bool(self._search_text and self._search_text.strip())
         is_scoped = bool(
             spec.folder_id
+            or spec.folder_ids
             or (hasattr(self, "left_nav_dock") and self.left_nav_dock.selected_folder_name() is not None)
             or spec.include_tag_ids
             or spec.exclude_tag_ids
             or spec.untagged_only
             or spec.person_ids
             or spec.date_year
+            or spec.dates
             or spec.ratings
             or spec.flagged_only
             or (spec.flag_filter is not None)
@@ -4419,7 +4444,9 @@ class PhotoGalleryMainWindow(QMainWindow):
             or spec.location_country
             or spec.location_state
             or spec.location_city
+            or spec.locations
             or spec.camera_model
+            or spec.camera_models
             or (subj_order is not None)
         )
         is_library_empty = False
@@ -7480,6 +7507,10 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._active_map_media_ids = None
             self._active_bbox = None
             self._active_map_location_label = None
+            cur_locs = getattr(self.left_nav_dock, "_locations", [])
+            req_tup = ((country or "").strip(), (state or "").strip(), (city or "").strip())
+            if cur_locs == [req_tup] and self.left_nav_dock._folder_id is None and self.left_nav_dock._album_id is None:
+                return
             self.left_nav_dock.select_place(country, state, city, clear_scope=True)
 
     def filter_gallery_to_map_selection(
@@ -9597,6 +9628,74 @@ class PhotoGalleryMainWindow(QMainWindow):
     def _on_subjects_section_clicked(self) -> None:
         if getattr(self, "semantic_engine", None) is not None and not self.semantic_engine.is_available():
             self._ensure_semantic_addon_with_prompt()
+
+    def _on_subjects_selected(self, subjects: Sequence[tuple[str, str]]) -> None:
+        """Filters gallery by one or more selected AI Subject presets (union ranked by best match)."""
+        subj_list = [(str(k), str(l)) for k, l in subjects if k]
+        if not subj_list:
+            return
+        if len(subj_list) == 1:
+            self._on_subject_selected(subj_list[0][0], subj_list[0][1])
+            return
+        if getattr(self, "semantic_repo", None) is None or getattr(self, "semantic_engine", None) is None:
+            return
+        from src.core.semantic_engine import SUBJECT_PRESETS
+
+        if not self.semantic_engine.is_available():
+            if self._ensure_semantic_addon_with_prompt():
+                joined = " + ".join(l for _, l in subj_list)
+                self.show_status_message(
+                    f"✓ MobileCLIP-S1 installed — indexing photos for '{joined}'...",
+                    4500,
+                )
+            return
+
+        joined_label = " + ".join(l for _, l in subj_list)
+        if self.semantic_repo.count_indexed() == 0:
+            self._start_semantic_worker(force=True)
+            self._active_subject_ids = []
+            self._active_subject_label = joined_label
+            self._update_scope_bar_visibility()
+            self.rebuild_and_run_query()
+            self.show_status_message(
+                f"Indexing photos for AI Subjects '{joined_label}' in the background...",
+                4500,
+            )
+            return
+
+        subj_vecs = self.semantic_repo.get_subject_vectors()
+        scope_ids = self._visible_non_private_media_ids()
+        best_scores: dict[int, float] = {}
+        for subject_key, _lbl in subj_list:
+            qvec = subj_vecs.get(subject_key)
+            if qvec is None:
+                for key, _plbl, prompts, _thr in SUBJECT_PRESETS:
+                    if key == subject_key and self.semantic_engine.is_available():
+                        vecs = [self.semantic_engine.encode_text(p) for p in prompts]
+                        valid_v = [v for v in vecs if v is not None]
+                        if valid_v:
+                            qvec = sum(valid_v) / float(len(valid_v))
+                            self.semantic_repo.put_subject_vectors({subject_key: qvec})
+                        break
+            if qvec is None:
+                continue
+            thr = next((t for k, _l, _p, t in SUBJECT_PRESETS if k == subject_key), 0.24)
+            hits = self.semantic_engine.query_by_vector(
+                self.semantic_repo, qvec, threshold=thr, limit=2000, scope_ids=scope_ids
+            )
+            for mid, sc in hits:
+                m_int = int(mid)
+                if m_int not in best_scores or float(sc) > best_scores[m_int]:
+                    best_scores[m_int] = float(sc)
+
+        ordered = [mid for mid, _sc in sorted(best_scores.items(), key=lambda kv: -kv[1])]
+        self._active_subject_ids = ordered
+        self._active_subject_label = joined_label
+        if self.central_stack.currentWidget() != self.grid_view:
+            self.show_grid_view()
+        self._update_scope_bar_visibility()
+        self.rebuild_and_run_query()
+        self.show_status_message(f"✓ Subjects '{joined_label}': {len(ordered):,} match(es)", 3500)
 
     def _on_subject_selected(self, subject_key: str, label: str) -> None:
         if getattr(self, "semantic_repo", None) is None or getattr(self, "semantic_engine", None) is None:

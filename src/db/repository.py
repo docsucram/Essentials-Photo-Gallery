@@ -209,10 +209,12 @@ class FilterQuerySpec:
     """Immutable specification of active navigation tree, ribbon, and search filters."""
 
     folder_id: int | None = None
+    folder_ids: tuple[int, ...] = ()
     include_subfolders: bool = True
     date_year: int | None = None
     date_month: int | None = None
     date_day: int | None = None
+    dates: tuple[tuple[int, int | None, int | None], ...] = ()
     date_from: int | None = None
     date_to: int | None = None
     include_tag_ids: tuple[int, ...] = ()
@@ -234,7 +236,9 @@ class FilterQuerySpec:
     location_country: str | None = None
     location_state: str | None = None
     location_city: str | None = None
+    locations: tuple[tuple[str, str, str], ...] = ()
     camera_model: str | None = None
+    camera_models: tuple[str, ...] = ()
     group_by: str = "month"  # "month", "year", "date", "rating", "folder", "media_type", "flag", "size", "none"
     sort_by: str = "date"  # "date", "name", "rating", "size", "media_type"
     sort_reverse: bool = False
@@ -1107,37 +1111,71 @@ class CatalogRepository:
             else:
                 where_clauses.append("(m.stack_parent_id IS NULL OR m.stack_parent_id = m.id)")
 
-        # 1. Folder scope
+        # 1. Folder scope (supports single or multi-folder selection)
+        raw_fids = list(getattr(spec, "folder_ids", ()) or ())
         if spec.folder_id is not None:
+            raw_fids.append(spec.folder_id)
+        eff_fids = tuple(dict.fromkeys(int(x) for x in raw_fids if x is not None))
+        if eff_fids:
             if spec.include_subfolders:
-                where_clauses.append(
-                    """
-                    m.folder_id IN (
-                        WITH RECURSIVE subfolder_tree(id) AS (
-                            SELECT ?
-                            UNION ALL
-                            SELECT f.id FROM folders f
-                            JOIN subfolder_tree st ON f.parent_id = st.id
+                if len(eff_fids) == 1:
+                    where_clauses.append(
+                        """
+                        m.folder_id IN (
+                            WITH RECURSIVE subfolder_tree(id) AS (
+                                SELECT ?
+                                UNION ALL
+                                SELECT f.id FROM folders f
+                                JOIN subfolder_tree st ON f.parent_id = st.id
+                            )
+                            SELECT id FROM subfolder_tree
                         )
-                        SELECT id FROM subfolder_tree
+                        """
                     )
-                    """
-                )
-                params.append(spec.folder_id)
+                    params.append(eff_fids[0])
+                else:
+                    values_sql = ", ".join("(?)" for _ in eff_fids)
+                    where_clauses.append(
+                        f"""
+                        m.folder_id IN (
+                            WITH RECURSIVE subfolder_tree(id) AS (
+                                VALUES {values_sql}
+                                UNION ALL
+                                SELECT f.id FROM folders f
+                                JOIN subfolder_tree st ON f.parent_id = st.id
+                            )
+                            SELECT id FROM subfolder_tree
+                        )
+                        """
+                    )
+                    params.extend(eff_fids)
             else:
-                where_clauses.append("m.folder_id = ?")
-                params.append(spec.folder_id)
+                if len(eff_fids) == 1:
+                    where_clauses.append("m.folder_id = ?")
+                    params.append(eff_fids[0])
+                else:
+                    placeholders = ",".join("?" for _ in eff_fids)
+                    where_clauses.append(f"m.folder_id IN ({placeholders})")
+                    params.extend(eff_fids)
 
         # 2. Date Taken range (uses idx_media_date_taken without per-row strftime overhead)
         if spec.date_from is not None and spec.date_to is not None:
             where_clauses.append("m.date_taken BETWEEN ? AND ?")
             params.extend([int(spec.date_from), int(spec.date_to)])
-        elif spec.date_year is not None:
-            start_ts, end_ts = _compute_date_bounds_utc(
-                spec.date_year, spec.date_month, spec.date_day
-            )
-            where_clauses.append("m.date_taken BETWEEN ? AND ?")
-            params.extend([start_ts, end_ts])
+        else:
+            eff_dates = list(getattr(spec, "dates", ()) or ())
+            if not eff_dates and spec.date_year is not None:
+                eff_dates = [(spec.date_year, spec.date_month, spec.date_day)]
+            if eff_dates:
+                date_subclauses: list[str] = []
+                for d_y, d_m, d_d in eff_dates:
+                    if d_y is None:
+                        continue
+                    start_ts, end_ts = _compute_date_bounds_utc(int(d_y), d_m, d_d)
+                    date_subclauses.append("(m.date_taken BETWEEN ? AND ?)")
+                    params.extend([start_ts, end_ts])
+                if date_subclauses:
+                    where_clauses.append(f"({' OR '.join(date_subclauses)})")
 
         # 3. Hierarchical Descriptive Tags (Boolean AND / OR / NOT via tag_closure)
         if spec.untagged_only:
@@ -1265,56 +1303,74 @@ class CatalogRepository:
                     params.extend(chunk)
                 where_clauses.append(f"({' OR '.join(id_subclauses)})")
 
-        # 6c. Place / Location hierarchy filter (from Places nav tree)
-        loc_country = (getattr(spec, "location_country", None) or "").strip()
-        loc_state = (getattr(spec, "location_state", None) or "").strip()
-        loc_city = (getattr(spec, "location_city", None) or "").strip()
-        if loc_country or loc_state or loc_city:
-            if loc_country:
-                where_clauses.append("TRIM(COALESCE(m.location_country, '')) = ?")
-                params.append(loc_country)
-            if loc_state:
-                if loc_country in ("United Kingdom", "GB", "UK") and loc_state in (
-                    "England",
-                    "Wales",
-                    "Scotland",
-                    "Northern Ireland",
-                ):
-                    uk_aliases = {
-                        "England": ("ENG", "ENGLAND"),
-                        "Wales": ("WLS", "WALES"),
-                        "Scotland": ("SCT", "SCOTLAND"),
-                        "Northern Ireland": ("NIR", "NORTHERN IRELAND"),
-                    }[loc_state]
-                    where_clauses.append(
-                        "UPPER(TRIM(COALESCE(m.location_state, ''))) IN (?, ?)"
-                    )
-                    params.extend(uk_aliases)
-                else:
-                    where_clauses.append("TRIM(COALESCE(m.location_state, '')) = ?")
-                    params.append(loc_state)
-            if loc_city:
-                where_clauses.append("TRIM(COALESCE(m.location_city, '')) = ?")
-                params.append(loc_city)
+        # 6c. Place / Location hierarchy filter (single or multi-selection from Places nav tree)
+        eff_locs: list[tuple[str, str, str]] = [
+            ((c or "").strip(), (s or "").strip(), (ci or "").strip())
+            for c, s, ci in (getattr(spec, "locations", ()) or ())
+            if (c or "").strip() or (s or "").strip() or (ci or "").strip()
+        ]
+        if not eff_locs:
+            loc_country = (getattr(spec, "location_country", None) or "").strip()
+            loc_state = (getattr(spec, "location_state", None) or "").strip()
+            loc_city = (getattr(spec, "location_city", None) or "").strip()
+            if loc_country or loc_state or loc_city:
+                eff_locs = [(loc_country, loc_state, loc_city)]
+        if eff_locs:
+            uk_aliases_map = {
+                "England": ("ENG", "ENGLAND"),
+                "Wales": ("WLS", "WALES"),
+                "Scotland": ("SCT", "SCOTLAND"),
+                "Northern Ireland": ("NIR", "NORTHERN IRELAND"),
+            }
+            loc_or_parts: list[str] = []
+            for loc_c, loc_s, loc_ci in eff_locs:
+                sub_parts: list[str] = []
+                if loc_c:
+                    sub_parts.append("TRIM(COALESCE(m.location_country, '')) = ?")
+                    params.append(loc_c)
+                if loc_s:
+                    if loc_c in ("United Kingdom", "GB", "UK") and loc_s in uk_aliases_map:
+                        sub_parts.append("UPPER(TRIM(COALESCE(m.location_state, ''))) IN (?, ?)")
+                        params.extend(uk_aliases_map[loc_s])
+                    else:
+                        sub_parts.append("TRIM(COALESCE(m.location_state, '')) = ?")
+                        params.append(loc_s)
+                if loc_ci:
+                    sub_parts.append("TRIM(COALESCE(m.location_city, '')) = ?")
+                    params.append(loc_ci)
+                if sub_parts:
+                    loc_or_parts.append(f"({' AND '.join(sub_parts)})")
+            if loc_or_parts:
+                where_clauses.append(f"({' OR '.join(loc_or_parts)})")
 
-        # 6d. Camera Make / Model filter (from optional Cameras nav section)
-        cam_filter = (getattr(spec, "camera_model", None) or "").strip()
-        if cam_filter:
-            if cam_filter == "__NO_CAMERA__":
-                where_clauses.append(
-                    "(COALESCE(TRIM(m.camera_make), '') = '' AND COALESCE(TRIM(m.camera_model), '') = '')"
-                )
-            else:
-                norm_cam_expr = (
-                    "TRIM(CASE "
-                    "WHEN COALESCE(TRIM(m.camera_make), '') != '' AND COALESCE(TRIM(m.camera_model), '') != '' "
-                    "AND LOWER(TRIM(m.camera_model)) NOT LIKE LOWER(TRIM(m.camera_make)) || '%' "
-                    "THEN TRIM(m.camera_make) || ' ' || TRIM(m.camera_model) "
-                    "WHEN COALESCE(TRIM(m.camera_model), '') != '' THEN TRIM(m.camera_model) "
-                    "ELSE COALESCE(TRIM(m.camera_make), '') END)"
-                )
-                where_clauses.append(f"LOWER({norm_cam_expr}) = LOWER(?)")
-                params.append(cam_filter)
+        # 6d. Camera Make / Model filter (single or multi-selection from Cameras nav section)
+        eff_cams: list[str] = [
+            c.strip() for c in (getattr(spec, "camera_models", ()) or ()) if (c or "").strip()
+        ]
+        if not eff_cams:
+            cam_filter = (getattr(spec, "camera_model", None) or "").strip()
+            if cam_filter:
+                eff_cams = [cam_filter]
+        if eff_cams:
+            norm_cam_expr = (
+                "TRIM(CASE "
+                "WHEN COALESCE(TRIM(m.camera_make), '') != '' AND COALESCE(TRIM(m.camera_model), '') != '' "
+                "AND LOWER(TRIM(m.camera_model)) NOT LIKE LOWER(TRIM(m.camera_make)) || '%' "
+                "THEN TRIM(m.camera_make) || ' ' || TRIM(m.camera_model) "
+                "WHEN COALESCE(TRIM(m.camera_model), '') != '' THEN TRIM(m.camera_model) "
+                "ELSE COALESCE(TRIM(m.camera_make), '') END)"
+            )
+            cam_or_parts: list[str] = []
+            for cam_entry in eff_cams:
+                if cam_entry == "__NO_CAMERA__":
+                    cam_or_parts.append(
+                        "(COALESCE(TRIM(m.camera_make), '') = '' AND COALESCE(TRIM(m.camera_model), '') = '')"
+                    )
+                else:
+                    cam_or_parts.append(f"LOWER({norm_cam_expr}) = LOWER(?)")
+                    params.append(cam_entry)
+            if cam_or_parts:
+                where_clauses.append(f"({' OR '.join(cam_or_parts)})")
 
         # 7. World Map Bounding Box filter (via media_rtree virtual table or media.lat/lon fallback)
         if spec.bbox is not None:

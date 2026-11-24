@@ -16,7 +16,19 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
-from PySide6.QtCore import QByteArray, QMimeData, QPoint, QSettings, QSize, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import (
+    QByteArray,
+    QItemSelectionModel,
+    QMimeData,
+    QPoint,
+    QSettings,
+    QSize,
+    Qt,
+    QTimer,
+    QUrl,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -475,6 +487,7 @@ class LeftNavigationDock(QDockWidget):
     tag_hierarchy_changed = Signal()
     place_selected = Signal(str, str, str)  # country, state, city
     subject_selected = Signal(str, str)     # subject_key, display_label
+    subjects_selected = Signal(list)        # list[(subject_key, display_label)]
     subjects_section_clicked = Signal()
     new_album_requested = Signal()
     rename_album_requested = Signal(int, str)
@@ -501,11 +514,14 @@ class LeftNavigationDock(QDockWidget):
 
         # Internal filter state
         self._folder_id: int | None = None
+        self._folder_ids: list[int] = []
         self._folder_name: str = "All folders"
+        self._folder_names: list[str] = []
         self._include_subfolders: bool = True
         self._date_year: int | None = None
         self._date_month: int | None = None
         self._date_day: int | None = None
+        self._dates: list[tuple[int, int | None, int | None]] = []
         self._include_tag_ids: set[int] = set()
         self._exclude_tag_ids: set[int] = set()
         self._tag_boolean_mode: Literal["AND", "OR"] = "AND"
@@ -514,6 +530,7 @@ class LeftNavigationDock(QDockWidget):
         self._person_boolean_mode: Literal["AND", "OR"] = "OR"
         self._ratings: set[int] = set()
         self._flagged_only: bool = False
+        self._flag_filter: int | None = None
         self._edited_only: bool = False
         self._edited_filter: int | None = None
         self._media_type: Literal["all", "image", "video", "raw", "motion"] = "all"
@@ -522,9 +539,13 @@ class LeftNavigationDock(QDockWidget):
         self._location_country: str | None = None
         self._location_state: str | None = None
         self._location_city: str | None = None
+        self._locations: list[tuple[str, str, str]] = []
         self._camera_model: str | None = None
+        self._camera_models: list[str] = []
         self._active_subject_key: str | None = None
         self._active_subject_label: str = ""
+        self._active_subject_keys: list[str] = []
+        self._active_subject_labels: list[str] = []
         self._album_id: int | None = None
         self._album_name: str = ""
         self._smart_album_id: int | None = None
@@ -1225,10 +1246,64 @@ class LeftNavigationDock(QDockWidget):
             finally:
                 self.tree.blockSignals(was_blocked)
 
+    def _mark_descendants_selected(
+        self,
+        item: QTreeWidgetItem,
+        selected: bool = True,
+        *,
+        skip_excluded_tags: bool = False,
+    ) -> None:
+        """Recursively marks instantiated child tree nodes selected to match WLPG subtree highlighting."""
+        for i in range(item.childCount()):
+            child = item.child(i)
+            if child is None:
+                continue
+            if skip_excluded_tags and child.data(0, _NODE_TYPE_ROLE) == "tag":
+                tid = child.data(0, _NODE_PAYLOAD_ROLE)
+                if tid is not None and int(tid) in self._exclude_tag_ids:
+                    self._mark_descendants_selected(child, selected, skip_excluded_tags=skip_excluded_tags)
+                    continue
+            child.setSelected(selected)
+            if child.childCount() > 0:
+                self._mark_descendants_selected(child, selected, skip_excluded_tags=skip_excluded_tags)
+
+    @staticmethod
+    def _prune_redundant_descendant_items(items: list[QTreeWidgetItem]) -> list[QTreeWidgetItem]:
+        """Filters out any tree item whose ancestor is also present in `items`."""
+        if len(items) <= 1:
+            return list(items)
+        item_set = set(items)
+        result: list[QTreeWidgetItem] = []
+        for it in items:
+            has_selected_ancestor = False
+            p = it.parent()
+            while p is not None:
+                if p in item_set:
+                    has_selected_ancestor = True
+                    break
+                p = p.parent()
+            if not has_selected_ancestor:
+                result.append(it)
+        return result
+
     @Slot(QTreeWidgetItem)
     def _on_tree_item_expanded(self, item: QTreeWidgetItem) -> None:
-        if item is not None and item.data(0, _NODE_TYPE_ROLE) == "date":
+        if item is None:
+            return
+        ntype = item.data(0, _NODE_TYPE_ROLE)
+        if ntype == "date":
             self._ensure_date_month_days_populated(item)
+        if item.isSelected() and (
+            ntype in ("date", "tag", "place")
+            or (ntype == "folder" and self._include_subfolders)
+        ):
+            prev_block = self.tree.blockSignals(True)
+            try:
+                self._mark_descendants_selected(
+                    item, True, skip_excluded_tags=(ntype == "tag")
+                )
+            finally:
+                self.tree.blockSignals(prev_block)
 
     def refresh_trees(
         self,
@@ -1239,10 +1314,16 @@ class LeftNavigationDock(QDockWidget):
         """Populates Folders, Date Taken, Descriptive Tags, People, and Ratings from catalog.db."""
         self._repo = repo
         self._updating_tree = True
+        sb = self.tree.verticalScrollBar()
+        prev_scroll_y = sb.value() if sb is not None else 0
         self.tree.blockSignals(True)
         self.tree.setUpdatesEnabled(False)
         try:
-            had_existing_folders = bool(self._folder_items)
+            had_existing_tree = hasattr(self, "root_all") and self.root_all is not None
+            was_all_expanded = self.root_all.isExpanded() if hasattr(self, "root_all") else True
+            was_dates_expanded = self.root_dates.isExpanded() if hasattr(self, "root_dates") else True
+            was_tags_expanded = self.root_tags.isExpanded() if hasattr(self, "root_tags") else True
+            was_ratings_expanded = self.root_ratings.isExpanded() if hasattr(self, "root_ratings") else False
             was_people_expanded = self.root_people.isExpanded() if hasattr(self, "root_people") else False
             was_places_expanded = self.root_places.isExpanded() if hasattr(self, "root_places") else False
             was_cameras_expanded = self.root_cameras.isExpanded() if hasattr(self, "root_cameras") else False
@@ -1255,6 +1336,32 @@ class LeftNavigationDock(QDockWidget):
             expanded_folder_ids = {
                 fid for fid, itm in self._folder_items.items() if itm.isExpanded()
             }
+            expanded_tag_ids = {
+                tid for tid, itm in self._tag_items.items() if itm.isExpanded()
+            }
+            expanded_date_payloads: set[tuple] = set()
+            if hasattr(self, "root_dates") and self.root_dates is not None:
+                def _collect_expanded_payloads(parent_item: QTreeWidgetItem, out: set[tuple]) -> None:
+                    for idx in range(parent_item.childCount()):
+                        ch = parent_item.child(idx)
+                        if ch is not None and ch.isExpanded():
+                            pl = ch.data(0, _NODE_PAYLOAD_ROLE)
+                            if isinstance(pl, tuple):
+                                out.add(pl)
+                            _collect_expanded_payloads(ch, out)
+                _collect_expanded_payloads(self.root_dates, expanded_date_payloads)
+            expanded_place_payloads: set[tuple] = set()
+            if hasattr(self, "root_places") and self.root_places is not None:
+                def _collect_expanded_places(parent_item: QTreeWidgetItem, out: set[tuple]) -> None:
+                    for idx in range(parent_item.childCount()):
+                        ch = parent_item.child(idx)
+                        if ch is not None and ch.isExpanded():
+                            pl = ch.data(0, _NODE_PAYLOAD_ROLE)
+                            if isinstance(pl, tuple):
+                                out.add(pl)
+                            _collect_expanded_places(ch, out)
+                _collect_expanded_places(self.root_places, expanded_place_payloads)
+
             self._init_root_sections()
             self.tree.blockSignals(True)
 
@@ -1523,22 +1630,56 @@ class LeftNavigationDock(QDockWidget):
                     self.root_cameras.addChild(c_item)
                     self._camera_items[cam_name.lower()] = c_item
 
-            self.root_folders.setExpanded(True)
-            self.root_tags.setExpanded(True)
+            if hasattr(self, "root_all") and self.root_all is not None:
+                self.root_all.setExpanded(was_all_expanded if had_existing_tree else True)
+            if hasattr(self, "root_dates") and self.root_dates is not None:
+                self.root_dates.setExpanded(was_dates_expanded if had_existing_tree else True)
+                if expanded_date_payloads:
+                    for yi in range(self.root_dates.childCount()):
+                        y_itm = self.root_dates.child(yi)
+                        if y_itm is None:
+                            continue
+                        if y_itm.data(0, _NODE_PAYLOAD_ROLE) in expanded_date_payloads:
+                            y_itm.setExpanded(True)
+                        for mi in range(y_itm.childCount()):
+                            m_itm = y_itm.child(mi)
+                            if m_itm is not None and m_itm.data(0, _NODE_PAYLOAD_ROLE) in expanded_date_payloads:
+                                self._ensure_date_month_days_populated(m_itm)
+                                m_itm.setExpanded(True)
+            if hasattr(self, "root_tags") and self.root_tags is not None:
+                self.root_tags.setExpanded(was_tags_expanded if had_existing_tree else True)
+                for tid_exp in expanded_tag_ids:
+                    t_itm = self._tag_items.get(tid_exp)
+                    if t_itm is not None:
+                        t_itm.setExpanded(True)
+            if hasattr(self, "root_ratings") and self.root_ratings is not None:
+                self.root_ratings.setExpanded(was_ratings_expanded)
             self.root_people.setExpanded(was_people_expanded)
-            if hasattr(self, "root_places"):
+            if hasattr(self, "root_places") and self.root_places is not None:
                 self.root_places.setExpanded(was_places_expanded)
+                if expanded_place_payloads:
+                    def _restore_expanded_places(parent_item: QTreeWidgetItem) -> None:
+                        for idx in range(parent_item.childCount()):
+                            ch = parent_item.child(idx)
+                            if ch is not None:
+                                if ch.data(0, _NODE_PAYLOAD_ROLE) in expanded_place_payloads:
+                                    ch.setExpanded(True)
+                                if ch.childCount() > 0:
+                                    _restore_expanded_places(ch)
+                    _restore_expanded_places(self.root_places)
             if hasattr(self, "root_cameras"):
-                self.root_cameras.setExpanded(was_cameras_expanded or bool(self._camera_model))
+                self.root_cameras.setExpanded(was_cameras_expanded or bool(self._camera_models or self._camera_model))
             self._populate_subjects_children(self._subject_counts)
             if hasattr(self, "root_subjects"):
-                self.root_subjects.setExpanded(was_subjects_expanded or bool(self._active_subject_key))
+                self.root_subjects.setExpanded(was_subjects_expanded or bool(self._active_subject_keys or self._active_subject_key))
             if getattr(self, "_dark_mode", False):
                 self._sync_tree_item_colors()
-            self._sync_tree_selection()
+            self._sync_tree_selection(scroll_to_selected=False)
         finally:
             self.tree.blockSignals(False)
             self.tree.setUpdatesEnabled(True)
+            if sb is not None:
+                sb.setValue(prev_scroll_y)
             self._updating_tree = False
         self._update_summary_label()
 
@@ -1551,13 +1692,16 @@ class LeftNavigationDock(QDockWidget):
         self._subject_items.clear()
         subj_icon = make_wlpg_icon("subjects", 16)
         cnt_map = counts if counts is not None else self._subject_counts
+        active_keys = set(self._active_subject_keys) if self._active_subject_keys else (
+            {self._active_subject_key} if self._active_subject_key else set()
+        )
         for key, label, _prompts, _thr in SUBJECT_PRESETS:
             cnt = int(cnt_map.get(key, 0))
             s_item = QTreeWidgetItem([f"{label} ({cnt})"])
             s_item.setData(0, _NODE_TYPE_ROLE, "subject_item")
             s_item.setData(0, _NODE_PAYLOAD_ROLE, (key, label))
             s_item.setIcon(0, subj_icon)
-            if self._active_subject_key == key:
+            if key in active_keys:
                 s_item.setSelected(True)
             self.root_subjects.addChild(s_item)
             self._subject_items[key] = s_item
@@ -1569,17 +1713,31 @@ class LeftNavigationDock(QDockWidget):
         if not hasattr(self, "root_subjects") or self.root_subjects is None:
             return
         self._updating_tree = True
+        sb = self.tree.verticalScrollBar()
+        prev_scroll_y = sb.value() if sb is not None else 0
         self.tree.blockSignals(True)
         try:
             self._populate_subjects_children(self._subject_counts)
         finally:
             self.tree.blockSignals(False)
+            if sb is not None:
+                sb.setValue(prev_scroll_y)
             self._updating_tree = False
 
-    def set_active_subject(self, subject_key: str | None, label: str = "") -> None:
-        self._active_subject_key = subject_key
-        self._active_subject_label = str(label or "")
-        self._sync_tree_selection()
+    def set_active_subject(
+        self, subject_key: str | None, label: str = ""
+    ) -> None:
+        if subject_key:
+            self._active_subject_keys = [str(subject_key)]
+            self._active_subject_labels = [str(label or subject_key)]
+            self._active_subject_key = str(subject_key)
+            self._active_subject_label = str(label or "")
+        else:
+            self._active_subject_keys = []
+            self._active_subject_labels = []
+            self._active_subject_key = None
+            self._active_subject_label = ""
+        self._sync_tree_selection(scroll_to_selected=False)
         self._update_summary_label()
 
     def refresh_people_only(self, repo: CatalogRepository) -> list[dict[str, Any]]:
@@ -1590,6 +1748,8 @@ class LeftNavigationDock(QDockWidget):
             self.refresh_trees(repo, preloaded_people=people_rows)
             return people_rows
         self._updating_tree = True
+        sb = self.tree.verticalScrollBar()
+        prev_scroll_y = sb.value() if sb is not None else 0
         self.tree.blockSignals(True)
         self.tree.setUpdatesEnabled(False)
         try:
@@ -1623,6 +1783,8 @@ class LeftNavigationDock(QDockWidget):
         finally:
             self.tree.blockSignals(False)
             self.tree.setUpdatesEnabled(True)
+            if sb is not None:
+                sb.setValue(prev_scroll_y)
             self._updating_tree = False
         return people_rows
 
@@ -1765,14 +1927,18 @@ class LeftNavigationDock(QDockWidget):
         """Refresh only the Static and Smart Albums counts without rebuilding the full tree."""
         self._repo = repo
         self._updating_tree = True
+        sb = self.tree.verticalScrollBar()
+        prev_scroll_y = sb.value() if sb is not None else 0
         self.tree.blockSignals(True)
         try:
             self._populate_albums_section(repo)
             if getattr(self, "_dark_mode", False):
                 self._sync_tree_item_colors()
-            self._sync_tree_selection()
+            self._sync_tree_selection(scroll_to_selected=False)
         finally:
             self.tree.blockSignals(False)
+            if sb is not None:
+                sb.setValue(prev_scroll_y)
             self._updating_tree = False
         self._update_summary_label()
 
@@ -1842,7 +2008,7 @@ class LeftNavigationDock(QDockWidget):
     # -------------------------------------------------------------------------
     # Visual Selection Synchronization
     # -------------------------------------------------------------------------
-    def _sync_tree_selection(self) -> None:
+    def _sync_tree_selection(self, *, scroll_to_selected: bool = True) -> None:
         """Synchronizes tree node visual selection (.setSelected) with internal filter state."""
         prev_block = self.tree.blockSignals(True)
         try:
@@ -1858,7 +2024,8 @@ class LeftNavigationDock(QDockWidget):
                 while p:
                     p.setExpanded(True)
                     p = p.parent()
-                self.tree.scrollToItem(a_item)
+                if scroll_to_selected:
+                    self.tree.scrollToItem(a_item)
                 has_album = True
             elif self._smart_album_id is not None and self._smart_album_id in self._smart_album_items:
                 s_item = self._smart_album_items[self._smart_album_id]
@@ -1868,70 +2035,113 @@ class LeftNavigationDock(QDockWidget):
                 while p:
                     p.setExpanded(True)
                     p = p.parent()
-                self.tree.scrollToItem(s_item)
+                if scroll_to_selected:
+                    self.tree.scrollToItem(s_item)
                 has_album = True
 
-            # 1. Folders
+            # 1. Folders (single or multi-selection + descendant subfolder highlight when Subfolders is ON)
             has_folder = False
-            if not has_album and self._folder_id is not None and self._folder_id in self._folder_items:
-                f_item = self._folder_items[self._folder_id]
-                self._folder_name = f_item.text(0)
-                f_item.setSelected(True)
-                self.tree.setCurrentItem(f_item)
-                p = f_item.parent()
-                while p:
-                    p.setExpanded(True)
-                    p = p.parent()
-                self.tree.scrollToItem(f_item)
-                has_folder = True
+            eff_folder_ids = list(self._folder_ids) if self._folder_ids else (
+                [self._folder_id] if self._folder_id is not None else []
+            )
+            if not has_album and eff_folder_ids:
+                first_f_item: QTreeWidgetItem | None = None
+                names: list[str] = []
+                for fid in eff_folder_ids:
+                    f_item = self._folder_items.get(fid)
+                    if f_item is None:
+                        continue
+                    names.append(f_item.text(0))
+                    f_item.setSelected(True)
+                    if self._include_subfolders:
+                        self._mark_descendants_selected(f_item, True)
+                    p = f_item.parent()
+                    while p:
+                        p.setExpanded(True)
+                        p = p.parent()
+                    if first_f_item is None:
+                        first_f_item = f_item
+                    has_folder = True
+                if names:
+                    self._folder_names = names
+                    self._folder_name = names[0] if len(names) == 1 else f"{len(names)} folders"
+                if first_f_item is not None:
+                    self.tree.setCurrentItem(
+                        first_f_item, 0, QItemSelectionModel.SelectionFlag.NoUpdate
+                    )
+                    if scroll_to_selected:
+                        self.tree.scrollToItem(first_f_item)
 
-            # 2. Dates
+            # 2. Dates (single or multi-selection + descendant Month/Day highlight)
             has_date = False
-            if not has_folder and self._date_year is not None and hasattr(self, "root_dates") and self.root_dates is not None:
-                target_payload = (self._date_year, self._date_month, self._date_day)
-
-                def find_date_item(parent_item: QTreeWidgetItem) -> QTreeWidgetItem | None:
+            eff_dates = list(self._dates) if self._dates else (
+                [(self._date_year, self._date_month, self._date_day)]
+                if self._date_year is not None
+                else []
+            )
+            if eff_dates and hasattr(self, "root_dates") and self.root_dates is not None:
+                def find_date_item(
+                    parent_item: QTreeWidgetItem,
+                    target_pl: tuple[int, int | None, int | None],
+                ) -> QTreeWidgetItem | None:
+                    ty, tm, td = target_pl
                     for i in range(parent_item.childCount()):
                         child = parent_item.child(i)
                         if child is not None:
                             c_payload = child.data(0, _NODE_PAYLOAD_ROLE)
-                            if c_payload == target_payload:
+                            if c_payload == target_pl:
                                 return child
                             if (
-                                self._date_day is not None
+                                td is not None
                                 and isinstance(c_payload, tuple)
                                 and len(c_payload) == 3
                                 and c_payload[2] is None
                                 and c_payload[1] is not None
-                                and c_payload[0] == self._date_year
-                                and c_payload[1] == self._date_month
+                                and c_payload[0] == ty
+                                and c_payload[1] == tm
                             ):
                                 self._ensure_date_month_days_populated(child)
-                            found = find_date_item(child)
+                            found = find_date_item(child, target_pl)
                             if found is not None:
                                 return found
                     return None
 
-                matched = find_date_item(self.root_dates)
-                if matched is not None:
-                    matched.setSelected(True)
-                    self.tree.setCurrentItem(matched)
-                    p = matched.parent()
-                    while p:
-                        p.setExpanded(True)
-                        p = p.parent()
-                    self.tree.scrollToItem(matched)
-                    has_date = True
+                first_d_item: QTreeWidgetItem | None = None
+                for target_payload in eff_dates:
+                    matched = find_date_item(self.root_dates, target_payload)
+                    if matched is not None:
+                        matched.setSelected(True)
+                        self._mark_descendants_selected(matched, True)
+                        p = matched.parent()
+                        while p:
+                            p.setExpanded(True)
+                            p = p.parent()
+                        if first_d_item is None:
+                            first_d_item = matched
+                        has_date = True
+                if first_d_item is not None and not has_folder:
+                    self.tree.setCurrentItem(
+                        first_d_item, 0, QItemSelectionModel.SelectionFlag.NoUpdate
+                    )
+                    if scroll_to_selected:
+                        self.tree.scrollToItem(first_d_item)
 
-            # 3. Tags
+            # 3. Tags (including descendant subtags visually highlighted under included parent tags)
             for tid, t_item in self._tag_items.items():
                 if tid in self._include_tag_ids:
                     t_item.setSelected(True)
                     self._apply_tag_item_visual_state(t_item, "include")
+                    self._mark_descendants_selected(t_item, True, skip_excluded_tags=True)
                 elif tid in self._exclude_tag_ids:
                     self._apply_tag_item_visual_state(t_item, "exclude")
                 else:
                     self._apply_tag_item_visual_state(t_item, "neutral")
+            # Re-apply include descendant highlights after neutral reset pass
+            for tid in self._include_tag_ids:
+                t_item = self._tag_items.get(tid)
+                if t_item is not None:
+                    t_item.setSelected(True)
+                    self._mark_descendants_selected(t_item, True, skip_excluded_tags=True)
 
             # 4. Untagged
             if hasattr(self, "item_untagged") and self.item_untagged is not None:
@@ -1945,61 +2155,91 @@ class LeftNavigationDock(QDockWidget):
             for r_val, r_item in self._rating_items.items():
                 r_item.setCheckState(0, Qt.Checked if r_val in self._ratings else Qt.Unchecked)
 
-            # 6b. Places
+            # 6b. Places (single or multi-selection + descendant State/City highlight)
             has_place = False
-            if (
-                (self._location_country or self._location_state or self._location_city)
-                and hasattr(self, "root_places")
-                and self.root_places is not None
-            ):
-                target_place = (
-                    self._location_country or "",
-                    self._location_state or "",
-                    self._location_city or "",
-                )
-
-                def find_place_item(parent_item: QTreeWidgetItem) -> QTreeWidgetItem | None:
+            eff_locs = list(self._locations) if self._locations else (
+                [(self._location_country or "", self._location_state or "", self._location_city or "")]
+                if (self._location_country or self._location_state or self._location_city)
+                else []
+            )
+            if eff_locs and hasattr(self, "root_places") and self.root_places is not None:
+                def find_place_item(
+                    parent_item: QTreeWidgetItem, target_pl: tuple[str, str, str]
+                ) -> QTreeWidgetItem | None:
                     for i in range(parent_item.childCount()):
                         child = parent_item.child(i)
                         if child is not None:
-                            if child.data(0, _NODE_PAYLOAD_ROLE) == target_place:
+                            if child.data(0, _NODE_PAYLOAD_ROLE) == target_pl:
                                 return child
-                            found = find_place_item(child)
+                            found = find_place_item(child, target_pl)
                             if found is not None:
                                 return found
                     return None
 
-                matched_place = find_place_item(self.root_places)
-                if matched_place is not None:
-                    matched_place.setSelected(True)
-                    self.tree.setCurrentItem(matched_place)
-                    p = matched_place.parent()
-                    while p:
-                        p.setExpanded(True)
-                        p = p.parent()
-                    self.tree.scrollToItem(matched_place)
-                    has_place = True
+                first_p_item: QTreeWidgetItem | None = None
+                for target_place in eff_locs:
+                    matched_place = find_place_item(self.root_places, target_place)
+                    if matched_place is not None:
+                        matched_place.setSelected(True)
+                        self._mark_descendants_selected(matched_place, True)
+                        p = matched_place.parent()
+                        while p:
+                            p.setExpanded(True)
+                            p = p.parent()
+                        if first_p_item is None:
+                            first_p_item = matched_place
+                        has_place = True
+                if first_p_item is not None and not has_folder:
+                    self.tree.setCurrentItem(
+                        first_p_item, 0, QItemSelectionModel.SelectionFlag.NoUpdate
+                    )
+                    if scroll_to_selected:
+                        self.tree.scrollToItem(first_p_item)
 
-            # 6c. Cameras & Subjects
+            # 6c. Cameras & Subjects (single or multi-selection)
             has_camera = False
-            if self._camera_model and self._camera_items:
-                cam_item = self._camera_items.get(self._camera_model.lower())
-                if cam_item is not None:
-                    cam_item.setSelected(True)
-                    self.tree.setCurrentItem(cam_item)
+            eff_cams = list(self._camera_models) if self._camera_models else (
+                [self._camera_model] if self._camera_model else []
+            )
+            if eff_cams and self._camera_items:
+                first_cam_item: QTreeWidgetItem | None = None
+                for cam_m in eff_cams:
+                    cam_item = self._camera_items.get(cam_m.lower())
+                    if cam_item is not None:
+                        cam_item.setSelected(True)
+                        if first_cam_item is None:
+                            first_cam_item = cam_item
+                        has_camera = True
+                if first_cam_item is not None:
+                    self.tree.setCurrentItem(
+                        first_cam_item, 0, QItemSelectionModel.SelectionFlag.NoUpdate
+                    )
                     if hasattr(self, "root_cameras") and self.root_cameras is not None:
                         self.root_cameras.setExpanded(True)
-                    has_camera = True
+                    if scroll_to_selected:
+                        self.tree.scrollToItem(first_cam_item)
 
             has_subject = False
-            if self._active_subject_key and self._subject_items:
-                subj_item = self._subject_items.get(self._active_subject_key)
-                if subj_item is not None:
-                    subj_item.setSelected(True)
-                    self.tree.setCurrentItem(subj_item)
+            eff_subjs = list(self._active_subject_keys) if self._active_subject_keys else (
+                [self._active_subject_key] if self._active_subject_key else []
+            )
+            if eff_subjs and self._subject_items:
+                first_subj_item: QTreeWidgetItem | None = None
+                for skey in eff_subjs:
+                    subj_item = self._subject_items.get(skey)
+                    if subj_item is not None:
+                        subj_item.setSelected(True)
+                        if first_subj_item is None:
+                            first_subj_item = subj_item
+                        has_subject = True
+                if first_subj_item is not None:
+                    self.tree.setCurrentItem(
+                        first_subj_item, 0, QItemSelectionModel.SelectionFlag.NoUpdate
+                    )
                     if hasattr(self, "root_subjects") and self.root_subjects is not None:
                         self.root_subjects.setExpanded(True)
-                    has_subject = True
+                    if scroll_to_selected:
+                        self.tree.scrollToItem(first_subj_item)
 
             # 7. All photos and videos (highlighted whenever no specific facet filter is active)
             is_all_media = (
@@ -2030,6 +2270,7 @@ class LeftNavigationDock(QDockWidget):
     # -------------------------------------------------------------------------
     def _on_subfolders_toggled(self, checked: bool) -> None:
         self._include_subfolders = bool(checked)
+        self._sync_tree_selection(scroll_to_selected=False)
         self._update_summary_label()
         self.filter_changed.emit()
 
@@ -2045,41 +2286,48 @@ class LeftNavigationDock(QDockWidget):
             return
         selected = self.tree.selectedItems()
         if not selected:
-            self._sync_tree_selection()
+            self._sync_tree_selection(scroll_to_selected=False)
             return
 
-        tag_ids: set[int] = set()
+        tag_items: list[QTreeWidgetItem] = []
         person_ids: set[int] = set()
         untagged_sel = False
-        folder_tuple: tuple[int, str] | None = None
-        date_tuple: tuple | None = None
+        folder_items: list[QTreeWidgetItem] = []
+        date_items: list[QTreeWidgetItem] = []
+        place_items: list[QTreeWidgetItem] = []
         album_tuple: tuple[int, str] | None = None
         smart_album_tuple: tuple[int, str] | None = None
-        camera_val: str | None = None
-        subject_tuple: tuple[str, str] | None = None
+        camera_vals: list[str] = []
+        subject_tuples: list[tuple[str, str]] = []
         all_media = False
 
         for it in selected:
             ntype = it.data(0, _NODE_TYPE_ROLE)
             payload = it.data(0, _NODE_PAYLOAD_ROLE)
             if ntype == "tag" and payload is not None:
-                tag_ids.add(int(payload))
+                tag_items.append(it)
             elif ntype == "untagged":
                 untagged_sel = True
             elif ntype == "person" and payload is not None:
                 person_ids.add(int(payload))
             elif ntype == "folder" and payload is not None:
-                folder_tuple = (int(payload), it.text(0))
+                folder_items.append(it)
             elif ntype == "date" and isinstance(payload, tuple):
-                date_tuple = payload
+                date_items.append(it)
+            elif ntype == "place" and isinstance(payload, tuple):
+                place_items.append(it)
             elif ntype == "album" and isinstance(payload, tuple):
                 album_tuple = (int(payload[0]), str(payload[1]))
             elif ntype == "smart_album" and isinstance(payload, tuple):
                 smart_album_tuple = (int(payload[0]), str(payload[1]))
             elif ntype == "camera_item" and payload is not None:
-                camera_val = str(payload)
+                cam_s = str(payload)
+                if cam_s not in camera_vals:
+                    camera_vals.append(cam_s)
             elif ntype == "subject_item" and isinstance(payload, tuple):
-                subject_tuple = (str(payload[0]), str(payload[1]))
+                tup = (str(payload[0]), str(payload[1]))
+                if tup not in subject_tuples:
+                    subject_tuples.append(tup)
             elif ntype == "favourites":
                 self.flag_filter_requested.emit(None)
                 self.favourite_filter_requested.emit(True)
@@ -2093,11 +2341,38 @@ class LeftNavigationDock(QDockWidget):
                 self.flag_filter_requested.emit(None)
                 all_media = True
 
+        # Prune descendant nodes that were automatically highlighted beneath a selected ancestor
+        pruned_tags = self._prune_redundant_descendant_items(tag_items)
+        tag_ids: set[int] = {int(it.data(0, _NODE_PAYLOAD_ROLE)) for it in pruned_tags}
+        pruned_folders = (
+            self._prune_redundant_descendant_items(folder_items)
+            if self._include_subfolders
+            else folder_items
+        )
+        folder_tuples: list[tuple[int, str]] = [
+            (int(it.data(0, _NODE_PAYLOAD_ROLE)), it.text(0)) for it in pruned_folders
+        ]
+        pruned_dates = self._prune_redundant_descendant_items(date_items)
+        date_tuples: list[tuple[int, int | None, int | None]] = [
+            (int(pl[0]), pl[1], pl[2])
+            for pl in (it.data(0, _NODE_PAYLOAD_ROLE) for it in pruned_dates)
+            if isinstance(pl, tuple) and len(pl) == 3 and pl[0] is not None
+        ]
+        pruned_places = self._prune_redundant_descendant_items(place_items)
+        place_tuples: list[tuple[str, str, str]] = [
+            (str(pl[0] or ""), str(pl[1] or ""), str(pl[2] or ""))
+            for pl in (it.data(0, _NODE_PAYLOAD_ROLE) for it in pruned_places)
+            if isinstance(pl, tuple) and len(pl) == 3
+        ]
+
         if all_media and (
             album_tuple is not None
             or smart_album_tuple is not None
-            or folder_tuple is not None
-            or date_tuple is not None
+            or folder_tuples
+            or date_tuples
+            or place_tuples
+            or camera_vals
+            or subject_tuples
             or tag_ids
             or person_ids
             or untagged_sel
@@ -2120,24 +2395,43 @@ class LeftNavigationDock(QDockWidget):
             sid, sname = smart_album_tuple
             self._select_smart_album_scope(smart_album_id=sid, smart_album_name=sname)
             return
-        if subject_tuple is not None:
-            skey, slabel = subject_tuple
-            self._active_subject_key = skey
-            self._active_subject_label = slabel
-            self._camera_model = None
-            self._location_country = None
-            self._location_state = None
-            self._location_city = None
-            if hasattr(self, "root_all") and self.root_all is not None:
-                self.root_all.setSelected(False)
+
+        if subject_tuples:
+            new_keys = [k for k, _ in subject_tuples]
+            new_labels = [l for _, l in subject_tuples]
+            ctrl_held = bool(QGuiApplication.keyboardModifiers() & Qt.ControlModifier)
+            self._updating_tree = True
+            try:
+                if not ctrl_held:
+                    self._folder_ids = []
+                    self._folder_id = None
+                    self._folder_names = []
+                    self._folder_name = "All folders"
+                    self._dates = []
+                    self._date_year = self._date_month = self._date_day = None
+                    self._camera_models = []
+                    self._camera_model = None
+                    self._locations = []
+                    self._location_country = self._location_state = self._location_city = None
+                self._active_subject_keys = new_keys
+                self._active_subject_labels = new_labels
+                self._active_subject_key = new_keys[0]
+                self._active_subject_label = " + ".join(new_labels) if len(new_labels) > 1 else new_labels[0]
+                self._sync_tree_selection(scroll_to_selected=False)
+            finally:
+                self._updating_tree = False
             self._update_summary_label()
-            self.subject_selected.emit(skey, slabel)
+            if len(subject_tuples) == 1:
+                self.subject_selected.emit(subject_tuples[0][0], subject_tuples[0][1])
+            self.subjects_selected.emit(list(subject_tuples))
             return
 
         changed = False
-        if self._active_subject_key is not None:
+        if self._active_subject_key is not None or self._active_subject_keys:
             self._active_subject_key = None
             self._active_subject_label = ""
+            self._active_subject_keys = []
+            self._active_subject_labels = []
             changed = True
         if self._album_id is not None or self._smart_album_id is not None or self._smart_album_rules is not None:
             self._album_id = None
@@ -2147,38 +2441,78 @@ class LeftNavigationDock(QDockWidget):
             self._smart_album_rules = None
             changed = True
         ctrl_held = bool(QGuiApplication.keyboardModifiers() & Qt.ControlModifier)
-        if not ctrl_held and (self._location_country or self._location_state or self._location_city) and (
-            folder_tuple is not None or date_tuple is not None or camera_val is not None
+
+        # Locations (single or multi-selection)
+        if place_tuples:
+            if hasattr(self, "root_all") and self.root_all is not None and self.root_all.isSelected():
+                self.root_all.setSelected(False)
+            if self._locations != place_tuples:
+                self._locations = place_tuples
+                c0, s0, ci0 = place_tuples[0]
+                self._location_country = c0 or None
+                self._location_state = s0 or None
+                self._location_city = ci0 or None
+                changed = True
+            if not ctrl_held:
+                if self._folder_ids or self._folder_id is not None:
+                    self._folder_ids = []
+                    self._folder_id = None
+                    self._folder_names = []
+                    self._folder_name = "All folders"
+                    changed = True
+                if self._dates or self._date_year is not None:
+                    self._dates = []
+                    self._date_year = self._date_month = self._date_day = None
+                    changed = True
+                if self._camera_models or self._camera_model is not None:
+                    self._camera_models = []
+                    self._camera_model = None
+                    changed = True
+        elif not ctrl_held and (self._locations or self._location_country or self._location_state or self._location_city) and (
+            folder_tuples or date_tuples or camera_vals
         ):
+            self._locations = []
             self._location_country = None
             self._location_state = None
             self._location_city = None
             changed = True
-        if folder_tuple is not None:
+
+        # Folders (single or multi-selection)
+        if folder_tuples:
             if hasattr(self, "root_all") and self.root_all is not None and self.root_all.isSelected():
                 self.root_all.setSelected(False)
-            if self._folder_id != folder_tuple[0]:
-                self._folder_id, self._folder_name = folder_tuple
+            new_fids = [fid for fid, _ in folder_tuples]
+            new_fnames = [fn for _, fn in folder_tuples]
+            if self._folder_ids != new_fids:
+                self._folder_ids = new_fids
+                self._folder_names = new_fnames
+                self._folder_id = new_fids[0]
+                self._folder_name = new_fnames[0] if len(new_fnames) == 1 else f"{len(new_fnames)} folders"
                 changed = True
-            if not ctrl_held and (self._date_year is not None or self._date_month is not None or self._date_day is not None):
+            if not ctrl_held and (self._dates or self._date_year is not None or self._date_month is not None or self._date_day is not None):
+                self._dates = []
                 self._date_year = None
                 self._date_month = None
                 self._date_day = None
                 changed = True
-        elif not ctrl_held and date_tuple is not None:
+        elif not ctrl_held and date_tuples:
             if hasattr(self, "root_all") and self.root_all is not None and self.root_all.isSelected():
                 self.root_all.setSelected(False)
-            if self._folder_id is not None:
+            if self._folder_ids or self._folder_id is not None:
+                self._folder_ids = []
+                self._folder_names = []
                 self._folder_id = None
                 self._folder_name = "All folders"
                 changed = True
 
-        if date_tuple is not None:
+        # Dates (single or multi-selection)
+        if date_tuples:
             if hasattr(self, "root_all") and self.root_all is not None and self.root_all.isSelected():
                 self.root_all.setSelected(False)
-            y, m, d = date_tuple
-            if (self._date_year, self._date_month, self._date_day) != (y, m, d):
-                self._date_year, self._date_month, self._date_day = y, m, d
+            if self._dates != date_tuples:
+                self._dates = date_tuples
+                y0, m0, d0 = date_tuples[0]
+                self._date_year, self._date_month, self._date_day = y0, m0, d0
                 changed = True
 
         if self._include_tag_ids != tag_ids:
@@ -2190,15 +2524,19 @@ class LeftNavigationDock(QDockWidget):
         if self._person_ids != person_ids:
             self._person_ids = person_ids
             changed = True
-        if camera_val is not None:
+
+        # Cameras (single or multi-selection)
+        if camera_vals:
             if hasattr(self, "root_all") and self.root_all is not None and self.root_all.isSelected():
                 self.root_all.setSelected(False)
-            if self._camera_model != camera_val:
-                self._camera_model = camera_val
+            if self._camera_models != camera_vals:
+                self._camera_models = camera_vals
+                self._camera_model = camera_vals[0]
                 changed = True
-        elif not ctrl_held and self._camera_model is not None and (
-            folder_tuple is not None or date_tuple is not None or tag_ids or person_ids or untagged_sel
+        elif not ctrl_held and (self._camera_models or self._camera_model is not None) and (
+            folder_tuples or date_tuples or place_tuples or tag_ids or person_ids or untagged_sel
         ):
+            self._camera_models = []
             self._camera_model = None
             changed = True
 
@@ -2206,11 +2544,19 @@ class LeftNavigationDock(QDockWidget):
             if hasattr(self, "root_all") and self.root_all is not None and self.root_all.isSelected():
                 self.root_all.setSelected(False)
 
+        if changed or folder_tuples or date_tuples or place_tuples or tag_ids:
+            # Refresh tree visual highlights so descendant subfolders/dates/places/tags match WLPG
+            self._updating_tree = True
+            try:
+                self._sync_tree_selection(scroll_to_selected=False)
+            finally:
+                self._updating_tree = False
+
         if changed:
-            if folder_tuple is not None:
-                self._last_sel_handled_node = ("folder", int(folder_tuple[0]))
-            elif date_tuple is not None:
-                self._last_sel_handled_node = ("date", tuple(date_tuple))
+            if folder_tuples and len(folder_tuples) == 1:
+                self._last_sel_handled_node = ("folder", int(folder_tuples[0][0]))
+            elif date_tuples and len(date_tuples) == 1:
+                self._last_sel_handled_node = ("date", tuple(date_tuples[0]))
             else:
                 self._last_sel_handled_node = None
             self._last_sel_handled_ts = time.monotonic()
@@ -2258,9 +2604,11 @@ class LeftNavigationDock(QDockWidget):
             return
         if ntype == "section_folders":
             self._folder_id = None
+            self._folder_ids = []
             self._folder_name = "All folders"
+            self._folder_names = []
             item.setExpanded(True)
-            self._sync_tree_selection()
+            self._sync_tree_selection(scroll_to_selected=False)
             self._update_summary_label()
             self.filter_changed.emit()
             return
@@ -2311,38 +2659,58 @@ class LeftNavigationDock(QDockWidget):
             item.setExpanded(not item.isExpanded())
             self.subjects_section_clicked.emit()
             return
+        shift_held = bool(QGuiApplication.keyboardModifiers() & Qt.ShiftModifier)
         if ntype == "place":
+            if ctrl_held or shift_held or len(self._locations) > 1:
+                return
             country, state, city = payload if isinstance(payload, tuple) else (str(payload), "", "")
             self.place_selected.emit(country, state, city)
             return
         if ntype == "folder":
             if item.childCount() > 0:
                 item.setExpanded(True)
+            if ctrl_held or shift_held or len(self._folder_ids) > 1:
+                return
             if (
                 getattr(self, "_last_sel_handled_node", None) == ("folder", int(payload))
                 and (time.monotonic() - getattr(self, "_last_sel_handled_ts", 0.0)) < 0.35
             ):
                 return
             self._folder_id = int(payload)
+            self._folder_ids = [int(payload)]
             self._folder_name = item.text(0)
+            self._folder_names = [item.text(0)]
             if hasattr(self, "root_all") and self.root_all is not None:
                 self.root_all.setSelected(False)
+            self._updating_tree = True
+            try:
+                self._sync_tree_selection(scroll_to_selected=False)
+            finally:
+                self._updating_tree = False
             self._update_summary_label()
             self.filter_changed.emit()
             return
         if ntype == "date" and isinstance(payload, tuple):
+            if ctrl_held or shift_held or len(self._dates) > 1:
+                return
             if (
                 getattr(self, "_last_sel_handled_node", None) == ("date", tuple(payload))
                 and (time.monotonic() - getattr(self, "_last_sel_handled_ts", 0.0)) < 0.35
             ):
                 return
             self._date_year, self._date_month, self._date_day = payload
+            self._dates = [(int(payload[0]), payload[1], payload[2])]
             if hasattr(self, "root_all") and self.root_all is not None:
                 self.root_all.setSelected(False)
+            self._updating_tree = True
+            try:
+                self._sync_tree_selection(scroll_to_selected=False)
+            finally:
+                self._updating_tree = False
             self._update_summary_label()
             self.filter_changed.emit()
             return
-        if ntype in ("tag", "untagged", "person"):
+        if ntype in ("tag", "untagged", "person", "camera_item", "subject_item"):
             # Handled reactively by itemSelectionChanged
             return
         if ntype == "rating":
@@ -3026,10 +3394,13 @@ class LeftNavigationDock(QDockWidget):
         self, folder_id: int | None, include_subfolders: bool | None = None
     ) -> None:
         self._folder_id = folder_id
+        self._folder_ids = [int(folder_id)] if folder_id is not None else []
         if folder_id is not None and folder_id in self._folder_items:
             self._folder_name = self._folder_items[folder_id].text(0)
+            self._folder_names = [self._folder_name]
         else:
             self._folder_name = "All folders"
+            self._folder_names = []
         if include_subfolders is not None:
             self._include_subfolders = bool(include_subfolders)
             self.chk_subfolders.blockSignals(True)
@@ -3042,13 +3413,22 @@ class LeftNavigationDock(QDockWidget):
     def clear_folder_filter(self) -> None:
         """Removes the folder filter, searching all folders while keeping all other filters intact."""
         self._folder_id = None
+        self._folder_ids = []
         self._folder_name = "All folders"
+        self._folder_names = []
         self._sync_tree_selection()
         self._update_summary_label()
         self.filter_changed.emit()
 
     def selected_folder_name(self) -> str | None:
-        """Returns the name of the currently filtered folder, or None if searching all folders."""
+        """Returns the name of the currently filtered folder(s), or None if searching all folders."""
+        eff_ids = self._folder_ids or ([self._folder_id] if self._folder_id is not None else [])
+        if len(eff_ids) > 1:
+            if self._folder_names:
+                return ", ".join(self._folder_names[:2]) + (
+                    f" +{len(self._folder_names) - 2}" if len(self._folder_names) > 2 else ""
+                )
+            return f"{len(eff_ids)} folders"
         if self._folder_id is not None:
             return self._folder_name
         return None
@@ -3069,13 +3449,22 @@ class LeftNavigationDock(QDockWidget):
             self._smart_album_name = ""
             self._smart_album_rules = None
             self._folder_id = None
+            self._folder_ids = []
             self._folder_name = "All folders"
-        self._location_country = (country or "").strip() or None
-        self._location_state = (state or "").strip() or None
-        self._location_city = (city or "").strip() or None
+            self._folder_names = []
+        c_s = (country or "").strip()
+        s_s = (state or "").strip()
+        ci_s = (city or "").strip()
+        self._location_country = c_s or None
+        self._location_state = s_s or None
+        self._location_city = ci_s or None
+        self._locations = [(c_s, s_s, ci_s)] if (c_s or s_s or ci_s) else []
         self._camera_model = None
+        self._camera_models = []
         self._active_subject_key = None
         self._active_subject_label = ""
+        self._active_subject_keys = []
+        self._active_subject_labels = []
         self._sync_tree_selection()
         self._update_summary_label()
         self.filter_changed.emit()
@@ -3086,15 +3475,31 @@ class LeftNavigationDock(QDockWidget):
             self._location_country is None
             and self._location_state is None
             and self._location_city is None
+            and not self._locations
         ):
             return
         self._location_country = None
         self._location_state = None
         self._location_city = None
+        self._locations = []
         self._camera_model = None
+        self._camera_models = []
         self._active_subject_key = None
         self._active_subject_label = ""
+        self._active_subject_keys = []
+        self._active_subject_labels = []
         self._sync_tree_selection()
+        self._update_summary_label()
+        if emit_signal:
+            self.filter_changed.emit()
+
+    def clear_camera_filter(self, *, emit_signal: bool = True) -> None:
+        """Clears any active Cameras section filter."""
+        if not self._camera_models and self._camera_model is None:
+            return
+        self._camera_models = []
+        self._camera_model = None
+        self._sync_tree_selection(scroll_to_selected=False)
         self._update_summary_label()
         if emit_signal:
             self.filter_changed.emit()
@@ -3108,6 +3513,7 @@ class LeftNavigationDock(QDockWidget):
         self._date_year = year
         self._date_month = month
         self._date_day = day
+        self._dates = [(int(year), month, day)] if year is not None else []
         self._sync_tree_selection()
         self._update_summary_label()
         self.filter_changed.emit()
@@ -3127,6 +3533,7 @@ class LeftNavigationDock(QDockWidget):
             item = self._tag_items.get(tag_id)
             if item is not None:
                 self._apply_tag_item_visual_state(item, state)
+            self._sync_tree_selection(scroll_to_selected=False)
         finally:
             self._updating_tree = False
         self._update_summary_label()
@@ -3250,16 +3657,23 @@ class LeftNavigationDock(QDockWidget):
     def _reset_non_album_facets(self) -> None:
         self._dates_section_active = False
         self._folder_id = None
+        self._folder_ids = []
         self._folder_name = "All folders"
+        self._folder_names = []
         self._date_year = None
         self._date_month = None
         self._date_day = None
+        self._dates = []
         self._location_country = None
         self._location_state = None
         self._location_city = None
+        self._locations = []
         self._camera_model = None
+        self._camera_models = []
         self._active_subject_key = None
         self._active_subject_label = ""
+        self._active_subject_keys = []
+        self._active_subject_labels = []
         self._include_tag_ids.clear()
         self._exclude_tag_ids.clear()
         self._untagged_only = False
@@ -3276,15 +3690,19 @@ class LeftNavigationDock(QDockWidget):
     def clear_search_filter_facets(self, *, emit_signal: bool = True) -> None:
         """Clears search/facet filters while preserving the active folder, album, or smart album scope."""
         saved_folder_id = self._folder_id
+        saved_folder_ids = list(self._folder_ids)
         saved_folder_name = self._folder_name
+        saved_folder_names = list(self._folder_names)
         saved_dates_active = self._dates_section_active
         self._updating_tree = True
         try:
             self._reset_non_album_facets()
             self._folder_id = saved_folder_id
+            self._folder_ids = saved_folder_ids
             self._folder_name = saved_folder_name
+            self._folder_names = saved_folder_names
             self._dates_section_active = saved_dates_active
-            self._sync_tree_selection()
+            self._sync_tree_selection(scroll_to_selected=False)
         finally:
             self._updating_tree = False
         self._update_summary_label()
@@ -3361,9 +3779,13 @@ class LeftNavigationDock(QDockWidget):
             parts.append(f"Album: {self._album_name or self._album_id}")
         if self._smart_album_id is not None:
             parts.append(f"Smart Album: {self._smart_album_name or self._smart_album_id}")
-        if self._folder_id is not None:
+        if len(self._folder_ids) > 1:
+            parts.append(f"Folders: {len(self._folder_ids)}")
+        elif self._folder_id is not None:
             parts.append(f"Folder: {self._folder_name}")
-        if self._date_year is not None:
+        if len(self._dates) > 1:
+            parts.append(f"Dates: {len(self._dates)}")
+        elif self._date_year is not None:
             if self._date_day is not None and self._date_month is not None:
                 parts.append(f"Date: {self._date_day}/{self._date_month:02d}/{self._date_year}")
             elif self._date_month is not None:
@@ -3378,13 +3800,19 @@ class LeftNavigationDock(QDockWidget):
             parts.append("Not tagged")
         if self._person_ids:
             parts.append(f"People: {len(self._person_ids)}")
-        if self._location_country or self._location_state or self._location_city:
+        if len(self._locations) > 1:
+            parts.append(f"Places: {len(self._locations)}")
+        elif self._location_country or self._location_state or self._location_city:
             loc_parts = [p for p in (self._location_city, self._location_state, self._location_country) if p]
             parts.append(f"Place: {', '.join(loc_parts)}")
-        if self._camera_model:
+        if len(self._camera_models) > 1:
+            parts.append(f"Cameras: {len(self._camera_models)}")
+        elif self._camera_model:
             cam_disp = "No camera info" if self._camera_model == "__NO_CAMERA__" else self._camera_model
             parts.append(f"Camera: {cam_disp}")
-        if self._active_subject_key:
+        if len(self._active_subject_labels) > 1:
+            parts.append(f"Subjects: {' + '.join(self._active_subject_labels)}")
+        elif self._active_subject_key:
             parts.append(f"Subject: {self._active_subject_label or self._active_subject_key}")
         if self._ratings:
             parts.append(f"Ratings: {sorted(self._ratings, reverse=True)}")
@@ -3420,10 +3848,12 @@ class LeftNavigationDock(QDockWidget):
             "smart_album_name": self._smart_album_name,
             "smart_album_rules": self._smart_album_rules,
             "folder_id": self._folder_id,
+            "folder_ids": tuple(self._folder_ids),
             "include_subfolders": self._include_subfolders,
             "date_year": self._date_year,
             "date_month": self._date_month,
             "date_day": self._date_day,
+            "dates": tuple(self._dates),
             "include_tag_ids": tuple(sorted(self._include_tag_ids)),
             "tag_boolean_mode": self._tag_boolean_mode,
             "exclude_tag_ids": tuple(sorted(self._exclude_tag_ids)),
@@ -3440,9 +3870,13 @@ class LeftNavigationDock(QDockWidget):
             "location_country": self._location_country,
             "location_state": self._location_state,
             "location_city": self._location_city,
+            "locations": tuple(self._locations),
             "camera_model": self._camera_model,
+            "camera_models": tuple(self._camera_models),
             "active_subject_key": self._active_subject_key,
             "active_subject_label": self._active_subject_label,
+            "active_subject_keys": tuple(self._active_subject_keys),
+            "active_subject_labels": tuple(self._active_subject_labels),
         }
 
     def restore_filter_state(self, state: dict[str, Any]) -> None:
@@ -3453,10 +3887,18 @@ class LeftNavigationDock(QDockWidget):
         self._smart_album_name = str(state.get("smart_album_name") or "")
         self._smart_album_rules = state.get("smart_album_rules")
         self._folder_id = state.get("folder_id")
+        rest_fids = list(state.get("folder_ids") or ())
+        if not rest_fids and self._folder_id is not None:
+            rest_fids = [int(self._folder_id)]
+        self._folder_ids = [int(x) for x in rest_fids]
         self._include_subfolders = state.get("include_subfolders", True)
         self._date_year = state.get("date_year")
         self._date_month = state.get("date_month")
         self._date_day = state.get("date_day")
+        rest_dates = list(state.get("dates") or ())
+        if not rest_dates and self._date_year is not None:
+            rest_dates = [(int(self._date_year), self._date_month, self._date_day)]
+        self._dates = [tuple(d) for d in rest_dates]
         self._include_tag_ids = set(state.get("include_tag_ids", ()))
         self._tag_boolean_mode = state.get("tag_boolean_mode", "AND")
         self._exclude_tag_ids = set(state.get("exclude_tag_ids", ()))
@@ -3464,7 +3906,8 @@ class LeftNavigationDock(QDockWidget):
         self._person_ids = set(state.get("person_ids", ()))
         self._person_boolean_mode = state.get("person_boolean_mode", "OR")
         self._ratings = set(state.get("ratings", ()))
-        self._flagged_only = state.get("flagged_only", False)
+        self._flag_filter = state.get("flag_filter", (1 if state.get("flagged_only", False) else None))
+        self._flagged_only = bool(state.get("flagged_only", False)) or (self._flag_filter == 1)
         self._edited_filter = state.get("edited_filter", (1 if state.get("edited_only", False) else None))
         self._edited_only = (self._edited_filter == 1)
         self._media_type = state.get("media_type", "all")
@@ -3472,9 +3915,24 @@ class LeftNavigationDock(QDockWidget):
         self._location_country = state.get("location_country")
         self._location_state = state.get("location_state")
         self._location_city = state.get("location_city")
+        rest_locs = list(state.get("locations") or ())
+        if not rest_locs and (self._location_country or self._location_state or self._location_city):
+            rest_locs = [(self._location_country or "", self._location_state or "", self._location_city or "")]
+        self._locations = [tuple(l) for l in rest_locs]
         self._camera_model = state.get("camera_model")
+        rest_cams = list(state.get("camera_models") or ())
+        if not rest_cams and self._camera_model:
+            rest_cams = [self._camera_model]
+        self._camera_models = [str(c) for c in rest_cams]
         self._active_subject_key = state.get("active_subject_key")
         self._active_subject_label = str(state.get("active_subject_label") or "")
+        rest_skeys = list(state.get("active_subject_keys") or ())
+        if not rest_skeys and self._active_subject_key:
+            rest_skeys = [self._active_subject_key]
+        self._active_subject_keys = [str(k) for k in rest_skeys]
+        self._active_subject_labels = list(state.get("active_subject_labels") or (
+            [self._active_subject_label] if self._active_subject_label else []
+        ))
 
         self._updating_tree = True
         try:
@@ -3517,10 +3975,12 @@ class LeftNavigationDock(QDockWidget):
             smart_album_id=self._smart_album_id,
             smart_album_rules=self._smart_album_rules,
             folder_id=self._folder_id,
+            folder_ids=tuple(self._folder_ids),
             include_subfolders=self._include_subfolders,
             date_year=self._date_year,
             date_month=self._date_month,
             date_day=self._date_day,
+            dates=tuple(self._dates),
             include_tag_ids=tuple(sorted(self._include_tag_ids)),
             tag_boolean_mode=self._tag_boolean_mode,
             exclude_tag_ids=tuple(sorted(self._exclude_tag_ids)),
@@ -3540,7 +4000,9 @@ class LeftNavigationDock(QDockWidget):
             location_country=self._location_country,
             location_state=self._location_state,
             location_city=self._location_city,
+            locations=tuple(self._locations),
             camera_model=self._camera_model,
+            camera_models=tuple(self._camera_models),
             arrange_by=arrange_by,
             reverse_sort=reverse_sort,
             group_by=group_by,

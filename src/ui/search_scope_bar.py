@@ -242,6 +242,7 @@ class SearchScopeBar(QFrame):
     edited_clear_requested = Signal()
     untagged_clear_requested = Signal()
     exclude_tag_remove_requested = Signal(int)
+    camera_clear_requested = Signal()
     similarity_threshold_changed = Signal(int)  # 70..98 %
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -864,23 +865,29 @@ class SearchScopeBar(QFrame):
             self.chips_layout.addWidget(chip)
 
         # 5. Active Month / Date Chip: "Date: Today", "Date: 15 November 2026", "Date: October 2022"
+        dates_list = list(filter_state.get("dates") or ())
         d_year = filter_state.get("date_year")
         d_month = filter_state.get("date_month")
         d_day = filter_state.get("date_day")
-        if date_label or d_year is not None or d_month is not None or d_day is not None:
+        if date_label or len(dates_list) > 1 or d_year is not None or d_month is not None or d_day is not None:
             self.chips_layout.addWidget(self._make_prefix_label("Date:"))
+
+            def _fmt_date_tuple(dy: Any, dm: Any, dd: Any) -> str:
+                parts: list[str] = []
+                if dd is not None:
+                    parts.append(str(dd))
+                if dm is not None and 1 <= int(dm) <= 12:
+                    parts.append(calendar.month_name[int(dm)])
+                if dy is not None:
+                    parts.append(str(dy))
+                return " ".join(parts) or "Date"
 
             if date_label:
                 d_text = date_label
+            elif len(dates_list) > 1:
+                d_text = " + ".join(_fmt_date_tuple(y, m, d) for y, m, d in dates_list)
             else:
-                parts: list[str] = []
-                if d_day is not None:
-                    parts.append(str(d_day))
-                if d_month is not None and 1 <= d_month <= 12:
-                    parts.append(calendar.month_name[d_month])
-                if d_year is not None:
-                    parts.append(str(d_year))
-                d_text = " ".join(parts) or "Date"
+                d_text = _fmt_date_tuple(d_year, d_month, d_day)
             chip = FilterChip(d_text, self.chips_widget, dark_mode=self._dark_mode)
             chip.remove_clicked.connect(self.date_clear_requested.emit)
             self.chips_layout.addWidget(chip)
@@ -892,6 +899,19 @@ class SearchScopeBar(QFrame):
 
             chip = FilterChip(location_label, self.chips_widget, dark_mode=self._dark_mode)
             chip.remove_clicked.connect(self.location_clear_requested.emit)
+            self.chips_layout.addWidget(chip)
+
+        # 6b. Active Camera Chip(s)
+        cams_list = list(filter_state.get("camera_models") or ())
+        if not cams_list and filter_state.get("camera_model"):
+            cams_list = [str(filter_state.get("camera_model"))]
+        if cams_list:
+            self.chips_layout.addWidget(self._make_prefix_label("Camera:"))
+            cam_text = " + ".join(
+                "No camera info" if c == "__NO_CAMERA__" else str(c) for c in cams_list
+            )
+            chip = FilterChip(cam_text, self.chips_widget, dark_mode=self._dark_mode)
+            chip.remove_clicked.connect(self.camera_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 
         # 7. Active Media Type Chip: "Media type: Video" (or "Photos", "RAW", "Motion photos") - ignore "all"
