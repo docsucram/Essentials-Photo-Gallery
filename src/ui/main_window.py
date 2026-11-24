@@ -764,6 +764,64 @@ class _FaceCropPreloadWorker(QRunnable):
                 self.engine.close_thread_connections()
 
 
+class _SubjectsCountSignals(QObject):
+    counts_ready = Signal(object)
+    finished = Signal()
+
+
+class _SubjectsCountWorker(QRunnable):
+    """Computes semantic Subject preset counts off the GUI thread."""
+
+    def __init__(
+        self,
+        engine: DualDatabaseEngine,
+        semantic_repo: Any,
+        semantic_engine: Any,
+        subj_vecs: Any,
+        *,
+        include_private: bool = False,
+    ) -> None:
+        super().__init__()
+        self.engine = engine
+        self.semantic_repo = semantic_repo
+        self.semantic_engine = semantic_engine
+        self.subj_vecs = subj_vecs
+        self.include_private = include_private
+        self.signals = _SubjectsCountSignals()
+
+    @Slot()
+    def run(self) -> None:
+        counts: dict[str, int] | None = None
+        try:
+            scope_ids: set[int] | None = None
+            if not self.include_private:
+                repo = CatalogRepository(self.engine, include_private=False)
+                if repo.has_private_folders():
+                    rows = self.engine.catalog_conn().execute(
+                        """
+                        SELECT m.id
+                        FROM media m
+                        JOIN folders f ON f.id = m.folder_id
+                        WHERE m.is_missing = 0 AND f.is_private = 0;
+                        """
+                    ).fetchall()
+                    scope_ids = {int(r[0]) for r in rows}
+            counts = self.semantic_engine.compute_subject_counts(
+                self.semantic_repo, self.subj_vecs, scope_ids=scope_ids
+            )
+        except Exception:
+            counts = None
+        finally:
+            if threading.current_thread() is not threading.main_thread():
+                self.engine.close_thread_connections()
+            try:
+                if counts is not None:
+                    self.signals.counts_ready.emit(counts)
+                self.signals.finished.emit()
+            except RuntimeError:
+                pass
+
+
 class _FramelessResizeFilter(QObject):
     """
     Handles native edge margin resizing on Windows / desktop OS for frameless window.
@@ -970,6 +1028,17 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.metadata_sync_daemon = self.xmp_daemon
 
         # Real-Time Continuous Directory Watcher
+        self._pending_watcher_delta: dict[str, Any] = {
+            "added": 0,
+            "modified": 0,
+            "deleted": 0,
+            "folders_changed": 0,
+            "folders": [],
+        }
+        self._watcher_delta_timer = QTimer(self)
+        self._watcher_delta_timer.setSingleShot(True)
+        self._watcher_delta_timer.setInterval(750)
+        self._watcher_delta_timer.timeout.connect(self._flush_folder_watcher_delta)
         self.folder_watcher = FolderWatcherDaemon(engine, debounce_interval_ms=750, parent=self)
         self.folder_watcher.delta_completed.connect(self._on_folder_watcher_delta)
         self.folder_watcher.reconciliation_completed.connect(self._on_startup_reconciliation_completed)
@@ -1447,7 +1516,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         r_hbox.addWidget(self.btn_status_zoom_out)
 
         self.slider_status_zoom = QSlider(Qt.Horizontal, right_ctrl)
-        self.slider_status_zoom.setCursor(Qt.SizeHorCursor)
+        self.slider_status_zoom.setCursor(Qt.PointingHandCursor)
         self.slider_status_zoom.setRange(72, 320)
         self.slider_status_zoom.setValue(150)
         self.slider_status_zoom.setFixedWidth(95)
@@ -1478,6 +1547,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.btn_status_zoom_in,
         ):
             sb_btn.setFocusPolicy(Qt.NoFocus)
+            sb_btn.setCursor(Qt.PointingHandCursor)
 
         sb.addPermanentWidget(right_ctrl)
 
@@ -2603,23 +2673,6 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self._semantic_cancel.set()
             except Exception:
                 pass
-        try:
-            rows = self.engine.catalog_conn().execute(
-                """
-                SELECT id, mtime
-                FROM media
-                WHERE is_video = 0 AND is_missing = 0
-                ORDER BY date_taken DESC, id DESC;
-                """
-            ).fetchall()
-            candidates = [(int(r[0]), int(r[1])) for r in rows]
-        except Exception:
-            candidates = []
-
-        if not candidates:
-            self._semantic_status_text = "Semantic AI: Idle"
-            self._update_worker_monitor()
-            return
 
         flag = CancellationFlag()
         self._semantic_cancel = flag
@@ -2627,7 +2680,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.engine,
             self.semantic_repo,
             self.semantic_engine,
-            candidates,
+            candidates=None,
             cancel_flag=flag,
             is_paused_cb=lambda: bool(getattr(self, "_workers_paused", False)),
         )
@@ -2717,31 +2770,66 @@ class PhotoGalleryMainWindow(QMainWindow):
     ) -> None:
         if added > 0 or modified > 0 or deleted > 0 or folders_changed > 0:
             self._media_meta_lookup.clear()
-            self.refresh_navigation_and_autocomplete()
-            self.rebuild_and_run_query()
-            fname = os.path.basename(folder_path) or folder_path
-            parts: list[str] = []
-            if added > 0:
-                parts.append(f"+{added}")
-            if modified > 0:
-                parts.append(f"~{modified}")
-            if deleted > 0:
-                parts.append(f"-{deleted}")
-            if folders_changed > 0:
-                parts.append(f"{folders_changed} folder(s)")
-            summary = ", ".join(parts) if parts else "updated"
-            self.statusBar().showMessage(f"✓ Synced '{fname}': {summary}", 4000)
-            if added > 0 or folders_changed > 0:
-                QTimer.singleShot(250, lambda p=folder_path: self._maybe_prompt_picasa_import(p))
-            if (
-                added > 0
-                and getattr(self, "find_people_enabled", True)
-                and self._are_face_models_installed()
-            ):
-                self.start_face_detection()
-            if added > 0:
-                self._start_ocr_worker()
-                self._start_semantic_worker()
+            pend = self._pending_watcher_delta
+            pend["added"] += int(added)
+            pend["modified"] += int(modified)
+            pend["deleted"] += int(deleted)
+            pend["folders_changed"] += int(folders_changed)
+            if folder_path and folder_path not in pend["folders"]:
+                pend["folders"].append(folder_path)
+            self._watcher_delta_timer.start(750)
+
+    def _flush_folder_watcher_delta(self) -> None:
+        if getattr(self, "_is_shutting_down", False):
+            return
+        pend = self._pending_watcher_delta
+        added = int(pend["added"])
+        modified = int(pend["modified"])
+        deleted = int(pend["deleted"])
+        folders_changed = int(pend["folders_changed"])
+        folders = list(pend["folders"])
+        pend["added"] = 0
+        pend["modified"] = 0
+        pend["deleted"] = 0
+        pend["folders_changed"] = 0
+        pend["folders"].clear()
+
+        if added <= 0 and modified <= 0 and deleted <= 0 and folders_changed <= 0:
+            return
+
+        self._media_meta_lookup.clear()
+        self.refresh_navigation_and_autocomplete()
+        self.rebuild_and_run_query()
+        if len(folders) == 1:
+            fname = os.path.basename(folders[0]) or folders[0]
+            target_label = f"'{fname}'"
+        elif folders:
+            target_label = f"{len(folders)} folders"
+        else:
+            target_label = "library"
+        parts: list[str] = []
+        if added > 0:
+            parts.append(f"+{added}")
+        if modified > 0:
+            parts.append(f"~{modified}")
+        if deleted > 0:
+            parts.append(f"-{deleted}")
+        if folders_changed > 0:
+            parts.append(f"{folders_changed} folder(s)")
+        summary = ", ".join(parts) if parts else "updated"
+        self.statusBar().showMessage(f"✓ Synced {target_label}: {summary}", 4000)
+        if added > 0 or folders_changed > 0:
+            for p in folders[:4]:
+                QTimer.singleShot(250, lambda path=p: self._maybe_prompt_picasa_import(path))
+        if (
+            added > 0
+            and getattr(self, "find_people_enabled", True)
+            and self._are_face_models_installed()
+        ):
+            self.start_face_detection()
+        if added > 0:
+            self._start_ocr_worker()
+            self._start_semantic_worker()
 
     def _on_startup_reconciliation_completed(
         self, added: int, modified: int, deleted: int, folders_changed: int
@@ -9322,7 +9410,8 @@ class PhotoGalleryMainWindow(QMainWindow):
 
     def _refresh_subjects_nav_counts(self) -> None:
         if (
-            getattr(self, "semantic_repo", None) is None
+            getattr(self, "_is_shutting_down", False)
+            or getattr(self, "semantic_repo", None) is None
             or getattr(self, "semantic_engine", None) is None
             or not hasattr(self, "left_nav_dock")
         ):
@@ -9330,11 +9419,57 @@ class PhotoGalleryMainWindow(QMainWindow):
         try:
             if not getattr(self, "nav_show_subjects", False):
                 return
+            if getattr(self, "_active_semantic_worker", None) is not None:
+                return
             subj_vecs = self.semantic_repo.get_subject_vectors()
             if not subj_vecs:
                 if self.semantic_engine.is_available() and getattr(self, "_active_semantic_worker", None) is None:
                     self._start_semantic_worker()
                 return
+
+            engine = getattr(self, "engine", None)
+            if engine is not None and "PYTEST_CURRENT_TEST" not in os.environ:
+                if getattr(self, "_subjects_count_inflight", False):
+                    self._subjects_count_dirty = True
+                    return
+                self._subjects_count_inflight = True
+                self._subjects_count_dirty = False
+                include_private = bool(
+                    getattr(getattr(self, "catalog_repo", None), "include_private", False)
+                )
+                worker = _SubjectsCountWorker(
+                    engine,
+                    self.semantic_repo,
+                    self.semantic_engine,
+                    subj_vecs,
+                    include_private=include_private,
+                )
+                self._active_subjects_worker = worker
+
+                def _on_counts(counts: dict[str, int]) -> None:
+                    if getattr(self, "_is_shutting_down", False):
+                        return
+                    try:
+                        if hasattr(self, "left_nav_dock"):
+                            self.left_nav_dock.refresh_subjects(counts)
+                    except Exception:
+                        pass
+
+                def _on_done() -> None:
+                    self._subjects_count_inflight = False
+                    if getattr(self, "_active_subjects_worker", None) is worker:
+                        self._active_subjects_worker = None
+                    if getattr(self, "_subjects_count_dirty", False) and not getattr(
+                        self, "_is_shutting_down", False
+                    ):
+                        self._subjects_count_dirty = False
+                        QTimer.singleShot(0, self._refresh_subjects_nav_counts)
+
+                worker.signals.counts_ready.connect(_on_counts)
+                worker.signals.finished.connect(_on_done)
+                QThreadPool.globalInstance().start(worker)
+                return
+
             scope_ids = self._visible_non_private_media_ids()
             counts = self.semantic_engine.compute_subject_counts(
                 self.semantic_repo, subj_vecs, scope_ids=scope_ids

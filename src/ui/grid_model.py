@@ -393,7 +393,7 @@ class CatalogListModel(QAbstractListModel):
         if self._layout_mode == "mosaic":
             self.compute_mosaic_geometry(
                 self._viewport_width,
-                target_row_height=max(80, self._cell_height - 36),
+                target_row_height=max(64, self._cell_height - 22),
                 spacing=self._spacing,
             )
         elif self._layout_mode == "masonry":
@@ -848,6 +848,8 @@ class CatalogListModel(QAbstractListModel):
         """
         Packs portrait and landscape images into gapless justified rows of equal height
         across `viewport_width`, storing raw (x, y, w, h) tuples and returning _LazyMosaicRectMap.
+        Uses nearest-target-height row breaking and locks incomplete trailing rows to the
+        full-row height above so zooming resizes the whole gallery in lockstep.
         """
         self._viewport_width = max(200, int(viewport_width))
         avail_w = max(200, self._viewport_width - (self.GRID_MARGIN_X * 2))
@@ -863,6 +865,29 @@ class CatalogListModel(QAbstractListModel):
         mosaic_group_y_ends: list[int] = []
         records = self._records
         headers_on = self._group_headers_enabled
+        overall_full_h_sum = 0
+        overall_full_count = 0
+
+        def _emit_full_row(
+            items: list[tuple[int, float]], ar_sum: float, y: int
+        ) -> tuple[int, int]:
+            n_row = len(items)
+            total_gaps = (n_row - 1) * spacing
+            exact_h = int((avail_w - total_gaps) / ar_sum + 0.5) if ar_sum > 0 else target_h
+            if exact_h < 40:
+                exact_h = 40
+            x_cursor = margin_x
+            last_i = n_row - 1
+            for idx_in_row, (item_vrow, item_ar) in enumerate(items):
+                if idx_in_row == last_i:
+                    tile_w = right_edge - x_cursor
+                else:
+                    tile_w = int(item_ar * exact_h + 0.5)
+                if tile_w < 20:
+                    tile_w = 20
+                raw[item_vrow] = (x_cursor, y, tile_w, exact_h)
+                x_cursor += tile_w + spacing
+            return exact_h, y + exact_h + spacing
 
         for g in self._groups:
             if headers_on and g.vrow_header >= 0:
@@ -875,6 +900,8 @@ class CatalogListModel(QAbstractListModel):
 
             row_items: list[tuple[int, float]] = []
             row_aspect_sum = 0.0
+            full_row_h_sum = 0
+            full_row_count = 0
             vrow_base = g.vrow_items_start
             rec_base = g.record_start
 
@@ -897,34 +924,63 @@ class CatalogListModel(QAbstractListModel):
                 n_items = len(row_items)
                 raw_row_w = (row_aspect_sum * target_h) + ((n_items - 1) * spacing)
                 if raw_row_w >= avail_w:
-                    total_gaps = (n_items - 1) * spacing
-                    exact_h = int((avail_w - total_gaps) / row_aspect_sum + 0.5)
-                    if exact_h < 40:
-                        exact_h = 40
-                    x_cursor = margin_x
-                    last_i = n_items - 1
-                    for idx_in_row, (item_vrow, item_ar) in enumerate(row_items):
-                        if idx_in_row == last_i:
-                            tile_w = right_edge - x_cursor
-                        else:
-                            tile_w = int(item_ar * exact_h + 0.5)
-                        if tile_w < 20:
-                            tile_w = 20
-                        raw[item_vrow] = (x_cursor, y_cursor, tile_w, exact_h)
-                        x_cursor += tile_w + spacing
-                    y_cursor += exact_h + spacing
+                    if n_items > 1:
+                        h_with = (avail_w - (n_items - 1) * spacing) / row_aspect_sum
+                        prev_ar_sum = row_aspect_sum - ar
+                        h_without = (avail_w - (n_items - 2) * spacing) / prev_ar_sum
+                        if (
+                            abs(h_without - target_h) < abs(h_with - target_h)
+                            and h_without <= target_h * 1.35
+                        ):
+                            exact_h, y_cursor = _emit_full_row(
+                                row_items[:-1], prev_ar_sum, y_cursor
+                            )
+                            full_row_h_sum += exact_h
+                            full_row_count += 1
+                            overall_full_h_sum += exact_h
+                            overall_full_count += 1
+                            row_items = [(vrow, ar)]
+                            row_aspect_sum = ar
+                            if ar * target_h >= avail_w:
+                                exact_h, y_cursor = _emit_full_row(
+                                    row_items, row_aspect_sum, y_cursor
+                                )
+                                full_row_h_sum += exact_h
+                                full_row_count += 1
+                                overall_full_h_sum += exact_h
+                                overall_full_count += 1
+                                row_items.clear()
+                                row_aspect_sum = 0.0
+                            continue
+                    exact_h, y_cursor = _emit_full_row(row_items, row_aspect_sum, y_cursor)
+                    full_row_h_sum += exact_h
+                    full_row_count += 1
+                    overall_full_h_sum += exact_h
+                    overall_full_count += 1
                     row_items.clear()
                     row_aspect_sum = 0.0
 
             if row_items:
+                if full_row_count > 0:
+                    ref_h = int(round(full_row_h_sum / full_row_count))
+                elif overall_full_count > 0:
+                    ref_h = int(round(overall_full_h_sum / overall_full_count))
+                else:
+                    ref_h = target_h
+                max_fit_h = (
+                    int((avail_w - (len(row_items) - 1) * spacing) / row_aspect_sum)
+                    if row_aspect_sum > 0
+                    else ref_h
+                )
+                final_h = max(40, min(ref_h, max_fit_h))
                 x_cursor = margin_x
                 for item_vrow, item_ar in row_items:
-                    tile_w = int(item_ar * target_h + 0.5)
+                    tile_w = int(item_ar * final_h + 0.5)
                     if tile_w < 20:
                         tile_w = 20
-                    raw[item_vrow] = (x_cursor, y_cursor, tile_w, target_h)
+                    raw[item_vrow] = (x_cursor, y_cursor, tile_w, final_h)
                     x_cursor += tile_w + spacing
-                y_cursor += target_h + section_gap
+                y_cursor += final_h + section_gap
             mosaic_group_y_ends.append(y_cursor)
 
         if self._layout_mode == "mosaic":

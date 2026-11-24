@@ -9228,7 +9228,7 @@ class RibbonToolbar(QWidget):
 
         # Thumbnail zoom slider kept for API/status bar compatibility, hidden from ribbon to match WLPG
         self.slider_zoom = QSlider(Qt.Horizontal, self)
-        self.slider_zoom.setCursor(Qt.SizeHorCursor)
+        self.slider_zoom.setCursor(Qt.PointingHandCursor)
         self.slider_zoom.setRange(72, 320)
         self.slider_zoom.setValue(150)
         self.slider_zoom.setFixedWidth(80)

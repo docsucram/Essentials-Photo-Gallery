@@ -44,6 +44,7 @@ class DeltaSyncSignals(QObject):
 
     delta_completed = Signal(str, int, int, int, int)  # folder_path, added, modified, deleted, folders_changed
     error = Signal(str, str)                            # folder_path, error_message
+    finished = Signal(str)                              # folder_path (always emitted in finally)
 
 
 class StartupReconciliationSignals(QObject):
@@ -123,15 +124,17 @@ def _enrich_and_upsert_media(
         if tag_and_people_queue:
             name_to_id = {r["filename"]: mid for r, mid in zip(enrichment_rows, upserted_ids)}
             cleaned_ids: list[int] = []
-            with engine.catalog_transaction() as _:
-                for fname, h_tags, people_list in tag_and_people_queue:
-                    mid = name_to_id.get(fname)
-                    if mid is None:
-                        continue
-                    _assign_tags_and_people_for_media(repo, mid, h_tags, people_list)
-                    cleaned_ids.append(mid)
-                if cleaned_ids:
-                    repo.mark_media_clean(cleaned_ids)
+            # Run outside write_lock so Pillow face-crop decoding never blocks the main UI thread
+            for fname, h_tags, people_list in tag_and_people_queue:
+                if cancel_flag.is_set:
+                    break
+                mid = name_to_id.get(fname)
+                if mid is None:
+                    continue
+                _assign_tags_and_people_for_media(repo, mid, h_tags, people_list)
+                cleaned_ids.append(mid)
+            if cleaned_ids:
+                repo.mark_media_clean(cleaned_ids)
         return len(enrichment_rows)
     return 0
 
@@ -390,7 +393,7 @@ class DeltaSyncWorker(QRunnable):
                     mid, prev_mtime, prev_size, prev_width = existing_map[fname_l]
                     if prev_mtime != mtime_int or prev_size != size_int or prev_width is None:
                         # Prevent self-triggered watcher loop
-                        if prev_width is not None and is_recently_written(entry.path, size=size_int, mtime=mtime_int, window_secs=5.0):
+                        if prev_width is not None and is_recently_written(entry.path, size=size_int, mtime=mtime_int, window_secs=20.0):
                             continue
                         to_update_enrich.append((mid, Path(entry.path), bool(is_vid), mtime_int))
                         if prev_mtime != mtime_int or prev_size != size_int:
@@ -460,6 +463,10 @@ class DeltaSyncWorker(QRunnable):
         finally:
             if threading.current_thread() is not threading.main_thread():
                 self.engine.close_thread_connections()
+            try:
+                self.signals.finished.emit(self.folder_path)
+            except RuntimeError:
+                pass
 
 
 class StartupReconciliationWorker(QRunnable):
@@ -661,6 +668,10 @@ class FolderWatcherDaemon(QObject):
 
         self._cancel_flag = CancellationFlag()
         self._active_workers: list[DeltaSyncWorker] = []
+        self._sync_pool = QThreadPool(self)
+        self._sync_pool.setMaxThreadCount(1)
+        self._inflight_paths: set[str] = set()
+        self._requeue_paths: dict[str, str] = {}  # normcase_path -> original normpath
 
     def start_startup_reconciliation(self) -> None:
         """Launches non-blocking background startup reconciliation for offline filesystem changes."""
@@ -739,7 +750,7 @@ class FolderWatcherDaemon(QObject):
 
     @Slot()
     def _flush_pending_changes(self) -> None:
-        """Dispatches debounced delta sync workers for all changed paths."""
+        """Dispatches serialized, deduplicated delta sync workers for changed paths."""
         if not self._pending_changed_paths:
             return
 
@@ -749,13 +760,28 @@ class FolderWatcherDaemon(QObject):
         for folder_path in paths_to_sync:
             if not os.path.exists(folder_path):
                 continue
+            key = os.path.normcase(os.path.normpath(folder_path))
+            if key in self._inflight_paths:
+                self._requeue_paths[key] = folder_path
+                continue
+            self._inflight_paths.add(key)
             worker = DeltaSyncWorker(
                 self.engine,
                 folder_path,
                 cancel_flag=self._cancel_flag,
             )
             worker.signals.delta_completed.connect(self._on_worker_delta_completed)
-            QThreadPool.globalInstance().start(worker)
+            worker.signals.finished.connect(self._on_worker_finished)
+            self._sync_pool.start(worker)
+
+    @Slot(str)
+    def _on_worker_finished(self, folder_path: str) -> None:
+        key = os.path.normcase(os.path.normpath(folder_path))
+        self._inflight_paths.discard(key)
+        requeued = self._requeue_paths.pop(key, None)
+        if requeued and not self._cancel_flag.is_set:
+            self._pending_changed_paths.add(requeued)
+            self._debounce_timer.start(self.debounce_interval_ms)
 
     @Slot(str, int, int, int, int)
     def _on_worker_delta_completed(
@@ -770,6 +796,8 @@ class FolderWatcherDaemon(QObject):
         """Halts pending timers and cancels active background sync tasks."""
         self._cancel_flag.set()
         self._debounce_timer.stop()
+        self._sync_pool.clear()
+        self._requeue_paths.clear()
         dirs = self.watcher.directories()
         if dirs:
             self.watcher.removePaths(dirs)

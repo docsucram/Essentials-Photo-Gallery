@@ -1474,7 +1474,7 @@ class DuplicateFinderView(QWidget):
         ws_ctrl_layout.addWidget(self.btn_zoom_out)
 
         self.slider_zoom = QSlider(Qt.Horizontal, self.ws_controls_widget)
-        self.slider_zoom.setCursor(Qt.SizeHorCursor)
+        self.slider_zoom.setCursor(Qt.PointingHandCursor)
         self.slider_zoom.setRange(220, 650)
         self.slider_zoom.setValue(310)
         self.slider_zoom.setFixedWidth(90)

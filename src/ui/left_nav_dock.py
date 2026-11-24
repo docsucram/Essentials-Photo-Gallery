@@ -16,7 +16,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
-from PySide6.QtCore import QByteArray, QMimeData, QPoint, QSettings, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QByteArray, QMimeData, QPoint, QSettings, QSize, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -569,6 +569,8 @@ class LeftNavigationDock(QDockWidget):
         self._camera_items: dict[str, QTreeWidgetItem] = {}
         self._subject_items: dict[str, QTreeWidgetItem] = {}
         self._subject_counts: dict[str, int] = {}
+        self._date_days_by_ym: dict[tuple[int, int], list[tuple[int, str, int]]] = {}
+        self._populated_date_months: set[tuple[int, int]] = set()
         self._person_avatar_icon_cache: dict[tuple[int, int], QIcon] = {}
         self._current_theme_mode: str = "wlpg_aero"
         self._updating_tree: bool = False
@@ -603,6 +605,7 @@ class LeftNavigationDock(QDockWidget):
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
         self.tree.itemClicked.connect(self._on_item_clicked)
+        self.tree.itemExpanded.connect(self._on_tree_item_expanded)
         self.tree.itemChanged.connect(self._on_item_changed)
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
         self.tree.files_dropped.connect(self.files_dropped_on_folder)
@@ -1188,6 +1191,45 @@ class LeftNavigationDock(QDockWidget):
     # -------------------------------------------------------------------------
     # Populate / Refresh from CatalogRepository
     # -------------------------------------------------------------------------
+    def _ensure_date_month_days_populated(self, m_item: QTreeWidgetItem) -> None:
+        """Lazily populates Day child items under a Date Taken Month node on demand."""
+        payload = m_item.data(0, _NODE_PAYLOAD_ROLE)
+        if not (
+            isinstance(payload, tuple)
+            and len(payload) == 3
+            and payload[0] is not None
+            and payload[1] is not None
+            and payload[2] is None
+        ):
+            return
+        ym = (int(payload[0]), int(payload[1]))
+        if ym in self._populated_date_months:
+            return
+        self._populated_date_months.add(ym)
+        days_list = self._date_days_by_ym.get(ym)
+        if not days_list:
+            return
+        cal_icon = make_wlpg_icon("calendar", 16)
+        day_items: list[QTreeWidgetItem] = []
+        for day, day_label, cnt in days_list:
+            d_item = QTreeWidgetItem([f"{day_label} ({cnt})"])
+            d_item.setData(0, _NODE_TYPE_ROLE, "date")
+            d_item.setData(0, _NODE_PAYLOAD_ROLE, (ym[0], ym[1], day))
+            d_item.setIcon(0, cal_icon)
+            day_items.append(d_item)
+        if day_items:
+            was_blocked = self.tree.signalsBlocked()
+            self.tree.blockSignals(True)
+            try:
+                m_item.addChildren(day_items)
+            finally:
+                self.tree.blockSignals(was_blocked)
+
+    @Slot(QTreeWidgetItem)
+    def _on_tree_item_expanded(self, item: QTreeWidgetItem) -> None:
+        if item is not None and item.data(0, _NODE_TYPE_ROLE) == "date":
+            self._ensure_date_month_days_populated(item)
+
     def refresh_trees(
         self,
         repo: CatalogRepository,
@@ -1277,7 +1319,9 @@ class LeftNavigationDock(QDockWidget):
                 if fid in expanded_folder_ids:
                     item.setExpanded(True)
 
-            # 2. Populate Date Taken hierarchy (Year -> Month -> Day, Weekday)
+            # 2. Populate Date Taken hierarchy (Year -> Month, with Day nodes lazily populated on expand)
+            self._date_days_by_ym.clear()
+            self._populated_date_months.clear()
             date_rows = repo.get_date_tree_counts()
             # Strict nested aggregation: year -> month -> list of (day, day_label, cnt)
             years_data: dict[int, dict[int, list[tuple[int, str, int]]]] = {}
@@ -1289,6 +1333,7 @@ class LeftNavigationDock(QDockWidget):
                 cnt = int(d["count"])
                 years_data.setdefault(y, {}).setdefault(m, []).append((day, day_label, cnt))
 
+            year_items: list[QTreeWidgetItem] = []
             for y in sorted(years_data.keys(), reverse=True):
                 months_data = years_data[y]
                 year_total = sum(cnt for m_days in months_data.values() for (_, _, cnt) in m_days)
@@ -1296,24 +1341,25 @@ class LeftNavigationDock(QDockWidget):
                 y_item.setData(0, _NODE_TYPE_ROLE, "date")
                 y_item.setData(0, _NODE_PAYLOAD_ROLE, (y, None, None))
                 y_item.setIcon(0, cal_icon)
-                self.root_dates.addChild(y_item)
 
+                month_items: list[QTreeWidgetItem] = []
                 for m in sorted(months_data.keys(), reverse=True):
-                    days_list = months_data[m]
+                    days_list = sorted(months_data[m], key=lambda x: x[0], reverse=True)
                     month_total = sum(cnt for (_, _, cnt) in days_list)
                     m_name = calendar.month_name[m] if 1 <= m <= 12 else f"Month {m}"
                     m_item = QTreeWidgetItem([f"{m_name} ({month_total})"])
                     m_item.setData(0, _NODE_TYPE_ROLE, "date")
                     m_item.setData(0, _NODE_PAYLOAD_ROLE, (y, m, None))
                     m_item.setIcon(0, cal_icon)
-                    y_item.addChild(m_item)
-
-                    for day, day_label, cnt in sorted(days_list, key=lambda x: x[0], reverse=True):
-                        d_item = QTreeWidgetItem([f"{day_label} ({cnt})"])
-                        d_item.setData(0, _NODE_TYPE_ROLE, "date")
-                        d_item.setData(0, _NODE_PAYLOAD_ROLE, (y, m, day))
-                        d_item.setIcon(0, cal_icon)
-                        m_item.addChild(d_item)
+                    if days_list:
+                        self._date_days_by_ym[(y, m)] = days_list
+                        m_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+                    month_items.append(m_item)
+                if month_items:
+                    y_item.addChildren(month_items)
+                year_items.append(y_item)
+            if year_items:
+                self.root_dates.addChildren(year_items)
 
             # 3. Populate Descriptive Tags hierarchy + "Not tagged" node
             self.item_untagged = QTreeWidgetItem(["Not tagged"])
@@ -1848,8 +1894,19 @@ class LeftNavigationDock(QDockWidget):
                     for i in range(parent_item.childCount()):
                         child = parent_item.child(i)
                         if child is not None:
-                            if child.data(0, _NODE_PAYLOAD_ROLE) == target_payload:
+                            c_payload = child.data(0, _NODE_PAYLOAD_ROLE)
+                            if c_payload == target_payload:
                                 return child
+                            if (
+                                self._date_day is not None
+                                and isinstance(c_payload, tuple)
+                                and len(c_payload) == 3
+                                and c_payload[2] is None
+                                and c_payload[1] is not None
+                                and c_payload[0] == self._date_year
+                                and c_payload[1] == self._date_month
+                            ):
+                                self._ensure_date_month_days_populated(child)
                             found = find_date_item(child)
                             if found is not None:
                                 return found

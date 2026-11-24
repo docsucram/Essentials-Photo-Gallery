@@ -6,6 +6,7 @@ full-res files on disk or triggers cloud OneDrive placeholder downloads).
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any, Sequence
 
@@ -31,7 +32,7 @@ class SemanticIndexWorker(QRunnable):
         db_engine: DualDatabaseEngine,
         semantic_repo: SemanticVectorRepository,
         semantic_engine: SemanticEngine,
-        candidates: Sequence[tuple[int, int]],
+        candidates: Sequence[tuple[int, int]] | None = None,
         *,
         cancel_flag: CancellationFlag | None = None,
         is_paused_cb: Any | None = None,
@@ -42,7 +43,9 @@ class SemanticIndexWorker(QRunnable):
         self.db_engine = db_engine
         self.semantic_repo = semantic_repo
         self.semantic_engine = semantic_engine
-        self.candidates = [(int(m), int(mt)) for m, mt in candidates]
+        self.candidates: list[tuple[int, int]] | None = (
+            None if candidates is None else [(int(m), int(mt)) for m, mt in candidates]
+        )
         self.cancel_flag = cancel_flag or CancellationFlag()
         self.is_paused_cb = is_paused_cb
         self.batch_size = max(4, int(batch_size))
@@ -52,7 +55,12 @@ class SemanticIndexWorker(QRunnable):
     @Slot()
     def run(self) -> None:
         if self.cancel_flag.is_set or not self.semantic_engine.is_available():
-            self.signals.finished_stats.emit(0, self.semantic_repo.count_indexed(model_ver=self.model_ver))
+            try:
+                self.signals.finished_stats.emit(
+                    0, self.semantic_repo.count_indexed(model_ver=self.model_ver)
+                )
+            except Exception:
+                pass
             return
 
         thumb_repo = ThumbnailRepository(self.db_engine)
@@ -63,10 +71,23 @@ class SemanticIndexWorker(QRunnable):
                 self.semantic_engine.ensure_subject_vectors(
                     self.semantic_repo, model_ver=self.model_ver
                 )
+            if self.candidates is None:
+                rows = self.db_engine.catalog_conn().execute(
+                    """
+                    SELECT id, mtime
+                    FROM media
+                    WHERE is_video = 0 AND is_missing = 0
+                    ORDER BY date_taken DESC, id DESC;
+                    """
+                ).fetchall()
+                candidates = [(int(r[0]), int(r[1])) for r in rows]
+            else:
+                candidates = self.candidates
+
             existing = self.semantic_repo.get_indexed_mtimes(
-                [m for m, _ in self.candidates], model_ver=self.model_ver
+                [m for m, _ in candidates], model_ver=self.model_ver
             )
-            todo = [(m, mt) for m, mt in self.candidates if existing.get(m) != mt]
+            todo = [(m, mt) for m, mt in candidates if existing.get(m) != mt]
             total = len(todo)
             indexed_now = 0
 
@@ -99,3 +120,6 @@ class SemanticIndexWorker(QRunnable):
             self.signals.finished_stats.emit(indexed_now, total_cnt)
         except Exception as exc:
             self.signals.error.emit(str(exc))
+        finally:
+            if threading.current_thread() is not threading.main_thread():
+                self.db_engine.close_thread_connections()

@@ -1594,17 +1594,19 @@ class FolderSyncWorker(QRunnable):
         }
         cleaned_ids: list[int] = []
 
-        with self.engine.catalog_transaction() as _:
-            for folder_id, fname, h_tags, people_list in tag_people_items:
-                mid = key_to_id.get((folder_id, fname))
-                if mid is None:
-                    continue
-                _assign_tags_and_people_for_media(repo, mid, h_tags, people_list)
-                cleaned_ids.append(mid)
+        # Run outside write_lock so Pillow face-crop decoding never blocks the main UI thread
+        for folder_id, fname, h_tags, people_list in tag_people_items:
+            if self.cancel_flag.is_set:
+                break
+            mid = key_to_id.get((folder_id, fname))
+            if mid is None:
+                continue
+            _assign_tags_and_people_for_media(repo, mid, h_tags, people_list)
+            cleaned_ids.append(mid)
 
-            # Tags/people read during initial scan came from the file itself, so mark metadata_dirty = 0
-            if cleaned_ids:
-                repo.mark_media_clean(cleaned_ids)
+        # Tags/people read during initial scan came from the file itself, so mark metadata_dirty = 0
+        if cleaned_ids:
+            repo.mark_media_clean(cleaned_ids)
 
 
 class ThumbnailDecodeWorkerSignals(QObject):

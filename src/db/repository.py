@@ -6661,17 +6661,32 @@ class CatalogRepository:
         return int(row["cnt"]) if row else 0
 
     def mark_media_clean(
-        self, media_ids: Sequence[int], updated_mtimes: dict[int, int] | None = None
+        self,
+        media_ids: Sequence[int],
+        updated_mtimes: dict[int, int] | None = None,
+        updated_sizes: dict[int, int] | None = None,
     ) -> None:
         if not media_ids:
             return
         with self.engine.write_lock:
             conn = self.engine.catalog_conn()
             for mid in media_ids:
-                if updated_mtimes and mid in updated_mtimes:
+                has_mtime = bool(updated_mtimes and mid in updated_mtimes)
+                has_size = bool(updated_sizes and mid in updated_sizes)
+                if has_mtime and has_size:
+                    conn.execute(
+                        "UPDATE media SET metadata_dirty = 0, mtime = ?, size = ? WHERE id = ?;",
+                        (updated_mtimes[mid], updated_sizes[mid], mid),
+                    )
+                elif has_mtime:
                     conn.execute(
                         "UPDATE media SET metadata_dirty = 0, mtime = ? WHERE id = ?;",
                         (updated_mtimes[mid], mid),
+                    )
+                elif has_size:
+                    conn.execute(
+                        "UPDATE media SET metadata_dirty = 0, size = ? WHERE id = ?;",
+                        (updated_sizes[mid], mid),
                     )
                 else:
                     conn.execute(

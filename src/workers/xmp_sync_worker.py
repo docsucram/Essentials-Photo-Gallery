@@ -1270,6 +1270,7 @@ class _AsyncFlushWorker(QRunnable):
             has_more = len(dirty_items) >= self.batch_limit
             synced_ids: list[int] = []
             updated_mtimes: dict[int, int] = {}
+            updated_sizes: dict[int, int] = {}
 
             for item in dirty_items:
                 if self.stop_requested and self.stop_requested.is_set():
@@ -1281,12 +1282,21 @@ class _AsyncFlushWorker(QRunnable):
                     synced_ids.append(mid)
                     if new_mtime is not None:
                         updated_mtimes[mid] = new_mtime
+                        fp = item.get("folder_path")
+                        fn = item.get("filename")
+                        if fp and fn:
+                            try:
+                                updated_sizes[mid] = int(
+                                    (Path(fp) / fn).stat(follow_symlinks=False).st_size
+                                )
+                            except OSError:
+                                pass
                 except Exception as exc:
                     self.signals.sync_error.emit(mid, str(exc))
                     synced_ids.append(mid)
 
             if synced_ids:
-                repo.mark_media_clean(synced_ids, updated_mtimes)
+                repo.mark_media_clean(synced_ids, updated_mtimes, updated_sizes)
                 self.signals.batch_synced.emit(synced_ids)
         except Exception as exc:
             has_more = False

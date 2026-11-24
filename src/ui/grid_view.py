@@ -2341,22 +2341,10 @@ class ThumbnailGridView(QListView):
         self._scroll_indicator.raise_()
         self._scroll_indicator_timer.start(1200)
 
-    def set_thumbnail_size(self, size_px: int) -> None:
-        new_size = max(72, min(320, int(size_px)))
-        if getattr(self, "_thumb_size", None) == new_size:
-            return
-        self._thumb_size = new_size
-        self._sync_metrics_and_scrollbar()
-        self._scroll_debounce.start()
-        self.thumbnail_size_changed.emit(self._thumb_size)
-
-    def set_layout_mode(
-        self, mode: Literal["wlpg_grid", "tiles", "mosaic", "masonry"]
-    ) -> None:
-        if self.catalog_model is None or self.card_delegate is None:
-            return
-        # Capture currently focused/selected or top-visible media item so switching
-        # between Grid, Tiles, Mosaic, and Masonry keeps the user on the same photo(s).
+    def _capture_viewport_anchor(self) -> tuple[int | None, int | None]:
+        """Captures the currently focused/selected or top-visible media ID and its viewport Y."""
+        if self.catalog_model is None:
+            return None, None
         anchor_mid: int | None = None
         anchor_rel_y: int | None = None
         sb = self.verticalScrollBar()
@@ -2378,6 +2366,42 @@ class ThumbnailGridView(QListView):
                     rel = old_rect.top() - old_scroll_y
                     if 0 <= rel < vp_h:
                         anchor_rel_y = rel
+        return anchor_mid, anchor_rel_y
+
+    def _restore_viewport_anchor(self, anchor_mid: int | None, anchor_rel_y: int | None) -> None:
+        sb = self.verticalScrollBar()
+        if anchor_mid is None or sb is None or self.catalog_model is None:
+            return
+        new_idx = self.catalog_model.index_for_media_id(anchor_mid)
+        if new_idx.isValid():
+            new_rect = self.catalog_model.item_rect(new_idx.row())
+            if new_rect.isValid():
+                if anchor_rel_y is not None:
+                    target_y = new_rect.top() - anchor_rel_y
+                else:
+                    vp_h = max(1, self.viewport().height())
+                    target_y = new_rect.center().y() - vp_h // 2
+                sb.setValue(max(sb.minimum(), min(sb.maximum(), target_y)))
+
+    def set_thumbnail_size(self, size_px: int) -> None:
+        new_size = max(72, min(320, int(size_px)))
+        if getattr(self, "_thumb_size", None) == new_size:
+            return
+        anchor_mid, anchor_rel_y = self._capture_viewport_anchor()
+        self._thumb_size = new_size
+        self._sync_metrics_and_scrollbar()
+        self._restore_viewport_anchor(anchor_mid, anchor_rel_y)
+        self._scroll_debounce.start()
+        self.thumbnail_size_changed.emit(self._thumb_size)
+
+    def set_layout_mode(
+        self, mode: Literal["wlpg_grid", "tiles", "mosaic", "masonry"]
+    ) -> None:
+        if self.catalog_model is None or self.card_delegate is None:
+            return
+        # Capture currently focused/selected or top-visible media item so switching
+        # between Grid, Tiles, Mosaic, and Masonry keeps the user on the same photo(s).
+        anchor_mid, anchor_rel_y = self._capture_viewport_anchor()
 
         if mode in ("tiles", "mosaic", "masonry"):
             if not hasattr(self, "_stashed_visible_details"):
@@ -2392,19 +2416,7 @@ class ThumbnailGridView(QListView):
         self.card_delegate.set_layout_mode(mode)
         self.catalog_model.set_layout_mode(mode)
         self._sync_metrics_and_scrollbar()
-
-        if anchor_mid is not None and sb is not None:
-            new_idx = self.catalog_model.index_for_media_id(anchor_mid)
-            if new_idx.isValid():
-                new_rect = self.catalog_model.item_rect(new_idx.row())
-                if new_rect.isValid():
-                    if anchor_rel_y is not None:
-                        target_y = new_rect.top() - anchor_rel_y
-                    else:
-                        vp_h = max(1, self.viewport().height())
-                        target_y = new_rect.center().y() - vp_h // 2
-                    sb.setValue(max(sb.minimum(), min(sb.maximum(), target_y)))
-
+        self._restore_viewport_anchor(anchor_mid, anchor_rel_y)
         self._scroll_debounce.start()
 
     def set_visible_details(self, details: set[str]) -> None:
