@@ -91,26 +91,25 @@ class FilterChip(QFrame):
     """
     Subtle aero chip displaying an active filter facet matching authentic Windows Live Photo Gallery.
     - Default unhovered state: clean plain Segoe UI text with no background, border, or visible '✕'.
-    - Hovered state: light blue aero outline box (#7EB4EA) and subtle background (#E5F1FB) with an interactive '✕' remove button.
+    - Hovered state: aero outline box and subtle highlight with an interactive '✕' remove button.
     """
 
     remove_clicked = Signal()
 
-    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+    def __init__(self, text: str, parent: QWidget | None = None, dark_mode: bool = False) -> None:
         super().__init__(parent)
         self.setObjectName("FilterChip")
         self.setCursor(Qt.PointingHandCursor)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WA_Hover, True)
+        self._dark_mode = bool(dark_mode)
+        self._hovered = False
 
         self._hbox = QHBoxLayout(self)
         self._hbox.setContentsMargins(4, 1, 3, 1)
         self._hbox.setSpacing(3)
 
         self.lbl = QLabel(text, self)
-        self.lbl.setStyleSheet(
-            "color: #1E395B; font-family: 'Segoe UI'; font-size: 8.5pt; border: none; background: transparent;"
-        )
         self.lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._hbox.addWidget(self.lbl)
 
@@ -118,44 +117,86 @@ class FilterChip(QFrame):
         self.btn_close.setFixedSize(13, 13)
         self.btn_close.setCursor(Qt.PointingHandCursor)
         self.btn_close.setToolTip(f"Remove '{text}' filter")
-        self.btn_close.setStyleSheet(
-            """
-            QPushButton {
-                border: none;
-                background: transparent;
-                color: #55708C;
-                font-family: 'Segoe UI';
-                font-size: 7.5pt;
-                font-weight: bold;
-                padding: 0;
-            }
-            QPushButton:hover {
-                color: #C50F1F;
-                background: #F8D7DA;
-                border-radius: 2px;
-            }
-            """ + _AERO_TOOLTIP_STYLE
-        )
         self.btn_close.clicked.connect(self.remove_clicked.emit)
         self._hbox.addWidget(self.btn_close)
         self.btn_close.setVisible(False)
 
-        self._set_hover_state(False)
+        self.set_dark_mode(self._dark_mode)
 
     def text(self) -> str:
         return self.lbl.text()
 
-    def _set_hover_state(self, hovered: bool) -> None:
-        if hovered:
-            self.setStyleSheet(
+    def set_dark_mode(self, is_dark: bool) -> None:
+        self._dark_mode = bool(is_dark)
+        if self._dark_mode:
+            self.lbl.setStyleSheet(
+                "color: #93C5FD; font-family: 'Segoe UI'; font-size: 8.5pt; border: none; background: transparent;"
+            )
+            self.btn_close.setStyleSheet(
                 """
-                QFrame#FilterChip {
-                    background: #E5F1FB;
-                    border: 1px solid #7EB4EA;
+                QPushButton {
+                    border: none;
+                    background: transparent;
+                    color: #CBD5E1;
+                    font-family: 'Segoe UI';
+                    font-size: 7.5pt;
+                    font-weight: bold;
+                    padding: 0;
+                }
+                QPushButton:hover {
+                    color: #FCA5A5;
+                    background: #4C1D24;
                     border-radius: 2px;
                 }
-                """
+                """ + _AERO_TOOLTIP_STYLE
             )
+        else:
+            self.lbl.setStyleSheet(
+                "color: #1E395B; font-family: 'Segoe UI'; font-size: 8.5pt; border: none; background: transparent;"
+            )
+            self.btn_close.setStyleSheet(
+                """
+                QPushButton {
+                    border: none;
+                    background: transparent;
+                    color: #55708C;
+                    font-family: 'Segoe UI';
+                    font-size: 7.5pt;
+                    font-weight: bold;
+                    padding: 0;
+                }
+                QPushButton:hover {
+                    color: #C50F1F;
+                    background: #F8D7DA;
+                    border-radius: 2px;
+                }
+                """ + _AERO_TOOLTIP_STYLE
+            )
+        self._set_hover_state(self._hovered)
+
+    def _set_hover_state(self, hovered: bool) -> None:
+        self._hovered = bool(hovered)
+        if self._hovered:
+            if self._dark_mode:
+                self.setStyleSheet(
+                    """
+                    QFrame#FilterChip {
+                        background: #253244;
+                        border: 1px solid #3B82F6;
+                        border-radius: 2px;
+                    }
+                    """
+                )
+            else:
+                self.setStyleSheet(
+                    """
+                    QFrame#FilterChip {
+                        background: #E5F1FB;
+                        border: 1px solid #7EB4EA;
+                        border-radius: 2px;
+                    }
+                    """
+                )
             self.btn_close.setVisible(True)
         else:
             self.setStyleSheet(
@@ -198,12 +239,17 @@ class SearchScopeBar(QFrame):
     special_people_clear_requested = Signal()
     media_type_clear_requested = Signal()
     orientation_clear_requested = Signal()
+    edited_clear_requested = Signal()
+    untagged_clear_requested = Signal()
+    exclude_tag_remove_requested = Signal(int)
     similarity_threshold_changed = Signal(int)  # 70..98 %
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("SearchScopeBar")
         self._is_pinned = False
+        self._dark_mode = False
+        self._is_dark = False
 
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
@@ -404,16 +450,16 @@ class SearchScopeBar(QFrame):
         sim_hbox.setContentsMargins(6, 0, 4, 0)
         sim_hbox.setSpacing(5)
 
-        lbl_sim = QLabel("Match ≥", self.similar_controls_widget)
-        lbl_sim.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
-        sim_hbox.addWidget(lbl_sim)
+        self.lbl_sim = QLabel("Match ≥", self.similar_controls_widget)
+        self.lbl_sim.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
+        sim_hbox.addWidget(self.lbl_sim)
 
         self.slider_similarity = QSlider(Qt.Horizontal, self.similar_controls_widget)
         self.slider_similarity.setRange(70, 98)
         self.slider_similarity.setValue(81)
         self.slider_similarity.setFixedWidth(105)
         self.slider_similarity.setFixedHeight(16)
-        self.slider_similarity.setCursor(Qt.SizeHorCursor)
+        self.slider_similarity.setCursor(Qt.PointingHandCursor)
         self.slider_similarity.setToolTip("Adjust minimum visual similarity threshold (70%–98%)")
         self.slider_similarity.valueChanged.connect(self._on_similarity_slider_changed)
         self.slider_similarity.sliderReleased.connect(self._emit_similarity_threshold)
@@ -463,6 +509,62 @@ class SearchScopeBar(QFrame):
             self.lbl_scope_label.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent;")
             self.lbl_scope_value.setStyleSheet("color: #1E395B; font-weight: bold; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent;")
             self.lbl_search_kw.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent;")
+            self.lbl_sim.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent;")
+            self.lbl_similarity_val.setStyleSheet(
+                "color: #1E395B; font-weight: bold; font-family: 'Segoe UI'; font-size: 8.5pt; min-width: 28px; background: transparent;"
+            )
+            self.btn_search_all.setStyleSheet(
+                """
+                QPushButton {
+                    color: #0066CC;
+                    text-decoration: underline;
+                    border: none;
+                    background: transparent;
+                    padding: 0 4px;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    color: #004499;
+                }
+                """ + _AERO_TOOLTIP_STYLE
+            )
+            self.btn_pin.setStyleSheet(
+                """
+                QToolButton {
+                    border: 1px solid transparent;
+                    background: transparent;
+                    border-radius: 2px;
+                }
+                QToolButton:hover {
+                    background: #E4EFF9;
+                    border-color: #A0C2E2;
+                }
+                QToolButton:checked {
+                    background: #CCE2F7;
+                    border-color: #7AAAD4;
+                }
+                """ + _AERO_TOOLTIP_STYLE
+            )
+            self.btn_close.setStyleSheet(
+                """
+                QPushButton {
+                    border: 1px solid transparent;
+                    background: transparent;
+                    color: #55708C;
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 8.5pt;
+                    font-weight: bold;
+                    padding: 0px;
+                    border-radius: 2px;
+                }
+                QPushButton:hover {
+                    color: #C50F1F;
+                    background: #F8D7DA;
+                    border: 1px solid #E8B4B8;
+                }
+                """ + _AERO_TOOLTIP_STYLE
+            )
             self.txt_search.setStyleSheet(
                 """
                 QLineEdit#ScopeBarSearchInput {
@@ -505,6 +607,62 @@ class SearchScopeBar(QFrame):
             self.lbl_scope_label.setStyleSheet("color: #94A3B8; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent;")
             self.lbl_scope_value.setStyleSheet("color: #E2E8F0; font-weight: bold; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent;")
             self.lbl_search_kw.setStyleSheet("color: #94A3B8; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent;")
+            self.lbl_sim.setStyleSheet("color: #94A3B8; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent;")
+            self.lbl_similarity_val.setStyleSheet(
+                "color: #E2E8F0; font-weight: bold; font-family: 'Segoe UI'; font-size: 8.5pt; min-width: 28px; background: transparent;"
+            )
+            self.btn_search_all.setStyleSheet(
+                """
+                QPushButton {
+                    color: #60A5FA;
+                    text-decoration: underline;
+                    border: none;
+                    background: transparent;
+                    padding: 0 4px;
+                    font-family: 'Segoe UI';
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    color: #93C5FD;
+                }
+                """ + _AERO_TOOLTIP_STYLE
+            )
+            self.btn_pin.setStyleSheet(
+                """
+                QToolButton {
+                    border: 1px solid transparent;
+                    background: transparent;
+                    border-radius: 2px;
+                }
+                QToolButton:hover {
+                    background: #2A3444;
+                    border-color: #475569;
+                }
+                QToolButton:checked {
+                    background: #1E3A5F;
+                    border-color: #3B82F6;
+                }
+                """ + _AERO_TOOLTIP_STYLE
+            )
+            self.btn_close.setStyleSheet(
+                """
+                QPushButton {
+                    border: 1px solid transparent;
+                    background: transparent;
+                    color: #CBD5E1;
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 8.5pt;
+                    font-weight: bold;
+                    padding: 0px;
+                    border-radius: 2px;
+                }
+                QPushButton:hover {
+                    color: #FCA5A5;
+                    background: #4C1D24;
+                    border: 1px solid #7F1D1D;
+                }
+                """ + _AERO_TOOLTIP_STYLE
+            )
             self.txt_search.setStyleSheet(
                 """
                 QLineEdit#ScopeBarSearchInput {
@@ -521,6 +679,44 @@ class SearchScopeBar(QFrame):
                 }
                 """ + _AERO_TOOLTIP_STYLE
             )
+        self._apply_chip_theme_styles()
+
+    def _prefix_label_style(self) -> str:
+        color = "#94A3B8" if self._dark_mode else "#55687C"
+        return f"color: {color}; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent;"
+
+    def _sep_label_style(self) -> str:
+        color = "#E2E8F0" if self._dark_mode else "#1E395B"
+        return f"color: {color}; font-weight: bold; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent;"
+
+    def _make_prefix_label(self, text: str) -> QLabel:
+        lbl = QLabel(text, self.chips_widget)
+        lbl.setProperty("chip_role", "prefix")
+        lbl.setStyleSheet(self._prefix_label_style())
+        return lbl
+
+    def _make_sep_label(self, text: str) -> QLabel:
+        lbl = QLabel(text, self.chips_widget)
+        lbl.setProperty("chip_role", "sep")
+        lbl.setStyleSheet(self._sep_label_style())
+        return lbl
+
+    def _apply_chip_theme_styles(self) -> None:
+        if not hasattr(self, "chips_layout"):
+            return
+        for idx in range(self.chips_layout.count()):
+            item = self.chips_layout.itemAt(idx)
+            w = item.widget() if item is not None else None
+            if w is None:
+                continue
+            if isinstance(w, FilterChip):
+                w.set_dark_mode(self._dark_mode)
+            else:
+                role = w.property("chip_role")
+                if role == "prefix":
+                    w.setStyleSheet(self._prefix_label_style())
+                elif role == "sep":
+                    w.setStyleSheet(self._sep_label_style())
 
     # -------------------------------------------------------------------------
     # Public Control & Query API
@@ -570,91 +766,101 @@ class SearchScopeBar(QFrame):
         # 1. Active People Chips: "People: Alice + Bob" or Special: "People: All tagged or detected"
         person_ids = filter_state.get("person_ids", ())
         if person_ids:
-            lbl_p = QLabel("People:", self.chips_widget)
-            lbl_p.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
-            self.chips_layout.addWidget(lbl_p)
+            self.chips_layout.addWidget(self._make_prefix_label("People:"))
 
             person_mode = filter_state.get("person_boolean_mode", "AND")
             sep_str = " / " if str(person_mode).upper() == "OR" else " + "
 
             for idx, pid in enumerate(person_ids):
                 if idx > 0:
-                    lbl_sep = QLabel(sep_str, self.chips_widget)
-                    lbl_sep.setStyleSheet(
-                        "color: #1E395B; font-weight: bold; font-family: 'Segoe UI'; font-size: 8.5pt;"
-                    )
-                    self.chips_layout.addWidget(lbl_sep)
+                    self.chips_layout.addWidget(self._make_sep_label(sep_str))
 
                 p_name = self._resolve_person_name(int(pid), catalog_repo)
-                chip = FilterChip(p_name, self.chips_widget)
+                chip = FilterChip(p_name, self.chips_widget, dark_mode=self._dark_mode)
                 chip.remove_clicked.connect(lambda p_id=int(pid): self.person_remove_requested.emit(p_id))
                 self.chips_layout.addWidget(chip)
         elif special_people_label:
-            lbl_p = QLabel("People:", self.chips_widget)
-            lbl_p.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
-            self.chips_layout.addWidget(lbl_p)
+            self.chips_layout.addWidget(self._make_prefix_label("People:"))
 
-            chip = FilterChip(special_people_label, self.chips_widget)
+            chip = FilterChip(special_people_label, self.chips_widget, dark_mode=self._dark_mode)
             chip.remove_clicked.connect(self.special_people_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 
         # 2. Active Descriptive Tag Chips: "Tagged: Burma + Nansumay" or "Tagged: Burma / Nansumay"
         include_tag_ids = filter_state.get("include_tag_ids", ())
         if include_tag_ids:
-            lbl_t = QLabel("Tagged:", self.chips_widget)
-            lbl_t.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
-            self.chips_layout.addWidget(lbl_t)
+            self.chips_layout.addWidget(self._make_prefix_label("Tagged:"))
 
             tag_mode = filter_state.get("tag_boolean_mode", "AND")
             sep_str = " / " if str(tag_mode).upper() == "OR" else " + "
 
             for idx, tid in enumerate(include_tag_ids):
                 if idx > 0:
-                    lbl_sep = QLabel(sep_str, self.chips_widget)
-                    lbl_sep.setStyleSheet(
-                        "color: #1E395B; font-weight: bold; font-family: 'Segoe UI'; font-size: 8.5pt;"
-                    )
-                    self.chips_layout.addWidget(lbl_sep)
+                    self.chips_layout.addWidget(self._make_sep_label(sep_str))
 
                 t_name = self._resolve_tag_name(int(tid), catalog_repo)
-                chip = FilterChip(t_name, self.chips_widget)
+                chip = FilterChip(t_name, self.chips_widget, dark_mode=self._dark_mode)
                 chip.remove_clicked.connect(lambda t_id=int(tid): self.tag_remove_requested.emit(t_id))
                 self.chips_layout.addWidget(chip)
+
+        exclude_tag_ids = filter_state.get("exclude_tag_ids", ())
+        if exclude_tag_ids:
+            self.chips_layout.addWidget(self._make_prefix_label("Not tagged:"))
+            for idx, tid in enumerate(exclude_tag_ids):
+                if idx > 0:
+                    self.chips_layout.addWidget(self._make_sep_label(", "))
+                t_name = self._resolve_tag_name(int(tid), catalog_repo)
+                chip = FilterChip(t_name, self.chips_widget, dark_mode=self._dark_mode)
+                chip.remove_clicked.connect(lambda t_id=int(tid): self.exclude_tag_remove_requested.emit(t_id))
+                self.chips_layout.addWidget(chip)
+
+        if filter_state.get("untagged_only"):
+            chip = FilterChip("Not tagged", self.chips_widget, dark_mode=self._dark_mode)
+            chip.remove_clicked.connect(self.untagged_clear_requested.emit)
+            self.chips_layout.addWidget(chip)
 
         # 3. Active Rating Chip: "Rating: ★ 4 or higher"
         ratings = filter_state.get("ratings", ())
         if ratings:
-            lbl_r = QLabel("Rating:", self.chips_widget)
-            lbl_r.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
-            self.chips_layout.addWidget(lbl_r)
+            self.chips_layout.addWidget(self._make_prefix_label("Rating:"))
 
             if tuple(ratings) == (0,):
                 r_text = "Unrated"
             else:
                 min_r = min(ratings)
                 r_text = f"★ {min_r} or higher" if len(ratings) > 1 else f"★ {min_r} only"
-            chip = FilterChip(r_text, self.chips_widget)
+            chip = FilterChip(r_text, self.chips_widget, dark_mode=self._dark_mode)
             chip.remove_clicked.connect(self.rating_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 
         # 4. Active Favourites & Flagged Chips
         if filter_state.get("favourites_only"):
-            chip = FilterChip("♥ Favourites", self.chips_widget)
+            chip = FilterChip("♥ Favourites", self.chips_widget, dark_mode=self._dark_mode)
             chip.remove_clicked.connect(self.favourites_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 
         flag_flt = filter_state.get("flag_filter")
         if flag_flt == 1 or (flag_flt is None and filter_state.get("flagged_only")):
-            chip = FilterChip("Flagged / Picked", self.chips_widget)
+            chip = FilterChip("Picked", self.chips_widget, dark_mode=self._dark_mode)
             chip.remove_clicked.connect(self.flagged_clear_requested.emit)
             self.chips_layout.addWidget(chip)
         elif flag_flt == -1:
-            chip = FilterChip("Rejected", self.chips_widget)
+            chip = FilterChip("Rejected", self.chips_widget, dark_mode=self._dark_mode)
             chip.remove_clicked.connect(self.flagged_clear_requested.emit)
             self.chips_layout.addWidget(chip)
         elif flag_flt == 0:
-            chip = FilterChip("Unflagged", self.chips_widget)
+            chip = FilterChip("Unflagged", self.chips_widget, dark_mode=self._dark_mode)
             chip.remove_clicked.connect(self.flagged_clear_requested.emit)
+            self.chips_layout.addWidget(chip)
+
+        edited_flt = filter_state.get("edited_filter")
+        if edited_flt == 1 or (edited_flt is None and filter_state.get("edited_only")):
+            chip = FilterChip("Edited", self.chips_widget, dark_mode=self._dark_mode)
+            chip.remove_clicked.connect(self.edited_clear_requested.emit)
+            self.chips_layout.addWidget(chip)
+        elif edited_flt == 0:
+            chip = FilterChip("Not edited", self.chips_widget, dark_mode=self._dark_mode)
+            chip.remove_clicked.connect(self.edited_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 
         # 5. Active Month / Date Chip: "Date: Today", "Date: 15 November 2026", "Date: October 2022"
@@ -662,9 +868,7 @@ class SearchScopeBar(QFrame):
         d_month = filter_state.get("date_month")
         d_day = filter_state.get("date_day")
         if date_label or d_year is not None or d_month is not None or d_day is not None:
-            lbl_d = QLabel("Date:", self.chips_widget)
-            lbl_d.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
-            self.chips_layout.addWidget(lbl_d)
+            self.chips_layout.addWidget(self._make_prefix_label("Date:"))
 
             if date_label:
                 d_text = date_label
@@ -677,28 +881,24 @@ class SearchScopeBar(QFrame):
                 if d_year is not None:
                     parts.append(str(d_year))
                 d_text = " ".join(parts) or "Date"
-            chip = FilterChip(d_text, self.chips_widget)
+            chip = FilterChip(d_text, self.chips_widget, dark_mode=self._dark_mode)
             chip.remove_clicked.connect(self.date_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 
         # 6. Active Location or Find Similar Chip
         if location_label:
             if not str(location_label).startswith("Similar to "):
-                lbl_loc = QLabel("Location:", self.chips_widget)
-                lbl_loc.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
-                self.chips_layout.addWidget(lbl_loc)
+                self.chips_layout.addWidget(self._make_prefix_label("Location:"))
 
-            chip = FilterChip(location_label, self.chips_widget)
+            chip = FilterChip(location_label, self.chips_widget, dark_mode=self._dark_mode)
             chip.remove_clicked.connect(self.location_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 
-        # 7. Active Media Type Chip: "Media type: Video" (or "Photos", "RAW") - ignore "all"
+        # 7. Active Media Type Chip: "Media type: Video" (or "Photos", "RAW", "Motion photos") - ignore "all"
         media_type = filter_state.get("media_type")
         m_val = str(media_type or "").lower().strip()
         if m_val and m_val not in ("all", "none"):
-            lbl_m = QLabel("Media type:", self.chips_widget)
-            lbl_m.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
-            self.chips_layout.addWidget(lbl_m)
+            self.chips_layout.addWidget(self._make_prefix_label("Media type:"))
 
             if m_val in ("video", "videos"):
                 m_label = "Video"
@@ -711,21 +911,19 @@ class SearchScopeBar(QFrame):
             else:
                 m_label = str(media_type).capitalize()
 
-            chip = FilterChip(m_label, self.chips_widget)
+            chip = FilterChip(m_label, self.chips_widget, dark_mode=self._dark_mode)
             chip.remove_clicked.connect(self.media_type_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 
         # 8. Active Orientation Chip: "Orientation: Landscape" / "Orientation: Portrait" - ignore "all"
         orient_val = str(filter_state.get("orientation_filter") or "").lower().strip()
         if orient_val and orient_val not in ("all", "none"):
-            lbl_o = QLabel("Orientation:", self.chips_widget)
-            lbl_o.setStyleSheet("color: #55687C; font-family: 'Segoe UI'; font-size: 8.5pt;")
-            self.chips_layout.addWidget(lbl_o)
+            self.chips_layout.addWidget(self._make_prefix_label("Orientation:"))
 
             o_label = "Landscape" if orient_val == "landscape" else (
                 "Portrait" if orient_val == "portrait" else orient_val.capitalize()
             )
-            chip = FilterChip(o_label, self.chips_widget)
+            chip = FilterChip(o_label, self.chips_widget, dark_mode=self._dark_mode)
             chip.remove_clicked.connect(self.orientation_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 

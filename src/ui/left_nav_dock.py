@@ -1709,7 +1709,7 @@ class LeftNavigationDock(QDockWidget):
             self.root_smart_albums.addChild(fav_item)
 
         if getattr(self, "_show_smart_picked", True):
-            pick_item = QTreeWidgetItem([f"Picked / Flagged ({picked_cnt})"])
+            pick_item = QTreeWidgetItem([f"Picked ({picked_cnt})"])
             pick_item.setData(0, _NODE_TYPE_ROLE, "smart_flag")
             pick_item.setData(0, _NODE_PAYLOAD_ROLE, 1)
             pick_item.setIcon(0, _make_builtin_smart_icon("picked"))
@@ -2704,7 +2704,7 @@ class LeftNavigationDock(QDockWidget):
                 )
                 menu.addAction(act_show_fav)
 
-            act_show_pick = QAction("Show Picked / Flagged", menu)
+            act_show_pick = QAction("Show Picked", menu)
             act_show_pick.setCheckable(True)
             act_show_pick.setChecked(bool(getattr(self, "_show_smart_picked", True)))
             act_show_pick.toggled.connect(
@@ -3267,10 +3267,29 @@ class LeftNavigationDock(QDockWidget):
         self._person_boolean_mode = "OR"
         self._ratings.clear()
         self._flagged_only = False
+        self._flag_filter = None
         self._edited_only = False
         self._edited_filter = None
         self._media_type = "all"
         self._orientation_filter = "all"
+
+    def clear_search_filter_facets(self, *, emit_signal: bool = True) -> None:
+        """Clears search/facet filters while preserving the active folder, album, or smart album scope."""
+        saved_folder_id = self._folder_id
+        saved_folder_name = self._folder_name
+        saved_dates_active = self._dates_section_active
+        self._updating_tree = True
+        try:
+            self._reset_non_album_facets()
+            self._folder_id = saved_folder_id
+            self._folder_name = saved_folder_name
+            self._dates_section_active = saved_dates_active
+            self._sync_tree_selection()
+        finally:
+            self._updating_tree = False
+        self._update_summary_label()
+        if emit_signal:
+            self.filter_changed.emit()
 
     def _select_album_scope(self, album_id: int, album_name: str = "") -> None:
         """Select a Static Album as the active gallery scope."""
@@ -3376,13 +3395,13 @@ class LeftNavigationDock(QDockWidget):
         elif getattr(self, "_edited_filter", None) == 0:
             parts.append("Not edited")
         if self._media_type == "image":
-            parts.append("Photos only")
+            parts.append("Photos")
         elif self._media_type == "video":
-            parts.append("Videos only")
+            parts.append("Video")
         elif self._media_type == "raw":
-            parts.append("RAW photos only")
+            parts.append("RAW")
         elif self._media_type == "motion":
-            parts.append("Motion photos only")
+            parts.append("Motion photos")
         if getattr(self, "_orientation_filter", "all") == "landscape":
             parts.append("Landscape only")
         elif getattr(self, "_orientation_filter", "all") == "portrait":
@@ -3413,6 +3432,7 @@ class LeftNavigationDock(QDockWidget):
             "person_boolean_mode": self._person_boolean_mode,
             "ratings": tuple(sorted(self._ratings)),
             "flagged_only": self._flagged_only,
+            "flag_filter": getattr(self, "_flag_filter", None),
             "edited_only": self._edited_only,
             "edited_filter": getattr(self, "_edited_filter", (1 if self._edited_only else None)),
             "media_type": self._media_type,

@@ -1,4 +1,5 @@
 import datetime
+import faulthandler
 import json
 import os
 import sys
@@ -12,6 +13,7 @@ from src.utils.paths import get_app_data_dir
 
 
 _CRASH_TRACE_LOCK = threading.Lock()
+_FAULT_LOG_HANDLE: Any = None
 _ACTIVE_TRACE_PATHS: dict[int, tuple[str, str]] = {}  # thread_id -> (stage, file_path)
 _STARTUP_T0 = time.perf_counter()
 _STARTUP_STAGES: dict[str, float] = {}
@@ -165,6 +167,14 @@ def install_global_crash_logger(log_dir: Path | str | None = None) -> None:
     except Exception:
         pass
     crash_file = target_dir / "crash.log"
+
+    if "PYTEST_CURRENT_TEST" not in os.environ:
+        global _FAULT_LOG_HANDLE
+        try:
+            _FAULT_LOG_HANDLE = open(crash_file, "a", encoding="utf-8")
+            faulthandler.enable(file=_FAULT_LOG_HANDLE, all_threads=True)
+        except Exception:
+            pass
 
     def _crash_handler(exc_type, exc_value, exc_traceback):
         if issubclass(exc_type, KeyboardInterrupt):

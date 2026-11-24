@@ -1667,6 +1667,15 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.scope_bar.orientation_clear_requested.connect(
             lambda: self.left_nav_dock.set_orientation_filter("all")
         )
+        self.scope_bar.edited_clear_requested.connect(
+            lambda: self.left_nav_dock.set_edited_filter(None)
+        )
+        self.scope_bar.untagged_clear_requested.connect(
+            lambda: self.left_nav_dock.set_untagged_only(False)
+        )
+        self.scope_bar.exclude_tag_remove_requested.connect(
+            lambda tid: self.left_nav_dock.set_tag_filter_state(tid, "neutral")
+        )
 
         # Quick Access Toolbar & Navigation History Signals
         self.ribbon.back_requested.connect(self.navigate_history_back)
@@ -3206,9 +3215,13 @@ class PhotoGalleryMainWindow(QMainWindow):
         return bool(
             state.get("person_ids")
             or state.get("include_tag_ids")
+            or state.get("exclude_tag_ids")
+            or state.get("untagged_only")
             or state.get("ratings")
             or state.get("flagged_only")
             or state.get("flag_filter") is not None
+            or state.get("edited_only")
+            or state.get("edited_filter") is not None
             or getattr(self, "_favourites_only", False)
             or has_media_filter
             or has_orientation_filter
@@ -3220,6 +3233,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             or self._active_bbox is not None
             or self._active_map_media_ids is not None
             or self._active_map_location_label is not None
+            or getattr(self, "_active_similar_seed_id", None) is not None
+            or getattr(self, "_active_similar_order", None) is not None
             or state.get("location_country") is not None
             or state.get("location_state") is not None
             or state.get("location_city") is not None
@@ -3342,13 +3357,82 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.scope_bar.focus_search_input()
 
     def hide_search_scope_bar(self) -> None:
+        was_explicit = self._search_scope_bar_explicitly_opened
         self._search_scope_bar_explicitly_opened = False
+        # Determine whether any search text or filter facet was active before clearing
+        # so dismissing the Search by bar never leaves an invisible filter narrowing results.
+        state = self.left_nav_dock.current_filter_state()
+        m_type = str(state.get("media_type") or "").lower().strip()
+        o_filt = str(state.get("orientation_filter") or "").lower().strip()
+        had_active_filters = bool(
+            self._search_text
+            or getattr(self, "_favourites_only", False)
+            or (m_type and m_type not in ("all", "none"))
+            or (o_filt and o_filt not in ("all", "none"))
+            or state.get("person_ids")
+            or state.get("include_tag_ids")
+            or state.get("exclude_tag_ids")
+            or state.get("untagged_only")
+            or state.get("ratings")
+            or state.get("flagged_only")
+            or state.get("flag_filter") is not None
+            or state.get("edited_only")
+            or state.get("edited_filter") is not None
+            or state.get("date_year") is not None
+            or state.get("date_month") is not None
+            or state.get("date_day") is not None
+            or self._active_date_range is not None
+            or self._active_bbox is not None
+            or self._active_map_media_ids is not None
+            or self._active_map_location_label is not None
+            or getattr(self, "_active_similar_seed_id", None) is not None
+            or getattr(self, "_active_similar_order", None) is not None
+            or state.get("location_country") is not None
+            or state.get("location_state") is not None
+            or state.get("location_city") is not None
+            or state.get("camera_model") is not None
+            or bool(getattr(self, "_active_subject_label", ""))
+            or (getattr(self, "_active_subject_ids", None) is not None)
+            or getattr(self, "_active_special_people_filter", None) is not None
+        )
+        self._search_text = ""
+        self._favourites_only = False
+        self._active_date_range = None
+        self._active_date_label = None
+        self._active_bbox = None
+        self._active_map_media_ids = None
+        self._active_map_location_label = None
+        self._active_similar_order = None
+        self._active_similar_scored = None
+        self._active_similar_label = None
+        self._active_similar_seed_id = None
+        self._active_similar_seed_name = ""
+        self._active_subject_ids = None
+        self._active_subject_label = ""
+        self._active_special_people_filter = None
+        self._active_special_people_label = None
+
         self.scope_bar.set_pinned(False)
+        self.scope_bar.set_similarity_controls(False)
+        self.scope_bar.txt_search.blockSignals(True)
         self.scope_bar.clear_search_input()
-        self.scope_bar.hide()
-        if self._search_text:
-            self._search_text = ""
+        self.scope_bar.txt_search.blockSignals(False)
+        if had_active_filters:
+            self.left_nav_dock.clear_search_filter_facets(emit_signal=False)
+            if hasattr(self.ribbon, "btn_find_edited"):
+                self.ribbon.btn_find_edited.blockSignals(True)
+                self.ribbon.btn_find_edited.setChecked(False)
+                self.ribbon._current_edited_filter = None
+                self.ribbon.btn_find_edited.setToolTip("Filter by edited items")
+                self.ribbon.btn_find_edited.blockSignals(False)
+            if hasattr(self.ribbon, "set_orientation_filter_ui"):
+                self.ribbon.set_orientation_filter_ui("all")
+            self._update_scope_bar_visibility()
             self.rebuild_and_run_query()
+        else:
+            if was_explicit:
+                self._update_scope_bar_visibility()
+            self.scope_bar.hide()
 
     def _on_scope_bar_pin_toggled(self, pinned: bool) -> None:
         if not pinned and not self._has_active_filter_facets():
@@ -4309,6 +4393,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         if hasattr(self, "bottom_dock") and self.bottom_dock is not None:
             self.bottom_dock.refresh_items()
 
+        if hasattr(self, "scope_bar") and self.scope_bar is not None:
+            self._update_scope_bar_visibility()
+
         # Update empty state overlay
         is_empty = (len(records) == 0)
         is_search = bool(self._search_text and self._search_text.strip())
@@ -4316,12 +4403,18 @@ class PhotoGalleryMainWindow(QMainWindow):
             spec.folder_id
             or (hasattr(self, "left_nav_dock") and self.left_nav_dock.selected_folder_name() is not None)
             or spec.include_tag_ids
+            or spec.exclude_tag_ids
+            or spec.untagged_only
             or spec.person_ids
             or spec.date_year
             or spec.ratings
             or spec.flagged_only
             or (spec.flag_filter is not None)
+            or spec.edited_only
+            or (spec.edited_filter is not None)
+            or spec.favourites_only
             or (spec.media_type != "all")
+            or (spec.orientation_filter != "all")
             or spec.bbox
             or spec.location_country
             or spec.location_state

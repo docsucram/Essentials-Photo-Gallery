@@ -288,19 +288,59 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawRoundedRect(QRectF(s * 0.10, s * 0.32, s * 0.62, s * 0.18), 2.0, 2.0)
 
     elif kind in ("text_search", "binoculars"):
-        p.setPen(QPen(QColor("#1E5288"), 1.3))
-        p.setBrush(QColor("#4A88C7"))
-        p.drawRoundedRect(QRectF(s * 0.18, s * 0.30, s * 0.26, s * 0.52), 3.0, 3.0)
-        p.drawRoundedRect(QRectF(s * 0.56, s * 0.30, s * 0.26, s * 0.52), 3.0, 3.0)
-        p.setBrush(QColor("#1E3E66"))
-        p.drawRoundedRect(QRectF(s * 0.22, s * 0.22, s * 0.18, s * 0.10), 2.0, 2.0)
-        p.drawRoundedRect(QRectF(s * 0.60, s * 0.22, s * 0.18, s * 0.10), 2.0, 2.0)
-        p.setPen(QPen(QColor("#1E3E66"), 2.0))
-        p.drawLine(QPointF(s * 0.44, s * 0.50), QPointF(s * 0.56, s * 0.50))
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(255, 255, 255, 160))
-        p.drawEllipse(QPointF(s * 0.28, s * 0.70), s * 0.06, s * 0.06)
-        p.drawEllipse(QPointF(s * 0.66, s * 0.70), s * 0.06, s * 0.06)
+        # Angled 3/4 Aero glossy binoculars (avoid vertical cylinder silhouette)
+        # Left & right angled barrels converging toward eyepieces at top-right
+        barrels = (
+            QPolygonF([
+                QPointF(s * 0.36, s * 0.16),
+                QPointF(s * 0.50, s * 0.22),
+                QPointF(s * 0.38, s * 0.68),
+                QPointF(s * 0.14, s * 0.62),
+            ]),
+            QPolygonF([
+                QPointF(s * 0.54, s * 0.20),
+                QPointF(s * 0.68, s * 0.26),
+                QPointF(s * 0.78, s * 0.68),
+                QPointF(s * 0.52, s * 0.68),
+            ]),
+        )
+        grad_barrel = QLinearGradient(0, s * 0.16, 0, s * 0.72)
+        grad_barrel.setColorAt(0.0, QColor("#6BA8DE"))
+        grad_barrel.setColorAt(0.45, QColor("#2D6EB0"))
+        grad_barrel.setColorAt(1.0, QColor("#173D68"))
+        p.setPen(QPen(QColor("#133256"), 1.1))
+        p.setBrush(grad_barrel)
+        for barrel in barrels:
+            p.drawPolygon(barrel)
+
+        # Center bridge & knurled focus wheel
+        p.setBrush(QColor("#244A75"))
+        p.drawRoundedRect(QRectF(s * 0.38, s * 0.36, s * 0.24, s * 0.12), 2.0, 2.0)
+        p.setBrush(QColor("#8EC0EC"))
+        p.drawRoundedRect(QRectF(s * 0.45, s * 0.29, s * 0.10, s * 0.16), 2.0, 2.0)
+
+        # Eyepiece cuffs at top
+        p.setBrush(QColor("#1A3554"))
+        p.drawEllipse(QRectF(s * 0.34, s * 0.12, s * 0.16, s * 0.10))
+        p.drawEllipse(QRectF(s * 0.52, s * 0.16, s * 0.16, s * 0.10))
+
+        # Prominent circular front objective lenses (Aero glass bezels)
+        for cx, cy in ((s * 0.26, s * 0.70), (s * 0.65, s * 0.70)):
+            r_outer = s * 0.175
+            r_inner = s * 0.125
+            p.setPen(QPen(QColor("#133256"), 1.2))
+            p.setBrush(QColor("#5B97CF"))
+            p.drawEllipse(QPointF(cx, cy), r_outer, r_outer)
+            grad_lens = QLinearGradient(cx - r_inner, cy - r_inner, cx + r_inner, cy + r_inner)
+            grad_lens.setColorAt(0.0, QColor("#9BE2FF"))
+            grad_lens.setColorAt(0.5, QColor("#2572B4"))
+            grad_lens.setColorAt(1.0, QColor("#0E2F54"))
+            p.setPen(QPen(QColor("#D6EEFF"), 0.8))
+            p.setBrush(grad_lens)
+            p.drawEllipse(QPointF(cx, cy), r_inner, r_inner)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 210))
+            p.drawEllipse(QPointF(cx - r_inner * 0.34, cy - r_inner * 0.34), r_inner * 0.26, r_inner * 0.20)
 
     elif kind == "edited":
         p.setPen(QPen(QColor("#6B5218"), 1.0))
@@ -7856,7 +7896,7 @@ class RibbonToolbar(QWidget):
         if not hasattr(self, "_ribbon_fav_actions"):
             self._ribbon_fav_actions = []
         self._ribbon_fav_actions.append(act_fav)
-        act_flagged = menu.addAction(self._make_cull_menu_icon("flag_picked"), "Picked / Flagged")
+        act_flagged = menu.addAction(self._make_cull_menu_icon("flag_picked"), "Picked")
         act_rejected = menu.addAction(self._make_cull_menu_icon("flag_rejected"), "Rejected")
         act_unflagged = menu.addAction(self._make_cull_menu_icon("flag_unflagged"), "Not flagged")
 
@@ -8892,16 +8932,14 @@ class RibbonToolbar(QWidget):
 
     def _build_media_type_menu(self, btn: QToolButton) -> None:
         menu = QMenu(btn)
-        act_all = menu.addAction("All media")
-        act_photos = menu.addAction("Photos only")
-        act_videos = menu.addAction("Videos only")
-        act_raw = menu.addAction("RAW photos only")
-        act_motion = menu.addAction("Motion photos only")
-        act_all.triggered.connect(lambda: self.media_type_filter_selected.emit("all"))
+        act_photos = menu.addAction("Photos")
+        act_raw = menu.addAction("RAW")
+        act_motion = menu.addAction("Motion photos")
+        act_videos = menu.addAction("Video")
         act_photos.triggered.connect(lambda: self.media_type_filter_selected.emit("image"))
-        act_videos.triggered.connect(lambda: self.media_type_filter_selected.emit("video"))
         act_raw.triggered.connect(lambda: self.media_type_filter_selected.emit("raw"))
         act_motion.triggered.connect(lambda: self.media_type_filter_selected.emit("motion"))
+        act_videos.triggered.connect(lambda: self.media_type_filter_selected.emit("video"))
         btn.setMenu(menu)
 
     def populate_tags_menu(self, tag_tree: Sequence[dict[str, Any]]) -> None:
