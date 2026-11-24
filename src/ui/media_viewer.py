@@ -3597,9 +3597,25 @@ class SingleMediaViewer(QWidget):
         target_h = int(round(h / proxy_scale))
         if target_w != w or target_h != h:
             pix = pix.scaled(target_w, target_h, Qt.IgnoreAspectRatio, Qt.FastTransformation)
+        prev_sz = self.pixmap_item.pixmap().size()
         self.pixmap_item.setPixmap(pix)
         self._update_alpha_backdrop(pix.width(), pix.height(), proxy_alpha is not None)
+        self._refit_viewport_after_pixmap_resize(prev_sz, pix.size())
         self._sync_animation_playback()
+
+    def _refit_viewport_after_pixmap_resize(self, prev_size: QSize, new_size: QSize) -> None:
+        """Keeps straightened/cropped images centered and fitted when rendered dimensions change."""
+        if new_size.isEmpty() or new_size == prev_size:
+            return
+        rect = QRectF(0, 0, new_size.width(), new_size.height())
+        self.scene.setSceneRect(rect)
+        if hasattr(self.scene, "crop_rect_item"):
+            self.scene.crop_rect_item.set_image_rect(rect)
+        mode = getattr(self, "current_zoom_mode", "fit")
+        if mode in ("fit", "fit_window"):
+            self.graphics_view.fitInView(self.pixmap_item, Qt.KeepAspectRatio)
+        else:
+            self.graphics_view.centerOn(self.pixmap_item)
 
     def _render_current_recipe(self) -> None:
         """Renders self.master_np_rgb with self.current_recipe using OpenCV/NumPy float pipeline."""
@@ -3656,10 +3672,12 @@ class SingleMediaViewer(QWidget):
 
         pix = self._build_pixmap_from_rgb_and_alpha(rendered_np, rendered_alpha)
         self._adjusted_pixmap = pix
+        prev_sz = self.pixmap_item.pixmap().size()
         self.pixmap_item.setPixmap(pix)
         self._update_alpha_backdrop(pix.width(), pix.height(), rendered_alpha is not None)
         self.scene.setSceneRect(QRectF(0, 0, pix.width(), pix.height()))
         self.scene.crop_rect_item.set_image_rect(QRectF(0, 0, pix.width(), pix.height()))
+        self._refit_viewport_after_pixmap_resize(prev_sz, pix.size())
         self.image_changed.emit(self.current_pil_image)
 
         # Update face overlays for current static image (clears overlays when empty)
@@ -6296,10 +6314,12 @@ class SingleMediaViewer(QWidget):
 
         pix = self._build_pixmap_from_rgb_and_alpha(rendered_np, rendered_alpha)
         self._adjusted_pixmap = pix
+        prev_sz = self.pixmap_item.pixmap().size()
         self.pixmap_item.setPixmap(pix)
         self._update_alpha_backdrop(pix.width(), pix.height(), rendered_alpha is not None)
         self.scene.setSceneRect(QRectF(0, 0, pix.width(), pix.height()))
         self.scene.crop_rect_item.set_image_rect(QRectF(0, 0, pix.width(), pix.height()))
+        self._refit_viewport_after_pixmap_resize(prev_sz, pix.size())
         self.image_changed.emit(self.current_pil_image)
 
         # Update face overlays for current static image (clears overlays when empty)
@@ -6660,10 +6680,27 @@ class SingleMediaViewer(QWidget):
         self.current_recipe.boundary_feather = float(boundary_feather)
         self._render_current_recipe()
 
+    def _render_proxy_and_schedule_master(self) -> None:
+        """Renders the fast display proxy immediately on GUI thread and defers full-res master off-thread."""
+        if self.master_np_rgb is None:
+            return
+        if self.display_proxy_rgb is not None:
+            self._master_render_dirty = True
+            self._master_render_gen += 1
+            self._render_proxy_to_viewport(
+                self.display_proxy_rgb, self.display_proxy_alpha, self._proxy_scale
+            )
+            if hasattr(self, "_master_render_timer"):
+                self._master_render_timer.start(80)
+            else:
+                self._flush_master_render()
+            return
+        self._render_current_recipe()
+
     def set_mask_overlay_preview(self, enabled: bool) -> None:
         """Toggles a semi-transparent ruby mask overlay over background pixels to visualize boundary adjustments."""
         self._mask_overlay_preview = bool(enabled)
-        self._render_current_recipe()
+        self._render_proxy_and_schedule_master()
 
     def set_depth_relight_parameters(
         self, near: int, far: int, warmth_near: int = 0, warmth_far: int = 0
@@ -6720,7 +6757,7 @@ class SingleMediaViewer(QWidget):
                 cmd = RecipeUndoCommand(self, before, new_rec, "Virtual Light Studio")
                 self.undo_stack.push(cmd)
             self.current_recipe = new_rec
-            self._render_current_recipe()
+            self._render_proxy_and_schedule_master()
             self.recipe_changed.emit(self.current_recipe)
         else:
             if self._recipe_before_slider is None:

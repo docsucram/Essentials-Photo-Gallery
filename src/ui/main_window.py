@@ -655,6 +655,115 @@ class _AvatarBackfillSignals(QObject):
     finished = Signal(int)
 
 
+class _MotionPhotoBackfillSignals(QObject):
+    finished = Signal(int)
+
+
+class _MotionPhotoBackfillWorker(QRunnable):
+    """Lightweight background backfill detecting Motion/Live photos for older catalog rows."""
+
+    def __init__(
+        self,
+        engine: DualDatabaseEngine,
+        signals: _MotionPhotoBackfillSignals,
+        *,
+        folder_ids: Sequence[int] | None = None,
+        batch_limit: int = 1500,
+    ) -> None:
+        super().__init__()
+        self.engine = engine
+        self.signals = signals
+        self.folder_ids = tuple(int(f) for f in folder_ids) if folder_ids else None
+        self.batch_limit = max(50, int(batch_limit))
+
+    def run(self) -> None:
+        found = 0
+        try:
+            from src.imaging.live_photo import detect_motion_photo_offset, find_paired_live_video
+
+            repo = CatalogRepository(self.engine)
+            conn = self.engine.catalog_conn()
+            if self.folder_ids:
+                placeholders = ",".join("?" for _ in self.folder_ids)
+                rows = conn.execute(
+                    f"""
+                    SELECT m.id, f.path AS folder_path, m.filename
+                    FROM media m
+                    JOIN folders f ON f.id = m.folder_id
+                    WHERE m.is_video = 0
+                      AND COALESCE(m.is_missing, 0) = 0
+                      AND COALESCE(m.is_live_photo, 0) = 0
+                      AND COALESCE(m.motion_offset, 0) = 0
+                      AND LOWER(COALESCE(m.ext, '')) IN ('jpg', 'jpeg', 'heic', 'heif')
+                      AND m.folder_id IN ({placeholders})
+                    ORDER BY m.date_taken DESC, m.id DESC
+                    LIMIT ?;
+                    """,
+                    (*self.folder_ids, self.batch_limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT m.id, f.path AS folder_path, m.filename
+                    FROM media m
+                    JOIN folders f ON f.id = m.folder_id
+                    WHERE m.is_video = 0
+                      AND COALESCE(m.is_missing, 0) = 0
+                      AND COALESCE(m.is_live_photo, 0) = 0
+                      AND COALESCE(m.motion_offset, 0) = 0
+                      AND LOWER(COALESCE(m.ext, '')) IN ('jpg', 'jpeg', 'heic', 'heif')
+                    ORDER BY m.date_taken DESC, m.id DESC
+                    LIMIT ?;
+                    """,
+                    (self.batch_limit,),
+                ).fetchall()
+
+            live_updates: list[tuple[int, int, str, int]] = []
+            mov_pairs: list[tuple[int, int]] = []
+            checked_still_ids: list[int] = []
+            for r in rows:
+                mid = int(r["id"])
+                fpath = Path(str(r["folder_path"])) / str(r["filename"])
+                paired = find_paired_live_video(fpath)
+                if paired is not None:
+                    live_updates.append((1, 0, str(paired), mid))
+                    mov_mid = repo.get_media_id_by_file_path(paired)
+                    if mov_mid is not None:
+                        mov_pairs.append((int(mov_mid), mid))
+                    continue
+                off = detect_motion_photo_offset(fpath)
+                if off is not None:
+                    live_updates.append((1, int(off), "", mid))
+                else:
+                    checked_still_ids.append(mid)
+
+            if live_updates:
+                repo.update_live_photo_metadata(live_updates)
+                found = len(live_updates)
+            if mov_pairs:
+                repo.mark_live_companion_videos(mov_pairs)
+            if checked_still_ids:
+                with self.engine.write_lock:
+                    wconn = self.engine.catalog_conn()
+                    for i in range(0, len(checked_still_ids), 900):
+                        chunk = checked_still_ids[i : i + 900]
+                        ph = ",".join("?" for _ in chunk)
+                        wconn.execute(
+                            f"UPDATE media SET motion_offset = -1 WHERE id IN ({ph}) AND COALESCE(is_live_photo, 0) = 0;",
+                            chunk,
+                        )
+                    wconn.commit()
+        except Exception:
+            found = 0
+        finally:
+            if threading.current_thread() is not threading.main_thread():
+                self.engine.close_thread_connections()
+            try:
+                self.signals.finished.emit(found)
+            except RuntimeError:
+                pass
+
+
 class _AvatarBackfillWorker(QRunnable):
     """Background worker that generates missing avatar crops in people table."""
 
@@ -3223,6 +3332,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             people = self.catalog_repo.get_people_list()
             self.left_nav_dock.refresh_trees(self.catalog_repo, preloaded_people=people)
         self.ribbon.populate_face_carousel(people)
+        if hasattr(self, "people_directory_view"):
+            self.people_directory_view.invalidate_cache()
         if hasattr(self.right_tag_dock, "_people_model"):
             self.right_tag_dock._people_model.setStringList([str(p["name"]) for p in people])
 
@@ -4399,6 +4510,8 @@ class PhotoGalleryMainWindow(QMainWindow):
 
             spec = _dc_replace(spec, expanded_stack_ids=exp_stack, favourites_only=fav_only)
         records = self.catalog_repo.query_media_records(spec)
+        if spec.media_type == "motion" and "PYTEST_CURRENT_TEST" not in os.environ:
+            self._maybe_start_motion_photo_backfill(folder_ids=spec.folder_ids)
 
         # Fuse semantic text matches with FTS5 keyword matches when MobileCLIP-S1 is installed
         if (
@@ -4838,6 +4951,38 @@ class PhotoGalleryMainWindow(QMainWindow):
                     self._failed_thumb_ids.add(int(mid))
             except Exception:
                 pass
+
+    def _maybe_start_motion_photo_backfill(
+        self, folder_ids: Sequence[int] | None = None
+    ) -> None:
+        """Runs a throttled background pass to detect Motion/Live photos on pre-existing catalog rows."""
+        if getattr(self, "_is_shutting_down", False) or getattr(self, "_motion_backfill_active", False):
+            return
+        self._motion_backfill_active = True
+        signals = _MotionPhotoBackfillSignals(self)
+        worker = _MotionPhotoBackfillWorker(
+            self.engine,
+            signals,
+            folder_ids=folder_ids,
+            batch_limit=1500,
+        )
+        self._retain_pool_worker(worker, signals)
+
+        def _on_motion_backfill_done(found_count: int) -> None:
+            self._motion_backfill_active = False
+            if found_count > 0 and not getattr(self, "_is_shutting_down", False):
+                st = self.left_nav_dock.current_filter_state()
+                if st.get("media_type") == "motion":
+                    self.rebuild_and_run_query()
+                    self.show_status_message(
+                        f"✓ Detected {found_count:,} motion photo(s)", 3500
+                    )
+
+        signals.finished.connect(_on_motion_backfill_done)
+        signals.finished.connect(
+            lambda *_args, w=worker, s=signals: self._release_pool_worker(w, s)
+        )
+        self.scanner_pool.start(worker)
 
     def _start_async_avatar_backfill(self) -> None:
         """Launches background QRunnable to generate avatar crops for people without blocking startup."""

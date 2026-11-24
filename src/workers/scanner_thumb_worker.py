@@ -1176,18 +1176,19 @@ def _resolve_person_name_from_tag(repo: Any, parts: list[str]) -> str | None:
     else:
         first_last = leaf
 
-    # Check match against known people in DB
+    # Check match against known people in DB (lightweight name-only query)
     try:
-        all_people = repo.get_all_people()
+        if hasattr(repo, "get_person_names"):
+            person_names = [str(n or "").strip() for n in repo.get_person_names()]
+        else:
+            person_names = [str(p.get("name") or "").strip() for p in repo.get_all_people()]
         # 1. Exact match on first_last (e.g. 'Nansumay Robinson')
-        for p in all_people:
-            p_name = str(p.get("name") or "").strip()
-            if p_name.lower() == first_last.lower():
+        for p_name in person_names:
+            if p_name and p_name.lower() == first_last.lower():
                 return p_name
         # 2. Match on leaf (e.g. 'Nansumay' matches 'Nansumay Robinson')
-        for p in all_people:
-            p_name = str(p.get("name") or "").strip()
-            if (
+        for p_name in person_names:
+            if p_name and (
                 p_name.lower() == leaf.lower()
                 or p_name.lower().startswith(leaf.lower() + " ")
                 or p_name.lower().split()[0] == leaf.lower()

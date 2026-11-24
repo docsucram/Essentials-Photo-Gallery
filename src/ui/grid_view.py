@@ -1508,10 +1508,28 @@ class MediaCardDelegate(QStyledItemDelegate):
                 painter.setBrush(deck_fill_1)
                 painter.drawRoundedRect(r1, rad, rad)
 
-            s_key = (int(pixmap.cacheKey()), scaled_sz.width(), scaled_sz.height())
+            strip_baked_video = bool(is_mosaic and is_video and pixmap.width() >= 48)
+            s_key = (int(pixmap.cacheKey()), scaled_sz.width(), scaled_sz.height(), strip_baked_video)
             scaled_pix = self._scaled_pixmap_cache.get(s_key)
             if scaled_pix is None:
-                if pixmap.size() == scaled_sz:
+                src_pix = pixmap
+                if strip_baked_video:
+                    # Crop away the ~8.5% baked-in filmstrip rails from cached video thumbnails
+                    # so mosaic view never doubles up perforations.
+                    inset_x = max(2, int(round(pixmap.width() * 0.085)))
+                    inner_w = pixmap.width() - (2 * inset_x)
+                    if inner_w >= 16:
+                        src_pix = pixmap.copy(inset_x, 0, inner_w, pixmap.height())
+                        scaled_pix = src_pix.scaled(
+                            target_rect.size(),
+                            Qt.KeepAspectRatioByExpanding,
+                            Qt.SmoothTransformation,
+                        )
+                    else:
+                        scaled_pix = pixmap.scaled(
+                            scaled_sz, Qt.IgnoreAspectRatio, Qt.SmoothTransformation
+                        )
+                elif pixmap.size() == scaled_sz:
                     scaled_pix = pixmap
                 else:
                     scaled_pix = pixmap.scaled(
@@ -1529,29 +1547,43 @@ class MediaCardDelegate(QStyledItemDelegate):
                     painter.setClipPath(clip_p)
                 else:
                     painter.setClipRect(target_rect)
-                src_x = max(0, (scaled_sz.width() - target_rect.width()) // 2)
-                src_y = max(0, (scaled_sz.height() - target_rect.height()) // 2)
+                src_x = max(0, (scaled_pix.width() - target_rect.width()) // 2)
+                src_y = max(0, (scaled_pix.height() - target_rect.height()) // 2)
                 painter.drawPixmap(
                     target_rect.topLeft(),
                     scaled_pix,
                     QRect(src_x, src_y, target_rect.width(), target_rect.height()),
                 )
                 if is_video and target_rect.width() >= 48 and target_rect.height() >= 36:
-                    strip_w = max(8, min(13, int(round(target_rect.width() * 0.07))))
-                    hole_sz = max(4, min(7, int(round(strip_w * 0.58))))
-                    hole_pad = max(3, int(round(hole_sz * 0.6)))
+                    # Sleek, single-width vector filmstrip sprocket rails with rounded holes
+                    strip_w = max(6, min(10, int(round(min(target_rect.width(), target_rect.height()) * 0.055))))
+                    hole_w = max(3.2, strip_w * 0.48)
+                    hole_h = max(3.8, hole_w * 1.18)
+                    gap_y = max(3.2, hole_h * 0.72)
+                    step_y = hole_h + gap_y
                     painter.setPen(Qt.NoPen)
-                    painter.setBrush(QColor("#0B0D12"))
-                    painter.drawRect(QRect(target_rect.left(), target_rect.top(), strip_w, target_rect.height()))
-                    painter.drawRect(QRect(target_rect.right() - strip_w + 1, target_rect.top(), strip_w, target_rect.height()))
-                    painter.setBrush(QColor(205, 210, 218))
-                    lx_h = target_rect.left() + (strip_w - hole_sz) / 2.0
-                    rx_h = target_rect.right() - strip_w + 1 + (strip_w - hole_sz) / 2.0
-                    cy_h = target_rect.top() + hole_pad
-                    while cy_h + hole_sz <= target_rect.bottom() - 2:
-                        painter.drawRect(QRectF(lx_h, cy_h, hole_sz, hole_sz))
-                        painter.drawRect(QRectF(rx_h, cy_h, hole_sz, hole_sz))
-                        cy_h += hole_sz + hole_pad
+                    painter.setBrush(QColor(15, 18, 24, 232))
+                    left_rail = QRect(target_rect.left(), target_rect.top(), strip_w, target_rect.height())
+                    right_rail = QRect(target_rect.right() - strip_w + 1, target_rect.top(), strip_w, target_rect.height())
+                    painter.drawRect(left_rail)
+                    painter.drawRect(right_rail)
+                    # Subtle inner hairline separating rail from video frame
+                    painter.setPen(QPen(QColor(255, 255, 255, 30), 1.0))
+                    painter.drawLine(left_rail.right(), target_rect.top(), left_rail.right(), target_rect.bottom())
+                    painter.drawLine(right_rail.left(), target_rect.top(), right_rail.left(), target_rect.bottom())
+                    # Vertically centered rounded sprocket perforations
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(QColor(226, 232, 242, 215))
+                    avail_h = max(0.0, target_rect.height() - 6.0)
+                    n_holes = max(1, int((avail_h + gap_y) // step_y))
+                    total_span = n_holes * hole_h + (n_holes - 1) * gap_y
+                    start_y = target_rect.top() + (target_rect.height() - total_span) / 2.0
+                    lx_h = left_rail.left() + (strip_w - hole_w) / 2.0
+                    rx_h = right_rail.left() + (strip_w - hole_w) / 2.0
+                    for hi in range(n_holes):
+                        cy_h = start_y + hi * step_y
+                        painter.drawRoundedRect(QRectF(lx_h, cy_h, hole_w, hole_h), 1.1, 1.1)
+                        painter.drawRoundedRect(QRectF(rx_h, cy_h, hole_w, hole_h), 1.1, 1.1)
                 painter.restore()
             else:
                 painter.drawPixmap(target_rect.topLeft(), scaled_pix)

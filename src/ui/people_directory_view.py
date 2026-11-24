@@ -866,6 +866,7 @@ class PeopleDirectoryView(QWidget):
         self._all_named_people: list[dict[str, Any]] = []
         self._all_unnamed_clusters: list[dict[str, Any]] = []
         self._cluster_gen_id: int = 0
+        self._named_cache_ts: float = 0.0
         self._unnamed_cache_ts: float = 0.0
         self._cluster_pool = QThreadPool(self)
         self._cluster_pool.setMaxThreadCount(1)
@@ -1101,13 +1102,39 @@ class PeopleDirectoryView(QWidget):
     # -------------------------------------------------------------------------
     # Directory Data Refresh & Rendering
     # -------------------------------------------------------------------------
-    def refresh_directory(self, recluster_unnamed: bool = True) -> None:
+    def invalidate_cache(self) -> None:
+        """Marks cached named people and unnamed clusters stale so the next visit reloads from DB."""
+        self._named_cache_ts = 0.0
+        self._unnamed_cache_ts = 0.0
+
+    def refresh_directory(self, recluster_unnamed: bool = True, *, force: bool = False) -> None:
         """Fetches named people immediately (<60ms) and computes unnamed clusters in background."""
+        import time
+
+        now = time.monotonic()
         try:
             min_conf = float(QSettings("PhotoGallery64", "PhotoGallery64").value("face_match_threshold", 0.52))
         except Exception:
             min_conf = 0.52
-        self._all_named_people = self.repo.get_named_people_directory_data(min_confidence=min_conf)
+
+        named_cache_fresh = (
+            not force
+            and self._named_cache_ts > 0.0
+            and (now - self._named_cache_ts) < 60.0
+            and bool(self._all_named_people)
+            and self._calc_cols() == getattr(self, "_last_rendered_cols", -1)
+        )
+        unnamed_cache_fresh = (
+            not force
+            and self._unnamed_cache_ts > 0.0
+            and (now - self._unnamed_cache_ts) < 60.0
+        )
+        if named_cache_fresh and (not recluster_unnamed or unnamed_cache_fresh):
+            return
+
+        if not named_cache_fresh:
+            self._all_named_people = self.repo.get_named_people_directory_data(min_confidence=min_conf)
+            self._named_cache_ts = now
 
         total_cnt = len(self._all_named_people)
         self.lbl_total_count.setText(f"({total_cnt:,})")
@@ -1162,14 +1189,12 @@ class PeopleDirectoryView(QWidget):
             )
 
         # Update Section 1 immediately; Section 2 either stays as-is or updates once worker finishes
-        self._render_named_grid()
-        import time
-        cache_fresh = (
-            self._unnamed_cache_ts > 0.0
-            and (time.monotonic() - self._unnamed_cache_ts) < 60.0
-        )
+        if not named_cache_fresh:
+            self._render_named_grid()
+        cache_fresh = unnamed_cache_fresh
         if not recluster_unnamed or cache_fresh:
-            self._render_unnamed_grid()
+            if not named_cache_fresh:
+                self._render_unnamed_grid()
         self._update_empty_state()
 
         if recluster_unnamed and not cache_fresh:
@@ -1555,7 +1580,7 @@ class PeopleDirectoryView(QWidget):
             pass
 
         self._prune_unnamed_cluster_faces(face_ids)
-        self.refresh_directory(recluster_unnamed=False)
+        self.refresh_directory(recluster_unnamed=False, force=True)
         self.directory_updated.emit()
 
     def _prune_unnamed_cluster_faces(self, face_ids: list[int]) -> None:
@@ -1579,7 +1604,7 @@ class PeopleDirectoryView(QWidget):
     def _on_ignore_cluster_faces(self, face_ids: list[int]) -> None:
         self.repo.ignore_face(face_ids)
         self._prune_unnamed_cluster_faces(face_ids)
-        self.refresh_directory(recluster_unnamed=False)
+        self.refresh_directory(recluster_unnamed=False, force=True)
         self.directory_updated.emit()
 
     def _on_rename_person(self, person_id: int, current_name: str) -> None:
@@ -1590,7 +1615,7 @@ class PeopleDirectoryView(QWidget):
         if ok and new_name.strip() and new_name.strip() != current_name:
             try:
                 self.repo.rename_person(person_id, new_name.strip())
-                self.refresh_directory(recluster_unnamed=False)
+                self.refresh_directory(recluster_unnamed=False, force=True)
                 self.directory_updated.emit()
             except Exception as e:
                 QMessageBox.warning(self, "Rename Failed", f"Could not rename person: {e}")
@@ -1618,7 +1643,7 @@ class PeopleDirectoryView(QWidget):
                 new_name = dlg.target_person_name()
                 try:
                     self.repo.rename_person(person_id, new_name)
-                    self.refresh_directory(recluster_unnamed=False)
+                    self.refresh_directory(recluster_unnamed=False, force=True)
                     self.directory_updated.emit()
                 except Exception as e:
                     QMessageBox.warning(self, "Rename Failed", f"Could not rename person: {e}")
@@ -1627,7 +1652,7 @@ class PeopleDirectoryView(QWidget):
                 if dst_id is not None:
                     try:
                         self.repo.merge_people(person_id, dst_id)
-                        self.refresh_directory(recluster_unnamed=False)
+                        self.refresh_directory(recluster_unnamed=False, force=True)
                         self.directory_updated.emit()
                     except Exception as e:
                         QMessageBox.warning(self, "Merge Failed", f"Could not merge people: {e}")

@@ -122,6 +122,40 @@ def _enrich_and_upsert_media(
 
     if enrichment_rows:
         upserted_ids = repo.bulk_upsert_media(enrichment_rows)
+        # Detect Android Motion Photos (JPEG + MP4 tail) & Apple Live Photos (.HEIC/.JPG + .MOV)
+        try:
+            from src.imaging.live_photo import detect_motion_photo_offset, find_paired_live_video
+
+            f_row = repo.engine.catalog_conn().execute(
+                "SELECT path FROM folders WHERE id = ?;", (int(folder_id),)
+            ).fetchone()
+            base_dir = Path(str(f_row["path"])) if f_row is not None else None
+            if base_dir is not None:
+                live_updates: list[tuple[int, int, str, int]] = []
+                mov_pairs: list[tuple[int, int]] = []
+                for row_dict, mid in zip(enrichment_rows, upserted_ids):
+                    if int(row_dict.get("is_video", 0)):
+                        continue
+                    ext_l = str(row_dict.get("ext", "")).lower()
+                    if ext_l not in ("jpg", "jpeg", "heic", "heif"):
+                        continue
+                    fpath = base_dir / str(row_dict["filename"])
+                    paired_mov = find_paired_live_video(fpath)
+                    if paired_mov is not None:
+                        live_updates.append((1, 0, str(paired_mov), int(mid)))
+                        mov_mid = repo.get_media_id_by_file_path(paired_mov)
+                        if mov_mid is not None:
+                            mov_pairs.append((int(mov_mid), int(mid)))
+                        continue
+                    motion_off = detect_motion_photo_offset(fpath)
+                    if motion_off is not None:
+                        live_updates.append((1, int(motion_off), "", int(mid)))
+                if live_updates:
+                    repo.update_live_photo_metadata(live_updates)
+                if mov_pairs:
+                    repo.mark_live_companion_videos(mov_pairs)
+        except Exception:
+            pass
         if tag_and_people_queue:
             name_to_id = {r["filename"]: mid for r, mid in zip(enrichment_rows, upserted_ids)}
             cleaned_ids: list[int] = []
