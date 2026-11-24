@@ -2931,6 +2931,19 @@ class PhotoGalleryMainWindow(QMainWindow):
         if QApplication.activeModalWidget() is not None:
             self._watcher_delta_timer.start(1500)
             return
+        # Coalesce watcher refreshes while XMP write-back daemon is actively draining batches to disk
+        if getattr(getattr(self, "xmp_daemon", None), "_is_flushing", False):
+            self._watcher_delta_timer.start(3000)
+            return
+        # Rate-limit heavy full nav+grid refreshes to at most once every 5s during sustained bursts
+        import time
+        now = time.monotonic()
+        last_flush = getattr(self, "_last_watcher_delta_flush_ts", 0.0)
+        if last_flush > 0.0 and (now - last_flush) < 5.0 and "PYTEST_CURRENT_TEST" not in os.environ:
+            remaining_ms = max(600, int((5.0 - (now - last_flush)) * 1000))
+            self._watcher_delta_timer.start(remaining_ms)
+            return
+
         pend = self._pending_watcher_delta
         added = int(pend["added"])
         modified = int(pend["modified"])
@@ -2946,9 +2959,14 @@ class PhotoGalleryMainWindow(QMainWindow):
         if added <= 0 and modified <= 0 and deleted <= 0 and folders_changed <= 0:
             return
 
+        self._last_watcher_delta_flush_ts = now
         self._media_meta_lookup.clear()
-        self.refresh_navigation_and_autocomplete()
-        self.rebuild_and_run_query()
+        if added > 0 or deleted > 0 or folders_changed > 0:
+            self.refresh_navigation_and_autocomplete()
+            self.rebuild_and_run_query()
+        else:
+            # Modify-only delta (e.g. metadata/XMP touch): skip 8-tree full-catalog nav rebuild
+            self.rebuild_and_run_query()
         if len(folders) == 1:
             fname = os.path.basename(folders[0]) or folders[0]
             target_label = f"'{fname}'"

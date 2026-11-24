@@ -20,6 +20,10 @@ from pathlib import Path
 from typing import Any
 
 import cv2
+try:
+    cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
+except Exception:
+    pass
 from PIL import ExifTags, Image, ImageOps
 
 warnings.filterwarnings("ignore", message=r".*AVIF support not installed.*", category=UserWarning)

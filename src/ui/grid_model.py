@@ -776,9 +776,19 @@ class CatalogListModel(QAbstractListModel):
                 else 0
             )
             raw = self._mosaic_raw
+            m_starts = getattr(self, "_mosaic_group_y_starts", None)
             for g_idx in range(start_g, len(self._groups)):
                 g = self._groups[g_idx]
-                if g.y_header > bottom_y and self._group_y_ends and g_idx > start_g:
+                g_start_y = (
+                    m_starts[g_idx]
+                    if m_starts is not None and g_idx < len(m_starts)
+                    else (
+                        self._group_y_ends[g_idx - 1]
+                        if g_idx > 0 and g_idx - 1 < len(self._group_y_ends)
+                        else 0
+                    )
+                )
+                if g_start_y > bottom_y and self._group_y_ends and g_idx > start_g:
                     break
                 if self._group_headers_enabled and g.vrow_header >= 0:
                     ht = raw.get(g.vrow_header)
@@ -862,6 +872,7 @@ class CatalogListModel(QAbstractListModel):
         raw = self._mosaic_raw
         raw.clear()
         y_cursor = self.GRID_MARGIN_TOP
+        mosaic_group_y_starts: list[int] = []
         mosaic_group_y_ends: list[int] = []
         records = self._records
         headers_on = self._group_headers_enabled
@@ -890,6 +901,7 @@ class CatalogListModel(QAbstractListModel):
             return exact_h, y + exact_h + spacing
 
         for g in self._groups:
+            mosaic_group_y_starts.append(y_cursor)
             if headers_on and g.vrow_header >= 0:
                 raw[g.vrow_header] = (margin_x, y_cursor, avail_w, header_h)
                 y_cursor += header_h + spacing
@@ -984,6 +996,7 @@ class CatalogListModel(QAbstractListModel):
             mosaic_group_y_ends.append(y_cursor)
 
         if self._layout_mode == "mosaic":
+            self._mosaic_group_y_starts = mosaic_group_y_starts
             self._group_y_ends = mosaic_group_y_ends
         self._mosaic_total_height = y_cursor + self.GRID_MARGIN_TOP
         return self._mosaic_rects
@@ -1008,11 +1021,13 @@ class CatalogListModel(QAbstractListModel):
         raw = self._mosaic_raw
         raw.clear()
         y_cursor = self.GRID_MARGIN_TOP
+        masonry_group_y_starts: list[int] = []
         masonry_group_y_ends: list[int] = []
         records = self._records
         headers_on = self._group_headers_enabled
 
         for g in self._groups:
+            masonry_group_y_starts.append(y_cursor)
             if headers_on and g.vrow_header >= 0:
                 raw[g.vrow_header] = (margin_x, y_cursor, avail_w, header_h)
                 y_cursor += header_h + gap
@@ -1045,6 +1060,7 @@ class CatalogListModel(QAbstractListModel):
             masonry_group_y_ends.append(y_cursor)
 
         if self._layout_mode == "masonry":
+            self._mosaic_group_y_starts = masonry_group_y_starts
             self._group_y_ends = masonry_group_y_ends
         self._mosaic_total_height = y_cursor + self.GRID_MARGIN_TOP
         return self._mosaic_rects

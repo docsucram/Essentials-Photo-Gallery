@@ -586,7 +586,7 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawLine(QPointF(s * 0.26, s * 0.59), QPointF(s * 0.70, s * 0.59))
         p.drawLine(QPointF(s * 0.26, s * 0.66), QPointF(s * 0.58, s * 0.66))
 
-    elif kind in ("geotag", "globe"):
+    elif kind in ("geotag", "globe", "world_map"):
         grad = QLinearGradient(0, s * 0.1, s, s * 0.9)
         grad.setColorAt(0.0, QColor("#63B8F2"))
         grad.setColorAt(1.0, QColor("#1D6AB5"))

@@ -14,6 +14,8 @@ from pathlib import Path
 # Keep Qt OpenGL off discrete NVIDIA OpenGL drivers (avoids Optimus/Overlay popup)
 # while giving QtWebEngine hardware-accelerated Direct3D 11 (ANGLE) compositing like WebView2.
 os.environ.setdefault("QT_OPENGL", "software")
+os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
+os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
 os.environ.setdefault(
     "QTWEBENGINE_CHROMIUM_FLAGS",
     "--use-angle=d3d11 --enable-gpu-rasterization --log-level=3",

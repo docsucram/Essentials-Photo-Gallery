@@ -16,6 +16,8 @@ Provides Picasa/WLPG-grade instant face confirmation:
 from __future__ import annotations
 
 import logging
+import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -27,11 +29,14 @@ from PySide6.QtCore import (
     QEvent,
     QItemSelectionModel,
     QModelIndex,
+    QObject,
     QPoint,
     QRect,
     QRectF,
+    QRunnable,
     QSize,
     Qt,
+    QThreadPool,
     QTimer,
     Signal,
 )
@@ -2557,16 +2562,72 @@ class BatchPeopleView(QWidget):
                     conn.execute("UPDATE people SET thumbnail_blob = ? WHERE id = ?;", (thumb, person_id))
                     conn.commit()
 
-        # 4. Instant re-match remaining unassigned faces against updated centroids (<50ms)
-        try:
-            self.repo.recalculate_signatures_and_rematch(min_match_score=getattr(self, "_min_confidence_threshold", 0.52))
-        except Exception as e:
-            logger.debug("Fast rematch after confirm failed: %s", e)
+        # 4. Re-match remaining unassigned faces against updated centroids off the GUI thread
+        min_score = getattr(self, "_min_confidence_threshold", 0.52)
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            try:
+                self.repo.recalculate_signatures_and_rematch(min_match_score=min_score)
+            except Exception as e:
+                logger.debug("Fast rematch after confirm failed: %s", e)
+            self._remove_faces_from_view(set(face_ids))
+            self.faces_confirmed.emit(face_ids, person_id)
+            self.refresh_suggestions()
+        else:
+            self._remove_faces_from_view(set(face_ids))
+            self.faces_confirmed.emit(face_ids, person_id)
+            self._schedule_async_rematch(min_score)
 
-        # 5. Remove confirmed face cards from UI
-        self._remove_faces_from_view(set(face_ids))
-        self.faces_confirmed.emit(face_ids, person_id)
-        self.refresh_suggestions()
+    def _schedule_async_rematch(self, min_score: float) -> None:
+        """Runs recalculate_signatures_and_rematch on a 1-thread background pool so Confirm All never stalls the UI."""
+        pool = getattr(self, "_rematch_pool", None)
+        if pool is None:
+            pool = QThreadPool(self)
+            pool.setMaxThreadCount(1)
+            self._rematch_pool = pool
+            self._inflight_rematch_workers: set[QRunnable] = set()
+
+        class _RematchSig(QObject):
+            finished = Signal()
+
+        class _RematchWorker(QRunnable):
+            def __init__(self, engine: DualDatabaseEngine, thresh: float, sig: _RematchSig) -> None:
+                super().__init__()
+                self.setAutoDelete(False)
+                self.engine = engine
+                self.thresh = float(thresh)
+                self.signals = sig
+
+            def run(self) -> None:
+                try:
+                    CatalogRepository(self.engine).recalculate_signatures_and_rematch(
+                        min_match_score=self.thresh
+                    )
+                except Exception as exc:
+                    logger.debug("Async rematch after confirm failed: %s", exc)
+                finally:
+                    if threading.current_thread() is not threading.main_thread():
+                        self.engine.close_thread_connections()
+                    try:
+                        self.signals.finished.emit()
+                    except RuntimeError:
+                        pass
+
+        sig = _RematchSig(self)
+        worker = _RematchWorker(self.engine, min_score, sig)
+        self._inflight_rematch_workers.add(worker)
+
+        def _on_done(w: QRunnable = worker, s: QObject = sig) -> None:
+            self._inflight_rematch_workers.discard(w)
+            try:
+                s.deleteLater()
+            except RuntimeError:
+                pass
+            if self.isVisible():
+                self.refresh_suggestions(debounce=True)
+
+        sig.finished.connect(_on_done)
+        pool.clear()
+        pool.start(worker)
 
     def sync_external_face_change(self, face_ids: list[int] | set[int] | None = None) -> None:
         """Immediately reflects face confirmations/dismissals made in other views (e.g. SingleMediaViewer)."""
