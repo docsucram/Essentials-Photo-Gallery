@@ -907,8 +907,10 @@ class _SubjectsCountWorker(QRunnable):
         try:
             scope_ids: set[int] | None = None
             if not self.include_private:
-                repo = CatalogRepository(self.engine, include_private=False)
-                if repo.has_private_folders():
+                has_priv = self.engine.catalog_conn().execute(
+                    "SELECT 1 FROM folders WHERE is_private = 1 LIMIT 1;"
+                ).fetchone()
+                if has_priv is not None:
                     rows = self.engine.catalog_conn().execute(
                         """
                         SELECT m.id

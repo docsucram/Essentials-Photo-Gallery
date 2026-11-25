@@ -2431,8 +2431,9 @@ class ThumbnailGridView(QListView):
     ) -> None:
         if self.catalog_model is None or self.card_delegate is None:
             return
-        # Capture currently focused/selected or top-visible media item so switching
-        # between Grid, Tiles, Mosaic, and Masonry keeps the user on the same photo(s).
+        # Capture currently focused/selected or top-visible media item and selection so switching
+        # between Grid, Tiles, Mosaic, and Masonry keeps the user on the same photo(s) and selection.
+        prev_selected_ids = self.selected_media_ids()
         anchor_mid, anchor_rel_y = self._capture_viewport_anchor()
 
         if mode in ("tiles", "mosaic", "masonry"):
@@ -2448,13 +2449,21 @@ class ThumbnailGridView(QListView):
         self.card_delegate.set_layout_mode(mode)
         self.catalog_model.set_layout_mode(mode)
         self._sync_metrics_and_scrollbar()
+        if prev_selected_ids:
+            self.set_selected_media_ids(prev_selected_ids, scroll_lead=False)
         self._restore_viewport_anchor(anchor_mid, anchor_rel_y)
         self._scroll_debounce.start()
 
     def set_visible_details(self, details: set[str]) -> None:
         if self.card_delegate:
+            sb = self.verticalScrollBar()
+            anchor_mid, anchor_rel_y = (
+                self._capture_viewport_anchor() if (sb is not None and sb.value() > 0) else (None, None)
+            )
             self.card_delegate.set_visible_details(details)
             self._sync_metrics_and_scrollbar()
+            if anchor_mid is not None:
+                self._restore_viewport_anchor(anchor_mid, anchor_rel_y)
             self.viewport().update()
 
     def resizeEvent(self, event: QResizeEvent) -> None:
@@ -2462,9 +2471,16 @@ class ThumbnailGridView(QListView):
             return
         self._in_resize_event = True
         try:
+            sb = self.verticalScrollBar()
+            prev_scroll_y = sb.value() if sb is not None else 0
+            anchor_mid, anchor_rel_y = (
+                self._capture_viewport_anchor() if prev_scroll_y > 0 else (None, None)
+            )
             super().resizeEvent(event)
             self._update_scope_bar_geometry()
             self._sync_metrics_and_scrollbar()
+            if anchor_mid is not None:
+                self._restore_viewport_anchor(anchor_mid, anchor_rel_y)
             self._reposition_empty_state()
             self._scroll_debounce.start()
         finally:
