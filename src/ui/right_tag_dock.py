@@ -1576,6 +1576,7 @@ class _DescriptiveTagRowWidget(QFrame):
     remove_clicked = Signal(int)
     tag_clicked = Signal(int, str)
     assign_to_all_clicked = Signal(int)
+    manage_tags_clicked = Signal()
 
     def __init__(
         self,
@@ -1589,6 +1590,7 @@ class _DescriptiveTagRowWidget(QFrame):
         super().__init__(parent)
         self.item_id = item_id
         self.label_text = label_text
+        self.full_path = (tooltip or label_text or "").strip()
         self.tag_count = tag_count
         self.total_selection_count = total_selection_count
         self.setObjectName("DescriptiveTagRow")
@@ -1681,6 +1683,8 @@ class _DescriptiveTagRowWidget(QFrame):
         super().mousePressEvent(event)
 
     def contextMenuEvent(self, event: Any) -> None:
+        from src.ui.shortcuts_dialog import populate_quick_tag_shortcut_submenu
+
         menu = QMenu(self)
         act_remove = menu.addAction("Remove tag")
         act_remove.triggered.connect(lambda: self.remove_clicked.emit(self.item_id))
@@ -1690,6 +1694,10 @@ class _DescriptiveTagRowWidget(QFrame):
                 act_assign.setEnabled(False)
             else:
                 act_assign.triggered.connect(lambda: self.assign_to_all_clicked.emit(self.item_id))
+        menu.addSeparator()
+        populate_quick_tag_shortcut_submenu(menu, self.full_path or self.label_text)
+        act_manage = menu.addAction("Manage Tags...")
+        act_manage.triggered.connect(self.manage_tags_clicked.emit)
         menu.exec(event.globalPos())
         event.accept()
 
@@ -2788,6 +2796,7 @@ class TagAndCaptionDock(QDockWidget):
     author_committed = Signal(str)          # author string
     tag_filter_requested = Signal(int)      # tag_id clicked to filter gallery
     tag_assign_to_all_requested = Signal(int) # tag_id to assign to all selected items
+    manage_tags_requested = Signal()        # user clicked Manage Tags... from tag context menu
     person_hovered = Signal(int, bool)      # (person_id, hovered)
     person_search_requested = Signal(int, str)  # (person_id, person_name)
     person_view_suggestions_requested = Signal(int)  # person_id
@@ -7137,6 +7146,7 @@ class TagAndCaptionDock(QDockWidget):
                 chip.remove_clicked.connect(self.tag_removed.emit)
                 chip.tag_clicked.connect(lambda tid, _name: self.tag_filter_requested.emit(tid))
                 chip.assign_to_all_clicked.connect(self.tag_assign_to_all_requested.emit)
+                chip.manage_tags_clicked.connect(self.manage_tags_requested.emit)
                 chip.show()
                 self.tags_chips_layout.addWidget(chip)
 

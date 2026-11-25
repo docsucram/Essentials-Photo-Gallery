@@ -501,6 +501,7 @@ class LeftNavigationDock(QDockWidget):
     private_mode_toggled = Signal(bool)  # include_private
     flag_filter_requested = Signal(object)  # int | None (1=picked, -1=rejected, 0=unflagged, None=all)
     builtin_smart_albums_changed = Signal()
+    manage_tags_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Navigation", parent)
@@ -2978,6 +2979,24 @@ class LeftNavigationDock(QDockWidget):
                 """
             )
 
+    def _set_subtree_expanded(self, item: QTreeWidgetItem, expanded: bool) -> None:
+        """Recursively expand or collapse ``item`` and its existing child items."""
+        if item is None:
+            return
+        self.tree.setUpdatesEnabled(False)
+        try:
+            stack = [item]
+            while stack:
+                cur = stack.pop()
+                if cur.childCount() > 0 or cur is item:
+                    cur.setExpanded(expanded)
+                for idx in range(cur.childCount()):
+                    ch = cur.child(idx)
+                    if ch is not None and ch.childCount() > 0:
+                        stack.append(ch)
+        finally:
+            self.tree.setUpdatesEnabled(True)
+
     def _build_context_menu(self, item: QTreeWidgetItem) -> QMenu:
         """Constructs the QMenu corresponding to the given navigation item."""
         ntype = item.data(0, _NODE_TYPE_ROLE)
@@ -2985,12 +3004,38 @@ class LeftNavigationDock(QDockWidget):
 
         menu = QMenu(self)
         self._apply_context_menu_style(menu)
+
+        # Expand / Collapse actions for root navigation sections
+        if ntype in ("section_albums", "section_dates", "section_tags", "section_places"):
+            act_exp_all = QAction("Expand all", menu)
+            act_exp_all.setEnabled(item.childCount() > 0)
+            act_exp_all.triggered.connect(lambda _c=False, it=item: self._set_subtree_expanded(it, True))
+            menu.addAction(act_exp_all)
+
+            act_col_all = QAction("Collapse all", menu)
+            act_col_all.setEnabled(item.childCount() > 0)
+            act_col_all.triggered.connect(lambda _c=False, it=item: self._set_subtree_expanded(it, False))
+            menu.addAction(act_col_all)
+        elif ntype in ("all_media", "section_folders", "section_people", "section_ratings", "section_cameras", "section_subjects"):
+            is_exp = item.isExpanded()
+            act_toggle_exp = QAction("Collapse" if is_exp else "Expand", menu)
+            act_toggle_exp.setEnabled(item.childCount() > 0)
+            act_toggle_exp.triggered.connect(lambda _c=False, it=item, cur=is_exp: it.setExpanded(not cur))
+            menu.addAction(act_toggle_exp)
+
         if ntype == "section_tags":
+            if not menu.isEmpty():
+                menu.addSeparator()
+            act_manage = QAction(make_wlpg_icon("tag_hierarchy", 16), "Manage Tags...", menu)
+            act_manage.triggered.connect(self.manage_tags_requested.emit)
+            menu.addAction(act_manage)
+
             act_clean = QAction("Delete unused tags", menu)
             act_clean.triggered.connect(self._on_delete_unused_tags)
             menu.addAction(act_clean)
         elif ntype == "tag":
             tid = int(payload)
+            tag_path = str(item.data(0, _OLD_PATH_ROLE) or item.data(0, _OLD_NAME_ROLE) or item.text(0).split(" (")[0]).strip()
             act_inc = QAction("Include tag", menu)
             act_exc = QAction("Exclude tag (NOT)", menu)
             act_clr = QAction("Clear tag filter", menu)
@@ -3000,6 +3045,14 @@ class LeftNavigationDock(QDockWidget):
             menu.addAction(act_inc)
             menu.addAction(act_exc)
             menu.addAction(act_clr)
+            menu.addSeparator()
+
+            from src.ui.shortcuts_dialog import populate_quick_tag_shortcut_submenu
+
+            populate_quick_tag_shortcut_submenu(menu, tag_path)
+            act_manage = QAction(make_wlpg_icon("tag_hierarchy", 16), "Manage Tags...", menu)
+            act_manage.triggered.connect(self.manage_tags_requested.emit)
+            menu.addAction(act_manage)
             menu.addSeparator()
 
             act_del_this = QAction("Delete tag", menu)
@@ -3075,6 +3128,8 @@ class LeftNavigationDock(QDockWidget):
             )
             menu.addAction(act_rem)
         elif ntype in ("section_folders", "all_media"):
+            if not menu.isEmpty():
+                menu.addSeparator()
             act_add = QAction(make_wlpg_icon("folder_add", 16), "Add folder to gallery...", menu)
             act_add.triggered.connect(self.folder_add_requested.emit)
             menu.addAction(act_add)
@@ -3087,6 +3142,8 @@ class LeftNavigationDock(QDockWidget):
             act_save_smart.triggered.connect(self.save_filter_as_smart_album_requested.emit)
             menu.addAction(act_save_smart)
         elif ntype in ("section_albums", "section_my_albums"):
+            if not menu.isEmpty():
+                menu.addSeparator()
             act_new_alb = QAction(make_wlpg_icon("pictures_library", 16), "New Album...", menu)
             act_new_alb.triggered.connect(self.new_album_requested.emit)
             menu.addAction(act_new_alb)

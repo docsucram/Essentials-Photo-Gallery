@@ -33,7 +33,10 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 - **UI Polish — Mosaic Flag Badges, Info Pane & Ribbon Menus (`src/ui/grid_view.py`, `src/ui/right_tag_dock.py`, `src/ui/ribbon_toolbar.py`):**
   - Added translucent top-right **Flag** (Pick/Reject) squircle badges matching Favourites/Ratings across **Mosaic**, **Tiles**, and **Masonry** layouts.
   - Aligned editable fields (`Filename`, `Date taken`, `Author`) flush with static labels in the **Information** pane, upgraded **Folder** to display compact middle-elided paths (e.g. `D:/Users/M...Photos/September trip`), and added a clickable **GPS Coordinates** copy readout under **Geotag** (plus mouse-selectable `Latitude`/`Longitude`).
-  - Tightened Ribbon dropdown menu icon-to-text padding to match classic WLPG, lowered large Find Ribbon dropdown arrows for breathing room below descenders, added icons to **Find → Media type**, and added smooth 90 ms fade-outs on Ribbon dropdown menus.
+  - Tightened Ribbon dropdown menu icon-to-text padding to match classic WLPG, lowered large Find Ribbon dropdown arrows for breathing room below descenders, added icons to **Find → Media type**, stacked **and** / **or** on separate rows in **Find → Tags**, and added smooth 140 ms fade-outs on Ribbon dropdown menus matching the Tag Someone popup.
+- **Quick-Tag Shortcuts & Navigation Pane Context Menus (`src/ui/tag_hierarchy_dialog.py`, `src/ui/shortcuts_dialog.py`, `src/ui/left_nav_dock.py`, `src/ui/right_tag_dock.py`):**
+  - Added `Alt+1..9` Quick-Tag shortcut assignment & badges directly inside **Manage Tags** (`TagHierarchyDialog`) and in tag right-click menus (Left Nav & Right Tag Pane) alongside **Manage Tags...**.
+  - Added **Expand all** / **Collapse all** to Navigation Pane root context menus (**Albums**, **Date taken**, **Descriptive tags**, **Places**) and **Collapse** / **Expand** to **Folders**, **People**, **Ratings**, **Cameras**, and **Subjects**.
 
 - **Covering Partial Indexes for Navigation SQL (`src/db/connection.py`, `src/db/repository.py`):**
   - Added `idx_media_rating_active`, `idx_media_date_active`, and `idx_media_places_active` (partial indexes on `is_missing = 0`).

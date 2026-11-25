@@ -374,6 +374,9 @@ class TagHierarchyDialog(QDialog):
             """
         )
         self.tree.tag_dropped.connect(self._on_tag_dropped)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._on_tree_context_menu)
+        self.tree.itemSelectionChanged.connect(self._sync_shortcut_button_state)
         main_vbox.addWidget(self.tree, 1)
 
         # 4. Bottom Button Row: [Clean up duplicates] [Add] [Cancel]
@@ -408,10 +411,18 @@ class TagHierarchyDialog(QDialog):
 
         self.btn_clean_orphans = QPushButton("Clean up duplicate tags", self)
         self.btn_clean_orphans.setStyleSheet(btn_style)
-        self.btn_clean_orphans.setMinimumWidth(185)
+        self.btn_clean_orphans.setMinimumWidth(170)
         self.btn_clean_orphans.setToolTip("Finds orphan root tags that duplicate existing hierarchical tags and consolidates them")
         self.btn_clean_orphans.clicked.connect(self._on_clean_duplicate_tags_clicked)
         btn_box.addWidget(self.btn_clean_orphans)
+
+        self.btn_quick_shortcut = QPushButton("Shortcut (Alt+1..9) ▾", self)
+        self.btn_quick_shortcut.setStyleSheet(btn_style)
+        self.btn_quick_shortcut.setMinimumWidth(145)
+        self.btn_quick_shortcut.setToolTip("Assign or clear an Alt+1..9 Quick-Tag shortcut for the selected tag")
+        self.btn_quick_shortcut.setEnabled(False)
+        self.btn_quick_shortcut.clicked.connect(self._on_shortcut_button_clicked)
+        btn_box.addWidget(self.btn_quick_shortcut)
 
         btn_box.addStretch(1)
 
@@ -444,17 +455,29 @@ class TagHierarchyDialog(QDialog):
         root.setExpanded(True)
 
         # First pass: instantiate nodes
+        from src.ui.shortcuts_dialog import load_quick_tag_hotkeys
+
+        hotkey_by_tag = {name.strip().lower(): slot for slot, name in load_quick_tag_hotkeys().items()}
+        self._last_tag_rows = list(tag_rows)
         for t in tag_rows:
             tid = int(t["id"])
             tname = str(t["name"])
+            full_path = str(t.get("full_path") or tname)
             cnt = int(t.get("direct_count", 0) or t.get("media_count", 0))
-            label = f"{tname} ({cnt})" if cnt > 0 else tname
+            slot = hotkey_by_tag.get(full_path.strip().lower()) or hotkey_by_tag.get(tname.strip().lower())
+            base_lbl = f"{tname} ({cnt})" if cnt > 0 else tname
+            label = f"{base_lbl}  [Alt+{slot}]" if slot is not None else base_lbl
             item = QTreeWidgetItem([label])
             item.setIcon(0, tag_icon)
             item.setData(0, Qt.UserRole, tid)
             item.setData(0, _NODE_TYPE_ROLE, "tag")
             item.setData(0, _NODE_PAYLOAD_ROLE, tid)
             item.setData(0, _OLD_NAME_ROLE, tname)
+            item.setData(0, 260, full_path)
+            if slot is not None:
+                item.setToolTip(0, f"{full_path} — Quick-Tag Shortcut: Alt+{slot}")
+            else:
+                item.setToolTip(0, full_path)
             self._tag_items[tid] = item
 
         # Second pass: attach hierarchy
@@ -584,6 +607,57 @@ class TagHierarchyDialog(QDialog):
             if tid is not None:
                 ids.append(int(tid))
         return ids
+
+    def _selected_single_tag_path(self) -> str:
+        sel = [it for it in self.tree.selectedItems() if it.data(0, _NODE_TYPE_ROLE) == "tag"]
+        if len(sel) != 1:
+            return ""
+        it = sel[0]
+        return str(it.data(0, 260) or it.data(0, _OLD_NAME_ROLE) or "").strip()
+
+    def _sync_shortcut_button_state(self) -> None:
+        if not hasattr(self, "btn_quick_shortcut"):
+            return
+        tpath = self._selected_single_tag_path()
+        self.btn_quick_shortcut.setEnabled(bool(tpath))
+
+    def _refresh_after_shortcut_change(self) -> None:
+        rows = self.repo.get_tag_tree() if self.repo is not None else getattr(self, "_last_tag_rows", [])
+        sel_ids = set(self.selected_tag_ids())
+        self.populate(rows)
+        for tid in sel_ids:
+            it = self._tag_items.get(tid)
+            if it is not None:
+                it.setSelected(True)
+        self._sync_shortcut_button_state()
+
+    def _on_shortcut_button_clicked(self) -> None:
+        from PySide6.QtWidgets import QMenu
+        from src.ui.shortcuts_dialog import populate_quick_tag_shortcut_submenu
+
+        tpath = self._selected_single_tag_path()
+        if not tpath:
+            return
+        menu = QMenu(self)
+        populate_quick_tag_shortcut_submenu(menu, tpath, on_changed=self._refresh_after_shortcut_change)
+        # Flatten the single submenu directly onto the popup for 1-click ergonomics
+        sub = menu.actions()[0].menu() if menu.actions() else None
+        if sub is not None:
+            sub.exec(self.btn_quick_shortcut.mapToGlobal(QPoint(0, self.btn_quick_shortcut.height())))
+
+    def _on_tree_context_menu(self, pos: QPoint) -> None:
+        from PySide6.QtWidgets import QMenu
+        from src.ui.shortcuts_dialog import populate_quick_tag_shortcut_submenu
+
+        item = self.tree.itemAt(pos)
+        if item is None or item.data(0, _NODE_TYPE_ROLE) != "tag":
+            return
+        tpath = str(item.data(0, 260) or item.data(0, _OLD_NAME_ROLE) or "").strip()
+        if not tpath:
+            return
+        menu = QMenu(self)
+        populate_quick_tag_shortcut_submenu(menu, tpath, on_changed=self._refresh_after_shortcut_change)
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     def _on_add_clicked(self) -> None:
         sel = self.selected_tag_ids()

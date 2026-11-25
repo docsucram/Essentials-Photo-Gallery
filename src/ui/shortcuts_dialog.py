@@ -109,6 +109,83 @@ def save_quick_tag_hotkeys(mapping: dict[int, str]) -> None:
     settings.setValue(_QUICK_TAG_SETTINGS_KEY, json.dumps(cleaned))
 
 
+def assign_quick_tag_hotkey(tag_path: str, slot: int | None) -> dict[int, str]:
+    """Assign ``tag_path`` to ``Alt+slot`` (1..9), or clear its slot when ``slot is None``."""
+    clean = str(tag_path or "").strip()
+    mapping = load_quick_tag_hotkeys()
+    if clean:
+        low = clean.lower()
+        for existing_slot in list(mapping.keys()):
+            if mapping[existing_slot].strip().lower() == low:
+                mapping.pop(existing_slot, None)
+    if slot is not None and 1 <= int(slot) <= 9 and clean:
+        mapping[int(slot)] = clean
+    save_quick_tag_hotkeys(mapping)
+    return mapping
+
+
+def get_quick_tag_slot_for_tag(tag_path: str) -> int | None:
+    """Return the assigned slot (1..9) for ``tag_path`` (case-insensitive), or None."""
+    low = str(tag_path or "").strip().lower()
+    if not low:
+        return None
+    for slot, name in load_quick_tag_hotkeys().items():
+        if name.strip().lower() == low:
+            return slot
+    return None
+
+
+def populate_quick_tag_shortcut_submenu(
+    parent_menu: Any,
+    tag_path: str,
+    on_changed: Any = None,
+) -> Any:
+    """Populate and return an 'Assign Quick-Tag Shortcut (Alt+1..9)' submenu on ``parent_menu``."""
+    clean = str(tag_path or "").strip()
+    mapping = load_quick_tag_hotkeys()
+    cur_slot = get_quick_tag_slot_for_tag(clean)
+    title = (
+        f"Quick-Tag Shortcut (Alt+{cur_slot})"
+        if cur_slot is not None
+        else "Assign Quick-Tag Shortcut"
+    )
+    sub = parent_menu.addMenu(title)
+    if not clean:
+        sub.setEnabled(False)
+        return sub
+
+    for slot in range(1, 10):
+        existing = mapping.get(slot, "")
+        if cur_slot == slot:
+            lbl = f"Alt+{slot}  ✓ (Assigned)"
+        elif existing:
+            lbl = f"Alt+{slot}  ({existing})"
+        else:
+            lbl = f"Alt+{slot}"
+        act = sub.addAction(lbl)
+        act.setCheckable(True)
+        act.setChecked(cur_slot == slot)
+
+        def _on_pick(_checked: bool = False, s: int = slot) -> None:
+            assign_quick_tag_hotkey(clean, s)
+            if callable(on_changed):
+                on_changed()
+
+        act.triggered.connect(_on_pick)
+
+    if cur_slot is not None:
+        sub.addSeparator()
+        act_clear = sub.addAction(f"Clear Shortcut (Alt+{cur_slot})")
+
+        def _on_clear(_checked: bool = False) -> None:
+            assign_quick_tag_hotkey(clean, None)
+            if callable(on_changed):
+                on_changed()
+
+        act_clear.triggered.connect(_on_clear)
+    return sub
+
+
 class _FilterableTagComboBox(QComboBox):
     """
     Editable tag picker mirroring `_DescriptiveTagInput` in `right_tag_dock.py`:

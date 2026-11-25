@@ -5186,45 +5186,42 @@ class WLPGTagsMenuWidget(QWidget):
         b_vbox.setContentsMargins(4, 3, 4, 3)
         b_vbox.setSpacing(2)
 
-        # Mode toggles: [+ and] and [/ or]
-        mode_hbox = QHBoxLayout()
-        mode_hbox.setContentsMargins(2, 0, 2, 0)
-        mode_hbox.setSpacing(4)
-
-        btn_style = """
+        # Mode toggles: separate full-width rows [+ and] and [/ or] matching classic WLPG
+        mode_row_style = """
             QPushButton {
-                border: 1px solid #BDD3E8;
+                text-align: left;
+                border: 1px solid transparent;
                 border-radius: 2px;
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FDFEFE, stop:1 #EBF2F9);
+                background: transparent;
                 color: #1E395B;
                 font-family: 'Segoe UI';
-                font-size: 8pt;
-                padding: 0 8px;
+                font-size: 8.5pt;
+                padding: 2px 6px;
             }
             QPushButton:hover {
                 background: #E5F1FB;
-                border-color: #7DA2CE;
+                border: 1px solid #A0C5E8;
             }
             QPushButton:checked {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #EAF3FD, stop:1 #BBDDF7);
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #EAF3FD, stop:1 #CCE2F7);
                 border: 1px solid #7DA2CE;
                 font-weight: 600;
             }
         """
-        self.btn_mode_and = QPushButton("and", bottom_frame)
-        self.btn_mode_and.setIcon(make_wlpg_icon("boolean_and", 12))
-        self.btn_mode_and.setIconSize(QSize(12, 12))
+        self.btn_mode_and = QPushButton("  and", bottom_frame)
+        self.btn_mode_and.setIcon(make_wlpg_icon("boolean_and", 14))
+        self.btn_mode_and.setIconSize(QSize(14, 14))
         self.btn_mode_and.setCheckable(True)
-        self.btn_mode_and.setFixedHeight(20)
-        self.btn_mode_and.setStyleSheet(btn_style)
+        self.btn_mode_and.setFixedHeight(22)
+        self.btn_mode_and.setStyleSheet(mode_row_style)
 
-        self.btn_mode_or = QPushButton("or", bottom_frame)
-        self.btn_mode_or.setIcon(make_wlpg_icon("boolean_or", 12))
-        self.btn_mode_or.setIconSize(QSize(12, 12))
+        self.btn_mode_or = QPushButton("  or", bottom_frame)
+        self.btn_mode_or.setIcon(make_wlpg_icon("boolean_or", 14))
+        self.btn_mode_or.setIconSize(QSize(14, 14))
         self.btn_mode_or.setCheckable(True)
-        self.btn_mode_or.setFixedHeight(20)
+        self.btn_mode_or.setFixedHeight(22)
         self.btn_mode_or.setChecked(True)
-        self.btn_mode_or.setStyleSheet(btn_style)
+        self.btn_mode_or.setStyleSheet(mode_row_style)
 
         self.mode_group = QButtonGroup(self)
         self.mode_group.setExclusive(True)
@@ -5235,10 +5232,8 @@ class WLPGTagsMenuWidget(QWidget):
             lambda checked: self.boolean_mode_changed.emit("AND" if checked else "OR")
         )
 
-        mode_hbox.addWidget(self.btn_mode_and)
-        mode_hbox.addWidget(self.btn_mode_or)
-        mode_hbox.addStretch(1)
-        b_vbox.addLayout(mode_hbox)
+        b_vbox.addWidget(self.btn_mode_and)
+        b_vbox.addWidget(self.btn_mode_or)
 
         sep = QFrame(bottom_frame)
         sep.setFrameShape(QFrame.HLine)
@@ -11255,13 +11250,13 @@ class RibbonToolbar(QWidget):
                 overlay.setAttribute(Qt.WA_ShowWithoutActivating, True)
                 overlay.setPixmap(pix)
                 overlay.setGeometry(menu.geometry())
-                overlay.setWindowOpacity(0.95)
+                overlay.setWindowOpacity(1.0)
                 overlay.show()
                 anim = QPropertyAnimation(overlay, b"windowOpacity", overlay)
-                anim.setDuration(90)
-                anim.setStartValue(0.95)
+                anim.setDuration(140)
+                anim.setStartValue(1.0)
                 anim.setEndValue(0.0)
-                anim.setEasingCurve(QEasingCurve.OutQuad)
+                anim.setEasingCurve(QEasingCurve.OutCubic)
                 anim.finished.connect(overlay.close)
                 anim.start(QPropertyAnimation.DeleteWhenStopped)
             except Exception:
