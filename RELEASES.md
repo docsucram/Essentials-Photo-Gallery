@@ -4,42 +4,85 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 
 ---
 
+## Essentials Photo Gallery v0.18.0 (Pre-Release)
+
+**Essentials Photo Gallery 0.18.0** kicks off with major **large-library database & responsiveness upgrades**—making navigation pane refreshes up to **6×–22× faster** at 500,000 photos, **Batch People Tagging** up to **10× faster**, and keeping **AI Straighten / Expand** and **Semantic Search** completely non-blocking.
+
+### Highlights
+
+- **Much Faster Navigation Pane at Scale:** Refreshing Ratings, Places, and Dates in the Navigation pane is now **6×–7× faster** overall (dropping from ~1.35 seconds to ~220 ms on a 500,000-photo library, and ~26 ms at 100,000 photos).
+- **Instant Batch People Tagging:** Opening Batch People Tagging on large libraries is now **up to 10× faster** (~28 ms at 500,000 photos / 333,000 faces).
+- **Zero-Freeze AI Straighten & Faster Semantic Search Startup:** Straightening or expanding a photo with AI Fill now runs in the background so the app stays responsive, and the local Semantic Search index loads faster and warms up quietly after launch.
+
+<details>
+<summary>Full Technical Changelog</summary>
+
+- **Covering Partial Indexes for Navigation SQL (`src/db/connection.py`, `src/db/repository.py`):**
+  - Added `idx_media_rating_active`, `idx_media_date_active`, and `idx_media_places_active` (partial indexes on `is_missing = 0`).
+  - Added `_get_hidden_folder_ids()` and removed unconditional `JOIN folders` + `COALESCE(m.is_missing, 0) = 0` from `get_rating_counts()`, `get_date_tree_counts()`, and `get_places_hierarchy()` so SQLite executes pure index-only covering scans (`get_rating_counts`: `539.6 ms → 24.6 ms`; `get_places_hierarchy`: `616.8 ms → 55.7 ms` at 500k).
+- **Zero-Sort Partial Indexes for Batch People Tagging (`src/db/connection.py`, `src/db/repository.py`):**
+  - Added leading-`state` partial indexes `idx_media_people_pending_named`, `idx_media_people_pending_unnamed`, and `idx_media_people_pending_person`, and split `get_pending_face_suggestions(include_unnamed=True)` into two index-ordered `LIMIT` queries, eliminating `USE TEMP B-TREE FOR ORDER BY` (`275.6 ms → 27.8 ms` at 500k).
+- **Async AI Straighten / Expand & Vectorized Semantic Matrix Load (`src/ui/media_viewer.py`, `src/core/semantic_engine.py`, `src/ui/main_window.py`):**
+  - Offloaded `straighten_with_ai_fill` and `expand_canvas_with_ai_fill` in `SingleMediaViewer.apply_crop()` to a 1-thread `QThreadPool` with generation/media-ID cancellation guards.
+  - Vectorized `SemanticVectorRepository.load_matrix()` (`b"".join` + single `np.frombuffer` + in-place L2 normalization, cutting 100k cold load from `676.0 ms → 403.2 ms` and saving ~205 MB peak RAM) and added `_prewarm_semantic_matrix_async()` 2.5 s after startup.
+
+</details>
+
+---
+
 ## Essentials Photo Gallery v0.17.0
 
-**Essentials Photo Gallery 0.17.0** introduces **brand-new Gallery Views** (**Tiles** and portrait-priority **Masonry** alongside **Grid** and **Mosaic**), a **new way to discover photos through local AI Subjects & Semantic Search (`MobileCLIP-S1`)**, **hardened Auto-Stacking / Photo Grouping**, **multi-selection across the Navigation Pane**, major **Batch People Tagging** and **Create Studio** upgrades, and sweeping **freeze-elimination & stability improvements**.
+**Essentials Photo Gallery 0.17.0** introduces **brand-new Gallery Views** (**Tiles** and portrait-priority **Masonry** alongside **Grid** and **Mosaic**), a **new way to discover photos through local AI Subjects & Semantic Search**, **hardened Auto-Stacking / Photo Grouping**, **multi-selection across the Navigation Pane**, major **Batch People Tagging** and **Create Studio** upgrades, and sweeping **freeze-elimination & stability improvements**.
 
 ### New Gallery Views (`Grid`, `Mosaic`, `Tiles` & `Masonry`)
 
-- **Four Gallery Layouts with Instant Cycling:** Added **Tiles** (edge-to-edge uniform square tiles with 4px corners) and portrait-priority **Masonry** (shortest-first column waterfall) alongside classic **Grid** and landscape **Mosaic**. Access them via the condensed **View → Photo layout → `View mosaic ▾`** split button (click the top icon to cycle Mosaic → Tiles → Masonry, or open the dropdown to pick directly).
-- **Consistent Selection & Anchor Preservation:** Switching between Grid, Tiles, Mosaic, and Masonry—or resizing the window—keeps your selected photos selected and your viewport anchored on the same photo without jumping to the top.
-- **Refined Media Overlays:** Unified `[♥/★ N]` squircle badges, crisp filmstrip perforations on video tiles in Tiles/Mosaic/Masonry, a vector Motion Photo icon, and a **`Badges ▾`** split button in **View** (master toggle + per-badge toggles for Flags, Favourites, and Photo groups).
+- **Four Ways to Browse Your Library:** Alongside classic **Grid** and landscape **Mosaic**, you can now switch to **Tiles** (clean, edge-to-edge square tiles) or **Masonry** (a waterfall layout that gives portrait photos room to breathe). Click the new **View mosaic ▾** button on the **View** ribbon to cycle layouts or pick one directly.
+- **Stay Right Where You Were:** Switching between Grid, Mosaic, Tiles, and Masonry—or resizing the window—keeps your selected photos selected and keeps the view anchored on the same photo instead of jumping back to the top.
+- **Cleaner Badges & Controls:** Unified rating/favourite badges, filmstrip borders on video tiles, a crisp Motion Photo icon, and a **Badges ▾** menu on the **View** ribbon to toggle all overlays at once or pick Flags, Favourites, and Photo groups individually.
 
-![Tiles gallery view with squircle rating badges and multi-selected folder subtrees in Dark Studio theme](docs/images/release-0.17.0/tiles-gallery-view.jpg)
+![New clean Tiles view in gallery mode](docs/images/release-0.17.0/tiles-gallery-view.jpg)
 
 ### New Way to Find Photos: AI Subjects & Local Semantic Search
 
-- **12 Built-In AI Subjects in the Navigation Pane:** Enable **Subjects** (`File → Options → General → Show Subjects (AI)`) to browse your library by visual concept—**Family**, **Kids**, **Pets**, **Portraits**, **Food**, **Sports**, **Landscape**, **Night**, **Architecture**, **Beach & Coast**, **Nature & Flowers**, and **Documents & Notes**—with live calibrated photo counts and multi-select support.
-- **Optional Local `MobileCLIP-S1` Add-On (`File → Options → Add-ons`):** Runs 100% locally on CPU from cached `thumbnails.db` blobs with resumable HTTP `Range` download and an automatic 1-click prompt when enabling or clicking Subjects. Powers privacy- and scope-aware Reciprocal Rank Fusion (`fuse_semantic_and_fts_scores`) in the Search Box so natural-language queries blend seamlessly with keyword, tag, and OCR matches.
+- **Browse by Visual Subject:** Turn on **Subjects** in **File → Options → General** to filter your library across 12 built-in visual categories—**Family**, **Kids**, **Pets**, **Portraits**, **Food**, **Sports**, **Landscape**, **Night**, **Architecture**, **Beach & Coast**, **Nature & Flowers**, and **Documents & Notes**—with live photo counts and multi-select support.
+- **Private, 100% Local Search:** Powered by the optional **MobileCLIP-S1** add-on (**File → Options → Add-ons**), which runs completely offline on your PC using your existing thumbnail cache. Natural-language searches in the Search Box blend automatically with your keywords, tags, and OCR text.
 
-![AI Subjects in the Navigation Pane filtering the library to Architecture matches in Dark Studio theme](docs/images/release-0.17.0/subjects-ai-search.jpg)
+![AI Subjects filtering in the Navigation pane](docs/images/release-0.17.0/subjects-ai-search.jpg)
 
-### Photo Grouping (Auto-Stacking) & Multi-Selection Navigation
+### Photo Grouping, Multi-Select Navigation & Picasa Polish
 
-- **Thumbnail-Time Visual Signatures & Undoable Auto-Stacking:** `ThumbnailDecodeWorker` computes `phash64`, `dhash64`, `laplacian_sharpness`, and `lab_haar` in memory during thumbnail decode without re-opening files. Hardened `auto_stack_raw_jpeg_pairs()` and `auto_stack_bursts()` pick the sharpest/best-rated head, support single-step `Ctrl+Z` undo/redo, and auto-promote a new head if a stack head is deleted.
-- **`Photo grouping ▾` Split Button (Home → Organize):** Includes checkable **Auto-group bursts** and **Auto-group RAW + JPEG** toggles, **Expand / Collapse all groups**, stacked-deck card edges + bottom-left group/`RAW+JPG` badges, **`S`** to expand/collapse, and **`C`** on a collapsed group to compare all frames in Compare View.
-- **Navigation Pane Multi-Selection & Subtree Highlighting:** Multi-select across **Folders**, **Places**, **Cameras**, **Tags**, **Dates**, and **Subjects**; when **Subfolders** is enabled, nested child folders/dates/tags/places highlight as selected (matching WLPG). Added optional **Cameras** nav section (`A–Z` with live counts) and automatic `Country → State → City` **Places** backfill.
-- **Find Bar & Picasa Enhancements:** Unified **Flagged** menu (`Picked` label), clean **Media type** filter (`Photos`, `RAW`, `Motion photos`, `Video`), improved Dark Studio Search Scope Bar contrast, clearer Picasa folder prompt (`in folder '<name>'`), **Include subfolders** toggle, and a new **View Picasa Folders...** manager in **Options → Import** with per-folder import status, one-click import, and Open Folder.
+- **Automatic Photo Grouping (Bursts & RAW+JPEG):** Use the new **Photo grouping ▾** button on the **Home** ribbon to automatically group rapid bursts and RAW+JPEG pairs, pick the sharpest cover shot, expand or collapse groups with **`S`**, or press **`C`** on a collapsed group to compare every shot side by side.
+- **Multi-Select Across the Navigation Pane:** Ctrl/Shift-select multiple **Folders**, **Places**, **Cameras**, **Tags**, **Dates**, or **Subjects** at once. When **Subfolders** is enabled, child folders and nested date/tag/place branches highlight together just like classic WLPG. Also adds an optional **Cameras** section (`A–Z`).
+- **Cleaner Filters & Picasa Folder Manager:** Simplified **Flagged** (`Picked`) and **Media type** (`Photos`, `RAW`, `Motion photos`, `Video`) filters, clearer Picasa import prompts with an **Include subfolders** checkbox, and a new **View Picasa Folders...** window in **Options → Import** showing which folders have been imported with one-click Import and Open Folder actions.
 
-### Create Studio, Editor, Batch People Tagging & Discoverability
+### Create Studio, Editor & Batch People Tagging
 
-- **Create Collage Overhaul & Colour Pop Quick Styles:** Grid default, gap-free canvas fill, animated drag-and-drop filmstrip tray, **Polaroid Border Caption** selector (`Caption`, `Date`, `File Name`, `Tagged People`, `None`), and `-45°..+45°` **Canvas Rotation**. Fixed **Colour Pop** Quick Styles (`Red`, `Blue`, `Green`, `Warm`, `Cool`) for natural HSV hue isolation, **Depth & Light** Reset to also reset **Remove Background**, **Spot Fix** Object Eraser mask downsampling + async execution + hover circle cursor, and **Fine Tune** Straighten framing.
-- **Batch People Tagging Polish:** Right-click any person's name or avatar chip to **View '<name>' photos**, persistent person filter across Single Image View round-trips, preserved `0.42–0.51` candidates on partial confirm/reject, restored Navigation Pane on Back, and eliminated idle refresh flicker.
-- **Keyboard Ergonomics (`F1` & `Alt+1..9`):** Searchable `KeyboardShortcutsDialog` (`F1` / Ribbon **`?`** button), type-to-filter `Alt+1..Alt+9` Quick-Tag hotkeys, clickable **Folder:** link in the Information pane, and motion-photo playback hiding the filmstrip pull-tab.
+- **Create Collage & Editor Polish:** Create Collage now defaults to **Grid** with gap-free fill, an animated drag-and-drop photo strip, **Polaroid Border Captions** (Caption, Date, File Name, Tagged People), and smooth **Canvas Rotation** (`-45°` to `+45°`). Fixed **Colour Pop** Quick Styles, **Depth & Light** Reset (now also resets **Remove Background**), **Spot Fix** Object Eraser accuracy & circle cursor, and **Fine Tune** Straighten framing.
+- **Batch People Tagging Improvements:** Right-click any person's name or avatar to jump straight to their photos, keep your person filter when opening and closing a photo, avoid losing lower-confidence suggestions on partial confirm/reject, restore the Navigation pane on Back, and eliminate idle screen flicker.
+- **Keyboard Shortcuts (`F1`) & Quick-Tag Hotkeys (`Alt+1..9`):** Press **`F1`** (or click **`?`** next to Settings) for a searchable keyboard shortcuts guide, configure `Alt+1..9` Quick-Tag hotkeys, click the **Folder** link in the Information pane to open it in Explorer, and enjoy cleaner motion-photo playback without the filmstrip tab overlapping the Play button.
 
-### Performance, Freeze Elimination & Stability
+### Smoother & More Reliable
 
-- **Main-Thread Freeze Watchdog & Elimination:** Added a lightweight watchdog (`%LOCALAPPDATA%\PhotoGallery\logs\freeze_traces.log`, capped at 512 KB) and eliminated main-thread stalls across Folder Watcher XMP loops, `PeopleDirectoryView` batch loading, `BatchPeopleView` async rematch, `Spot Fix` Object Eraser ONNX inference, `on_face_worker_finished`, Save-as-Copy folder scans, and post-launch Map pre-warming.
-- **Stability & Native Crash Logging:** Enabled `faulthandler` native crash logging (`logs/crash.log`), fixed cross-thread `QRunnable` signal lifecycle crashes, fixed `_on_dock_person_confirm_requested` `NameError`, and updated [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) with v0.17.0 scale & subsystem benchmarks.
+- **Major Freeze & Crash Fixes:** Eliminated main-thread UI freezes across background folder watching, People view, Batch People Tagging, AI Object Eraser, Save as Copy, and post-launch Map pre-warming, plus added a capped 512 KB freeze log (`logs/freeze_traces.log`) and native crash log (`logs/crash.log`).
+
+<details>
+<summary>Full Technical Changelog</summary>
+
+- **Visual Signatures & Auto-Stacking (`src/workers/thumbnail_worker.py`, `src/db/repository.py`, `src/ui/grid_view.py`, `src/ui/main_window.py`):**
+  - `ThumbnailDecodeWorker` computes `phash64`, `dhash64`, `laplacian_sharpness`, and `lab_haar` in memory during thumbnail decode and writes them to `thumbnails.db` (`media_signatures`).
+  - Hardened `auto_stack_raw_jpeg_pairs()` and `auto_stack_bursts()` with `30.0s` burst windows, `dhash64` anchor Hamming distance checks, single-step `Ctrl+Z` undo/redo (`_StackMutationUndoCommand`), `reconcile_stack_after_delete()` head promotion, and fixed `_annotate_media_records()` collapsed stack counts in folders with `<= 500` items.
+- **4-Mode Photo Layout Engine (`src/ui/grid_model.py`, `src/ui/grid_view.py`, `src/ui/ribbon_toolbar.py`):**
+  - Added `"tiles"` and `"masonry"` layouts alongside `"wlpg_grid"` and `"mosaic"`, `View mosaic ▾` split button, `Badges ▾` split button, viewport anchor preservation across resize/layout/details changes, selection preservation across `set_layout_mode()`, and fixed grouped Mosaic/Masonry blank scroll and double filmstrip perforations.
+- **Local Semantic Search & AI Subjects (`src/core/semantic_engine.py`, `src/workers/semantic_worker.py`, `src/ui/left_nav_dock.py`):**
+  - Added `SemanticEngine` (pure-Python CLIP BPE `tokenizer.json`, MobileCLIP-S1 FP16 ONNX), `SemanticVectorRepository` (`semantic_vectors.db`), `SemanticIndexWorker`, HTTP `Range` resumable download in **Options → Add-ons**, `fuse_semantic_and_fts_scores()` RRF search, and dedicated-pool `_SubjectsCountWorker`.
+- **Navigation, Filters & Picasa (`src/ui/left_nav_dock.py`, `src/ui/picasa_import_dialog.py`, `src/core/picasa_importer.py`, `src/ui/dialogs.py`):**
+  - Added multi-selection across Folders, Places, Cameras, Tags, Dates, and Subjects; subtree selection highlighting; optional Cameras nav section; automatic `Country → State → City` Places backfill; `include_subfolders` in `scan_picasa_tree()` and `PicasaImportDialog`; and `PicasaFoldersDialog` with persisted import status.
+- **Editor, Create Studio & Batch People (`src/ui/media_viewer.py`, `src/imaging/creative_effects.py`, `src/ui/create_studio/`, `src/ui/batch_people_view.py`):**
+  - Fixed Colour Pop Quick Styles HSV hue masking, Depth & Light `reset_depth_light()` resetting `_pre_cutout_rgb`/`master_alpha`, LaMa mask downsampling (`cv2.INTER_AREA` + dilation), async Object Eraser worker, cached Spot Fix hover circle cursor, Create Collage overhaul, and Batch People Tagging context menus / filter persistence / rematch floor (`0.42`) / idle signature guard.
+- **Diagnostics, Stability & Benchmarks (`src/utils/freeze_watchdog.py`, `docs/BENCHMARKS.md`):**
+  - Added `MainThreadFreezeWatchdog` (`logs/freeze_traces.log`, 512 KB in-place cap), `faulthandler` native crash logging, fixed cross-thread `QRunnable` signal crashes and `_on_dock_person_confirm_requested` `NameError`, and added v0.17.0 pre-release benchmarks to `docs/BENCHMARKS.md`.
+
+</details>
 
 ---
 
@@ -47,87 +90,92 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 
 **Essentials Photo Gallery 0.16.0** delivers major **speed & responsiveness improvements** across World Map View and the thumbnail grid, a **borderless fullscreen Quick Preview (`Space`)**, a **redesigned draggable Filmstrip**, an **overhauled Export / Resize** workflow, **Favourites & Tri-State Culling Flags**, and an **auto-detecting Google Picasa importer**.
 
-### Performance Improvements (Map View, Grid & RAW Pipeline)
+### Much Faster Map View, Grid & RAW Browsing
 
-- **World Map View Speed Overhaul (Zero-CDN & Web Worker Clustering):** Bundled Leaflet `1.9.4` + Web Worker clustering assets into `resources/leaflet/` and registered a `QWebEngineUrlSchemeHandler` (`gallerythumb://leaflet/...` & `gallerythumb://media/<id>`) so World Map View and Adjust Location open instantaneously offline without hitting `unpkg.com` or Base64-encoding thumbnails. Replaced per-pan SQLite queries with a lightweight ~1 km overview query (`query_map_overview_cells`) clustered off-thread in `map_clusters_worker.js`, lazy cluster member lookup, incremental marker diffing, `media_rtree`-backed bounds, `_map_data_dirty` caching, `"Current View vs. Entire Library"` scope toggle, and a 3-second post-launch idle pre-warm.
-- **Two-Tier Fast Cache & Viewport-Center Priority Scheduler:** Split fast batched `thumbnails.db` reads (`BatchThumbCacheWorker` on `thumb_cache_pool`) from disk decodes (`thumbnail_pool`, compact viewport-center priority window of 12 in-flight workers), eliminating head-of-line blocking behind slow RAW/video decodes.
-- **Batched DB Commits, Zero-SQL Paint & Tier-0 RAW Fast-Path:** Added `ThumbnailWriteCoalescer` for batched WebP commits, removed synchronous SQLite face queries from `MediaCardDelegate.paint()` in favor of off-thread `BatchFaceCropWorker` prefetching, added `extract_tiff_embedded_jpeg()` to extract embedded previews from TIFF-based camera RAWs without invoking `rawpy.imread()`, and added `ScanCrashTrace` (`active_scan_trace.json`) crash recovery.
-- **HiDPI Panorama-Aware Thumbnail Pipeline:** Raised `THUMB_MAX_DIM` from `256` → `384` with a `240px` short-edge floor (up to `768px` long edge for panoramas), 2× pre-decode `SmoothTransformation`, WebP quality `85`, and one-click **Rebuild Thumbnail Cache (HiDPI & Panoramas)** in **Options → Database**.
+- **Instant Offline World Map:** World Map View and Adjust Location now open immediately offline with smooth Web Worker pin clustering, zero lag when panning or zooming, and a new **Current View / Entire Library** toggle.
+- **Faster Thumbnails & RAW Previews:** Cached thumbnails load in fast batches without getting stuck behind slow RAW or video decodes, and camera RAW files extract embedded previews directly for instant grid browsing.
+- **Sharper HiDPI & Panorama Thumbnails:** Higher-resolution thumbnail caching with dedicated support for wide panoramas, plus a one-click **Rebuild Thumbnail Cache** option in **Options → Database**.
 
-### Quick Preview & Updated Filmstrip
+### Quick Preview & Draggable Filmstrip
 
-- **Borderless Fullscreen Quick Preview (`Space`):** Press `Space` in Grid View for an instant borderless full-screen lightbox over a dimmed backdrop with floating filename, star rating, and vector Pick/Reject/Favourite HUD (`Enter` to open full view, `←`/`→` to browse, `0–5` to rate, `P` Pick, `X` Reject, `U` Unflag, `F` Favourite, `Space`/`Esc` or backdrop click to dismiss; auto-repeat `Space` ignored). Hold `Shift` with `0–5`, `P`, `X`, `U`, or `F` in Grid or Single Image View to apply and auto-advance.
+- **Fullscreen Quick Preview (`Space`):** Press **`Space`** in the gallery for an instant borderless full-screen preview with floating filename, star rating, and Pick/Reject/Favourite controls. Use **`←`/`→`** to browse, **`0–5`** to rate, **`P`/`X`/`U`** to flag, **`F`** to favourite, or hold **`Shift`** to rate/flag and auto-advance.
 
-![Borderless Fullscreen Spacebar Quick Preview with floating rating and cull HUD](docs/images/release-0.16.0/quick-preview-spacebar.jpg)
+![Spacebar Quick Preview fullscreen lightbox](docs/images/release-0.16.0/quick-preview-spacebar.jpg)
 
-- **Updated Draggable Filmstrip & Flush Pull-Tab:** Headerless `BottomFilmstripDock` with smooth slide-up/down animation, translucent edge scroll buttons, and a welded bottom-left viewer pull-tab (`⌄` / `⌃`) aligned flush against the filmstrip border. Drag the filmstrip taller (up to `148px`) to scale thumbnails proportionally, with its height remembered across hide/show toggles and app restarts, and unified bottom-right squircle star/heart + rating pills.
+- **Draggable Filmstrip & Pull-Tab:** A sleek, headerless filmstrip in Single Image View with a flush bottom-left show/hide tab. Drag its top edge taller (up to `148px`) to scale thumbnails smoothly—your preferred height is remembered across restarts.
 
-![Updated draggable Filmstrip with squircle rating pills and Zoom Minimap in Single Image View](docs/images/release-0.16.0/filmstrip-updated.jpg)
+![Draggable filmstrip and Zoom Minimap in Single Image View](docs/images/release-0.16.0/filmstrip-updated.jpg)
 
-### Upgraded Export / Resize & Photographer Culling Toolkit
+### Upgraded Export / Resize & Culling Tools
 
-- **Overhauled Export / Resize Dialog:** Defaults cleanly to **Original size (No resize)** with an always-visible **Customize dimensions & scaling** toggle (housing **Fit within**, **Exact W × H**, **Percentage**, **Do not enlarge smaller photos**, and **+ Save Preset**), customizable **File name** patterns (`Auto`, `name_export`, `name_size`, `name_edited`, `Keep original name`, `Custom...`) with live italic `Filename:` preview, plain `Original → Output` readout, and in-session settings memory.
+- **Overhauled Export / Resize Dialog:** Defaults cleanly to **Original size**, with an expandable section for **Fit within**, **Exact W × H**, **Percentage**, and custom saved presets, plus flexible filename templates with a live preview.
 
-![Overhauled Export / Resize dialog with Original size default and italic Filename preview](docs/images/release-0.16.0/export-resize-dialog.png)
-- **Zoom Minimap Navigator:** Floating bottom-right minimap in Single Image View and Compare Mode when zoomed beyond fit (`> 100%`), with click/drag panning and quick scroll-wheel zoom controls.
-- **Batch Rename (`F2`) & Camera AF Area Overlay (`A`):** Template-driven batch renaming (`{name}`, `{date}`, `{seq}`, `{camera}`, etc.) with two-phase atomic staging and `.xmp` / `.OriginalFiles` syncing, plus on-demand EXIF/MakerNote AF focus point overlay (`A`) for Nikon, Canon, Sony, and Fujifilm.
+![Updated Export and Resize dialog](docs/images/release-0.16.0/export-resize-dialog.png)
 
-### Favourites, Tri-State Flags, Picasa Importer & Polish
+- **Zoom Minimap, Batch Rename (`F2`) & Camera AF Overlay (`A`):** Pan zoomed-in photos effortlessly with a corner minimap, rename selections using templates (`{name}`, `{date}`, `{seq}`, `{camera}`) with automatic sidecar syncing, and press **`A`** to view camera autofocus points for Nikon, Canon, Sony, and Fujifilm shots.
 
-- **Favourites, Tri-State Pick/Reject Flags & Mosaic Polish:** Separated permanent **Favourites** (`F` / `Shift+F`) from **Pick / Neutral / Reject** culling flags (`P`/`X`/`U`) with unified centered squircle badges across Grid, Mosaic, and Filmstrip, a cycling Flag button and transparent cull buttons in the Information panel, **Options → General → Enable Favourites**, and permanent live-counted **Smart Albums** (`Favourites`, `Picked / Flagged`, `Rejected`, `Unflagged`). Mosaic View also features tighter `4px` tile spacing and a clearer blue selection frame.
-- **Auto-Detecting Google Picasa Importer:** Automatically detects `.picasa.ini` and `contacts.xml` on folder scan to import Picasa stars (→ Favourites), captions, tags, face boxes/names, and `.album:` virtual albums.
-- **Welcome Canvas, Dark Theme Fixes & Auto-Closing Updater:** Theme-aware 3-card `WelcomeEmptyOverlay` (defaulting folder import to your system Pictures folder), Dark Theme fixes for Quick Find People carousel and Depth & Light, and `AboutDialog` update checker that automatically closes the app cleanly when launching a downloaded installer.
+### Favourites, Tri-State Flags & Google Picasa Import
+
+- **Separate Favourites & Culling Flags:** Keep permanent **Favourites** (`F`) separate from **Pick / Neutral / Reject** culling flags (`P`/`X`/`U`), backed by live-counted **Smart Albums** in the Navigation pane.
+- **Auto-Detecting Google Picasa Importer:** Automatically spots `.picasa.ini` and `contacts.xml` files when scanning folders to bring in Picasa stars, captions, tags, face regions, and albums non-destructively.
+- **Welcome Screen & Auto-Closing Updater:** A clean 3-card Welcome screen for empty libraries, Dark Theme fixes, and an update installer that closes the app cleanly when upgrading.
+
+<details>
+<summary>Full Technical Changelog</summary>
+
+- **World Map Overhaul (`src/ui/map_view.py`, `resources/leaflet/`):** Bundled Leaflet `1.9.4` + Web Worker clustering (`map_clusters_worker.js`), `QWebEngineUrlSchemeHandler` (`gallerythumb://leaflet/...` & `gallerythumb://media/<id>`), `query_map_overview_cells()`, lazy cluster member lookup, incremental marker diffing, `media_rtree`-backed bounds, `_map_data_dirty` caching, scope toggle, and 3s post-launch idle pre-warm.
+- **Thumbnail & RAW Pipeline (`src/workers/thumb_scheduler.py`, `src/db/repository.py`, `src/imaging/image_loader.py`):** Split `BatchThumbCacheWorker` (`thumb_cache_pool`) from disk decodes (`thumbnail_pool`, 12 in-flight viewport-center window), added `ThumbnailWriteCoalescer`, off-thread `BatchFaceCropWorker` prefetching, `extract_tiff_embedded_jpeg()` Tier-0 RAW fast-path, `ScanCrashTrace` (`active_scan_trace.json`), and raised `THUMB_MAX_DIM` from `256` → `384` (up to `768px` long edge for panoramas, WebP quality `85`).
+- **Culling, Filmstrip & Export (`src/ui/quick_preview.py`, `src/ui/bottom_filmstrip_dock.py`, `src/ui/export_dialog.py`, `src/ui/batch_rename_dialog.py`):** Added borderless `Space` Quick Preview, `Shift`-to-advance culling, resizable `BottomFilmstripDock` with welded pull-tab, Zoom Minimap, `F2` two-phase atomic Batch Rename with `.xmp`/`.OriginalFiles` sync, and MakerNote AF point overlay (`A`).
+- **Favourites, Flags & Picasa (`src/core/picasa_importer.py`, `src/ui/picasa_import_dialog.py`, `src/ui/welcome_overlay.py`):** Added `is_favourite` and `is_rejected` columns, permanent built-in Smart Albums, `.picasa.ini` / `contacts.xml` importer, `WelcomeEmptyOverlay`, and auto-closing updater in `AboutDialog`.
+
+</details>
 
 ---
 
 ## Essentials Photo Gallery v0.15.0
 
-**Essentials Photo Gallery 0.15.0** introduces a **revamped Create Studio with integrated main-window UI** (replacing cramped popup dialogs with full-window Ribbon, Inspector, and Filmstrip workspaces), **Depth & Light 2.0 (3D Relight)** with interactive virtual lights and surface-normal relighting, a **unified Crop & Straighten bar**, an upgraded **Resize & Export** dialog, consolidated **ThemeTokens** contrast auditing, and key **reliability & data-safety hardening** for OneDrive libraries and third-party XMP sidecars.
+**Essentials Photo Gallery 0.15.0** introduces a **revamped Create Studio with integrated full-window workspaces**, **Depth & Light 2.0 (3D Relight)** with interactive virtual lights, a **unified Crop & Straighten bar**, an upgraded **Resize & Export** dialog, and important **safety & reliability upgrades** for OneDrive libraries and third-party XMP sidecars.
 
-### Revamped Create Studio (Integrated Main-Window UI)
+### Revamped Create Studio (Full-Window Workspaces)
 
-- **Full-Window Studio Workspaces:** Replaced the cramped modal dialogs for **Collage**, **Photo Fuse**, **Panorama**, **Colour Pop**, and **3D Cinematic** with integrated main-window workspaces featuring a dedicated contextual Ribbon tab (with **Save New...** and **Cancel** anchored in the **Close** group on the right), a themed right-hand inspector pane, a zoomable live canvas with `Fit` / `100%` / zoom slider controls, and exact restoration of your previous view, ribbon tab, and dock layout when closing.
-- **Collage (formerly Auto Collage):** Choose from **Blended**, **Grid**, **Polaroid**, and **Then Now** layouts, visual **Canvas Shape & Quality** presets (**Square**, **16:9 Wide**, **9:16 Phone**, **4:3 Wide**, **3:4 Tall**, **3:2 (6×4)**, **2:3 (4×6)**, **5:4 (10×8)**, **4:5 Social**, **A4 Wide**, **A4 Tall**), background colour swatches, smooth per-photo zoom and drag-to-pan framing (backed by cached preview proxies), and a drag-and-drop reorderable bottom photo strip.
-- **Photo Fuse, Panorama, Colour Pop & 3D Cinematic:**
-  - **Photo Fuse:** Full-canvas face/region expression swapping with a bottom thumbnail tray for base shot & expression selection, **Add Region**, **Show Boxes**, and **Compare Original**.
-  - **Panorama:** Interactive stitching with projection modes, bottom source-photo tray, and optional **AI Fill Gaps** for uneven stitched borders.
-  - **Colour Pop:** Full-canvas selective colour studio with Ribbon **Quick Styles** swatches (**Red Pop**, **Blue Pop**, **Green Pop**, **Warm Tones**, **Cool Tones**) and edge-aware contour snapping on the Add/Remove colour selection brushes.
-  - **3D Cinematic:** 2.5D depth-parallax motion studio with camera presets and MP4 export.
-- **Collapsible Bottom Filmstrip Dock:** Added `BottomFilmstripDock` (`src/ui/bottom_filmstrip_dock.py`) for quick photo navigation in Single Image View (hidden by default, toggleable on demand) and studio tray hosting across Classic Aero, Fluent, and Dark Studio themes.
+- **Integrated Studio Experience:** **Collage**, **Photo Fuse**, **Panorama**, **Colour Pop**, and **3D Cinematic** now open as full-window workspaces with their own contextual Ribbon tab, right-hand inspector, zoomable live canvas, and bottom photo strip—returning you right back to your previous view when closed.
+- **Collage, Photo Fuse, Panorama, Colour Pop & 3D Cinematic:**
+  - **Collage:** Blended, Grid, Polaroid, and Then & Now layouts with social/print aspect presets, background colours, per-photo pan/zoom, and drag-and-drop reordering.
+  - **Photo Fuse:** Full-canvas group expression swapping with **Compare Original**.
+  - **Panorama:** Interactive stitching with optional **AI Fill Gaps** for uneven borders.
+  - **Colour Pop:** Quick Style colour swatches (**Red**, **Blue**, **Green**, **Warm**, **Cool**) and edge-snapping selection brushes.
+  - **3D Cinematic:** 2.5D depth-parallax motion presets with MP4 export.
+- **Collapsible Bottom Filmstrip:** Toggle a sleek bottom filmstrip in Single Image View to jump between photos quickly.
 
-![Revamped Create Studio Collage workspace with integrated Ribbon, Inspector, and drag-and-drop photo strip](docs/images/release-0.15.0/create-studio-collage.jpg)
+![Create Studio Collage workspace](docs/images/release-0.15.0/create-studio-collage.jpg)
 
-### Depth & Light 2.0: 3D Relight & Virtual Light Studio
+### Depth & Light 2.0: 3D Relight Studio
 
-- **3D Surface-Normal Reconstruction & Albedo-Preserving De-Lighting:** Replaced flat Z-slice relighting with joint-guided depth edge refinement, multi-scale Scharr + hemispherical subject volume normals (`DepthAndMatteEngine.get_refined_depth_and_normals()`), optional ONNX normal-map model support (`dsine.onnx` / `normal_bae.onnx`), and linear-light ambient **Original light** suppression that keeps deep blacks rich without washing out into grey.
-- **Up to 3 Interactive Virtual 3D Lights & On-Canvas Gizmos:** Add up to 3 independent **Point**, **Spot**, or **Rim** lights with draggable on-canvas source orbs and aim reticles, per-light **Temperature (1800K–10000K)** + color swatch picker, **Intensity**, **Softness**, **Distance (Close ↔ Far)**, **Spot cone**, **Fine Shaping** (Gloss, Depth Range, and procedural **Gobo** projections), and **Hold to Compare (Original)**.
-- **1-Click "Relight Looks" Sphere Presets:** Six shaded visual lighting sphere presets (**Warm Streetlamp**, **Golden Rim**, **Rembrandt**, **Dual Neon**, **Moonlit**, **Window Gobo**) configure lights and ambient dimming in one click.
+- **Interactive 3D Virtual Lights:** Add up to 3 independent **Point**, **Spot**, or **Rim** lights directly on your photo with draggable light orbs and aim handles, adjusting temperature (`1800K–10000K`), intensity, softness, distance, spot cone, gloss, and gobo shadows.
+- **One-Click Relight Looks:** Six visual lighting sphere presets (**Warm Streetlamp**, **Golden Rim**, **Rembrandt**, **Dual Neon**, **Moonlit**, **Window Gobo**) style your lighting in a single click.
 
-![Depth & Light 2.0 3D Relight with interactive multi-light gizmos and sphere presets](docs/images/release-0.15.0/depth-3d-relight.jpg)
+![Depth and Light 3D Relight studio with virtual lights](docs/images/release-0.15.0/depth-3d-relight.jpg)
 
-### Unified Crop & Straighten Tool
+### Unified Crop & Straighten + Resize & Export
 
-- **Draw-a-Line Straighten & Smooth Angle Slider:** Replaced the disconnected straighten flow with a unified **Crop & Straighten** bar featuring a checkable **Straighten** line-draw tool (*"Straighten the image by drawing a line on it"*, synced with Fine Tune), a `-15.0° .. +15.0°` slider with double-click reset, **Auto** horizon detection, and a temporary `9×9` fine alignment grid while rotating. Clicking **Straighten** on the Edit Ribbon auto-straightens and opens this unified bar directly.
-- **Streamlined Aspect Ratios & Progressive Disclosure:** Removed reoriented duplicate presets (`3:4`, `2:3`, `4:5`, `9:16`) in favor of **↻ Flip** (`X`), hid `[W] : [H] [+ Save]` unless **Custom** is active, persisted saved custom ratios in `QSettings`, and restored a crisp `▾` chevron on the ratio selector across all themes.
-- **Composition Grids, Scrim & AI Expand Preview:** Added **Grid ▾** (`G`) cycling through Rule of Thirds (`3×3`), Golden Ratio (`Phi`), Diagonals, Center Crosshair, and None; refined outer scrim opacity (~65% idle / ~40% dragging) with L-shaped corner brackets and `Shift + Drag` corner ratio lock; and added an `AI Expand` fill-zone preview with dynamic **Apply & Fill** labeling.
+- **Draw-a-Line Straighten & Cleaner Aspect Ratios:** Draw a horizon line directly on the photo, fine-tune with the `-15°..+15°` slider (double-click to reset), or click **Auto**. Use **↻ Flip (`X`)** instead of duplicate portrait/landscape presets, cycle composition grids (`G`), and preview **AI Expand** fill zones before applying.
+- **Flexible Resize & Export:** Export from Gallery or Single Image View using **Fit within**, **Exact W × H**, or **Percentage**, with custom presets, live file-size estimates, `JPEG`/`WebP`/`PNG` quality controls, and an option to **Strip GPS & EXIF metadata**.
 
-### Unified Resize & Export
+### Safety, Reliability & Everyday Polish
 
-- **Upgraded `Resize & Export` Dialog:** Available from both Gallery View (**Export / Resize...**) and Single Image View (**Save as copy ▾ → Resize & Export...**, baking active non-destructive edits and crops).
-- **Flexible Modes, Presets & Privacy:** Supports **Fit within (Long Edge)**, **Exact W × H** (with **Lock aspect ratio** and **Center-crop to fill**), and **Percentage (`%`)**, alongside **Do not enlarge smaller photos**, `QSettings`-saved custom size presets, live output resolution & file-size estimates, `JPEG`/`WebP`/`PNG` format & quality controls, **Strip GPS & EXIF metadata**, and non-destructive collision naming.
+- **OneDrive Files On-Demand Protection:** Background scanners, thumbnailers, OCR, and face detection automatically skip cloud-only OneDrive placeholders so your library stays indexed without triggering unwanted gigabyte downloads.
+- **Third-Party XMP Preservation:** When optional file write-back is enabled, edits made in Adobe Lightroom, Camera Raw, or darktable are preserved intact rather than overwritten.
+- **Streamlined Context Menus & On-Demand OCR:** Cleaner WLPG-style right-click menus with an **AI & Scan ▸** submenu (including on-demand **Scan for text (OCR)** on any photo).
 
-### Context Menus, On-Demand OCR & Theme Architecture
+<details>
+<summary>Full Technical Changelog</summary>
 
-- **WLPG-Faithful Context Menus & On-Demand OCR:** Aligned Gallery Grid and Single Image View right-click menus with a compact WLPG structure (`AI & Scan ▸` submenu with `Find Similar Photos...`, `Copy subject to clipboard`, `Remove background`, `Rescan for faces`, and on-demand `Scan for text (OCR)` even inside `scan_ocr = 0` folders, plus `Rename...` in Single Image View).
-- **Central `ThemeTokens` & Contrast Auditing:** Consolidated theme colors into `ThemeTokens` and semantic `uiRole` properties across Classic Aero, Fluent, and Dark Studio stylesheets, backed by an automated headless contrast audit test suite (`tests/test_theme_contrast_audit.py`).
+- **Create Studio & Filmstrip (`src/ui/create_studio/`, `src/ui/bottom_filmstrip_dock.py`):** Migrated Collage, Photo Fuse, Panorama, Colour Pop, and 3D Cinematic from modal dialogs to integrated main-window workspaces with contextual Ribbon tabs and `BottomFilmstripDock`.
+- **Depth & Light 2.0 (`src/imaging/creative_effects.py`, `src/ui/right_tag_dock.py`):** Added joint-guided depth refinement, multi-scale Scharr + hemispherical subject normals (`DepthAndMatteEngine.get_refined_depth_and_normals()`), optional ONNX normal-map model support (`dsine.onnx` / `normal_bae.onnx`), linear-light ambient dimming, up to 3 virtual 3D lights, and 6 sphere presets.
+- **Crop, Export & Theme Architecture (`src/ui/crop_tool.py`, `src/ui/export_dialog.py`, `src/ui/theme_tokens.py`):** Unified Crop & Straighten bar, `ThemeTokens` + semantic `uiRole` properties across Aero/Fluent/Dark Studio, and automated headless contrast auditing (`tests/test_theme_contrast_audit.py`).
+- **Safety & Worker Hardening (`src/workers/`, `src/metadata/xmp_writer.py`, `src/ui/main_window.py`):** Added Windows `st_file_attributes` (`OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS`) OneDrive guards across all background workers, surgical `merge_wlpg_xmp_packet()` third-party namespace preservation (`crs:*`, `darktable:*`, `dc:rights`, `photoshop:Headline`), fixed `perform_fresh_start_reset()` worker shutdown, and routed `WorldMapView` cluster thumbnails through `thumbnail_pool`.
 
-### Safety, Reliability & Bug Fixes
-
-- **Windows OneDrive Files On-Demand Protection:** Background workers (`FolderSyncWorker`, `ThumbnailDecodeWorker`, `FaceDetectionWorker`, `OcrScanWorker`, `DuplicateDetectionEngine`, `FolderWatcher`, and `MetadataSyncDaemon`) now inspect Windows `st_file_attributes` (`OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS`) before reading file bytes, keeping cloud-only placeholders indexed without accidentally triggering gigabytes of OneDrive downloads.
-- **Non-Destructive Third-Party XMP Preservation:** When optional file write-back is enabled, `merge_wlpg_xmp_packet()` now surgically updates only Essentials Photo Gallery's managed tags, ratings, captions, GPS, and face regions—preserving unrelated third-party namespaces such as Adobe Lightroom / Camera Raw develop edits (`crs:*`), darktable history (`darktable:*`), `dc:rights`, and `photoshop:Headline`, and updating existing Lightroom-style `<stem>.xmp` sidecars in place.
-- **Clean Fresh Start Reset Worker Shutdown:** Fixed a typo (`thumb_pool` → `thumbnail_pool`) in `perform_fresh_start_reset()` and ensured all active thumbnail, scanner, face, OCR, map, and XMP workers are cleanly cancelled and awaited before resetting `catalog.db` and `thumbnails.db`.
-- **World Map Worker Pool & Pause Integration:** Routed `WorldMapView` cluster thumbnail decoding through the application's managed `thumbnail_pool` with per-worker cancellation flags, viewport-change cancellation, and global Pause Background Tasks support.
-- **Dark Theme & Re-Entrancy Polish:** Added `_applying_theme` re-entrancy guards in `create_studio_dialogs.py` and fixed dark-mode styling on the floating Crop toolbar, Quick find People carousel, and Create Studio / Filmstrip bottom trays.
+</details>
 
 ---
 
@@ -135,44 +183,46 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 
 **Essentials Photo Gallery 0.14.0** takes a big step forward in both editing power and library cleanup—introducing **Advanced Fine Tune** with **Automatic Regional Masks**, a **revamped Duplicates Finder** paired with **Find Similar Photos**, and **Companion Phone GPS Matching** for automatic geotagging.
 
-### Fine Tune Advanced Mode & Automatic Regional Masking
+### Fine Tune Advanced Mode & Automatic Regional Masks
 
-- **Advanced Fine Tune:** Fine Tune controls now have an **Advanced** mode (leaving the classic **Basic** controls untouched when you want simplicity), unlocking a live RGB histogram, **Smart Enhance**, **Whites** & **Blacks**, content-aware **Structure**, **Tone Curve** (`RGB` + `R`/`G`/`B` channels + S-Curve preset), **WB Eyedropper**, **8-Band Color Mixer (HSL)**, **Sharpen Masking**, **Color Noise**, **Vignette Feather**, **Orton Glow / Golden Hour**, and **Film Grain**.
+- **Advanced Fine Tune:** Switch Fine Tune from **Basic** to **Advanced** whenever you want deeper control—unlocking a live RGB histogram, **Smart Enhance**, **Whites** & **Blacks**, **Structure**, **Tone Curve** (`RGB` + individual colour channels), **White Balance Eyedropper**, **8-Band Color Mixer (HSL)**, **Orton Glow / Golden Hour**, and **Film Grain**.
 
-![Fine Tune Advanced Mode with Tone Curve, Whites, Blacks, Structure, and RGB Histogram](docs/images/release-0.14.0/fine-tune-advanced-curve.jpg)
+![Fine Tune Advanced mode with Tone Curve and RGB Histogram](docs/images/release-0.14.0/fine-tune-advanced-curve.jpg)
 
-- **Automatic Regional Masks (`Whole | Subject | Background | Sky`):** Isolate and adjust the **Subject**, **Background**, or **Sky** automatically using `DepthAndMatteEngine`, refine any region with the interactive **Add (+) / Subtract (-)** Smart Brush, and inspect a live **region-masked histogram**. The red mask overlay and dotted boundary can be toggled anytime (even while on **Whole Photo**), and the red fill automatically hides while dragging sliders so you can judge tonal changes clearly.
+- **Automatic Regional Masks (`Whole | Subject | Background | Sky`):** Automatically isolate and adjust the **Subject**, **Background**, or **Sky**, refine edges with the **Add (+) / Subtract (-)** brush, and see a live histogram for just that region.
 
-![Automatic Sky Regional Mask with dotted boundary and Fine Tune Advanced controls](docs/images/release-0.14.0/fine-tune-regional-sky-mask.jpg)
+![Automatic Sky regional mask in Fine Tune](docs/images/release-0.14.0/fine-tune-regional-sky-mask.jpg)
 
 ### Revamped Duplicates Finder & New Find Similar Photos
 
-- **Revamped Duplicates & Bursts Workspace:** Redesigned around a dedicated contextual **`Duplicates`** Ribbon tab with **Compare Selected** (opening full Light Table Compare Mode), **Info Pane**, **Sort & Group**, **Auto-Pick** rules, **Metadata Merge** on delete, **Move Duplicates...**, and **Delete All Duplicates**, plus right-click **Show Card Details** toggles (`Filename`, `Folder Path`, `Resolution & Size`, `Date & Sharpness`).
+- **Revamped Duplicates & Bursts Workspace:** A dedicated **Duplicates** Ribbon tab with **Compare Selected**, **Info Pane**, **Auto-Pick** rules, **Metadata Merge** on delete, **Move Duplicates...**, and customizable card details.
 
-![Revamped Find Duplicates workspace with contextual Ribbon, Auto-Pick, and Side-by-Side Cards](docs/images/release-0.14.0/duplicates-finder-revamped.jpg)
+![Revamped Find Duplicates workspace](docs/images/release-0.14.0/duplicates-finder-revamped.jpg)
 
-- **New Find Similar Photos:** Right-click any photo in the Gallery or Single Image View and choose **Find Similar** to surface visually matching shots using spatial + position-invariant LAB color palette and perceptual hash matching. Fine-tune matches live between **70%–98%** (default **81%**) with the Scope Bar slider, expand from a folder to **Search all**, and jump right back to your photo's position when closing the search.
+- **New Find Similar Photos:** Right-click any photo and choose **Find Similar** to find visually matching shots across your library, with a live similarity slider (`70%–98%`) in the Search bar.
 
-![Find Similar Photos matching purple iris shots with the live Scope Bar similarity slider](docs/images/release-0.14.0/find-similar-results.jpg)
+![Find Similar Photos results with similarity slider](docs/images/release-0.14.0/find-similar-results.jpg)
 
-### Auto-Geotagging: Match Locations from Timed Photos
+### Auto-Geotagging from Phone Photos or GPX Tracks
 
-- **Companion Phone GPS Matching (`Home → Geotag ▾ → Match Locations from Timed Photos...`):** Copy GPS locations from your phone's geotagged photos (or a `.gpx` track) onto camera photos taken around the same time. Review side-by-side **Destination ← GPS Source** previews with enlarged hover cards, sort by any column, optionally sync a wrong camera clock using 2 photos, and undo in one step (`Ctrl+Z`).
+- **Match Locations from Timed Photos (`Home → Geotag ▾`):** Copy GPS locations from your phone's geotagged photos (or a `.gpx` track) onto camera photos taken around the same time, with side-by-side previews, optional camera clock sync, and one-step Undo (`Ctrl+Z`).
 
-![Match Locations from Timed Photos showing side-by-side Destination and GPS Source previews](docs/images/release-0.14.0/gps-match-locations.jpg)
+![Match Locations from Timed Photos side-by-side preview](docs/images/release-0.14.0/gps-match-locations.jpg)
 
-### Other Notable Improvements & Fixes
+### Other Notable Improvements
 
-- **Database Fresh Start & Empty-Library Prompt:** Added **Fresh Start (Reset Catalog & Thumbnails)...** in **Options → Database** (with confirmation warning, leaving files on disk untouched) and an empty-library `"No photos or videos in your gallery yet."` screen with a clickable **`Add a folder to your library...`** link.
-- **Performance & Responsiveness:**
-  - **Faster Face Recognition Model Loading:** Cached the loaded `FaceEngine` session across scans, skipped unused 2D/3D landmark and gender/age InsightFace models (`allowed_modules=["detection", "recognition"]`), and lowered background `FaceDetectionWorker` thread priority.
-  - **Snappier Folder Manager:** Sped up opening and toggling via grouped `media_count` queries, batched policy commits, cached icons, deferred OCR probing, in-place tree/subfolder updates (no scroll jump), and deferred main-window refresh on close.
-  - **Large Folder Indexing:** Improved UI responsiveness when adding large folders via **File → Add to Library**.
-- **UX & Reliability Polish:**
-  - **Tag & Caption Pane & Face Tagging:** Multi-selection people tags show `(All)` when shared across all selected photos and hide `(no box - add)`; clicking into the right pane closes an open face box, and the **Tag someone** popup fades out smoothly.
-  - **Video Seek Bar, Immersive Mode & Navigation:** Clicking anywhere on the video seek bar jumps straight to that timestamp (`PointingHandCursor`), **Immersive Mode (`F4`)** keeps the draggable title bar and window controls visible, and Left Navigation / Folder Manager folders sort in true case-insensitive A–Z order.
-  - **Home Ribbon `People` & `Geotag` Split Buttons:** Added the **Geotag ▾** dropdown menu and promoted **People** to a 2-part split button, plus improved narrow-screen Ribbon spacing.
-  - **Bug Fixes:** Fixed **Object Eraser** and the 99% **LaMa Neural Inpainting** download hang from 0.13.0, fixed **Private Folders** unhide persistence and **Places** tree expansion persistence, reduced startup NVIDIA/DirectML probe popups, and prevented unprompted background ~280 MB face model downloads.
+- **Fresh Start Reset & Faster Library Management:** Added **Fresh Start (Reset Catalog & Thumbnails)** in **Options → Database**, faster Face Recognition startup, snappier **Folder Manager** opening and toggling, and smoother large-folder indexing.
+- **Everyday Polish & Fixes:** Click anywhere on the video seek bar to jump straight to that timestamp, keep the title bar visible in **Immersive Mode (`F4`)**, true A–Z folder sorting, and fixes for Object Eraser, the 99% LaMa download hang, and Private Folder persistence.
+
+<details>
+<summary>Full Technical Changelog</summary>
+
+- **Fine Tune Advanced & Regional Masking (`src/ui/right_tag_dock.py`, `src/imaging/opencv_engine.py`, `src/imaging/creative_effects.py`):** Added Basic/Advanced Fine Tune toggle, live RGB histogram, `Smart Enhance`, `Whites`/`Blacks`, `Structure`, `Tone Curve` (`RGB`/`R`/`G`/`B` + S-Curve), WB Eyedropper, 8-band HSL mixer, Sharpen Masking, Color Noise, Vignette Feather, Orton Glow, Film Grain, and `DepthAndMatteEngine` automatic Subject/Background/Sky masks with paint/erase brush and region-masked histogram.
+- **Duplicates & Visual Similarity (`src/ui/duplicates_workspace.py`, `src/core/duplicate_engine.py`):** Redesigned Duplicates workspace with contextual Ribbon tab, Auto-Pick, metadata merge on delete, and Find Similar Photos (spatial + position-invariant LAB color palette and perceptual hash matching with live `70%–98%` Scope Bar slider).
+- **GPS Matching (`src/ui/gps_match_dialog.py`):** Added timestamp-based companion phone GPS matching and `.gpx` track interpolation with 2-photo camera clock offset calibration and `Ctrl+Z` undo.
+- **Performance & Fixes (`src/core/face_engine.py`, `src/ui/folder_manager_dialog.py`, `src/ui/main_window.py`):** Session-cached `FaceEngine` with `allowed_modules=["detection", "recognition"]`, lowered `FaceDetectionWorker` priority, grouped `media_count` queries in Folder Manager, Fresh Start Reset, and fixes for LaMa download hang, Private Folders unhide persistence, and Places expansion persistence.
+
+</details>
 
 ---
 
@@ -190,31 +240,31 @@ Under the hood, **0.13.0** moves to a newer runtime (**OpenCV 5.0**, **Qt 6.12**
 ### Inpainting: Crop AI Expand & Object Eraser
 
 - **Cleaner Crop AI Expand & Straighten:** Expanding a photo's canvas or straightening crooked horizons now blends seamlessly into the edges and corners without leaving dark seam lines or edge artifacts.
-- **Contextual AI Object Eraser:** Painting over unwanted objects in **Spot Fix -> Object Eraser** (or using **Crop AI Expand**) now offers a one-time contextual prompt to download the optional **LaMa Neural Inpainting** add-on (~208 MB), while keeping built-in basic inpainting ready out of the box.
+- **Contextual AI Object Eraser:** Painting over unwanted objects in **Spot Fix → Object Eraser** (or using **Crop AI Expand**) now offers a one-time contextual prompt to download the optional **LaMa Neural Inpainting** add-on (~208 MB), while keeping built-in basic inpainting ready out of the box.
 
-![Object Eraser removing a boat cleanly using AI Neural Inpainting](docs/images/release-0.13.0/inpainting-object-eraser.jpg)
+![Object Eraser removing a boat with AI inpainting](docs/images/release-0.13.0/inpainting-object-eraser.jpg)
 
 ### Offline Text-in-Photo Search (OCR)
 
 Find receipts, street signs, documents, and screenshots by the words inside them—completely offline:
 
-- **Opt-In Per Folder:** Text recognition is off by default; enable it on any folder from **Folder Manager** (or run an on-demand **Scan Folder for Text Now**). If no OCR engine is installed yet, you'll be prompted to download **RapidOCR (~15 MB)** in one click, or point to an existing **Tesseract** or **Windows Native OCR** setup in **Options -> Add-ons**.
+- **Opt-In Per Folder:** Text recognition is off by default; enable it on any folder from **Folder Manager** (or run an on-demand **Scan Folder for Text Now**). If no OCR engine is installed yet, you'll be prompted to download **RapidOCR (~15 MB)** in one click, or point to an existing **Tesseract** or **Windows Native OCR** setup in **Options → Add-ons**.
 - **Search & Copy:** Extracted text is indexed in the local database for instant search and Smart Albums, and appears selectable/copyable right in the **Information** pane.
 
-![Text in Photo OCR detecting and displaying copyable text from a station sign](docs/images/release-0.13.0/ocr-text-in-photo.jpg)
+![Text-in-Photo OCR reading text from a station sign](docs/images/release-0.13.0/ocr-text-in-photo.jpg)
 
 ### Folder Manager & Private Folders
 
 - **Folder Manager:** Open **Folder Manager** to add or remove catalog folders, filter the folder tree, switch folders between **Scan Always**, **Scan Once**, and **Exclude from catalog**, toggle Face Recognition and Text (OCR) per folder, and cascade settings to subfolders.
 - **Private Folders & Flexible Unlock:** Mark sensitive folders as **Private** to hide their photos, people, tags, and places until unlocked from the **File** menu (hidden automatically when no private folders are in use). Protect unlocking with a **PIN / Passcode**, **Windows Login / Windows Hello**, or 1-click unlock, with optional idle auto-lock.
 
-![Folder Manager showing monitoring policies, AI indexing toggles, and Private Folders](docs/images/release-0.13.0/folder-manager.jpg)
+![Folder Manager with scan policies and Private Folders](docs/images/release-0.13.0/folder-manager.jpg)
 
 ### Other Notable Improvements
 
 - **USB Smartphone & Camera Import:** Native Windows **MTP/PTP** import with thumbnail previews, duplicate detection, and streamed transfers for iPhones, Android phones, and cameras.
 - **Auto Collage Polish:** Reorder photos manually in all collage styles (including **Blended Collage**), drag cropped photos with the **Hand** tool to adjust framing, drag **Polaroids** freely across the canvas, and get count-aware Grid layouts (e.g. `3x1` / `1x3` for 3 photos).
-- **Add-ons & In-App Update Check:** Renamed **Options -> Add-ons** with clearer status for LaMa and OCR, plus a **Check for Updates...** button in **About**.
+- **Add-ons & In-App Update Check:** Renamed **Options → Add-ons** with clearer status for LaMa and OCR, plus a **Check for Updates...** button in **About**.
 
 <details>
 <summary>Full Technical Changelog</summary>
@@ -248,18 +298,18 @@ Welcome to **Essentials Photo Gallery 0.12.0**! This release focuses on two of t
 
 Whether you're pulling together highlights from a weekend trip or building dynamic collections that update themselves as you import new photos, **Albums** gives your library a new home right at the top of the navigation pane.
 
-![Albums View showing My Albums and Smart Albums](docs/images/release-0.12.0/albums-view.jpg)
+![Albums view with My Albums and Smart Albums](docs/images/release-0.12.0/albums-view.jpg)
 
 - **My Albums:** Group photos into non-destructive collections from the right-click menu (`Add to Album` or `New Album from Selection...`) without moving or copying anything on disk. Pick your favorite photo as the **Album Cover**, and browse your albums as stacked photo cards in the new **Albums** view.
 - **Smart Albums:** Build live rule-based collections using 17+ metadata dimensions—including date/time of day, orientation, star rating, flags, tags, camera manufacturer, and detected face count—with an instant **Live Preview** of how many photos match before you save. Built-in presets like *On This Day*, *4+ Star & Flagged Favorites*, and *All Videos* are ready out of the box.
 
-![Smart Album rule builder with live match preview](docs/images/release-0.12.0/smart-album-builder.jpg)
+![Smart Album rule builder](docs/images/release-0.12.0/smart-album-builder.jpg)
 
 ### Multi-Photo Compare & Light Table Mode
 
 Picking the sharpest keeper from a burst of nearly identical shots shouldn't mean flipping back and forth in a single viewer. Press **`C`** (or choose **Compare** from the View ribbon or right-click menu) to open the new **Compare** light table.
 
-![Compare Mode showing side-by-side inspection, EXIF difference highlighting, and sharpness badge](docs/images/release-0.12.0/compare-mode.jpg)
+![Compare Mode side-by-side light table](docs/images/release-0.12.0/compare-mode.jpg)
 
 - **Flexible Layouts & Wipe Slider:** Inspect 2-up side-by-side, 2-up top/bottom, 3-up columns, 2×2 quad grid, or drag an interactive **Wipe Slider** curtain across two photos.
 - **Pin Champion & Cycle Challengers:** Pin your current favorite (`Pin`) and step through the rest of your selection using the arrow keys or the bottom candidate filmstrip—with optional **Auto-Advance** as soon as you rate or flag a shot.
@@ -275,7 +325,7 @@ Picking the sharpest keeper from a burst of nearly identical shots shouldn't mea
 
 ### Other Notable Improvements
 
-- **Contextual World Map Ribbon & People View:** Switching to World Map brings up dedicated map styles, location search, and year/person/rating filters; People View adds a quick switcher in `View -> Views` and fixes inline suggestion inspection and filtering.
+- **Contextual World Map Ribbon & People View:** Switching to World Map brings up dedicated map styles, location search, and year/person/rating filters; People View adds a quick switcher in `View → Views` and fixes inline suggestion inspection and filtering.
 - **Native Windows Framing & Aero Snap:** Restored native Win32/DWM window snapping (`Win+Left/Right/Up/Down` and drag-to-edge), drop shadows, and Windows 11 rounded corners while keeping the custom Ribbon title bar.
 
 <details>
@@ -311,7 +361,7 @@ This release upgrades Depth & Light with one-click subject cutouts, adds new gro
 
 - **Depth & Light & Subject Cutout Tools:** Added 1-click **Copy Subject** and **Remove Background** (to transparent PNG) with interactive **Boundary shift**, **Boundary feather**, and live mask preview, plus an atmospheric 3D haze/mist engine alongside Portrait Bokeh and 3D Depth Relighting.
 
-![Depth & Light Studio showing Subject Mask & Cutout and Portrait Bokeh controls](docs/images/release-0.11.0/depth-light-cutout.jpg)
+![Depth and Light subject cutout and bokeh controls](docs/images/release-0.11.0/depth-light-cutout.jpg)
 
 - **New Group Tools & Scroll Indicator:** Scrolling through large libraries now displays a floating group & date indicator badge (`Group` / `Item` timestamp), and right-clicking a group header offers quick **Collapse Group**, **Collapse all groups**, and **Select All Group Items** actions.
 
@@ -352,15 +402,15 @@ v0.10.0 brings a major overhaul to the World Map view, introduces the offline **
 
 - **World Map Overhaul:** Rebuilt the map experience with multiple map styles (`Clean (Light)`, `Street (OSM)`, `Satellite`, `Carto Dark`, and `Stamen Terrain`), clustered photo pins with thumbnail preview bubbles, and responsive zoom.
 
-![World Map view with clustered photo pins over Italy](docs/images/release-0.10.0/world-map-clusters.jpg)
+![World Map view with clustered photo pins](docs/images/release-0.10.0/world-map-clusters.jpg)
 
 - **Places & Offline Reverse Geotagging:** Added an offline world gazetteer covering 25,000+ cities and regions and a **Places** tree (`Country / State / City`) in the Left Navigation pane so you can browse your library by where photos were taken.
 
-![Places hierarchy in the Left Navigation pane](docs/images/release-0.10.0/places-nav-filter.jpg)
+![Places hierarchy in the Navigation pane](docs/images/release-0.10.0/places-nav-filter.jpg)
 
 - **New Fluent UI Option & Title Bar QAT:** Added a modern Windows 11 **Fluent** light theme and icon style option alongside Classic Aero and Dark modes, plus a Quick Access Toolbar (`Back`, `Forward`, `Undo`, `Redo`) integrated directly into the title bar.
 
-![Ribbon with the Fluent UI icon style and title bar Quick Access Toolbar](docs/images/release-0.10.0/fluent-ribbon-icons.png)
+![Fluent UI ribbon icons and title bar Quick Access Toolbar](docs/images/release-0.10.0/fluent-ribbon-icons.png)
 
 ### Other Notable Improvements
 
@@ -391,7 +441,7 @@ The first public release of Essentials Photo Gallery — a modern, 64-bit contin
 
 - **Classic WLPG Ribbon, Thumbnail Grid & Single Image View:** Recreates the familiar WLPG Ribbon (`Home`, `Edit`, `Find`, `Create`, `View`), Left Navigation pane, Right Info/Tagging pane, fast thumbnail grid browsing, and dedicated single-image viewer.
 
-![Thumbnail grid view with WLPG Ribbon, Left Navigation pane, and Right Info/Tags pane](docs/images/release-0.9.0/thumbnail-grid-view.jpg)
+![Classic WLPG thumbnail grid view](docs/images/release-0.9.0/thumbnail-grid-view.jpg)
 
 ![Single image view in Light mode](docs/images/release-0.9.0/single-view-light.jpg)
 
@@ -399,7 +449,7 @@ The first public release of Essentials Photo Gallery — a modern, 64-bit contin
 - **64-Bit Large-Library Architecture:** Eliminates 32-bit out-of-memory crashes and stays responsive across 500,000+ photo libraries.
 - **Updated Facial Recognition & People View:** Local SCRFD + ArcFace (ONNX) face detection, a dedicated **People** view (`Named People` & `People to Name`), face crops view, and batch confirmation.
 
-![People view with Named People, People to Name, and Quick Find strip](docs/images/release-0.9.0/people-view.jpg)
+![People view with Named People and People to Name](docs/images/release-0.9.0/people-view.jpg)
 
 - **Dark Mode:** Full Light and Dark theme support across the Ribbon, navigation panes, grid, and single-image viewer.
 
