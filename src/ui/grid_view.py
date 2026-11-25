@@ -3539,6 +3539,9 @@ class ThumbnailGridView(QListView):
             act_del.triggered.connect(main_win.delete_selection_to_recycle_bin)
 
         if not getattr(self, "_suppress_menu_exec", False):
+            _mw_ref = self.window()
+            if hasattr(_mw_ref, "ribbon") and hasattr(_mw_ref.ribbon, "_apply_menu_polish"):
+                _mw_ref.ribbon._apply_menu_polish(menu)
             menu.exec(global_pos)
         return menu
 
@@ -3661,7 +3664,7 @@ class ThumbnailGridView(QListView):
                 act_choose.triggered.connect(lambda: main_win.open_with_app_for_media(media_id, "choose"))
 
             # 3. Open file location
-            act_loc = menu.addAction("Open file location")
+            act_loc = menu.addAction(make_wlpg_icon("folder", 16), "Open file location")
             if is_mw:
                 act_loc.triggered.connect(lambda: main_win.open_file_location_for_media(media_id))
 
@@ -3702,7 +3705,7 @@ class ThumbnailGridView(QListView):
             target_mids = sel_mids if (sel_mids and media_id in sel_mids) else [media_id]
 
             # 1. Open: View file (bold), Compare (C), Open with ▸, Open file location
-            act_view = menu.addAction("View file")
+            act_view = menu.addAction(make_wlpg_icon("view_file", 16), "View file")
             bold_font = QFont(act_view.font())
             bold_font.setBold(True)
             act_view.setFont(bold_font)
@@ -3756,7 +3759,7 @@ class ThumbnailGridView(QListView):
             if is_mw:
                 act_choose.triggered.connect(lambda: main_win.open_with_app_for_media(media_id, "choose"))
 
-            act_loc = menu.addAction("Open file location")
+            act_loc = menu.addAction(make_wlpg_icon("folder", 16), "Open file location")
             if is_mw:
                 act_loc.triggered.connect(lambda: main_win.open_file_location_for_media(media_id))
 
@@ -3817,7 +3820,7 @@ class ThumbnailGridView(QListView):
 
             self._append_album_menu_actions(menu, media_id, main_win)
 
-            create_menu = menu.addMenu("Create")
+            create_menu = menu.addMenu(make_wlpg_icon("collage", 16), "Create")
             menu._create_menu = create_menu
             create_menu.setFont(QFont("Segoe UI", 9))
             act_pano = create_menu.addAction("Panoramic photo...")
@@ -3857,7 +3860,7 @@ class ThumbnailGridView(QListView):
             if is_mw and len(target_mids) == 1 and hasattr(main_win, "remove_background_for_media"):
                 act_rm_bg.triggered.connect(lambda _c=False, mid=int(media_id): main_win.remove_background_for_media(mid))
 
-            scan_menu = menu.addMenu(make_wlpg_icon("search", 16), "Scan")
+            scan_menu = menu.addMenu(make_wlpg_icon("text_search", 16), "Scan")
             menu._ai_scan_menu = scan_menu
             scan_menu.setFont(QFont("Segoe UI", 9))
             act_sim = scan_menu.addAction("Find Similar Photos...")
@@ -3872,22 +3875,22 @@ class ThumbnailGridView(QListView):
             menu.addSeparator()
 
             # 4. File Actions (Classic WLPG Order)
-            act_copy = menu.addAction("Copy")
+            act_copy = menu.addAction(make_wlpg_icon("copy", 16), "Copy")
             act_copy.setShortcut("Ctrl+C")
             if is_mw:
                 act_copy.triggered.connect(main_win.copy_selection_to_clipboard)
 
-            act_del = menu.addAction("Delete")
+            act_del = menu.addAction(make_wlpg_icon("delete", 16), "Delete")
             act_del.setShortcut("Del")
             if is_mw:
                 act_del.triggered.connect(main_win.delete_selection_to_recycle_bin)
 
-            act_ren = menu.addAction("Rename...")
+            act_ren = menu.addAction(make_wlpg_icon("rename", 16), "Rename...")
             act_ren.setShortcut("F2")
             if is_mw:
                 act_ren.triggered.connect(main_win.rename_selection)
 
-            act_res = menu.addAction("Export / Resize...")
+            act_res = menu.addAction(make_wlpg_icon("export", 16), "Export / Resize...")
             if is_mw:
                 act_res.triggered.connect(main_win.open_resize_dialog)
 
@@ -3903,6 +3906,9 @@ class ThumbnailGridView(QListView):
                 act_prop.triggered.connect(lambda: main_win.toggle_right_pane("info"))
 
         if not getattr(self, "_suppress_menu_exec", False):
+            _mw_ref = self.window()
+            if hasattr(_mw_ref, "ribbon") and hasattr(_mw_ref.ribbon, "_apply_menu_polish"):
+                _mw_ref.ribbon._apply_menu_polish(menu)
             menu.exec(global_pos)
         return menu
 
@@ -4153,6 +4159,9 @@ class ThumbnailGridView(QListView):
             act_select_all.triggered.connect(self.selectAll)
 
         if not getattr(self, "_suppress_menu_exec", False):
+            _mw_ref = self.window()
+            if hasattr(_mw_ref, "ribbon") and hasattr(_mw_ref.ribbon, "_apply_menu_polish"):
+                _mw_ref.ribbon._apply_menu_polish(menu)
             menu.exec(global_pos)
         return menu
 

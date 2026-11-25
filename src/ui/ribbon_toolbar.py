@@ -6246,6 +6246,10 @@ class RibbonToolbar(QWidget):
 
         self.tab_widget.tabBarDoubleClicked.connect(self._on_tab_bar_double_clicked)
         self.tab_widget.tabBarClicked.connect(self._on_tab_bar_clicked)
+        self.tab_widget.currentChanged.connect(
+            lambda _idx: self._apply_responsive_layout(self.width()) if self.isVisible() else None
+        )
+        self._apply_file_menu_stylesheet(getattr(self, "_dark_mode", False))
 
         # Right Corner: Minimize the Ribbon button and Exit Immersive Pill
         right_corner = QWidget(self.tab_widget)
@@ -7307,19 +7311,18 @@ class RibbonToolbar(QWidget):
 
         # --- 5. View Tab Priority Collapse ---
         for btn in getattr(self, "view_details_checkboxes", []):
-            self._set_button_compact(btn, width < 1280)
+            self._set_button_compact(btn, width < 1380)
 
         for btn in getattr(self, "view_arrange_buttons", []):
-            self._set_button_compact(btn, width < 1180)
+            self._set_button_compact(btn, width < 1260)
 
         for btn in (
             getattr(self, "btn_reverse_sort", None),
             getattr(self, "btn_detail_rating", None),
             getattr(self, "btn_detail_caption", None),
-            getattr(self, "btn_detail_flags", None),
         ):
             if btn is not None:
-                self._set_button_compact(btn, width < 1050)
+                self._set_button_compact(btn, width < 1120)
 
         for btn in (
             getattr(self, "btn_zoom_in", None),
@@ -7335,7 +7338,7 @@ class RibbonToolbar(QWidget):
             getattr(self, "btn_layout_mosaic", None),
         ):
             if btn is not None:
-                self._set_button_compact(btn, width < 920)
+                self._set_button_compact(btn, width < 1020)
 
         # --- 6. Group Box Minimum Width Synchronization ---
         for page in (
@@ -7361,7 +7364,10 @@ class RibbonToolbar(QWidget):
                             if sub and sub.layout():
                                 sub.layout().invalidate()
                         w.content_layout.invalidate()
-                        cw_min = w.content_layout.sizeHint().width()
+                        cw_min = max(
+                            w.content_layout.minimumSize().width(),
+                            w.content_layout.sizeHint().width(),
+                        )
                         w.content_widget.setMinimumWidth(cw_min)
                         w.setMinimumWidth(cw_min + 4)
 
@@ -8004,7 +8010,6 @@ class RibbonToolbar(QWidget):
         def _on_all():
             self.favourite_filter_selected.emit(False)
             self.flag_filter_selected.emit(None)
-            self.flagged_filter_selected.emit(False)
 
         def _on_fav():
             self.favourite_filter_selected.emit(True)
@@ -8012,17 +8017,14 @@ class RibbonToolbar(QWidget):
         def _on_flagged():
             self.favourite_filter_selected.emit(False)
             self.flag_filter_selected.emit(1)
-            self.flagged_filter_selected.emit(True)
 
         def _on_rejected():
             self.favourite_filter_selected.emit(False)
             self.flag_filter_selected.emit(-1)
-            self.flagged_filter_selected.emit(False)
 
         def _on_unflagged():
             self.favourite_filter_selected.emit(False)
             self.flag_filter_selected.emit(0)
-            self.flagged_filter_selected.emit(False)
 
         act_all.triggered.connect(_on_all)
         act_fav.triggered.connect(_on_fav)
@@ -8224,13 +8226,16 @@ class RibbonToolbar(QWidget):
         flag_menu.setFont(QFont("Segoe UI", 9))
         flag_menu.addAction(self._make_cull_menu_icon("flag_picked"), "Pick (P)", lambda: self.action_triggered.emit("flag_pick"))
         flag_menu.addAction(self._make_cull_menu_icon("flag_rejected"), "Reject (X)", lambda: self.action_triggered.emit("flag_reject"))
-        flag_menu.addAction("Unflag (U)", lambda: self.action_triggered.emit("flag_unflag"))
+        flag_menu.addAction(self._make_cull_menu_icon("flag_unflagged"), "Unflag (U)", lambda: self.action_triggered.emit("flag_unflag"))
         flag_menu.addSeparator()
         flag_menu.addAction(self._make_cull_menu_icon("heart"), "Toggle Favourite (F)", lambda: self.action_triggered.emit("toggle_favourite"))
         flag_menu.addSeparator()
-        flag_menu.addAction("Select All Rejected", lambda: self.action_triggered.emit("select_rejected"))
-        flag_menu.addAction("Delete All Rejected...", lambda: self.action_triggered.emit("delete_rejected"))
+        flag_menu.addAction(make_wlpg_icon("select_all", 16), "Select All Rejected", lambda: self.action_triggered.emit("select_rejected"))
+        flag_menu.addAction(make_wlpg_icon("delete", 16), "Delete All Rejected...", lambda: self.action_triggered.emit("delete_rejected"))
         self.btn_home_flag.setMenu(flag_menu)
+
+        for _sp_btn in (self.btn_geotag, self.btn_home_rate, self.btn_home_flag):
+            _sp_btn.setMinimumWidth(max(_sp_btn.sizeHint().width() + 14, 78))
 
         o_right_col.addWidget(self.btn_geotag)
         o_right_col.addWidget(self.btn_home_rate)
@@ -11237,10 +11242,12 @@ class RibbonToolbar(QWidget):
 
 
     def _install_menu_quick_fade(self, menu: QMenu) -> None:
-        """Attach a non-blocking 90ms fade-out overlay when a Ribbon dropdown menu closes."""
+        """Attach a non-blocking 140ms fade-out overlay when a Ribbon dropdown menu closes."""
         if getattr(menu, "_quick_fade_installed", False):
             return
         menu._quick_fade_installed = True  # type: ignore[attr-defined]
+        if not hasattr(self, "_active_menu_fade_overlays"):
+            self._active_menu_fade_overlays: list[QLabel] = []
 
         def _on_about_to_hide() -> None:
             try:
@@ -11262,12 +11269,27 @@ class RibbonToolbar(QWidget):
                 overlay.setGeometry(menu.geometry())
                 overlay.setWindowOpacity(1.0)
                 overlay.show()
+                self._active_menu_fade_overlays.append(overlay)
+
                 anim = QPropertyAnimation(overlay, b"windowOpacity", overlay)
                 anim.setDuration(140)
                 anim.setStartValue(1.0)
                 anim.setEndValue(0.0)
                 anim.setEasingCurve(QEasingCurve.OutCubic)
-                anim.finished.connect(overlay.close)
+
+                def _cleanup(ov: QLabel = overlay) -> None:
+                    try:
+                        if ov in self._active_menu_fade_overlays:
+                            self._active_menu_fade_overlays.remove(ov)
+                    except Exception:
+                        pass
+                    try:
+                        ov.close()
+                    except Exception:
+                        pass
+
+                anim.finished.connect(_cleanup)
+                overlay._fade_anim = anim  # type: ignore[attr-defined]
                 anim.start(QPropertyAnimation.DeleteWhenStopped)
             except Exception:
                 pass
@@ -11287,7 +11309,7 @@ class RibbonToolbar(QWidget):
                     color: #E2E8F0;
                 }
                 QMenu::item {
-                    padding: 5px 18px 5px 28px;
+                    padding: 5px 18px 5px 8px;
                     background-color: transparent;
                     border: 1px solid transparent;
                     border-radius: 2px;
@@ -11303,13 +11325,12 @@ class RibbonToolbar(QWidget):
                     color: #64748B;
                 }
                 QMenu::icon {
-                    position: absolute;
-                    left: 6px;
+                    padding-left: 6px;
                 }
                 QMenu::indicator {
                     width: 14px;
                     height: 14px;
-                    left: 6px;
+                    padding-left: 6px;
                 }
                 QMenu::separator {
                     height: 1px;
@@ -11329,7 +11350,7 @@ class RibbonToolbar(QWidget):
                     color: #1E395B;
                 }
                 QMenu::item {
-                    padding: 5px 18px 5px 28px;
+                    padding: 5px 18px 5px 8px;
                     background-color: transparent;
                     border: 1px solid transparent;
                     border-radius: 2px;
@@ -11345,13 +11366,12 @@ class RibbonToolbar(QWidget):
                     color: #A0B2C6;
                 }
                 QMenu::icon {
-                    position: absolute;
-                    left: 6px;
+                    padding-left: 6px;
                 }
                 QMenu::indicator {
                     width: 14px;
                     height: 14px;
-                    left: 6px;
+                    padding-left: 6px;
                 }
                 QMenu::separator {
                     height: 1px;
@@ -11381,6 +11401,19 @@ class RibbonToolbar(QWidget):
                 if any(isinstance(a, QWidgetAction) for a in m.actions()):
                     continue
                 m.setStyleSheet(menu_qss)
+        self._last_menu_qss = menu_qss
+
+    def _apply_menu_polish(self, menu: QMenu) -> None:
+        """Apply tight WLPG icon-to-text spacing & 140ms fade-out to a context menu and its submenus."""
+        qss = getattr(self, "_last_menu_qss", "")
+        if not qss:
+            self._apply_file_menu_stylesheet(getattr(self, "_dark_mode", False))
+            qss = getattr(self, "_last_menu_qss", "")
+        targets = [menu] + list(menu.findChildren(QMenu))
+        for m in targets:
+            self._install_menu_quick_fade(m)
+            if qss and not any(isinstance(a, QWidgetAction) for a in m.actions()):
+                m.setStyleSheet(qss)
 
     def _apply_aero_stylesheet(self) -> None:
         self._dark_mode = False

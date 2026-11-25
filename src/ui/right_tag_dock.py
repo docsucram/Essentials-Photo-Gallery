@@ -1833,14 +1833,13 @@ class _ClickToEditLabel(QLabel):
                 color: #1E395B;
                 font-family: 'Segoe UI';
                 font-size: 9pt;
-                padding: 1px 4px 1px 0px;
-                margin: 0px;
                 border: none;
-                border-radius: 2px;
+                margin: 0px;
+                padding: 0px;
             }
             QLabel:hover {
                 background: #F4F8FC;
-                border: 1px solid #C5D9EC;
+                text-decoration: underline;
             }
             """
         )
@@ -1911,8 +1910,9 @@ class _ClickToEditWidget(QStackedWidget):
                     color: {'#94A3B8' if is_dark else '#55687C'};
                     font-family: 'Segoe UI';
                     font-size: 9pt;
-                    padding: 1px 4px 1px 0px;
                     border: none;
+                    margin: 0px;
+                    padding: 0px;
                 }}
                 """
             )
@@ -1924,13 +1924,13 @@ class _ClickToEditWidget(QStackedWidget):
                     color: {'#E2E8F0' if is_dark else '#1E395B'};
                     font-family: 'Segoe UI';
                     font-size: 9pt;
-                    padding: 1px 4px 1px 0px;
                     border: none;
-                    border-radius: 2px;
+                    margin: 0px;
+                    padding: 0px;
                 }}
                 QLabel:hover {{
                     background: {'#242A36' if is_dark else '#F4F8FC'};
-                    border: 1px solid {'#3B82F6' if is_dark else '#C5D9EC'};
+                    text-decoration: underline;
                 }}
                 """
             )
@@ -3471,10 +3471,11 @@ class TagAndCaptionDock(QDockWidget):
         flag_hbox.setSpacing(4)
 
         self.btn_flag = QPushButton(flag_widget)
-        self.btn_flag.setFixedSize(24, 22)
+        self.btn_flag.setFixedSize(18, 22)
         self.btn_flag.setFlat(True)
         self.btn_flag.setCursor(Qt.PointingHandCursor)
         self.btn_flag.setIconSize(QSize(15, 15))
+        self.btn_flag.setStyleSheet("QPushButton { padding: 0px; margin: 0px; border: none; text-align: left; }")
         self.btn_flag.setToolTip("Cycle Flag: Pick → Reject → Unflagged (P / X / U)")
         self.btn_flag.clicked.connect(self._on_flag_button_clicked)
         flag_hbox.addWidget(self.btn_flag)

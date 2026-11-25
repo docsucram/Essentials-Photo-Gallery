@@ -8940,7 +8940,10 @@ class SingleMediaViewer(QWidget):
             )
             if not getattr(self, "_suppress_menu_exec", False):
                 menu.exec(screen_pos)
-            return menu
+            _mw_ref = self.window()
+        if hasattr(_mw_ref, "ribbon") and hasattr(_mw_ref.ribbon, "_apply_menu_polish"):
+            _mw_ref.ribbon._apply_menu_polish(menu)
+        return menu
 
         # 1. Confirm (if unconfirmed suggestion)
         if is_unconfirmed and face_id and person_id:
@@ -8988,6 +8991,9 @@ class SingleMediaViewer(QWidget):
 
         if not getattr(self, "_suppress_menu_exec", False):
             menu.exec(screen_pos)
+        _mw_ref = self.window()
+        if hasattr(_mw_ref, "ribbon") and hasattr(_mw_ref.ribbon, "_apply_menu_polish"):
+            _mw_ref.ribbon._apply_menu_polish(menu)
         return menu
 
     def _on_face_region_dismiss(self, face_id: int) -> None:
@@ -9506,6 +9512,9 @@ class SingleMediaViewer(QWidget):
 
         if not getattr(self, "_suppress_menu_exec", False):
             menu.exec(self.video_widget.mapToGlobal(pos))
+        _mw_ref = self.window()
+        if hasattr(_mw_ref, "ribbon") and hasattr(_mw_ref.ribbon, "_apply_menu_polish"):
+            _mw_ref.ribbon._apply_menu_polish(menu)
         return menu
 
     def _on_video_position_changed(self, pos_ms: int) -> None:
@@ -10050,6 +10059,9 @@ class SingleMediaViewer(QWidget):
         menu = self._build_viewer_context_menu()
         if menu is not None and not getattr(self, "_suppress_menu_exec", False):
             menu.exec(self.graphics_view.mapToGlobal(pos))
+        _mw_ref = self.window()
+        if hasattr(_mw_ref, "ribbon") and hasattr(_mw_ref.ribbon, "_apply_menu_polish"):
+            _mw_ref.ribbon._apply_menu_polish(menu)
         return menu
 
     def _build_viewer_context_menu(self) -> QMenu | None:
@@ -10215,7 +10227,7 @@ class SingleMediaViewer(QWidget):
             act_rm_bg = edit_menu.addAction("Remove background")
             act_rm_bg.triggered.connect(self.remove_background_cutout)
 
-        scan_menu = menu.addMenu(make_wlpg_icon("search", 16), "Scan")
+        scan_menu = menu.addMenu(make_wlpg_icon("text_search", 16), "Scan")
         menu._ai_scan_menu = scan_menu
         scan_menu.setFont(QFont("Segoe UI", 9))
 
@@ -10261,23 +10273,23 @@ class SingleMediaViewer(QWidget):
         menu.addSeparator()
 
         # 4. File Actions (Classic WLPG Order)
-        act_copy = menu.addAction("Copy")
+        act_copy = menu.addAction(make_wlpg_icon("copy", 16), "Copy")
         act_copy.setShortcut("Ctrl+C")
         if is_mw and hasattr(mw, "copy_selection_to_clipboard"):
             act_copy.triggered.connect(mw.copy_selection_to_clipboard)
 
-        act_del = menu.addAction("Delete")
+        act_del = menu.addAction(make_wlpg_icon("delete", 16), "Delete")
         act_del.setShortcut("Del")
         if is_mw and hasattr(mw, "delete_selection_to_recycle_bin"):
             act_del.triggered.connect(mw.delete_selection_to_recycle_bin)
 
-        act_ren = menu.addAction("Rename...")
+        act_ren = menu.addAction(make_wlpg_icon("rename", 16), "Rename...")
         act_ren.setShortcut("F2")
         if hasattr(mw, "rename_selection"):
             act_ren.triggered.connect(mw.rename_selection)
 
         if not is_vid:
-            act_res = menu.addAction("Export / Resize...")
+            act_res = menu.addAction(make_wlpg_icon("export", 16), "Export / Resize...")
             if hasattr(mw, "dispatch_ribbon_action"):
                 act_res.triggered.connect(lambda: mw.dispatch_ribbon_action("save_as_resized_copy"))
             elif hasattr(mw, "open_resize_dialog"):
@@ -10293,4 +10305,7 @@ class SingleMediaViewer(QWidget):
         elif hasattr(mw, "toggle_right_pane"):
             act_prop.triggered.connect(lambda: mw.toggle_right_pane("info"))
 
+        _mw_ref = self.window()
+        if hasattr(_mw_ref, "ribbon") and hasattr(_mw_ref.ribbon, "_apply_menu_polish"):
+            _mw_ref.ribbon._apply_menu_polish(menu)
         return menu
