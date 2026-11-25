@@ -586,23 +586,22 @@ class SemanticVectorRepository:
                 self._matrix_cache[model_ver] = empty
                 return empty
             dim = int(rows[0][1] or EMBED_DIM)
+            expected_bytes = dim * 2
             valid_ids: list[int] = []
-            vecs: list[np.ndarray] = []
+            valid_blobs: list[bytes] = []
             for mid, rdim, blob in rows:
-                if int(rdim) != dim:
-                    continue
-                arr = np.frombuffer(bytes(blob), dtype=np.float16).astype(np.float32)
-                if arr.size == dim:
+                if int(rdim) == dim and blob is not None and len(blob) == expected_bytes:
                     valid_ids.append(int(mid))
-                    vecs.append(arr)
-            if not vecs:
+                    valid_blobs.append(blob)
+            if not valid_blobs:
                 empty = (np.empty((0,), dtype=np.int64), np.empty((0, dim), dtype=np.float32))
                 self._matrix_cache[model_ver] = empty
                 return empty
-            mat = np.vstack(vecs)
+            raw = b"".join(valid_blobs)
+            mat = np.frombuffer(raw, dtype=np.float16).reshape(len(valid_ids), dim).astype(np.float32)
             norms = np.linalg.norm(mat, axis=1, keepdims=True)
-            norms = np.where(norms > 1e-8, norms, 1.0)
-            mat = mat / norms
+            np.maximum(norms, 1e-8, out=norms)
+            mat /= norms
             pair = (np.array(valid_ids, dtype=np.int64), mat)
             self._matrix_cache[model_ver] = pair
             return pair

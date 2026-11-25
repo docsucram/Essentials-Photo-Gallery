@@ -204,19 +204,22 @@ All bottlenecks identified in the 100,000- and 500,000-item scale benchmark have
 
 ---
 
-## 6. v0.18.0 Priority 1 & 2 SQL Optimization Results (Before vs. After)
+## 6. v0.18.0 Priority 1, 2 & 3 Optimization Results (Before vs. After)
 
-*Measured: 2026-11-25 (`tests/benchmark_v018_targets.py` & `tests/benchmark_scale_v2.py`)*
+*Measured: 2026-11-25 (`tests/benchmark_v018_targets.py`, `tests/benchmark_scale_v2.py`, and Priority 3 micro-benchmarks)*
 
 ### Summary of Changes
 - **Priority 1 (Navigation Tree SQL):** Added covering partial indexes (`idx_media_rating_active`, `idx_media_date_active`, `idx_media_places_active`) and replaced unconditional `JOIN folders f` + `COALESCE(m.is_missing, 0) = 0` with `_get_hidden_folder_ids()` (`folder_id NOT IN (...)` only when excluded/private folders exist) and `is_missing = 0`, enabling pure index-only covering scans.
 - **Priority 2 (Batch People Tagging):** Added leading-`state` partial indexes (`idx_media_people_pending_named`, `idx_media_people_pending_unnamed`, `idx_media_people_pending_person`) and split `get_pending_face_suggestions(include_unnamed=True)` into two index-ordered `LIMIT` queries, eliminating `USE TEMP B-TREE FOR ORDER BY`.
+- **Priority 3 (Async AI Straighten/Expand & Vectorized Semantic Matrix Load):** Offloaded `straighten_with_ai_fill` / `expand_canvas_with_ai_fill` in `SingleMediaViewer.apply_crop()` to a 1-thread `QThreadPool`, vectorized `SemanticVectorRepository.load_matrix()` (`b"".join` + single `np.frombuffer` + in-place L2 normalization), and added a 2.5 s post-startup background prewarm (`_prewarm_semantic_matrix_async`).
 
-| Operation | Scale | v0.17.0-pre (Before) | v0.18.0 (After) | Speedup |
+| Operation | Scale | v0.17.0-pre (Before) | v0.18.0 (After) | Speedup / Impact |
 | :--- | :---: | :---: | :---: | :--- |
 | **`get_rating_counts()`** | 100k / 500k | `48.37` / `539.55 ms` | **`3.62`** / **`24.64 ms`** | **13.4× – 21.9× faster** |
 | **`get_places_hierarchy()`** | 100k / 500k | `117.68` / `616.83 ms` | **`8.09`** / **`55.68 ms`** | **11.1× – 14.5× faster** |
 | **`get_date_tree_counts()`** | 100k / 500k | `27.66` / `191.59 ms` | **`13.95`** / **`140.38 ms`** | **1.4× – 2.0× faster** |
 | **Total Nav Tree SQL** | 100k / 500k | `194.37` / `1,348.69 ms` | **`26.16`** / **`221.42 ms`** | **6.1× – 7.4× faster** |
 | **`get_pending_face_suggestions(limit=5000)`** | 50k / 500k | `50.98` / `275.57 ms` | **`19.25`** / **`27.78 ms`** | **2.6× – 9.9× faster** |
+| **Semantic `load_matrix()` (cold)** | 20k / 100k | `118.94` / `675.95 ms` | **`83.21`** / **`403.20 ms`** | **1.4× – 1.7× faster + 0 ms GUI block (bg prewarm)** |
+| **AI Straighten / Expand Fill (`apply_crop`)** | 4K ROI | `~1,427 ms` (GUI stall) | **`0 ms` GUI stall** | Runs asynchronously on `QThreadPool` |
 | **Bulk Insert Trade-Off (500k rows + 333k faces)** | 500k | `21.76 s` | `23.17 s` | `+6.5%` one-time ingestion cost |

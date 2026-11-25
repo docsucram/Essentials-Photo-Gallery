@@ -4627,6 +4627,7 @@ class SingleMediaViewer(QWidget):
         extends_outside = raw_l < 0 or raw_t < 0 or raw_r > master_w or raw_b > master_h
 
         if ai_expand_on and (extends_outside or abs(rot_deg) >= 0.05):
+            import os
             max_px_x = max(16, master_w // 4)
             max_px_y = max(16, master_h // 4)
             el = max(-max_px_x, min(master_w - 1, raw_l))
@@ -4634,37 +4635,96 @@ class SingleMediaViewer(QWidget):
             er = max(el + 4, min(master_w + max_px_x, raw_r))
             eb = max(et + 4, min(master_h + max_px_y, raw_b))
 
-            from PySide6.QtWidgets import QApplication
             from src.imaging.opencv_engine import expand_canvas_with_ai_fill, straighten_with_ai_fill
 
             before_px = self.master_np_rgb.copy()
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            try:
-                work_rgb = self.master_np_rgb
+
+            def _compute_ai_expand(src_rgb: np.ndarray) -> np.ndarray:
+                work_rgb = src_rgb
                 if abs(rot_deg) >= 0.05:
                     work_rgb = straighten_with_ai_fill(work_rgb, rot_deg)
                 if extends_outside:
-                    self.master_np_rgb = expand_canvas_with_ai_fill(work_rgb, el, et, er, eb)
-                elif not (el <= 3 and et <= 3 and er >= master_w - 3 and eb >= master_h - 3):
-                    self.master_np_rgb = work_rgb[max(0, et):min(master_h, eb), max(0, el):min(master_w, er)].copy()
-                else:
-                    self.master_np_rgb = work_rgb
-            finally:
-                QApplication.restoreOverrideCursor()
+                    return expand_canvas_with_ai_fill(work_rgb, el, et, er, eb)
+                if not (el <= 3 and et <= 3 and er >= master_w - 3 and eb >= master_h - 3):
+                    return work_rgb[max(0, et):min(master_h, eb), max(0, el):min(master_w, er)].copy()
+                return work_rgb
 
-            self.current_recipe.crop_rect = None
-            self.current_recipe.straighten_deg = 0.0
-            self._crop_committed = True
-            self._original_pixmap = None
-            cmd = PixelArrayUndoCommand(self, before_px, self.master_np_rgb.copy(), "AI Expand Canvas")
-            self.undo_stack.push(cmd)
-            self.set_crop_mode(False)
-            self._update_display_proxy()
-            self._render_current_recipe()
-            self.set_zoom_mode("fit")
-            if self.current_media_id is not None:
-                self.pixel_edit_saved.emit(self.current_media_id, "")
-            self._show_status("AI Expand applied", 3000)
+            def _apply_ai_expand_result(result_rgb: np.ndarray | None, err: Exception | None) -> None:
+                self._ai_expand_in_progress = False
+                if err is not None or result_rgb is None:
+                    self._show_status("AI Expand / Straighten failed — please try again", 3500)
+                    return
+                self.master_np_rgb = result_rgb
+                self.current_recipe.crop_rect = None
+                self.current_recipe.straighten_deg = 0.0
+                self._crop_committed = True
+                self._original_pixmap = None
+                cmd = PixelArrayUndoCommand(self, before_px, self.master_np_rgb.copy(), "AI Expand Canvas")
+                self.undo_stack.push(cmd)
+                self.set_crop_mode(False)
+                self._update_display_proxy()
+                self._render_current_recipe()
+                self.set_zoom_mode("fit")
+                if self.current_media_id is not None:
+                    self.pixel_edit_saved.emit(self.current_media_id, "")
+                self._show_status("✓ AI Expand applied", 3000)
+
+            if "PYTEST_CURRENT_TEST" in os.environ:
+                try:
+                    _apply_ai_expand_result(_compute_ai_expand(before_px), None)
+                except Exception as exc:
+                    _apply_ai_expand_result(None, exc)
+                return True
+
+            if getattr(self, "_ai_expand_in_progress", False):
+                return False
+            self._ai_expand_in_progress = True
+            self._show_status("Applying AI Expand / Straighten Fill...", 0)
+            req_media_id = self.current_media_id
+            req_gen = self._master_render_gen
+
+            pool = getattr(self, "_ai_expand_pool", None)
+            if pool is None:
+                from PySide6.QtCore import QThreadPool
+                pool = QThreadPool(self)
+                pool.setMaxThreadCount(1)
+                self._ai_expand_pool = pool
+                self._ai_expand_workers: set[Any] = set()
+
+            class _AiExpandSig(QObject):
+                done = Signal(object, object)
+
+            class _AiExpandWorker(QRunnable):
+                def __init__(self, img_arr: np.ndarray, sig: _AiExpandSig) -> None:
+                    super().__init__()
+                    self.setAutoDelete(False)
+                    self._img = img_arr
+                    self._sig = sig
+
+                def run(self) -> None:
+                    try:
+                        res = _compute_ai_expand(self._img)
+                        self._sig.done.emit(res, None)
+                    except Exception as exc:
+                        self._sig.done.emit(None, exc)
+
+            sig = _AiExpandSig(self)
+            worker = _AiExpandWorker(before_px, sig)
+            self._ai_expand_workers.add(worker)
+
+            def _on_done(res_rgb: Any, err: Any, w: Any = worker, s: Any = sig) -> None:
+                self._ai_expand_workers.discard(w)
+                try:
+                    s.deleteLater()
+                except RuntimeError:
+                    pass
+                if self.current_media_id != req_media_id or self._master_render_gen != req_gen:
+                    self._ai_expand_in_progress = False
+                    return
+                _apply_ai_expand_result(res_rgb, err)
+
+            sig.done.connect(_on_done)
+            pool.start(worker)
             return True
 
         ml = max(0, min(master_w - 1, raw_l))

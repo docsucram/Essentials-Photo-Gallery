@@ -9836,6 +9836,25 @@ class PhotoGalleryMainWindow(QMainWindow):
         if target_ids:
             self.on_selection_tag_added(tag_name)
 
+    def _prewarm_semantic_matrix_async(self) -> None:
+        """Pre-loads the semantic vector matrix on a background thread so first search is sub-5ms."""
+        if (
+            getattr(self, "_is_shutting_down", False)
+            or getattr(self, "semantic_repo", None) is None
+            or getattr(self, "_semantic_matrix_prewarmed", False)
+        ):
+            return
+        self._semantic_matrix_prewarmed = True
+        repo = self.semantic_repo
+
+        def _worker() -> None:
+            try:
+                repo.load_matrix()
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True, name="SemanticMatrixWarmup").start()
+
     def _refresh_subjects_nav_counts(self) -> None:
         if (
             getattr(self, "_is_shutting_down", False)
@@ -12948,6 +12967,13 @@ class PhotoGalleryMainWindow(QMainWindow):
             )
             if self.nav_show_subjects:
                 self._refresh_subjects_nav_counts()
+            elif (
+                "PYTEST_CURRENT_TEST" not in os.environ
+                and getattr(self, "semantic_repo", None) is not None
+                and getattr(self, "semantic_engine", None) is not None
+                and self.semantic_engine.is_available()
+            ):
+                QTimer.singleShot(2500, self._prewarm_semantic_matrix_async)
             self.left_nav_dock.set_builtin_smart_albums_visibility(
                 favourites=_to_bool(_get_val("smart_show_favourites", True), True),
                 picked=_to_bool(_get_val("smart_show_picked", True), True),
