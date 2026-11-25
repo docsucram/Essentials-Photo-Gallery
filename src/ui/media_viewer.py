@@ -10177,7 +10177,7 @@ class SingleMediaViewer(QWidget):
                 act_unf.setShortcut("U")
                 act_unf.triggered.connect(lambda: mw.apply_flag_to_selection(0))
 
-        add_album_menu = menu.addMenu(make_wlpg_icon("albums", 16), "Add to Album")
+        add_album_menu = menu.addMenu(make_wlpg_icon("pictures_library", 16), "Add to Album")
         menu._add_album_menu = add_album_menu
         add_album_menu.setFont(QFont("Segoe UI", 9))
         repo = getattr(mw, "catalog_repo", None)

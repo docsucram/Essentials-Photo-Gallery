@@ -957,7 +957,7 @@ class PeopleDirectoryView(QWidget):
         self.btn_refresh = QPushButton("Refresh", header_bar)
         self.btn_refresh.setObjectName("btnRefreshDirectory")
         self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_refresh.setIcon(make_wlpg_icon("rotate_right", 14))
+        self.btn_refresh.setIcon(make_wlpg_icon("refresh", 14))
         self.btn_refresh.setIconSize(QSize(14, 14))
         self.btn_refresh.setStyleSheet(
             """

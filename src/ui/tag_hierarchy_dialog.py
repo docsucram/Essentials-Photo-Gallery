@@ -660,20 +660,72 @@ class TagHierarchyDialog(QDialog):
 
     def _on_tree_context_menu(self, pos: QPoint) -> None:
         from PySide6.QtWidgets import QMenu
-        from src.ui.shortcuts_dialog import populate_quick_tag_shortcut_submenu
+        from src.ui.shortcuts_dialog import (
+            assign_quick_tag_hotkey,
+            get_quick_tag_slot_for_tag,
+            populate_quick_tag_shortcut_submenu,
+        )
 
         item = self.tree.itemAt(pos)
         if item is None or item.data(0, _NODE_TYPE_ROLE) != "tag":
             return
-        tpath = str(item.data(0, 260) or item.data(0, _OLD_NAME_ROLE) or "").strip()
+        tid = item.data(0, _NODE_PAYLOAD_ROLE)
+        tname = str(item.data(0, _OLD_NAME_ROLE) or "").strip()
+        tpath = str(item.data(0, 260) or tname).strip()
         if not tpath:
             return
+
         menu = QMenu(self)
-        populate_quick_tag_shortcut_submenu(menu, tpath, on_changed=self._refresh_after_shortcut_change)
+        sub = populate_quick_tag_shortcut_submenu(
+            menu, tpath, on_changed=self._refresh_after_shortcut_change
+        )
+        sub.setTitle("Assign keyboard shortcut")
+        sub.setIcon(make_wlpg_icon("tag", 16))
+
+        cur_slot = get_quick_tag_slot_for_tag(tpath)
+        if cur_slot is not None:
+            act_clear = menu.addAction(
+                make_wlpg_icon("clear_filters", 16),
+                f"Clear shortcut (Alt+{cur_slot})",
+            )
+
+            def _on_clear_top() -> None:
+                assign_quick_tag_hotkey(tpath, None)
+                self._refresh_after_shortcut_change()
+
+            act_clear.triggered.connect(_on_clear_top)
+
+        if self.repo is not None and tid is not None:
+            menu.addSeparator()
+            act_del = menu.addAction(make_wlpg_icon("delete", 16), "Delete tag")
+            act_del.triggered.connect(
+                lambda _c=False, tag_id=int(tid), tag_path=tpath: self._on_delete_tag(tag_id, tag_path)
+            )
+
         parent_win = self.parent() or self.window()
         if hasattr(parent_win, "ribbon") and hasattr(parent_win.ribbon, "_apply_menu_polish"):
             parent_win.ribbon._apply_menu_polish(menu)
         menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _on_delete_tag(self, tag_id: int, tag_path: str) -> None:
+        if self.repo is None:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete Tag",
+            f"Delete tag '{tag_path}' and any sub-tags from your catalog?\n\n"
+            "Your photo files will not be deleted, only this tag assignment.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        from src.ui.shortcuts_dialog import assign_quick_tag_hotkey
+
+        self.repo.delete_tag(int(tag_id))
+        assign_quick_tag_hotkey(tag_path, None)
+        self.populate(self.repo.get_tag_tree())
+        self.tag_hierarchy_changed.emit()
 
     def _on_add_clicked(self) -> None:
         sel = self.selected_tag_ids()

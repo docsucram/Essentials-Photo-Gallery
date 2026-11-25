@@ -687,6 +687,51 @@ class MediaCardDelegate(QStyledItemDelegate):
         return QRect(box.left() + 4, box.bottom() - h - 4, w, h)
 
     @staticmethod
+    def _draw_vector_tag_badge(
+        painter: QPainter, rect: QRectF, kind: str, color: QColor
+    ) -> None:
+        """Draw a crisp monochrome outline glyph (geotag / tag / person) centered inside ``rect``."""
+        cx = rect.center().x()
+        cy = rect.center().y()
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(color, 1.45, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+
+        if kind == "geotag":
+            # Minimal monochrome map pin outline + center dot
+            pin = QPainterPath()
+            pin.moveTo(cx, cy + 6.0)
+            pin.cubicTo(cx - 4.8, cy + 1.8, cx - 4.8, cy - 5.2, cx, cy - 5.6)
+            pin.cubicTo(cx + 4.8, cy - 5.2, cx + 4.8, cy + 1.8, cx, cy + 6.0)
+            pin.closeSubpath()
+            painter.drawPath(pin)
+            painter.drawEllipse(QPointF(cx, cy - 1.3), 1.6, 1.6)
+        elif kind == "tag":
+            # Minimal monochrome diagonal tag outline + eyelet hole
+            poly = QPolygonF([
+                QPointF(cx - 5.2, cy - 5.2),
+                QPointF(cx - 0.6, cy - 5.2),
+                QPointF(cx + 5.6, cy + 1.0),
+                QPointF(cx + 1.0, cy + 5.6),
+                QPointF(cx - 5.2, cy - 0.6),
+            ])
+            painter.drawPolygon(poly)
+            painter.setBrush(color)
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(QPointF(cx - 2.6, cy - 2.6), 1.15, 1.15)
+        elif kind == "person":
+            # Minimal monochrome head + shoulders outline
+            painter.drawEllipse(QPointF(cx, cy - 2.7), 2.5, 2.5)
+            shoulders = QPainterPath()
+            shoulders.moveTo(cx - 5.0, cy + 5.2)
+            shoulders.cubicTo(cx - 4.8, cy + 1.4, cx + 4.8, cy + 1.4, cx + 5.0, cy + 5.2)
+            painter.drawPath(shoulders)
+
+        painter.restore()
+
+    @staticmethod
     def _draw_vector_stack_icon(painter: QPainter, x: float, y: float, color: QColor) -> None:
         """Draw a razor-sharp 2-card mini stack icon (replaces blurry Unicode ⧉ glyph)."""
         painter.save()
@@ -801,17 +846,10 @@ class MediaCardDelegate(QStyledItemDelegate):
         if getattr(self, "show_people_tag_badges", False) and getattr(rec_meta, "has_people_tags", 0):
             tag_badge_keys.append("person")
         if tag_badge_keys:
-            if not self._tag_badge_pixmaps:
-                from src.ui.ribbon_toolbar import make_wlpg_icon
-
-                self._tag_badge_pixmaps = {
-                    "geotag": make_wlpg_icon("geotag", 16).pixmap(16, 16),
-                    "tag": make_wlpg_icon("tag", 16).pixmap(16, 16),
-                    "person": make_wlpg_icon("person", 16).pixmap(16, 16),
-                }
             badge_sz = fl_rect.width()
             badge_gap = 3
             next_right = (fl_rect.left() - badge_gap) if flag_drawn else fl_rect.right()
+            stroke_col = QColor("#E2E8F0") if (is_mosaic_layout or self.dark_mode) else QColor("#64748B")
             painter.save()
             painter.setRenderHint(QPainter.Antialiasing, True)
             for b_key in tag_badge_keys:
@@ -820,19 +858,15 @@ class MediaCardDelegate(QStyledItemDelegate):
                     break
                 if is_mosaic_layout:
                     painter.setBrush(QColor(15, 23, 42, 185))
-                    painter.setPen(QPen(QColor(255, 255, 255, 60), 1.0))
+                    painter.setPen(QPen(QColor(255, 255, 255, 55), 1.0))
                     painter.drawRoundedRect(QRectF(b_rect).adjusted(0.5, 0.5, -0.5, -0.5), 6.0, 6.0)
                 else:
-                    bg = QColor(30, 41, 59, 175) if self.dark_mode else QColor(255, 255, 255, 210)
-                    bd = QColor(255, 255, 255, 45) if self.dark_mode else QColor(148, 163, 184, 140)
+                    bg = QColor(30, 41, 59, 175) if self.dark_mode else QColor(255, 255, 255, 200)
+                    bd = QColor(255, 255, 255, 40) if self.dark_mode else QColor(148, 163, 184, 110)
                     painter.setBrush(bg)
                     painter.setPen(QPen(bd, 1.0))
                     painter.drawRoundedRect(QRectF(b_rect).adjusted(1.0, 1.0, -1.0, -1.0), 5.0, 5.0)
-                pm = self._tag_badge_pixmaps.get(b_key)
-                if pm is not None and not pm.isNull():
-                    px = b_rect.left() + (b_rect.width() - pm.width()) // 2
-                    py = b_rect.top() + (b_rect.height() - pm.height()) // 2
-                    painter.drawPixmap(px, py, pm)
+                self._draw_vector_tag_badge(painter, QRectF(b_rect), b_key, stroke_col)
                 next_right = b_rect.left() - badge_gap - 1
             painter.restore()
 
@@ -3612,7 +3646,7 @@ class ThumbnailGridView(QListView):
             else [int(media_id)]
         )
 
-        add_album_menu = menu.addMenu(make_wlpg_icon("albums", 16), "Add to Album")
+        add_album_menu = menu.addMenu(make_wlpg_icon("pictures_library", 16), "Add to Album")
         menu._add_album_menu = add_album_menu
         add_album_menu.setFont(QFont("Segoe UI", 9))
 
