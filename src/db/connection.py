@@ -1026,6 +1026,15 @@ class DualDatabaseEngine:
                 "ON media_people(state, suggested_person_id, similarity_score DESC) "
                 "WHERE state = 0 AND suggested_person_id IS NOT NULL;"
             )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_people_confirmed_person "
+                "ON media_people(person_id, media_id) "
+                "WHERE state = 1 AND person_id IS NOT NULL;"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_tags_tag_media "
+                "ON media_tags(tag_id, media_id);"
+            )
 
             try:
                 cur.execute(

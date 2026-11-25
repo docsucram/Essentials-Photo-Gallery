@@ -3860,7 +3860,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                     if self.media_viewer.has_unsaved_adjustments():
                         self.media_viewer.save_current_image_with_backup()
                         self.rebuild_and_run_query()
-                    self.media_viewer.media_player.stop()
+                    if self.media_viewer.media_player is not None:
+                        self.media_viewer.media_player.stop()
                 self.open_batch_people_view(person_id=state.get("person_id"))
             elif view == "map":
                 if hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
@@ -7273,7 +7274,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                 if not self.media_viewer.prompt_save_changes_if_needed("close"):
                     return
                 self.rebuild_and_run_query()
-        self.media_viewer.media_player.stop()
+        if self.media_viewer.media_player is not None:
+            self.media_viewer.media_player.stop()
         self.media_viewer._stop_animated_image()
         self.media_viewer.set_markup_mode(False)
         self.media_viewer.set_retouch_mode(False)
@@ -13209,8 +13211,10 @@ class PhotoGalleryMainWindow(QMainWindow):
                 if wt is not None and wt.is_alive():
                     wt.join(timeout=3.0)
             if hasattr(self, "media_viewer") and hasattr(self.media_viewer, "media_player"):
-                self.media_viewer.media_player.stop()
-                self.media_viewer.media_player.setSource(QUrl())
+                if self.media_viewer.media_player is not None:
+                    self.media_viewer.media_player.stop()
+                if self.media_viewer.media_player is not None:
+                    self.media_viewer.media_player.setSource(QUrl())
         except Exception:
             pass
         try:

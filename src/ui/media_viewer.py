@@ -1938,11 +1938,8 @@ class SingleMediaViewer(QWidget):
         self.mouse_overlay.setContextMenuPolicy(Qt.CustomContextMenu)
         self.mouse_overlay.customContextMenuRequested.connect(self._show_video_context_menu)
 
-        self.media_player = QMediaPlayer(self)
-        self.audio_output = QAudioOutput(self)
-        self.media_player.setAudioOutput(self.audio_output)
-        self.media_player.setVideoOutput(self.video_widget)
-        self.media_player.playbackStateChanged.connect(self._on_playback_state_changed)
+        self.media_player: Any = None
+        self.audio_output: Any = None
         self.video_widget.clicked.connect(self.toggle_video_playback)
         vid_vbox.addWidget(self.video_widget, 1)
 
@@ -2053,9 +2050,7 @@ class SingleMediaViewer(QWidget):
         self.slider_position = _ClickJumpSeekSlider(Qt.Horizontal, transport)
         self.slider_position.setRange(0, 1000)
         self.slider_position.setCursor(Qt.PointingHandCursor)
-        self.slider_position.sliderMoved.connect(self.media_player.setPosition)
-        self.media_player.positionChanged.connect(self._on_video_position_changed)
-        self.media_player.durationChanged.connect(self._on_video_duration_changed)
+        self.slider_position.sliderMoved.connect(self._on_video_slider_moved)
         t_hbox.addWidget(self.slider_position, 1)
 
         self.lbl_video_time = QLabel("00:00 / 00:00", transport)
@@ -3025,11 +3020,30 @@ class SingleMediaViewer(QWidget):
         else:
             btn.hide()
 
+    def _ensure_media_player(self) -> Any:
+        """Lazily initialize QMediaPlayer & QAudioOutput (defers FFmpeg load until first video/motion photo)."""
+        if self.media_player is None:
+            self.media_player = QMediaPlayer(self)
+            self.audio_output = QAudioOutput(self)
+            self.media_player.setAudioOutput(self.audio_output)
+            self.media_player.setVideoOutput(self.video_widget)
+            self.media_player.playbackStateChanged.connect(self._on_playback_state_changed)
+            self.media_player.positionChanged.connect(self._on_video_position_changed)
+            self.media_player.durationChanged.connect(self._on_video_duration_changed)
+            if hasattr(self, "slider_volume"):
+                self.audio_output.setVolume(max(0.0, min(1.0, self.slider_volume.value() / 100.0)))
+        return self.media_player
+
+    def _on_video_slider_moved(self, pos: int) -> None:
+        if self.media_player is not None:
+            self.media_player.setPosition(pos)
+
     def toggle_live_photo_playback(self) -> bool:
         """Plays or stops the paired Live Photo .MOV or embedded Motion Photo MP4."""
         if getattr(self, "_is_playing_live_motion", False):
             self._is_playing_live_motion = False
-            self.media_player.stop()
+            if self.media_player is not None:
+                self.media_player.stop()
             self.media_stack.setCurrentIndex(0)
             self._update_filmstrip_toggle()
             return False
@@ -3048,8 +3062,9 @@ class SingleMediaViewer(QWidget):
         self._is_playing_live_motion = True
         self.media_stack.setCurrentIndex(1)
         self._update_filmstrip_toggle()
-        self.media_player.setSource(QUrl.fromLocalFile(str(play_path)))
-        self.media_player.play()
+        mp = self._ensure_media_player()
+        mp.setSource(QUrl.fromLocalFile(str(play_path)))
+        mp.play()
         return True
 
     def _update_zoom_minimap(self) -> None:
@@ -3408,13 +3423,15 @@ class SingleMediaViewer(QWidget):
         if self.current_is_video:
             self.media_stack.setCurrentIndex(1)
             self.fix_pane.setVisible(False)
-            self.media_player.setSource(QUrl.fromLocalFile(str(self.current_file_path)))
-            self.media_player.play()
+            mp = self._ensure_media_player()
+            mp.setSource(QUrl.fromLocalFile(str(self.current_file_path)))
+            mp.play()
             self.btn_play_pause.setIcon(make_wlpg_icon("pause", 16))
             self.btn_play_pause.setToolTip("Pause (Space)")
             return True
 
-        self.media_player.stop()
+        if self.media_player is not None:
+            self.media_player.stop()
         self.media_stack.setCurrentIndex(0)
         self.fix_pane.setVisible(False)
 
@@ -9263,24 +9280,28 @@ class SingleMediaViewer(QWidget):
                 self._update_filmstrip_toggle()
 
     def toggle_video_playback(self) -> None:
-        if self.media_player.playbackState() == QMediaPlayer.PlayingState:
-            self.media_player.pause()
+        mp = self._ensure_media_player()
+        if mp.playbackState() == QMediaPlayer.PlayingState:
+            mp.pause()
             self.btn_play_pause.setIcon(make_wlpg_icon("play", 16))
             self.btn_play_pause.setToolTip("Play (Space)")
         else:
-            self.media_player.play()
+            mp.play()
             self.btn_play_pause.setIcon(make_wlpg_icon("pause", 16))
             self.btn_play_pause.setToolTip("Pause (Space)")
 
     def stop_video_playback(self) -> None:
-        self.media_player.stop()
+        if self.media_player is not None:
+            self.media_player.stop()
         self.btn_play_pause.setIcon(make_wlpg_icon("play", 16))
         self.btn_play_pause.setToolTip("Play (Space)")
 
     def _on_volume_changed(self, val: int) -> None:
         vol = max(0.0, min(1.0, val / 100.0))
-        self.audio_output.setVolume(vol)
-        if val == 0 or self.audio_output.isMuted():
+        if self.audio_output is not None:
+            self.audio_output.setVolume(vol)
+        is_muted = bool(self.audio_output.isMuted()) if self.audio_output is not None else False
+        if val == 0 or is_muted:
             self.btn_volume.setIcon(make_wlpg_icon("volume_mute", 14))
         elif val < 50:
             self.btn_volume.setIcon(make_wlpg_icon("volume_low", 14))
@@ -9288,6 +9309,7 @@ class SingleMediaViewer(QWidget):
             self.btn_volume.setIcon(make_wlpg_icon("volume", 14))
 
     def _toggle_mute(self) -> None:
+        self._ensure_media_player()
         is_muted = not self.audio_output.isMuted()
         self.audio_output.setMuted(is_muted)
         if is_muted:
@@ -9303,7 +9325,10 @@ class SingleMediaViewer(QWidget):
         menu = QMenu(self)
         menu.setFont(QFont("Segoe UI", 9))
 
-        is_playing = self.media_player.playbackState() == QMediaPlayer.PlayingState
+        is_playing = (
+            self.media_player is not None
+            and self.media_player.playbackState() == QMediaPlayer.PlayingState
+        )
         act_toggle = menu.addAction("Pause" if is_playing else "Play")
         bold_font = QFont(act_toggle.font())
         bold_font.setBold(True)
@@ -9393,7 +9418,7 @@ class SingleMediaViewer(QWidget):
         self.slider_position.blockSignals(True)
         self.slider_position.setValue(pos_ms)
         self.slider_position.blockSignals(False)
-        dur_ms = max(0, self.media_player.duration())
+        dur_ms = max(0, self.media_player.duration()) if self.media_player is not None else 0
         self.lbl_video_time.setText(
             f"{pos_ms // 60000:02d}:{(pos_ms // 1000) % 60:02d} / "
             f"{dur_ms // 60000:02d}:{(dur_ms // 1000) % 60:02d}"

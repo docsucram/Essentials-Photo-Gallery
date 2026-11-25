@@ -3594,30 +3594,54 @@ class CatalogRepository:
 
     def get_tag_tree(self) -> list[dict[str, Any]]:
         conn = self.engine.catalog_conn()
-        priv_clause = self._private_folder_clause("f")
-        rows = conn.execute(
-            f"""
-            WITH tag_counts AS (
-                SELECT tc.ancestor_id AS tag_id, COUNT(DISTINCT mt.media_id) AS cnt
-                FROM tag_closure tc
-                JOIN media_tags mt ON mt.tag_id = tc.descendant_id
-                JOIN media m ON m.id = mt.media_id
-                JOIN folders f ON f.id = m.folder_id
-                WHERE COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
-                GROUP BY tc.ancestor_id
-            )
-            SELECT
-                t.id,
-                t.parent_id,
-                t.name,
-                t.full_path,
-                COALESCE(tc.cnt, 0) AS media_count,
-                COALESCE(tc.cnt, 0) AS direct_count
-            FROM tags t
-            LEFT JOIN tag_counts tc ON tc.tag_id = t.id
-            ORDER BY t.full_path COLLATE NOCASE ASC;
-            """
-        ).fetchall()
+        hidden_fids = self._get_hidden_folder_ids()
+        has_missing = conn.execute("SELECT 1 FROM media WHERE is_missing = 1 LIMIT 1;").fetchone() is not None
+        if not hidden_fids and not has_missing:
+            rows = conn.execute(
+                """
+                WITH tag_counts AS (
+                    SELECT tc.ancestor_id AS tag_id, COUNT(DISTINCT mt.media_id) AS cnt
+                    FROM tag_closure tc
+                    JOIN media_tags mt ON mt.tag_id = tc.descendant_id
+                    GROUP BY tc.ancestor_id
+                )
+                SELECT
+                    t.id,
+                    t.parent_id,
+                    t.name,
+                    t.full_path,
+                    COALESCE(tc.cnt, 0) AS media_count,
+                    COALESCE(tc.cnt, 0) AS direct_count
+                FROM tags t
+                LEFT JOIN tag_counts tc ON tc.tag_id = t.id
+                ORDER BY t.full_path COLLATE NOCASE ASC;
+                """
+            ).fetchall()
+        else:
+            priv_clause = self._private_folder_clause("f")
+            rows = conn.execute(
+                f"""
+                WITH tag_counts AS (
+                    SELECT tc.ancestor_id AS tag_id, COUNT(DISTINCT mt.media_id) AS cnt
+                    FROM tag_closure tc
+                    JOIN media_tags mt ON mt.tag_id = tc.descendant_id
+                    JOIN media m ON m.id = mt.media_id
+                    JOIN folders f ON f.id = m.folder_id
+                    WHERE m.is_missing = 0 AND {priv_clause}
+                    GROUP BY tc.ancestor_id
+                )
+                SELECT
+                    t.id,
+                    t.parent_id,
+                    t.name,
+                    t.full_path,
+                    COALESCE(tc.cnt, 0) AS media_count,
+                    COALESCE(tc.cnt, 0) AS direct_count
+                FROM tags t
+                LEFT JOIN tag_counts tc ON tc.tag_id = t.id
+                ORDER BY t.full_path COLLATE NOCASE ASC;
+                """
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def get_tag_full_path(self, tag_id: int) -> str | None:
@@ -4439,26 +4463,44 @@ class CatalogRepository:
 
     def get_people_list(self) -> list[dict[str, Any]]:
         conn = self.engine.catalog_conn()
-        priv_clause = self._private_folder_clause("f")
+        hidden_fids = self._get_hidden_folder_ids()
+        has_missing = conn.execute("SELECT 1 FROM media WHERE is_missing = 1 LIMIT 1;").fetchone() is not None
         restricted_pids = self._get_restricted_person_ids(conn)
 
-        rows = conn.execute(
-            f"""
-            SELECT p.id, p.name, p.thumbnail_blob, p.confirmed_count,
-                   COALESCE(c.media_count, 0) AS media_count
-            FROM people p
-            LEFT JOIN (
-                SELECT mp.person_id, COUNT(DISTINCT mp.media_id) AS media_count
-                FROM media_people mp
-                JOIN media m ON m.id = mp.media_id
-                JOIN folders f ON f.id = m.folder_id
-                WHERE mp.state = 1 AND mp.person_id IS NOT NULL
-                  AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
-                GROUP BY mp.person_id
-            ) c ON c.person_id = p.id
-            ORDER BY p.name COLLATE NOCASE ASC;
-            """
-        ).fetchall()
+        if not hidden_fids and not has_missing:
+            rows = conn.execute(
+                """
+                SELECT p.id, p.name, p.thumbnail_blob, p.confirmed_count,
+                       COALESCE(c.media_count, 0) AS media_count
+                FROM people p
+                LEFT JOIN (
+                    SELECT mp.person_id, COUNT(DISTINCT mp.media_id) AS media_count
+                    FROM media_people mp
+                    WHERE mp.state = 1 AND mp.person_id IS NOT NULL
+                    GROUP BY mp.person_id
+                ) c ON c.person_id = p.id
+                ORDER BY p.name COLLATE NOCASE ASC;
+                """
+            ).fetchall()
+        else:
+            priv_clause = self._private_folder_clause("f")
+            rows = conn.execute(
+                f"""
+                SELECT p.id, p.name, p.thumbnail_blob, p.confirmed_count,
+                       COALESCE(c.media_count, 0) AS media_count
+                FROM people p
+                LEFT JOIN (
+                    SELECT mp.person_id, COUNT(DISTINCT mp.media_id) AS media_count
+                    FROM media_people mp
+                    JOIN media m ON m.id = mp.media_id
+                    JOIN folders f ON f.id = m.folder_id
+                    WHERE mp.state = 1 AND mp.person_id IS NOT NULL
+                      AND m.is_missing = 0 AND {priv_clause}
+                    GROUP BY mp.person_id
+                ) c ON c.person_id = p.id
+                ORDER BY p.name COLLATE NOCASE ASC;
+                """
+            ).fetchall()
         if not restricted_pids:
             return [dict(r) for r in rows]
         return [

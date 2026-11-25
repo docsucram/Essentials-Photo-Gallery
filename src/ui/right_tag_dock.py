@@ -7810,6 +7810,10 @@ class TagAndCaptionDock(QDockWidget):
         self._is_dark = bool(is_dark)
         if not hasattr(self, "_theme_name") or (is_dark and self._theme_name != "dark") or (not is_dark and self._theme_name == "dark"):
             self._theme_name = "dark" if is_dark else "wlpg_aero"
+        theme_key = (self._is_dark, self._theme_name)
+        if getattr(self, "_applied_theme_key", None) == theme_key:
+            return
+        self._applied_theme_key = theme_key
         self._apply_stylesheet()
         if hasattr(self, "lbl_custom_inspector_title"):
             self.lbl_custom_inspector_title.setStyleSheet(

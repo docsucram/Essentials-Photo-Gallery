@@ -258,6 +258,28 @@ def _render_fluent_slash_icon(color: str = "#0078D4") -> QIcon:
     return icon
 
 
+_THEME_ASSET_FILES: dict[str, set[str]] = {}
+
+
+def _get_theme_asset_files(theme_dir: Path) -> set[str]:
+    """Cache directory filenames per icon theme so get_icon() avoids ~1,200 os.stat() calls on launch."""
+    key = str(theme_dir)
+    cached = _THEME_ASSET_FILES.get(key)
+    if cached is not None:
+        return cached
+    files: set[str] = set()
+    try:
+        if theme_dir.is_dir():
+            with os.scandir(theme_dir) as it:
+                for entry in it:
+                    if entry.is_file():
+                        files.add(entry.name)
+    except OSError:
+        pass
+    _THEME_ASSET_FILES[key] = files
+    return files
+
+
 def get_icon(kind: str, size: int = 20, color_override: str | None = None) -> QIcon:
     """
     Returns a cached high-DPI QIcon for the given action/kind, tailored to the active icon theme.
@@ -269,14 +291,14 @@ def get_icon(kind: str, size: int = 20, color_override: str | None = None) -> QI
 
     icon: QIcon | None = None
 
-    # Check for direct PNG/SVG file asset in assets/icons/<theme>/
+    # Check for direct PNG/SVG file asset in assets/icons/<theme>/ using cached directory listing
     assets_dir = get_icons_dir()
     theme_dir = assets_dir / _CURRENT_ICON_THEME
-    asset_file = theme_dir / f"{kind}.png"
-    if not asset_file.exists():
-        asset_file = theme_dir / f"{kind}.svg"
-    if asset_file.exists():
-        icon = QIcon(str(asset_file))
+    theme_files = _get_theme_asset_files(theme_dir)
+    if f"{kind}.png" in theme_files:
+        icon = QIcon(str(theme_dir / f"{kind}.png"))
+    elif f"{kind}.svg" in theme_files:
+        icon = QIcon(str(theme_dir / f"{kind}.svg"))
 
     # Fluent Theme custom forward slash for boolean OR
     if icon is None and _CURRENT_ICON_THEME in ("fluent", "minimal") and kind in ("boolean_or", "slash"):

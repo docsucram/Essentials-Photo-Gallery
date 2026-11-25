@@ -8687,7 +8687,8 @@ class RibbonToolbar(QWidget):
         if hasattr(self, "grp_edit_manage"):
             self.grp_edit_manage.content_widget.setMinimumWidth(0)
             self.grp_edit_manage.setMinimumWidth(0)
-        self._apply_responsive_layout(self.width())
+        if self.isVisible():
+            self._apply_responsive_layout(self.width())
 
     def _build_find_tab(self) -> QWidget:
         """
@@ -12491,6 +12492,9 @@ class RibbonToolbar(QWidget):
         self._apply_file_menu_stylesheet(True)
 
     def apply_theme_mode(self, theme_name: str) -> None:
+        if getattr(self, "_applied_theme_mode", None) == theme_name:
+            return
+        self._applied_theme_mode = theme_name
         self._current_theme_mode = theme_name
         if theme_name == "dark":
             self.set_dark_mode(True)
