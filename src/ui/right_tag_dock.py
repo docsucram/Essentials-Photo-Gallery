@@ -1896,9 +1896,9 @@ class _ClickToEditWidget(QStackedWidget):
                 QLabel {{
                     color: {'#94A3B8' if is_dark else '#55687C'};
                     font-family: 'Segoe UI';
-                    font-size: 8.5pt;
-                    padding: 1px 4px;
-                    border: 1px solid transparent;
+                    font-size: 9pt;
+                    padding: 1px 4px 1px 0px;
+                    border: none;
                 }}
                 """
             )
@@ -1909,9 +1909,9 @@ class _ClickToEditWidget(QStackedWidget):
                 QLabel {{
                     color: {'#E2E8F0' if is_dark else '#1E395B'};
                     font-family: 'Segoe UI';
-                    font-size: 8.5pt;
-                    padding: 1px 4px;
-                    border: 1px solid transparent;
+                    font-size: 9pt;
+                    padding: 1px 4px 1px 0px;
+                    border: none;
                     border-radius: 2px;
                 }}
                 QLabel:hover {{
@@ -3248,6 +3248,17 @@ class TagAndCaptionDock(QDockWidget):
         self.txt_geotag.adjust_pin_requested.connect(self.adjust_geotag_requested.emit)
         top_vbox.addWidget(self.txt_geotag)
 
+        self._current_coords_str: str = ""
+        self.lbl_geotag_coords = _ClickableFolderLabel("", top_content)
+        self.lbl_geotag_coords.setObjectName("GeotagCoordsLabel")
+        self.lbl_geotag_coords.setVisible(False)
+        self.lbl_geotag_coords.setStyleSheet(
+            "QLabel#GeotagCoordsLabel { color: #64748B; font-family: 'Segoe UI'; font-size: 8pt; padding-left: 2px; }"
+            "QLabel#GeotagCoordsLabel:hover { color: #0066CC; text-decoration: underline; }"
+        )
+        self.lbl_geotag_coords.clicked.connect(self._on_geotag_coords_clicked)
+        top_vbox.addWidget(self.lbl_geotag_coords)
+
         # 3. Caption
         lbl_cap = QLabel("Caption", top_content)
         lbl_cap.setObjectName("SectionTitle")
@@ -3523,9 +3534,11 @@ class TagAndCaptionDock(QDockWidget):
         form.addRow(make_field_lbl("ISO:"), self.lbl_iso)
 
         self.lbl_lat = make_val_lbl()
+        self.lbl_lat.setTextInteractionFlags(Qt.TextSelectableByMouse)
         form.addRow(make_field_lbl("Latitude:"), self.lbl_lat)
 
         self.lbl_lon = make_val_lbl()
+        self.lbl_lon.setTextInteractionFlags(Qt.TextSelectableByMouse)
         form.addRow(make_field_lbl("Longitude:"), self.lbl_lon)
 
         self._apply_video_info_rows(None)
@@ -6997,6 +7010,7 @@ class TagAndCaptionDock(QDockWidget):
                 self.lbl_iso.setText("-")
                 self.lbl_lat.setText("Unavailable")
                 self.lbl_lon.setText("Unavailable")
+                self._set_geotag_coords_display(None, None)
                 self.txt_caption.clear()
                 self.txt_geotag.clear()
                 if hasattr(self, "ocr_section_widget"):
@@ -7199,6 +7213,7 @@ class TagAndCaptionDock(QDockWidget):
                 lon = summary.get("lon")
                 self.lbl_lat.setText(f"{float(lat):.5f}" if lat is not None else "Unavailable")
                 self.lbl_lon.setText(f"{float(lon):.5f}" if lon is not None else "Unavailable")
+                self._set_geotag_coords_display(lat, lon)
 
                 cap_val = str(summary.get("caption") or "")
                 self.txt_caption.setText(cap_val)
@@ -7286,6 +7301,7 @@ class TagAndCaptionDock(QDockWidget):
                 lead_lon = lead.get("lon")
                 self.lbl_lat.setText(f"{float(lead_lat):.5f}" if lead_lat is not None else "Unavailable")
                 self.lbl_lon.setText(f"{float(lead_lon):.5f}" if lead_lon is not None else "Unavailable")
+                self._set_geotag_coords_display(lead_lat, lead_lon)
 
                 cap_val = str(lead.get("caption") or "")
                 self.txt_caption.setText(cap_val)
@@ -7440,6 +7456,63 @@ class TagAndCaptionDock(QDockWidget):
             self._original_filename = new_name
             self.filename_committed.emit(new_name)
 
+    @staticmethod
+    def _format_compact_folder_path(clean_path: str, max_len: int = 34) -> str:
+        """Format folder path like 'D:/Users/M...Photos/September trip' for the Info pane."""
+        norm = clean_path.replace("\\", "/").rstrip("/")
+        if not norm:
+            return "-"
+        if len(norm) <= max_len:
+            return norm
+        parts = [p for p in norm.split("/") if p]
+        if len(parts) <= 2:
+            keep_tail = max(10, max_len - 12)
+            return f"{norm[:max_len - keep_tail - 3]}...{norm[-keep_tail:]}"
+        # Prefer showing drive/root prefix + '...' + parent/leaf (e.g. 'D:/Users/M...Photos/September trip')
+        tail = f"{parts[-2]}/{parts[-1]}"
+        if len(tail) > max_len - 8:
+            tail = parts[-1]
+            if len(tail) > max_len - 10:
+                tail = tail[-(max_len - 10):]
+        head_budget = max(6, max_len - len(tail) - 3)
+        head = norm[:head_budget].rstrip("/")
+        return f"{head}...{tail}"
+
+    def _set_geotag_coords_display(self, lat: Any, lon: Any) -> None:
+        if not hasattr(self, "lbl_geotag_coords"):
+            return
+        if lat is not None and lon is not None:
+            try:
+                coord_txt = f"{float(lat):.5f}, {float(lon):.5f}"
+                self._current_coords_str = coord_txt
+                self.lbl_geotag_coords.setText(f"Coords: {coord_txt}")
+                self.lbl_geotag_coords.setToolTip(f"{coord_txt}\nClick to copy GPS coordinates")
+                self.lbl_geotag_coords.set_clickable(True)
+                self.lbl_geotag_coords.setVisible(True)
+                return
+            except Exception:
+                pass
+        self._current_coords_str = ""
+        self.lbl_geotag_coords.setText("")
+        self.lbl_geotag_coords.set_clickable(False)
+        self.lbl_geotag_coords.setVisible(False)
+
+    def _on_geotag_coords_clicked(self) -> None:
+        coords = getattr(self, "_current_coords_str", "")
+        if not coords:
+            return
+        cb = QApplication.clipboard()
+        if cb is not None:
+            cb.setText(coords)
+        if hasattr(self, "lbl_geotag_coords"):
+            self.lbl_geotag_coords.setText(f"✓ Copied {coords}")
+            QTimer.singleShot(
+                1800,
+                lambda c=coords: self.lbl_geotag_coords.setText(f"Coords: {c}")
+                if getattr(self, "_current_coords_str", "") == c
+                else None,
+            )
+
     def _set_folder_display(self, folder_path: str, folder_name: str = "", *, multiple: bool = False) -> None:
         if not hasattr(self, "lbl_folder"):
             return
@@ -7451,7 +7524,7 @@ class TagAndCaptionDock(QDockWidget):
             self.lbl_folder.setToolTip("Selected items are in multiple folders")
             self.lbl_folder.set_clickable(False)
         elif clean_path:
-            display = (folder_name or "").strip() or Path(clean_path).name or clean_path
+            display = self._format_compact_folder_path(clean_path)
             self._current_folder_path = clean_path
             self._folder_is_multiple = False
             self.lbl_folder.setText(display)

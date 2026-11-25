@@ -650,12 +650,16 @@ class MediaCardDelegate(QStyledItemDelegate):
             return card_rect.adjusted(1, 1, -1, -b_pad)
         return card_rect.adjusted(10, 10, -10, -bottom_reserve)
 
-    def flag_rect(self, card_rect: QRect) -> QRect:
+    def flag_rect(self, card_rect: QRect, img_box: QRect | None = None) -> QRect:
         if getattr(self, "is_horizontal_card", False):
             thumb_side = max(70, min(int(card_rect.height() - 12), 120))
             img_x = card_rect.left() + 8
             img_y = card_rect.top() + (card_rect.height() - thumb_side) // 2
             return QRect(img_x + thumb_side - 26, img_y + 4, 24, 24)
+        if getattr(self, "_layout_mode", "wlpg_grid") in ("tiles", "mosaic", "masonry"):
+            box = img_box if img_box is not None else self._estimate_img_box(card_rect)
+            sz = 26
+            return QRect(box.right() - sz - 4, box.top() + 4, sz, sz)
         return QRect(card_rect.right() - 28, card_rect.top() + 4, 24, 24)
 
     def heart_rect(self, card_rect: QRect, img_box: QRect | None = None) -> QRect:
@@ -728,52 +732,52 @@ class MediaCardDelegate(QStyledItemDelegate):
             painter.fillRect(img_box, QColor(15, 23, 42, 115))
 
         # Top-Right WLPG Flag (Pick = 1 shaded red pennant + silver pole / Reject = -1 hollow with strike / Unreviewed = 0 on hover)
+        is_mosaic_layout = getattr(self, "_layout_mode", "wlpg_grid") in ("tiles", "mosaic", "masonry")
         if getattr(self, "show_flag_badges", True):
-            if flag == -1:
-                fl_rect = self.flag_rect(card_rect)
-                pole_x = fl_rect.left() + 6
+            if flag == -1 or flag == 1 or is_hovered:
+                fl_rect = self.flag_rect(card_rect, img_box)
                 painter.save()
                 painter.setRenderHint(QPainter.Antialiasing, True)
-                pole_col = QColor("#CBD5E1") if self.dark_mode else QColor("#64748B")
-                painter.setPen(QPen(pole_col, 1.6, Qt.SolidLine, Qt.RoundCap))
-                painter.setBrush(Qt.NoBrush)
-                painter.drawLine(pole_x, fl_rect.top() + 3, pole_x, fl_rect.bottom() - 3)
+                if is_mosaic_layout:
+                    pill_bg = QColor(15, 23, 42, 195 if flag != 0 else 135)
+                    pill_bd = QColor(255, 255, 255, 65 if flag != 0 else 45)
+                    painter.setBrush(pill_bg)
+                    painter.setPen(QPen(pill_bd, 1.0))
+                    painter.drawRoundedRect(QRectF(fl_rect).adjusted(0.5, 0.5, -0.5, -0.5), 6.0, 6.0)
+                    icon_rect = fl_rect.adjusted(2, 2, -2, -2)
+                else:
+                    icon_rect = fl_rect
+                pole_x = icon_rect.left() + 6
                 banner = QPolygonF([
-                    QPointF(pole_x, fl_rect.top() + 3.5),
-                    QPointF(fl_rect.right() - 3.5, fl_rect.top() + 8.0),
-                    QPointF(pole_x, fl_rect.top() + 12.5),
+                    QPointF(pole_x + 0.5, icon_rect.top() + 3.5),
+                    QPointF(icon_rect.right() - 3.5, icon_rect.top() + 8.0),
+                    QPointF(pole_x + 0.5, icon_rect.top() + 12.5),
                 ])
-                painter.drawPolygon(banner)
-                painter.setPen(QPen(QColor("#EF4444"), 2.1, Qt.SolidLine, Qt.RoundCap))
-                painter.drawLine(fl_rect.left() + 3, fl_rect.bottom() - 3, fl_rect.right() - 3, fl_rect.top() + 3)
-                painter.restore()
-            elif flag == 1 or is_hovered:
-                fl_rect = self.flag_rect(card_rect)
-                pole_x = fl_rect.left() + 6
-                painter.save()
-                painter.setRenderHint(QPainter.Antialiasing, True)
-                banner = QPolygonF([
-                    QPointF(pole_x + 0.5, fl_rect.top() + 3.5),
-                    QPointF(fl_rect.right() - 3.5, fl_rect.top() + 8.0),
-                    QPointF(pole_x + 0.5, fl_rect.top() + 12.5),
-                ])
-                if flag == 1:
+                if flag == -1:
+                    pole_col = QColor("#E2E8F0") if (self.dark_mode or is_mosaic_layout) else QColor("#64748B")
+                    painter.setPen(QPen(pole_col, 1.6, Qt.SolidLine, Qt.RoundCap))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawLine(pole_x, icon_rect.top() + 3, pole_x, icon_rect.bottom() - 3)
+                    painter.drawPolygon(banner)
+                    painter.setPen(QPen(QColor("#EF4444"), 2.1, Qt.SolidLine, Qt.RoundCap))
+                    painter.drawLine(icon_rect.left() + 3, icon_rect.bottom() - 3, icon_rect.right() - 3, icon_rect.top() + 3)
+                elif flag == 1:
                     # Shaded WLPG pennant matching the Ribbon Flagged icon + neutral silver flagpole
-                    grad = QLinearGradient(pole_x, fl_rect.top() + 3, pole_x, fl_rect.top() + 13)
+                    grad = QLinearGradient(pole_x, icon_rect.top() + 3, pole_x, icon_rect.top() + 13)
                     grad.setColorAt(0.0, QColor("#F87171"))
                     grad.setColorAt(0.45, QColor("#DC2626"))
                     grad.setColorAt(1.0, QColor("#991B1B"))
                     painter.setPen(QPen(QColor("#7F1D1D"), 0.9))
                     painter.setBrush(grad)
                     painter.drawPolygon(banner)
-                    pole_col = QColor("#CBD5E1") if self.dark_mode else QColor("#64748B")
+                    pole_col = QColor("#E2E8F0") if (self.dark_mode or is_mosaic_layout) else QColor("#64748B")
                     painter.setPen(QPen(pole_col, 1.7, Qt.SolidLine, Qt.RoundCap))
-                    painter.drawLine(pole_x, fl_rect.top() + 3, pole_x, fl_rect.bottom() - 3)
+                    painter.drawLine(pole_x, icon_rect.top() + 3, pole_x, icon_rect.bottom() - 3)
                 else:
-                    pole_col = QColor("#94A3B8") if self.dark_mode else QColor("#64748B")
+                    pole_col = QColor("#E2E8F0") if is_mosaic_layout else (QColor("#94A3B8") if self.dark_mode else QColor("#64748B"))
                     painter.setPen(QPen(pole_col, 1.5, Qt.SolidLine, Qt.RoundCap))
                     painter.setBrush(Qt.NoBrush)
-                    painter.drawLine(pole_x, fl_rect.top() + 3, pole_x, fl_rect.bottom() - 3)
+                    painter.drawLine(pole_x, icon_rect.top() + 3, pole_x, icon_rect.bottom() - 3)
                     painter.drawPolygon(banner)
                 painter.restore()
 

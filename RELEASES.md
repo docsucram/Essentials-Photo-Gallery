@@ -30,6 +30,10 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
   - Added `"semantic_subject"` (`"Subject / Semantic Search (AI)"`, `matches` / `not_matches`) to `SMART_FIELD_SPECS` with built-in Subject preset autocomplete and free-text query support, compiled via `set_smart_album_semantic_provider()` inside `compile_smart_album_where()`.
 - **Update Available Dialog Sizing (`src/ui/dialogs.py`):**
   - Fixed clipped button labels (`Download & Install` / `Open Release Page`) in the Update Available dialog on Windows scaling.
+- **UI Polish — Mosaic Flag Badges, Info Pane & Ribbon Menus (`src/ui/grid_view.py`, `src/ui/right_tag_dock.py`, `src/ui/ribbon_toolbar.py`):**
+  - Added translucent top-right **Flag** (Pick/Reject) squircle badges matching Favourites/Ratings across **Mosaic**, **Tiles**, and **Masonry** layouts.
+  - Aligned editable fields (`Filename`, `Date taken`, `Author`) flush with static labels in the **Information** pane, upgraded **Folder** to display compact middle-elided paths (e.g. `D:/Users/M...Photos/September trip`), and added a clickable **GPS Coordinates** copy readout under **Geotag** (plus mouse-selectable `Latitude`/`Longitude`).
+  - Tightened Ribbon dropdown menu icon-to-text padding to match classic WLPG, lowered large Find Ribbon dropdown arrows for breathing room below descenders, added icons to **Find → Media type**, and added smooth 90 ms fade-outs on Ribbon dropdown menus.
 
 - **Covering Partial Indexes for Navigation SQL (`src/db/connection.py`, `src/db/repository.py`):**
   - Added `idx_media_rating_active`, `idx_media_date_active`, and `idx_media_places_active` (partial indexes on `is_missing = 0`).

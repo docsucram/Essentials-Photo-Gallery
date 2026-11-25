@@ -23,7 +23,7 @@ from typing import Any, Literal
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSettings, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPoint, QPointF, QPropertyAnimation, QRect, QRectF, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -2917,13 +2917,14 @@ class _RibbonLargeToolButton(QToolButton):
         lines = self.text().split("\n")
 
         if has_menu and len(lines) == 1:
-            # WLPG menu button: icon at y=4, text slightly higher (y=36)
-            # giving comfortable, even spacing between the 32x32 icon and the dropdown arrow below
+            # WLPG menu button: icon at y=4, text at y=36, dropdown arrow at y=59
+            # giving comfortable breathing room below descenders (e.g. Tags / Flagged)
             ty = 36
             line_h = fm.height()
             text_rect = QRect(1, ty, r.width() - 2, line_h + 2)
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, self.text())
-            arrow_y = 54
+            arrow_y = max(59, ty + line_h + 5)
+            arrow_y = min(arrow_y, r.height() - 8)
         elif len(lines) == 1:
             line_h = fm.height()
             ty = iy + sz.height() + 3
@@ -9037,10 +9038,11 @@ class RibbonToolbar(QWidget):
 
     def _build_media_type_menu(self, btn: QToolButton) -> None:
         menu = QMenu(btn)
-        act_photos = menu.addAction("Photos")
-        act_raw = menu.addAction("RAW")
-        act_motion = menu.addAction("Motion photos")
-        act_videos = menu.addAction("Video")
+        menu.setFont(QFont("Segoe UI", 9))
+        act_photos = menu.addAction(make_wlpg_icon("pictures_library", 16), "Photos")
+        act_raw = menu.addAction(make_wlpg_icon("camera", 16), "RAW")
+        act_motion = menu.addAction(make_wlpg_icon("media_type", 16), "Motion photos")
+        act_videos = menu.addAction(make_wlpg_icon("videos_library", 16), "Video")
         act_photos.triggered.connect(lambda: self.media_type_filter_selected.emit("image"))
         act_raw.triggered.connect(lambda: self.media_type_filter_selected.emit("raw"))
         act_motion.triggered.connect(lambda: self.media_type_filter_selected.emit("motion"))
@@ -11229,28 +11231,62 @@ class RibbonToolbar(QWidget):
             self.tab_widget.tabBar().update()
 
 
-    def _apply_file_menu_stylesheet(self, is_dark: bool) -> None:
-        menu = getattr(self, "file_menu", None) or (self.btn_file.menu() if hasattr(self, "btn_file") else None)
-        if menu is None:
+    def _install_menu_quick_fade(self, menu: QMenu) -> None:
+        """Attach a non-blocking 90ms fade-out overlay when a Ribbon dropdown menu closes."""
+        if getattr(menu, "_quick_fade_installed", False):
             return
+        menu._quick_fade_installed = True  # type: ignore[attr-defined]
+
+        def _on_about_to_hide() -> None:
+            try:
+                if not menu.isVisible() or menu.width() <= 2 or menu.height() <= 2:
+                    return
+                pix = menu.grab()
+                if pix.isNull():
+                    return
+                overlay = QLabel(
+                    None,
+                    Qt.ToolTip
+                    | Qt.FramelessWindowHint
+                    | Qt.WindowTransparentForInput
+                    | Qt.WindowDoesNotAcceptFocus,
+                )
+                overlay.setAttribute(Qt.WA_DeleteOnClose, True)
+                overlay.setAttribute(Qt.WA_ShowWithoutActivating, True)
+                overlay.setPixmap(pix)
+                overlay.setGeometry(menu.geometry())
+                overlay.setWindowOpacity(0.95)
+                overlay.show()
+                anim = QPropertyAnimation(overlay, b"windowOpacity", overlay)
+                anim.setDuration(90)
+                anim.setStartValue(0.95)
+                anim.setEndValue(0.0)
+                anim.setEasingCurve(QEasingCurve.OutQuad)
+                anim.finished.connect(overlay.close)
+                anim.start(QPropertyAnimation.DeleteWhenStopped)
+            except Exception:
+                pass
+
+        menu.aboutToHide.connect(_on_about_to_hide)
+
+    def _apply_file_menu_stylesheet(self, is_dark: bool) -> None:
         if is_dark:
-            menu.setStyleSheet(
-                """
+            menu_qss = """
                 QMenu {
                     background-color: #1B1E24;
                     border: 1px solid #333A45;
-                    border-radius: 2px;
-                    padding: 4px 0px;
+                    border-radius: 3px;
+                    padding: 4px 2px;
                     font-family: 'Segoe UI', sans-serif;
                     font-size: 9pt;
                     color: #E2E8F0;
                 }
                 QMenu::item {
-                    padding: 6px 24px 6px 36px;
+                    padding: 5px 18px 5px 28px;
                     background-color: transparent;
                     border: 1px solid transparent;
                     border-radius: 2px;
-                    margin: 1px 4px;
+                    margin: 1px 3px;
                     color: #E2E8F0;
                 }
                 QMenu::item:selected {
@@ -11262,33 +11298,37 @@ class RibbonToolbar(QWidget):
                     color: #64748B;
                 }
                 QMenu::icon {
-                    padding-left: 8px;
+                    position: absolute;
+                    left: 6px;
+                }
+                QMenu::indicator {
+                    width: 14px;
+                    height: 14px;
+                    left: 6px;
                 }
                 QMenu::separator {
                     height: 1px;
                     background: #2D323B;
                     margin: 4px 8px;
                 }
-                """
-            )
+            """
         else:
-            menu.setStyleSheet(
-                """
+            menu_qss = """
                 QMenu {
                     background-color: #FFFFFF;
                     border: 1px solid #7DA2CE;
-                    border-radius: 2px;
-                    padding: 4px 0px;
+                    border-radius: 3px;
+                    padding: 4px 2px;
                     font-family: 'Segoe UI', sans-serif;
                     font-size: 9pt;
                     color: #1E395B;
                 }
                 QMenu::item {
-                    padding: 6px 24px 6px 36px;
+                    padding: 5px 18px 5px 28px;
                     background-color: transparent;
                     border: 1px solid transparent;
                     border-radius: 2px;
-                    margin: 1px 4px;
+                    margin: 1px 3px;
                     color: #1E395B;
                 }
                 QMenu::item:selected {
@@ -11300,15 +11340,42 @@ class RibbonToolbar(QWidget):
                     color: #A0B2C6;
                 }
                 QMenu::icon {
-                    padding-left: 8px;
+                    position: absolute;
+                    left: 6px;
+                }
+                QMenu::indicator {
+                    width: 14px;
+                    height: 14px;
+                    left: 6px;
                 }
                 QMenu::separator {
                     height: 1px;
                     background: #E5EEF7;
                     margin: 4px 8px;
                 }
-                """
-            )
+            """
+
+        file_menu = getattr(self, "file_menu", None) or (self.btn_file.menu() if hasattr(self, "btn_file") else None)
+        menus_to_polish: list[QMenu] = []
+        if file_menu is not None:
+            menus_to_polish.append(file_menu)
+        for m in self.findChildren(QMenu):
+            if m not in menus_to_polish:
+                menus_to_polish.append(m)
+
+        for m in menus_to_polish:
+            self._install_menu_quick_fade(m)
+            # Preserve specialized custom menus (WLPG Tags popup, Rating star-row popup, Slideshow/Effect pickers)
+            if isinstance(m, WLPGTagsMenu):
+                continue
+            existing_ss = m.styleSheet() or ""
+            if "padding: 3px 14px 3px 94px" in existing_ss or m.property("_custom_menu_style"):
+                continue
+            if m is file_menu or not existing_ss or "QMenu::item" in existing_ss:
+                # Skip custom QWidgetAction-only menus (like WLPG rating menu with _WLPGStarRowWidget)
+                if any(isinstance(a, QWidgetAction) for a in m.actions()):
+                    continue
+                m.setStyleSheet(menu_qss)
 
     def _apply_aero_stylesheet(self) -> None:
         self._dark_mode = False
