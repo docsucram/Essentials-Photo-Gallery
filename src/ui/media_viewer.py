@@ -2852,6 +2852,7 @@ class SingleMediaViewer(QWidget):
             self.isVisible()
             and self.current_media_id is not None
             and not self.is_in_edit_mode()
+            and not getattr(self, "_is_playing_live_motion", False)
             and self.media_stack.currentWidget() == self.graphics_view
             and vp is not None
             and vp.width() >= 160
@@ -3030,6 +3031,7 @@ class SingleMediaViewer(QWidget):
             self._is_playing_live_motion = False
             self.media_player.stop()
             self.media_stack.setCurrentIndex(0)
+            self._update_filmstrip_toggle()
             return False
         spec = getattr(self, "_live_motion_spec", None)
         if spec is None:
@@ -3045,6 +3047,7 @@ class SingleMediaViewer(QWidget):
             return False
         self._is_playing_live_motion = True
         self.media_stack.setCurrentIndex(1)
+        self._update_filmstrip_toggle()
         self.media_player.setSource(QUrl.fromLocalFile(str(play_path)))
         self.media_player.play()
         return True
@@ -9197,6 +9200,7 @@ class SingleMediaViewer(QWidget):
             if state == QMediaPlayer.StoppedState and getattr(self, "_is_playing_live_motion", False):
                 self._is_playing_live_motion = False
                 self.media_stack.setCurrentIndex(0)
+                self._update_filmstrip_toggle()
 
     def toggle_video_playback(self) -> None:
         if self.media_player.playbackState() == QMediaPlayer.PlayingState:

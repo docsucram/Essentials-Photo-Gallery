@@ -118,3 +118,85 @@ All bottlenecks identified in the 100,000- and 500,000-item scale benchmark have
 | **`extract_tiff_embedded_jpeg()` (Tier-0 RAW fast-path)** | **`0.291 ms/file`** | `14.56 ms` for 50 files — avoids `rawpy.imread()` completely |
 | **`detect_motion_photo_offset()` (EOI/XMP tail scan)** | **`0.277 ms/file`** | `27.73 ms` for 100 JPEGs |
 | **`query_map_overview_cells()` (20k *distinct* 0.01° cells)** | `84.17 ms` | Worst-case 1-item-per-cell spread; runs **once** on map load, 0 SQL on pan/zoom |
+
+
+---
+
+## 5. v0.17.0 Pre-Release Benchmarks & Architecture Review
+
+*Measured: 2026-11-25 (`QT_QPA_PLATFORM=offscreen`, `tests/benchmark_scale.py`, `tests/benchmark_scale_v2.py`, and v0.17.0 subsystem micro-benchmarks on Windows CPU / SSD)*
+
+### A. 100,000 & 500,000 Item Scale Regression Check (`tests/benchmark_scale.py`)
+
+| Metric | 100k (v0.12.0) | 100k (v0.17.0-pre) | 500k (v0.12.0) | 500k (v0.17.0-pre) | Trend / Notes |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **`set_records()` + Qt `endResetModel()`** | `13.3 ms` | `26.9 ms` | `37.4 ms` | `44.8 ms` | Pass (sub-50ms at 500k) |
+| **1× `notify_pixmap_ready()` / 40× Est.** | `1.1 / 45.7 ms` | `1.6 / 62.9 ms` | `1.8 / 70.1 ms` | `4.4 / 177.9 ms` | Direct update: `4.04 ms` / `7.15 ms` |
+| **Mosaic Layout `compute_mosaic_geometry()`** | `44.3 ms` | `51.6 ms` | `293.3 ms` | `330.9 ms` | +13% vs v0.12.0 |
+| **SQL `query_all` (Date Sort)** | `205.2 ms` | `246.3 ms` | `1,389.5 ms` | `1,720.8 ms` | +20–24% (extra `media` columns/annotations) |
+| **SQL `query_folder` (100 Subfolders)** | `235.2 ms` | `277.9 ms` | `1,880.2 ms` | `2,348.3 ms` | +18–25% vs v0.12.0 |
+| **SQL `nav_refresh_sql` (Nav Tree Counts)** | `50.3 ms` | **`98.8 ms`** | `148.1 ms` | **`665.8 ms`** | **Watchlist (~2×–4.5× vs v0.12.0)** |
+| **Scroll: Empty / Warm `p95`** | `10.34 / 12.84 ms` | `10.67 / 12.77 ms` | `10.25 / 12.71 ms` | `15.69 / 13.05 ms` | Pass (`60+ FPS`) |
+| **Scroll: Contended / Arrival Max** | `15.27 / 11.17 ms` | `16.06 / 11.16 ms` | `17.07 / 10.62 ms` | `15.58 / 7.18 ms` | Pass (0 hitches) |
+| **Cold 40-Item Viewport (First / Total)** | `24.3 / 211.6 ms` | `63.7 / 457.3 ms` | `26.5 / 116.9 ms` | `40.0 / 228.8 ms` | Varies with CPU thermal/background load |
+| **Warm 40-Item Viewport (Workers / Batched SQL)** | `45.8 / 22.6 ms` | `53.7 / 39.1 ms` | `45.6 / 23.0 ms` | `49.6 / 33.1 ms` | Persistent conn: `0.24–0.25 ms` vs `95 ms` reopen |
+
+---
+
+### B. People Directory & Batch People Tagging (`tests/benchmark_scale_v2.py`)
+
+| Operation | 50,000 Images (33k Faces) | 500,000 Images (333k Faces) | Notes |
+| :--- | :---: | :---: | :--- |
+| **`get_total_media_count()`** | `10.91 ms` | `229.60 ms` | Full table count without cached summary |
+| **`get_folders()`** | `0.20 ms` | `1.02 ms` | 26 / 251 folders |
+| **`get_date_tree_counts()`** | `11.32 ms` | `149.16 ms` | 2 / 7 date buckets |
+| **`get_people_directory_data()`** | `20.75 ms` | `252.54 ms` | 100 / 300 named people |
+| **`get_pending_face_suggestions(limit=5000)`** | `50.98 ms` | **`275.57 ms`** | Uses `idx_media_people_state` + `USE TEMP B-TREE FOR ORDER BY` |
+| **Avatar Picker Strip Query** | `0.54 ms` | `0.36 ms` | Fast PK `IN (...)` lookup |
+
+---
+
+### C. v0.17.0 Subsystem Micro-Benchmarks (20k Catalog, Semantic AI, Editor, Colour Pop, LaMa)
+
+| Subsystem / Operation | Measured Latency | Notes |
+| :--- | :---: | :--- |
+| **`query_media_records()` (20k rows)** | `43.67 ms` | Flat vs v0.16.0 (`43.01 ms`) |
+| **`query_media_records()` Multi-Select (5 folders + 3 cameras, 20k)** | `15.34 ms` | 800 matching rows |
+| **`get_places_hierarchy()` / `get_date_tree_counts()` (20k)** | `11.91 ms` / `3.51 ms` | Fast at 20k; grows linearly at 500k |
+| **`query_map_overview_cells()` (20k distinct 0.01° cells)** | `85.83 ms` | Flat vs v0.16.0 (`84.17 ms`) |
+| **`put_webp_blobs_batch(256)` / `get_webp_blobs_batch(256)`** | `2.44 ms` / `0.61 ms` | ~2.4 µs/thumb cached read |
+| **`detect_motion_photo_offset()` (100 JPEGs)** | `0.721 ms/file` | `72.09 ms` total |
+| **Semantic AI `load_matrix()` (20k / 100k fp16 vectors)** | `118.94 ms` / **`675.95 ms`** | One-time cold load into RAM; keep off GUI thread |
+| **Semantic AI `compute_subject_counts()` (12 presets, 20k / 100k)** | **`2.62 ms`** / **`11.36 ms`** | Batched `mat @ subj_mat.T` after matrix load |
+| **Semantic AI `query_by_vector()` (20k / 100k)** | **`0.54 ms`** / **`4.10 ms`** | Sub-5ms semantic search at 100k photos |
+| **Editor `render_adjusted_image` (`1280×853` cold / `dd_img` / `tl_img`)** | `282.61` / `92.13` / `24.44 ms` | Consistent with v0.12.0 stage cache |
+| **Colour Pop Quick Styles (`1280×853`, `style_red` / `style_warm`)** | `57.54 ms` / `56.53 ms` | Interactive single-click response |
+| **LaMa Object Eraser (`inpaint_object_lama`, 4K ROI, warm CPU)** | **`1,427.22 ms`** | Runs asynchronously off GUI thread in Spot Fix |
+
+---
+
+### D. Candidate Improvements, Further Testing & Trade-Offs (Pre-Release Review)
+
+#### Potential Improvements (Not Yet Implemented)
+1. **Navigation Tree Refresh SQL (`nav_refresh_sql`: `98.8 ms` @ 100k, `665.8 ms` @ 500k):**
+   - Investigate why `nav_refresh_sql` grew 2×–4.5× since v0.12.0 (likely additional `WHERE is_missing = 0 AND is_rejected = 0` / `folders.is_private = 0` joins or unindexed `date_taken` / `location_*` group-bys) and move full `refresh_trees()` SQL off the main thread or maintain lightweight summary counts.
+2. **Covering Index for `get_pending_face_suggestions()` (`275.6 ms` @ 500k):**
+   - `EXPLAIN QUERY PLAN` shows `USE TEMP B-TREE FOR ORDER BY` over all `state = 0` rows. A partial covering index on `media_people(state, suggested_person_id, similarity_score DESC) WHERE state = 0` would eliminate the temp B-tree sort at 500k scale.
+3. **Full-Catalog `query_media_records()` (`1.72 s` @ 500k, `2.35 s` for 100-subfolder query):**
+   - Materializing 500k Python `MediaItemRecord` objects in one synchronous call on the GUI thread causes a noticeable pause when switching views; consider incremental/background query execution or a lighter projection for the initial viewport.
+4. **Semantic Matrix Cold Load (`675.95 ms` @ 100k):**
+   - Ensure `SemanticVectorRepository.load_matrix()` is always warmed on a background thread (never on the first synchronous text/subject click on the GUI thread), and consider storing the matrix as a contiguous memory-mapped `.npy` sidecar or reading blobs via `np.frombuffer` without per-row Python loops.
+5. **Synchronous LaMa Inpainting in Straighten (`apply_crop` → `straighten_with_ai_fill`):**
+   - Like Object Eraser (`~1.43 s`), `straighten_with_ai_fill` still runs LaMa synchronously on the GUI thread (~1.4 s stall in `freeze_traces.log`); moving it to the same async worker pattern would eliminate that stall.
+
+#### Useful Further Testing
+- **Real-world cold startup & view-switch profiling (`tests/benchmark_startup_and_views.py`)** against an actual multi-100k user `catalog.db` (measuring `MainWindow.__init__`, People Directory, Person Grid, Face Crops toggle, and return to Gallery).
+- **Grouped Mosaic scroll & resize benchmark** (100k items grouped by Camera / Date / Folder, measuring scroll frame `p95` and zoom slider responsiveness).
+- **Concurrent background worker contention**: measure UI frame times while Face Scan + Semantic Indexer + Thumbnail Writer + Folder Watcher run simultaneously.
+- **Memory footprint tracking (RSS)** at 100k & 500k items with `catalog_model`, `SemanticVectorRepository` float32 matrix (~205 MB at 100k), and `LruCache` active.
+
+#### Compromises & Trade-Offs to Weigh
+- **SQLite indexes vs. scan/write speed & DB size:** Adding composite/partial indexes speeds up `nav_refresh_sql` and `get_pending_face_suggestions`, at the cost of ~5–15% slower initial folder ingestion and larger `catalog.db` size.
+- **Semantic matrix RAM (`float32` vs `float16`):** Keeping the cached matrix in `float32` gives `4.1 ms` search at 100k (~205 MB RAM); keeping `float16` halves RAM (~102 MB) but slows CPU BLAS matmul significantly because NumPy upcasts `float16` on CPU.
+- **Async queries vs. UI complexity:** Moving `query_media_records` and `nav_refresh_sql` fully off the GUI thread prevents >600 ms stalls at 500k items, but requires generation-token cancellation so rapid filter clicks never display stale results.
+- **LaMa CPU latency vs. quality:** `lama_fp32.onnx` on CPU takes ~1.4 s per 512×512 ROI; quantized int8 LaMa or DirectML GPU (`onnxruntime-directml`) could cut latency 3–5×, at the trade-off of model packaging size or GPU driver compatibility.
