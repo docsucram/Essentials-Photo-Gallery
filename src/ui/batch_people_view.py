@@ -641,6 +641,7 @@ class _PersonGroupSectionWidget(QWidget):
     open_media_requested = Signal(int)           # (media_id)
     preview_requested = Signal(object)           # (FaceCardRecord)
     rename_merge_requested = Signal(int, str)    # (person_id, person_name)
+    view_person_photos_requested = Signal(int)   # (person_id)
 
     def __init__(
         self,
@@ -690,7 +691,9 @@ class _PersonGroupSectionWidget(QWidget):
             # Interactive clickable name linking to rename/merge with suggestions
             self.lbl_name = QLabel(self.person_name, self.header_frame)
             self.lbl_name.setCursor(Qt.CursorShape.PointingHandCursor)
-            self.lbl_name.setToolTip(f"Click to rename or merge '{self.person_name}' with existing contacts...")
+            self.lbl_name.setToolTip(
+                f"Click to rename or merge '{self.person_name}'. Right-click to view photos or rename/merge."
+            )
             self.lbl_name.setStyleSheet(
                 "QLabel { font-weight: bold; font-size: 13px; color: #005A9E; background: transparent; border: none; padding: 1px 4px; border-radius: 3px; }"
                 "QLabel:hover { background-color: #E2E8F0; text-decoration: underline; }"
@@ -699,6 +702,8 @@ class _PersonGroupSectionWidget(QWidget):
                 self.rename_merge_requested.emit(self.person_id, self.person_name)
                 if ev.button() == Qt.MouseButton.LeftButton else None
             )
+            self.lbl_name.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            self.lbl_name.customContextMenuRequested.connect(self._show_name_context_menu)
             h_layout.addWidget(self.lbl_name)
 
             self.lbl_counts = QLabel("", self.header_frame)
@@ -1055,8 +1060,10 @@ class _PersonGroupSectionWidget(QWidget):
             act_ignore = menu.addAction("Don't show again")
 
         menu.addSeparator()
+        act_view_person = None
         act_rename = None
         if self.person_id is not None:
+            act_view_person = menu.addAction(f"View '{self.person_name}' photos")
             act_rename = menu.addAction(f"✏ Rename or merge '{self.person_name}'...")
             menu.addSeparator()
         act_open_single = menu.addAction("View photo in single image view")
@@ -1121,12 +1128,29 @@ class _PersonGroupSectionWidget(QWidget):
             self.tag_as_requested.emit(face_ids)
         elif chosen == act_ignore:
             self.ignore_faces_requested.emit(face_ids)
+        elif chosen == act_view_person and self.person_id is not None:
+            self.view_person_photos_requested.emit(self.person_id)
         elif chosen == act_rename and self.person_id is not None:
             self.rename_merge_requested.emit(self.person_id, self.person_name)
         elif chosen == act_open_single and sel:
             self.open_media_requested.emit(sel[0].media_id)
         elif chosen == act_view_full and sel:
             self.preview_requested.emit(sel[0])
+        return menu
+
+    def _show_name_context_menu(self, pos: QPoint) -> QMenu | None:
+        if self.person_id is None:
+            return None
+        menu = QMenu(self)
+        act_view_person = menu.addAction(f"View '{self.person_name}' photos")
+        act_rename = menu.addAction(f"✏ Rename or merge '{self.person_name}'...")
+        chosen = None
+        if not getattr(self, "_suppress_menu_exec", False) and hasattr(self, "lbl_name"):
+            chosen = menu.exec(self.lbl_name.mapToGlobal(pos))
+        if chosen == act_view_person:
+            self.view_person_photos_requested.emit(self.person_id)
+        elif chosen == act_rename:
+            self.rename_merge_requested.emit(self.person_id, self.person_name)
         return menu
 
 
@@ -1140,6 +1164,7 @@ class _PeopleAvatarPickerStrip(QWidget):
 
     person_selected = Signal(object)  # person_id (int) or None for All
     rename_merge_requested = Signal(int, str)  # (person_id, person_name)
+    view_person_photos_requested = Signal(int)  # (person_id)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1310,6 +1335,15 @@ class _PeopleAvatarPickerStrip(QWidget):
         Populates avatar buttons: list of (person_id, name, count, thumb_blob).
         person_id=None represents 'All Suggestions' / 'All Flagged'.
         """
+        strip_sig = (
+            mode,
+            tuple((pid, name, cnt, bool(blob)) for pid, name, cnt, blob in people_counts),
+        )
+        if strip_sig == getattr(self, "_last_strip_sig", None) and self._buttons:
+            self.set_active_person_id(self.__active_person_id)
+            return
+        self._last_strip_sig = strip_sig
+
         while self._strip_layout.count() > 0:
             item = self._strip_layout.takeAt(0)
             w = item.widget()
@@ -1392,12 +1426,18 @@ class _PeopleAvatarPickerStrip(QWidget):
 
         QTimer.singleShot(0, self._update_scroll_buttons)
 
-    def _show_btn_context_menu(self, pos: QPoint, person_id: int, person_name: str, btn: QWidget) -> None:
+    def _show_btn_context_menu(self, pos: QPoint, person_id: int, person_name: str, btn: QWidget) -> QMenu:
         menu = QMenu(self)
+        act_view_person = menu.addAction(f"View '{person_name}' photos")
         act_rename = menu.addAction(f"✏ Rename or merge '{person_name}'...")
-        act = menu.exec(btn.mapToGlobal(pos))
-        if act == act_rename:
+        act = None
+        if not getattr(self, "_suppress_menu_exec", False):
+            act = menu.exec(btn.mapToGlobal(pos))
+        if act == act_view_person:
+            self.view_person_photos_requested.emit(person_id)
+        elif act == act_rename:
             self.rename_merge_requested.emit(person_id, person_name)
+        return menu
 
     def _on_clicked(self, person_id: int | None) -> None:
         self.set_active_person_id(person_id)
@@ -1415,6 +1455,8 @@ class BatchPeopleView(QWidget):
     faces_rejected = Signal(list)              # (list[int] face_ids)
     faces_ignored = Signal(list)               # (list[int] face_ids)
     person_renamed = Signal(int, str)          # (int person_id, str new_name)
+    view_person_photos_requested = Signal(int) # (int person_id)
+    person_filter_changed = Signal(object)     # (int | None)
     back_to_gallery_requested = Signal()
     open_media_requested = Signal(int)         # (media_id)
     card_selection_changed = Signal(str, object, str)  # (mode, swap_suggested_name, person_name)
@@ -1564,6 +1606,7 @@ class BatchPeopleView(QWidget):
         self.avatar_strip = _PeopleAvatarPickerStrip(self)
         self.avatar_strip.person_selected.connect(self._on_avatar_strip_filtered)
         self.avatar_strip.rename_merge_requested.connect(self._on_rename_merge_person)
+        self.avatar_strip.view_person_photos_requested.connect(self.view_person_photos_requested.emit)
         main_layout.addWidget(self.avatar_strip)
 
         # Active single-person filter banner (clear one-click reset to All People)
@@ -1773,6 +1816,7 @@ class BatchPeopleView(QWidget):
         self.avatar_strip._active_person_id = person_id
         self._filter_person_id = person_id
         self._update_filter_banner()
+        self.person_filter_changed.emit(person_id)
         self.refresh_suggestions()
 
     def _update_filter_banner(self, person_name: str | None = None) -> None:
@@ -2030,35 +2074,56 @@ class BatchPeopleView(QWidget):
             getattr(self, "chk_include_no_face", None) is not None
             and self.chk_include_no_face.isChecked()
         )
-        render_sig = (
+        if self._filter_person_id is None:
+            visible_records = self._all_records
+        elif self._filter_person_id == -1:
+            visible_records = [r for r in self._all_records if r.suggested_person_id is None]
+        else:
+            visible_records = [r for r in self._all_records if r.suggested_person_id == self._filter_person_id]
+
+        strip_sig = (
+            mode,
+            tuple((pid, p_name, cnt) for pid, p_name, cnt, _ in picker_data),
+        )
+        section_sig = (
             mode,
             self._filter_person_id,
             bool(getattr(self, "_show_tagged_faces", False)),
             bool(inc_no_face),
-            tuple(sorted(person_names.items())),
-            tuple(sorted(confirmed_counts.items())),
+            tuple(
+                (
+                    pid,
+                    person_names.get(pid, ""),
+                    confirmed_counts.get(pid, 0),
+                )
+                for pid in sorted({r.suggested_person_id for r in visible_records if r.suggested_person_id is not None})
+            ),
             tuple(
                 (
                     r.face_id,
                     r.suggested_person_id,
-                    round(r.confidence, 3),
                     r.is_confirmed,
                     r.outlier_reason,
                     r.is_boxless_match,
                 )
-                for r in self._all_records
+                for r in visible_records
             ),
         )
+        render_sig = (strip_sig, section_sig)
         if render_sig == getattr(self, "_last_render_signature", None):
             self._update_empty_state_label()
             return
         self._last_render_signature = render_sig
 
+        self.avatar_strip.populate(picker_data, mode=mode)
+        if section_sig == getattr(self, "_last_section_signature", None) and self._sections:
+            self._update_empty_state_label()
+            return
+        self._last_section_signature = section_sig
+
         v_scroll = self.scroll_area.verticalScrollBar().value() if hasattr(self, "scroll_area") else 0
         self.scroll_content.setUpdatesEnabled(False)
         try:
-            self.avatar_strip.populate(picker_data, mode=mode)
-
             # Clear existing section widgets (hide first to avoid visual flash before deleteLater)
             for sec in self._sections.values():
                 sec.hide()
@@ -2093,6 +2158,7 @@ class BatchPeopleView(QWidget):
                 sec.ignore_faces_requested.connect(self._on_section_ignore_faces)
                 sec.tag_as_requested.connect(self._on_section_tag_as)
                 sec.rename_merge_requested.connect(self._on_rename_merge_person)
+                sec.view_person_photos_requested.connect(self.view_person_photos_requested.emit)
                 sec.open_media_requested.connect(self.open_media_requested.emit)
                 sec.preview_requested.connect(self._open_quick_preview)
                 sec.list_view.selectionModel().selectionChanged.connect(lambda *args: self._on_selection_changed())
@@ -2189,6 +2255,7 @@ class BatchPeopleView(QWidget):
         """Filters section visibility when a chip is clicked on the avatar strip."""
         self._filter_person_id = person_id
         self._update_filter_banner()
+        self.person_filter_changed.emit(person_id)
         built_filter = getattr(self, "_sections_filtered_at_build", None)
         needs_rebuild = (
             (built_filter is not None and person_id != built_filter)
@@ -2341,11 +2408,15 @@ class BatchPeopleView(QWidget):
         rejected_fids = {r.face_id for r in selected}
         self._remove_faces_from_view(rejected_fids)
         self.faces_rejected.emit(list(rejected_fids))
-        try:
-            self.repo.recalculate_signatures_and_rematch(min_match_score=getattr(self, "_min_confidence_threshold", 0.52))
-            self.refresh_suggestions()
-        except Exception as e:
-            logger.debug("Fast rematch after reject_selected failed: %s", e)
+        rematch_floor = min(0.42, float(getattr(self, "_min_confidence_threshold", 0.52)))
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            try:
+                self.repo.recalculate_signatures_and_rematch(min_match_score=rematch_floor)
+                self.refresh_suggestions()
+            except Exception as e:
+                logger.debug("Fast rematch after reject failed: %s", e)
+        else:
+            self._schedule_async_rematch(rematch_floor)
 
     def switch_selected(self) -> None:
         """Switches all currently selected outlier cards to their suggested/swap person."""
@@ -2493,11 +2564,15 @@ class BatchPeopleView(QWidget):
             self.repo.reject_face_suggestion(fid, person_id if person_id > 0 else None)
         self._remove_faces_from_view(set(face_ids))
         self.faces_rejected.emit(face_ids)
-        try:
-            self.repo.recalculate_signatures_and_rematch(min_match_score=getattr(self, "_min_confidence_threshold", 0.52))
-            self.refresh_suggestions()
-        except Exception as e:
-            logger.debug("Fast rematch after reject failed: %s", e)
+        rematch_floor = min(0.42, float(getattr(self, "_min_confidence_threshold", 0.52)))
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            try:
+                self.repo.recalculate_signatures_and_rematch(min_match_score=rematch_floor)
+                self.refresh_suggestions()
+            except Exception as e:
+                logger.debug("Fast rematch after reject failed: %s", e)
+        else:
+            self._schedule_async_rematch(rematch_floor)
 
     def _on_section_not_a_face(self, face_ids: list[int]) -> None:
         self.repo.mark_not_a_face(face_ids)
@@ -2563,7 +2638,7 @@ class BatchPeopleView(QWidget):
                     conn.commit()
 
         # 4. Re-match remaining unassigned faces against updated centroids off the GUI thread
-        min_score = getattr(self, "_min_confidence_threshold", 0.52)
+        min_score = min(0.42, float(getattr(self, "_min_confidence_threshold", 0.52)))
         if "PYTEST_CURRENT_TEST" in os.environ:
             try:
                 self.repo.recalculate_signatures_and_rematch(min_match_score=min_score)

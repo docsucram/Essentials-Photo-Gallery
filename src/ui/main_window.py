@@ -1247,6 +1247,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.batch_people_view.faces_rejected.connect(self._on_batch_faces_rejected)
         self.batch_people_view.faces_ignored.connect(self._on_batch_faces_ignored)
         self.batch_people_view.person_renamed.connect(self._on_batch_person_renamed)
+        self.batch_people_view.view_person_photos_requested.connect(self._on_batch_view_person_photos)
+        self.batch_people_view.person_filter_changed.connect(self._on_batch_person_filter_changed)
         self.batch_people_view.back_to_gallery_requested.connect(self.close_batch_people_view)
         self.batch_people_view.open_media_requested.connect(self.open_single_viewer)
         self.batch_people_view.card_selection_changed.connect(self._on_batch_card_selection_changed)
@@ -3728,6 +3730,15 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._is_navigating_history = True
         try:
             view = state.get("view", "grid")
+            if (
+                hasattr(self, "batch_people_view")
+                and self.central_stack.currentWidget() == self.batch_people_view
+                and view not in ("batch_people", "viewer")
+            ):
+                self._restore_docks_after_batch_people()
+                if getattr(self, "_batch_people_modified", False):
+                    self._batch_people_modified = False
+                    self.refresh_people_navigation_and_autocomplete()
             if view == "people_directory":
                 if hasattr(self, "media_viewer") and self.central_stack.currentWidget() == self.media_viewer:
                     self.show_grid_view()
@@ -7484,6 +7495,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         if self.central_stack.currentWidget() == self.batch_people_view and person_id is None:
             self.close_batch_people_view()
             return
+        if self.central_stack.currentWidget() not in (self.batch_people_view, self.media_viewer):
+            self._nav_dock_was_visible = (not self.left_nav_dock.isHidden()) if self.isVisible() else True
         self._batch_people_modified = False
         self.central_stack.setCurrentWidget(self.batch_people_view)
         if hasattr(self, "ribbon"):
@@ -7565,6 +7578,27 @@ class PhotoGalleryMainWindow(QMainWindow):
         """Slot called when a person is renamed or merged in BatchPeopleView."""
         self._batch_people_modified = True
         self.refresh_people_navigation_and_autocomplete()
+
+    def _on_batch_person_filter_changed(self, person_id: int | None) -> None:
+        """Keeps the current batch_people history entry synced when the active person filter changes."""
+        if getattr(self, "_is_navigating_history", False):
+            return
+        if (
+            0 <= getattr(self, "_nav_index", -1) < len(getattr(self, "_nav_history", []))
+            and self._nav_history[self._nav_index].get("view") == "batch_people"
+        ):
+            self._nav_history[self._nav_index]["person_id"] = person_id
+
+    def _on_batch_view_person_photos(self, person_id: int) -> None:
+        """Exits BatchPeopleView and opens the filtered gallery view for the given person_id."""
+        self.central_stack.setCurrentWidget(self.grid_view)
+        if hasattr(self, "ribbon"):
+            self.ribbon.set_active_mode("grid")
+        self._restore_docks_after_batch_people()
+        if getattr(self, "_batch_people_modified", False):
+            self._batch_people_modified = False
+            self.refresh_people_navigation_and_autocomplete()
+        self.left_nav_dock.select_person(int(person_id))
 
     def _on_batch_card_selection_changed(self, mode: str, swap_name: str | None, person_name: str | None) -> None:
         """Updates ribbon batch actions dynamically when card selection or mode changes."""
