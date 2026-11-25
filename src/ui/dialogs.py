@@ -3495,12 +3495,24 @@ class AboutDialog(QDialog):
                 f"QMessageBox QTextEdit {{ background-color: {tok.bg_card}; color: {tok.text_primary}; "
                 f"border: 1px solid {tok.border_subtle}; border-radius: 4px; }} "
                 f"QMessageBox QPushButton {{ background-color: {tok.bg_elevated}; color: {tok.text_primary}; "
-                f"border: 1px solid {tok.border_subtle}; border-radius: 4px; padding: 5px 14px; min-width: 76px; }} "
+                f"border: 1px solid {tok.border_subtle}; border-radius: 4px; padding: 5px 12px; }} "
                 f"QMessageBox QPushButton:hover {{ background-color: {tok.bg_hover}; border-color: {tok.accent}; }}"
             )
             btn_dl = msg.addButton("Download && Install", QMessageBox.AcceptRole) if installer_url else None
             btn_web = msg.addButton("Open Release Page", QMessageBox.ActionRole)
             msg.addButton(QMessageBox.Close)
+            for b in msg.buttons():
+                b.setMinimumWidth(b.sizeHint().width() + 8)
+            lay = msg.layout()
+            if lay is not None and hasattr(lay, "addItem"):
+                from PySide6.QtWidgets import QSpacerItem
+                lay.addItem(
+                    QSpacerItem(560, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding),
+                    lay.rowCount(),
+                    0,
+                    1,
+                    lay.columnCount(),
+                )
             msg.exec()
             clicked = msg.clickedButton()
             if btn_dl is not None and clicked == btn_dl:
