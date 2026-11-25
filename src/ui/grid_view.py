@@ -802,6 +802,8 @@ class MediaCardDelegate(QStyledItemDelegate):
             tag_badge_keys.append("person")
         if tag_badge_keys:
             if not self._tag_badge_pixmaps:
+                from src.ui.ribbon_toolbar import make_wlpg_icon
+
                 self._tag_badge_pixmaps = {
                     "geotag": make_wlpg_icon("geotag", 16).pixmap(16, 16),
                     "tag": make_wlpg_icon("tag", 16).pixmap(16, 16),
