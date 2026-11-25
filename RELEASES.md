@@ -42,6 +42,8 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
   - Eliminated duplicate startup `apply_theme()` (~500 ms), deduplicated `RightTagDock` / `RibbonToolbar` theme & hidden responsive layout passes, cached `icon_provider` directory lookups, added covering partial indexes for `get_people_list()` (`300 ms → 109 ms`) and `get_tag_tree()` (`147 ms → 62 ms`), lazily initialized `QMediaPlayer` / FFmpeg until first video/motion photo playback, skipped `query_camera_counts()` when hidden, and deferred `deduplicate_media_people()` to 2.2 s post-launch — bringing total cold launch on a 92k-photo / 504 MB catalog down from **`~14.2 s` → `~3.2 s`**.
   - Unified the photo right-click context menu across **Thumbnail Grid** and **Single Image View** with clean **Flag ▸** (*Mark as Favourite*, *Pick*, *Reject*, *Unflag*), **Edit ▸** (*Rotate left/right*, *Copy subject to clipboard*, *Remove background*), and **Scan ▸** (*Find Similar Photos*, *Rescan for faces*, *Scan for text (OCR)*) submenus.
   - Moved **AF Focus Points** out of the image right-click menu onto the **Compare** Ribbon tab (**Inspect & Sync**).
+- **Video Frame Capture (`src/imaging/video_frame_capture.py`, `src/ui/media_viewer.py`):**
+  - Added **"Save still frame as photo"** to the video right-click context menu in Single Media Viewer—extracting the current full-resolution frame as a collision-safe JPEG in the same folder with offset EXIF capture date + GPS coordinates and immediate catalog indexing.
 
 - **Covering Partial Indexes for Navigation SQL (`src/db/connection.py`, `src/db/repository.py`):**
   - Added `idx_media_rating_active`, `idx_media_date_active`, and `idx_media_places_active` (partial indexes on `is_missing = 0`).

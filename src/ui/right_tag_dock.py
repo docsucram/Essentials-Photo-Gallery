@@ -1825,14 +1825,17 @@ class _ClickToEditLabel(QLabel):
         super().__init__(text, parent)
         self.setCursor(Qt.PointingHandCursor)
         self.setWordWrap(True)
+        self.setMargin(0)
+        self.setIndent(0)
         self.setStyleSheet(
             """
             QLabel {
                 color: #1E395B;
                 font-family: 'Segoe UI';
-                font-size: 8.5pt;
-                padding: 1px 4px;
-                border: 1px solid transparent;
+                font-size: 9pt;
+                padding: 1px 4px 1px 0px;
+                margin: 0px;
+                border: none;
                 border-radius: 2px;
             }
             QLabel:hover {
@@ -1863,6 +1866,9 @@ class _ClickToEditWidget(QStackedWidget):
         empty_placeholder: str = "-",
     ) -> None:
         super().__init__(parent)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setLineWidth(0)
+        self.setContentsMargins(0, 0, 0, 0)
         self.editor_widget = editor_widget
         self.empty_placeholder = empty_placeholder
         self._editable = editable

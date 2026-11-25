@@ -9321,6 +9321,95 @@ class SingleMediaViewer(QWidget):
             else:
                 self.btn_volume.setIcon(make_wlpg_icon("volume", 14))
 
+    def save_current_video_frame(self) -> Path | None:
+        """Capture the current video playback frame as a JPEG photo in the same folder and index it."""
+        if not self.current_file_path or not Path(self.current_file_path).is_file():
+            return None
+        from PIL import Image
+        from src.imaging.video_frame_capture import capture_video_still_frame
+
+        pos_ms = int(self.media_player.position()) if self.media_player is not None else 0
+
+        # Optional fallback QImage from active Qt videoSink in case OpenCV cannot decode a codec
+        fallback_pil = None
+        try:
+            sink = self.video_widget.videoSink() if hasattr(self, "video_widget") else None
+            if sink is not None:
+                vf = sink.videoFrame()
+                if vf.isValid():
+                    qimg = vf.toImage().convertToFormat(QImage.Format_RGB888)
+                    if not qimg.isNull():
+                        bpl = qimg.bytesPerLine()
+                        raw = bytes(qimg.bits())
+                        fallback_pil = Image.frombytes("RGB", (qimg.width(), qimg.height()), raw, "raw", "RGB", bpl, 1)
+        except Exception:
+            fallback_pil = None
+
+        mw = getattr(self, "main_window", None) or self.window()
+        repo = getattr(mw, "catalog_repo", None)
+        det = None
+        if repo is not None and self.current_media_id is not None:
+            try:
+                det = repo.get_media_detail(int(self.current_media_id))
+            except Exception:
+                det = None
+
+        base_dt = det.get("date_taken") if det else None
+        lat = det.get("lat") if det else None
+        lon = det.get("lon") if det else None
+
+        res = capture_video_still_frame(
+            Path(self.current_file_path),
+            pos_ms,
+            fallback_rgb_image=fallback_pil,
+            base_date_taken=base_dt,
+            lat=lat,
+            lon=lon,
+        )
+        if res is None:
+            if hasattr(mw, "show_status_message"):
+                mw.show_status_message("Could not capture still frame from this video", 3500)
+            return None
+
+        saved_path, w, h, eff_dt = res
+        if repo is not None:
+            try:
+                st = saved_path.stat()
+                folder_id = int(det["folder_id"]) if det and det.get("folder_id") is not None else repo.upsert_folder(
+                    str(saved_path.parent), saved_path.parent.name, None, int(st.st_mtime)
+                )
+                new_ids = repo.bulk_upsert_media(
+                    [
+                        {
+                            "folder_id": folder_id,
+                            "filename": saved_path.name,
+                            "ext": "jpg",
+                            "size": int(st.st_size),
+                            "mtime": int(st.st_mtime),
+                            "date_taken": eff_dt,
+                            "width": w,
+                            "height": h,
+                            "is_video": 0,
+                            "lat": lat,
+                            "lon": lon,
+                            "location_name": det.get("location_name") if det else None,
+                            "location_country": det.get("location_country") if det else None,
+                            "location_state": det.get("location_state") if det else None,
+                            "location_city": det.get("location_city") if det else None,
+                        }
+                    ]
+                )
+                if new_ids and hasattr(mw, "rebuild_and_run_query"):
+                    mw.rebuild_and_run_query(preserve_selection=True)
+                if hasattr(mw, "refresh_navigation_and_autocomplete"):
+                    mw.refresh_navigation_and_autocomplete({"dates", "places"} if (lat is not None and lon is not None) else {"dates"})
+            except Exception as exc:
+                logger.warning("Failed to catalog saved still frame %s: %s", saved_path, exc)
+
+        if hasattr(mw, "show_status_message"):
+            mw.show_status_message(f"✓ Saved still frame: {saved_path.name}", 4000)
+        return saved_path
+
     def _show_video_context_menu(self, pos: QPoint) -> QMenu:
         menu = QMenu(self)
         menu.setFont(QFont("Segoe UI", 9))
@@ -9338,9 +9427,14 @@ class SingleMediaViewer(QWidget):
         act_stop = menu.addAction("Stop")
         act_stop.triggered.connect(self.stop_video_playback)
 
-        is_muted = self.audio_output.isMuted()
+        is_muted = bool(self.audio_output.isMuted()) if self.audio_output is not None else False
         act_mute = menu.addAction("Unmute" if is_muted else "Mute")
-        act_mute.triggered.connect(lambda: self.audio_output.setMuted(not is_muted))
+        act_mute.triggered.connect(self._toggle_mute)
+
+        menu.addSeparator()
+
+        act_save_frame = menu.addAction(make_wlpg_icon("camera", 16), "Save still frame as photo")
+        act_save_frame.triggered.connect(self.save_current_video_frame)
 
         menu.addSeparator()
 

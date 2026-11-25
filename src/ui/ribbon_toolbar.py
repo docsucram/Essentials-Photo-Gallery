@@ -2923,8 +2923,8 @@ class _RibbonLargeToolButton(QToolButton):
             line_h = fm.height()
             text_rect = QRect(1, ty, r.width() - 2, line_h + 2)
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, self.text())
-            arrow_y = max(59, ty + line_h + 5)
-            arrow_y = min(arrow_y, r.height() - 8)
+            arrow_y = max(56, ty + line_h + 3)
+            arrow_y = min(arrow_y, r.height() - 9)
         elif len(lines) == 1:
             line_h = fm.height()
             ty = iy + sz.height() + 3
