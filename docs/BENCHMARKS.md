@@ -200,3 +200,23 @@ All bottlenecks identified in the 100,000- and 500,000-item scale benchmark have
 - **Semantic matrix RAM (`float32` vs `float16`):** Keeping the cached matrix in `float32` gives `4.1 ms` search at 100k (~205 MB RAM); keeping `float16` halves RAM (~102 MB) but slows CPU BLAS matmul significantly because NumPy upcasts `float16` on CPU.
 - **Async queries vs. UI complexity:** Moving `query_media_records` and `nav_refresh_sql` fully off the GUI thread prevents >600 ms stalls at 500k items, but requires generation-token cancellation so rapid filter clicks never display stale results.
 - **LaMa CPU latency vs. quality:** `lama_fp32.onnx` on CPU takes ~1.4 s per 512×512 ROI; quantized int8 LaMa or DirectML GPU (`onnxruntime-directml`) could cut latency 3–5×, at the trade-off of model packaging size or GPU driver compatibility.
+
+
+---
+
+## 6. v0.18.0 Priority 1 & 2 SQL Optimization Results (Before vs. After)
+
+*Measured: 2026-11-25 (`tests/benchmark_v018_targets.py` & `tests/benchmark_scale_v2.py`)*
+
+### Summary of Changes
+- **Priority 1 (Navigation Tree SQL):** Added covering partial indexes (`idx_media_rating_active`, `idx_media_date_active`, `idx_media_places_active`) and replaced unconditional `JOIN folders f` + `COALESCE(m.is_missing, 0) = 0` with `_get_hidden_folder_ids()` (`folder_id NOT IN (...)` only when excluded/private folders exist) and `is_missing = 0`, enabling pure index-only covering scans.
+- **Priority 2 (Batch People Tagging):** Added leading-`state` partial indexes (`idx_media_people_pending_named`, `idx_media_people_pending_unnamed`, `idx_media_people_pending_person`) and split `get_pending_face_suggestions(include_unnamed=True)` into two index-ordered `LIMIT` queries, eliminating `USE TEMP B-TREE FOR ORDER BY`.
+
+| Operation | Scale | v0.17.0-pre (Before) | v0.18.0 (After) | Speedup |
+| :--- | :---: | :---: | :---: | :--- |
+| **`get_rating_counts()`** | 100k / 500k | `48.37` / `539.55 ms` | **`3.62`** / **`24.64 ms`** | **13.4× – 21.9× faster** |
+| **`get_places_hierarchy()`** | 100k / 500k | `117.68` / `616.83 ms` | **`8.09`** / **`55.68 ms`** | **11.1× – 14.5× faster** |
+| **`get_date_tree_counts()`** | 100k / 500k | `27.66` / `191.59 ms` | **`13.95`** / **`140.38 ms`** | **1.4× – 2.0× faster** |
+| **Total Nav Tree SQL** | 100k / 500k | `194.37` / `1,348.69 ms` | **`26.16`** / **`221.42 ms`** | **6.1× – 7.4× faster** |
+| **`get_pending_face_suggestions(limit=5000)`** | 50k / 500k | `50.98` / `275.57 ms` | **`19.25`** / **`27.78 ms`** | **2.6× – 9.9× faster** |
+| **Bulk Insert Trade-Off (500k rows + 333k faces)** | 500k | `21.76 s` | `23.17 s` | `+6.5%` one-time ingestion cost |

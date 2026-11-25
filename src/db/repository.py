@@ -350,6 +350,19 @@ class CatalogRepository:
             return base
         return f"({base} AND COALESCE({alias}.is_private, 0) = 0)"
 
+    def _get_hidden_folder_ids(self) -> tuple[int, ...]:
+        """Returns folder IDs excluded from normal queries (excluded monitor_mode and/or private folders)."""
+        conn = self.engine.catalog_conn()
+        if self.include_private:
+            rows = conn.execute(
+                "SELECT id FROM folders WHERE COALESCE(monitor_mode, 'always') = 'excluded';"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id FROM folders WHERE COALESCE(monitor_mode, 'always') = 'excluded' OR COALESCE(is_private, 0) = 1;"
+            ).fetchall()
+        return tuple(int(r[0]) for r in rows)
+
     # -------------------------------------------------------------------------
     # Folder Operations
     # -------------------------------------------------------------------------
@@ -865,16 +878,25 @@ class CatalogRepository:
         cur = conn.cursor()
         cur.row_factory = None
         counts = {r: 0 for r in range(6)}
-        priv_clause = self._private_folder_clause("f")
-        for r_val, cnt in cur.execute(
-            f"""
-            SELECT m.rating, COUNT(*)
-            FROM media m
-            JOIN folders f ON f.id = m.folder_id
-            WHERE COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
-            GROUP BY m.rating;
+        hidden_fids = self._get_hidden_folder_ids()
+        if not hidden_fids:
+            sql = """
+                SELECT rating, COUNT(*)
+                FROM media
+                WHERE is_missing = 0
+                GROUP BY rating;
             """
-        ).fetchall():
+            params: tuple[Any, ...] = ()
+        else:
+            ph = ",".join("?" for _ in hidden_fids)
+            sql = f"""
+                SELECT rating, COUNT(*)
+                FROM media
+                WHERE is_missing = 0 AND folder_id NOT IN ({ph})
+                GROUP BY rating;
+            """
+            params = hidden_fids
+        for r_val, cnt in cur.execute(sql, params).fetchall():
             if r_val is not None:
                 counts[int(r_val)] = int(cnt)
         return counts
@@ -889,18 +911,28 @@ class CatalogRepository:
         cur = conn.cursor()
         cur.row_factory = None
         day_buckets: dict[int, int] = {}
-        priv_clause = self._private_folder_clause("f")
-        for (day_key, cnt) in cur.execute(
-            f"""
-            SELECT CAST(FLOOR((CASE WHEN m.date_taken > 100000000000 THEN m.date_taken / 1000.0 ELSE m.date_taken * 1.0 END) / 86400.0) AS INTEGER) AS day_key,
-                   COUNT(*) AS cnt
-            FROM media m
-            JOIN folders f ON f.id = m.folder_id
-            WHERE m.date_taken IS NOT NULL AND m.date_taken != 0
-              AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
-            GROUP BY day_key;
+        hidden_fids = self._get_hidden_folder_ids()
+        if not hidden_fids:
+            sql = """
+                SELECT CAST(FLOOR((CASE WHEN date_taken > 100000000000 THEN date_taken / 1000.0 ELSE date_taken * 1.0 END) / 86400.0) AS INTEGER) AS day_key,
+                       COUNT(*) AS cnt
+                FROM media
+                WHERE is_missing = 0 AND date_taken IS NOT NULL AND date_taken != 0
+                GROUP BY day_key;
             """
-        ).fetchall():
+            params: tuple[Any, ...] = ()
+        else:
+            ph = ",".join("?" for _ in hidden_fids)
+            sql = f"""
+                SELECT CAST(FLOOR((CASE WHEN date_taken > 100000000000 THEN date_taken / 1000.0 ELSE date_taken * 1.0 END) / 86400.0) AS INTEGER) AS day_key,
+                       COUNT(*) AS cnt
+                FROM media
+                WHERE is_missing = 0 AND date_taken IS NOT NULL AND date_taken != 0
+                  AND folder_id NOT IN ({ph})
+                GROUP BY day_key;
+            """
+            params = hidden_fids
+        for (day_key, cnt) in cur.execute(sql, params).fetchall():
             if day_key is not None:
                 day_buckets[int(day_key)] = int(cnt)
 
@@ -5665,7 +5697,17 @@ class CatalogRepository:
         """
         conn = self.engine.catalog_conn()
         priv_clause = self._private_folder_clause("f")
+        lim = max(0, int(limit))
+        if lim == 0:
+            return []
+        min_conf = float(min_confidence)
+
         if person_id is not None:
+            score_clause = "AND mp.similarity_score >= ?" if min_conf > 0.0 else ""
+            params: list[Any] = [int(person_id)]
+            if min_conf > 0.0:
+                params.append(min_conf)
+            params.append(lim)
             rows = conn.execute(
                 f"""
                 SELECT mp.id, mp.id AS face_id, mp.media_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
@@ -5677,52 +5719,59 @@ class CatalogRepository:
                 JOIN media m ON m.id = mp.media_id
                 JOIN folders f ON f.id = m.folder_id
                 WHERE mp.state = 0 AND mp.suggested_person_id = ?
-                  AND COALESCE(mp.similarity_score, 0.0) >= ?
-                  AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
-                ORDER BY COALESCE(mp.similarity_score, 0.0) DESC
+                  {score_clause}
+                  AND m.is_missing = 0 AND {priv_clause}
+                ORDER BY mp.similarity_score DESC
                 LIMIT ?;
                 """,
-                (int(person_id), float(min_confidence), int(limit)),
+                params,
             ).fetchall()
-        elif include_unnamed:
-            rows = conn.execute(
+            return [dict(r) for r in rows]
+
+        # Fetch named suggestions first via partial index idx_media_people_pending_named (no temp B-tree)
+        score_clause = "AND mp.similarity_score >= ?" if min_conf > 0.0 else ""
+        named_params: list[Any] = [min_conf, lim] if min_conf > 0.0 else [lim]
+        named_rows = conn.execute(
+            f"""
+            SELECT mp.id, mp.id AS face_id, mp.media_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
+                   COALESCE(mp.similarity_score, 0.0) AS confidence,
+                   mp.suggested_person_id, p.name AS suggested_name, p.thumbnail_blob AS person_thumb,
+                   m.filename, f.path AS folder_path
+            FROM media_people mp
+            JOIN people p ON p.id = mp.suggested_person_id
+            JOIN media m ON m.id = mp.media_id
+            JOIN folders f ON f.id = m.folder_id
+            WHERE mp.state = 0 AND mp.suggested_person_id IS NOT NULL
+              {score_clause}
+              AND m.is_missing = 0 AND {priv_clause}
+            ORDER BY mp.similarity_score DESC
+            LIMIT ?;
+            """,
+            named_params,
+        ).fetchall()
+        results = [dict(r) for r in named_rows]
+
+        if include_unnamed and len(results) < lim:
+            rem = lim - len(results)
+            unnamed_rows = conn.execute(
                 f"""
                 SELECT mp.id, mp.id AS face_id, mp.media_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
                        COALESCE(mp.similarity_score, 0.0) AS confidence,
-                       mp.suggested_person_id, p.name AS suggested_name, p.thumbnail_blob AS person_thumb,
+                       mp.suggested_person_id, NULL AS suggested_name, NULL AS person_thumb,
                        m.filename, f.path AS folder_path
                 FROM media_people mp
-                LEFT JOIN people p ON p.id = mp.suggested_person_id
                 JOIN media m ON m.id = mp.media_id
                 JOIN folders f ON f.id = m.folder_id
-                WHERE mp.state = 0
-                  AND (mp.suggested_person_id IS NULL OR COALESCE(mp.similarity_score, 0.0) >= ?)
-                  AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
-                ORDER BY (mp.suggested_person_id IS NULL) ASC, COALESCE(mp.similarity_score, 0.0) DESC
+                WHERE mp.state = 0 AND mp.suggested_person_id IS NULL
+                  AND m.is_missing = 0 AND {priv_clause}
+                ORDER BY mp.id ASC
                 LIMIT ?;
                 """,
-                (float(min_confidence), int(limit)),
+                (rem,),
             ).fetchall()
-        else:
-            rows = conn.execute(
-                f"""
-                SELECT mp.id, mp.id AS face_id, mp.media_id, mp.rect_x, mp.rect_y, mp.rect_w, mp.rect_h,
-                       COALESCE(mp.similarity_score, 0.0) AS confidence,
-                       mp.suggested_person_id, p.name AS suggested_name, p.thumbnail_blob AS person_thumb,
-                       m.filename, f.path AS folder_path
-                FROM media_people mp
-                JOIN people p ON p.id = mp.suggested_person_id
-                JOIN media m ON m.id = mp.media_id
-                JOIN folders f ON f.id = m.folder_id
-                WHERE mp.state = 0 AND mp.suggested_person_id IS NOT NULL
-                  AND COALESCE(mp.similarity_score, 0.0) >= ?
-                  AND COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
-                ORDER BY COALESCE(mp.similarity_score, 0.0) DESC
-                LIMIT ?;
-                """,
-                (float(min_confidence), int(limit)),
-            ).fetchall()
-        return [dict(r) for r in rows]
+            results.extend(dict(r) for r in unnamed_rows)
+
+        return results
 
     def get_confirmed_faces(
         self, limit: int = 2000, person_id: int | None = None
@@ -6026,29 +6075,38 @@ class CatalogRepository:
         numeric administrative codes (e.g. '01', '07').
         """
         conn = self.engine.catalog_conn()
-        priv_clause = self._private_folder_clause("f")
-        rows = conn.execute(
-            f"""
-            SELECT m.location_country, m.location_state, m.location_city, COUNT(*) as cnt
-            FROM media m
-            JOIN folders f ON f.id = m.folder_id
-            WHERE COALESCE(m.is_missing, 0) = 0 AND {priv_clause}
-              AND (
-                (m.location_country IS NOT NULL AND m.location_country != '')
-                OR (m.location_state IS NOT NULL AND m.location_state != '')
-                OR (m.location_city IS NOT NULL AND m.location_city != '')
-              )
-            GROUP BY m.location_country, m.location_state, m.location_city
-            ORDER BY m.location_country, m.location_state, m.location_city;
+        cur = conn.cursor()
+        cur.row_factory = None
+        hidden_fids = self._get_hidden_folder_ids()
+        if not hidden_fids:
+            sql = """
+                SELECT location_country, location_state, location_city, COUNT(*) AS cnt
+                FROM media
+                WHERE is_missing = 0
+                  AND (location_country IS NOT NULL OR location_state IS NOT NULL OR location_city IS NOT NULL)
+                GROUP BY location_country, location_state, location_city;
             """
-        ).fetchall()
+            params: tuple[Any, ...] = ()
+        else:
+            ph = ",".join("?" for _ in hidden_fids)
+            sql = f"""
+                SELECT location_country, location_state, location_city, COUNT(*) AS cnt
+                FROM media
+                WHERE is_missing = 0 AND folder_id NOT IN ({ph})
+                  AND (location_country IS NOT NULL OR location_state IS NOT NULL OR location_city IS NOT NULL)
+                GROUP BY location_country, location_state, location_city;
+            """
+            params = hidden_fids
+        rows = cur.execute(sql, params).fetchall()
 
         grouped: dict[tuple[str, str, str], int] = {}
-        for r in rows:
-            country = (r["location_country"] or "").strip()
-            state = (r["location_state"] or "").strip()
-            city = (r["location_city"] or "").strip()
-            cnt = int(r["cnt"])
+        for c_raw, s_raw, city_raw, cnt_raw in rows:
+            country = (c_raw or "").strip()
+            state = (s_raw or "").strip()
+            city = (city_raw or "").strip()
+            if not country and not state and not city:
+                continue
+            cnt = int(cnt_raw)
 
             if country in ("United Kingdom", "GB", "UK"):
                 if state.upper() in ("ENG", "ENGLAND"):
@@ -7370,6 +7428,19 @@ class ThumbnailRepository:
         if self.include_private:
             return base
         return f"({base} AND COALESCE({alias}.is_private, 0) = 0)"
+
+    def _get_hidden_folder_ids(self) -> tuple[int, ...]:
+        """Returns folder IDs excluded from normal queries (excluded monitor_mode and/or private folders)."""
+        conn = self.engine.catalog_conn()
+        if self.include_private:
+            rows = conn.execute(
+                "SELECT id FROM folders WHERE COALESCE(monitor_mode, 'always') = 'excluded';"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id FROM folders WHERE COALESCE(monitor_mode, 'always') = 'excluded' OR COALESCE(is_private, 0) = 1;"
+            ).fetchall()
+        return tuple(int(r[0]) for r in rows)
 
     @property
     def _write_lock(self) -> Any:

@@ -980,6 +980,35 @@ class DualDatabaseEngine:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_media_live_companion ON media(live_companion_for_id);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_media_favourite ON media(is_favourite);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_media_rejected ON media(is_rejected);")
+            # v0.18 covering partial indexes for fast nav tree counts & Batch People Tagging
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_rating_active "
+                "ON media(rating) WHERE is_missing = 0;"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_date_active "
+                "ON media(date_taken) WHERE is_missing = 0 AND date_taken IS NOT NULL AND date_taken != 0;"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_places_active "
+                "ON media(location_country, location_state, location_city) "
+                "WHERE is_missing = 0 AND (location_country IS NOT NULL OR location_state IS NOT NULL OR location_city IS NOT NULL);"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_people_pending_named "
+                "ON media_people(state, similarity_score DESC) "
+                "WHERE state = 0 AND suggested_person_id IS NOT NULL;"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_people_pending_unnamed "
+                "ON media_people(state, id) "
+                "WHERE state = 0 AND suggested_person_id IS NULL;"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_people_pending_person "
+                "ON media_people(state, suggested_person_id, similarity_score DESC) "
+                "WHERE state = 0 AND suggested_person_id IS NOT NULL;"
+            )
 
             try:
                 cur.execute(
