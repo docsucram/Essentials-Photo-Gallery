@@ -300,9 +300,17 @@ class DuplicateDetectionEngine:
     and ThumbnailRepository WebP blobs.
     """
 
-    def __init__(self, catalog_repo: Any, thumb_repo: Any) -> None:
+    def __init__(
+        self,
+        catalog_repo: Any,
+        thumb_repo: Any,
+        semantic_repo: Any = None,
+        semantic_engine: Any = None,
+    ) -> None:
         self.catalog_repo = catalog_repo
         self.thumb_repo = thumb_repo
+        self.semantic_repo = semantic_repo
+        self.semantic_engine = semantic_engine
         self._is_cancelled = False
 
     def cancel(self) -> None:
@@ -727,6 +735,26 @@ class DuplicateDetectionEngine:
         if progress_cb:
             progress_cb(90, 100, "Ranking spatial color & composition similarity...")
 
+        # Optional MobileCLIP-S1 semantic boost when installed & seed is indexed
+        sem_score_map: dict[int, float] = {}
+        if (
+            self.semantic_repo is not None
+            and self.semantic_engine is not None
+            and getattr(self.semantic_engine, "is_available", lambda: False)()
+        ):
+            try:
+                sem_mids, sem_mat = self.semantic_repo.load_matrix()
+                if sem_mat.shape[0] > 0:
+                    seed_matches = np.where(sem_mids == int(seed.media_id))[0]
+                    if seed_matches.size > 0:
+                        seed_vec = sem_mat[int(seed_matches[0])]
+                        cos_sims = sem_mat @ seed_vec
+                        for mid_val, cs in zip(sem_mids.tolist(), cos_sims.tolist()):
+                            if mid_val != seed.media_id:
+                                sem_score_map[int(mid_val)] = float(max(0.0, min(1.0, cs)))
+            except Exception:
+                sem_score_map = {}
+
         scored: list[tuple[float, DuplicateMediaItem]] = []
         for other in valid_cands:
             if other.media_id == seed.media_id:
@@ -735,9 +763,18 @@ class DuplicateDetectionEngine:
             pal_sim = compute_lab_palette_similarity(seed.lab_haar, other.lab_haar)
             dist = min(hamming_distance(seed.phash, other.phash), hamming_distance(seed.dhash, other.dhash))
             hash_sim = similarity_from_distance(dist)
-            if hash_sim < 0.42 or pal_sim < 0.62:
-                continue
-            combined = 0.35 * haar_sim + 0.40 * pal_sim + 0.25 * hash_sim
+            visual_combined = 0.35 * haar_sim + 0.40 * pal_sim + 0.25 * hash_sim
+            sem_sim = sem_score_map.get(other.media_id)
+            if sem_sim is not None:
+                # Blend semantic similarity with visual similarity; allow strong semantic matches
+                # even when lighting/crop differs slightly.
+                if sem_sim < 0.72 and (hash_sim < 0.42 or pal_sim < 0.62):
+                    continue
+                combined = 0.45 * sem_sim + 0.55 * visual_combined
+            else:
+                if hash_sim < 0.42 or pal_sim < 0.62:
+                    continue
+                combined = visual_combined
             if combined >= similarity_threshold:
                 other.similarity_score = round(combined, 3)
                 other.is_recommended_keep = False
@@ -902,11 +939,20 @@ class DuplicateDetectionEngine:
             return {}
 
     def _enrich_burst_face_sharpness(self, items: Sequence[DuplicateMediaItem]) -> None:
-        """Compute face/eye sharpness for burst items with detected face bounding boxes."""
+        """Compute face/eye sharpness for burst items with detected face bounding boxes.
+        Skips decoding items that have no detected faces and already carry cached sharpness from media_signatures.
+        """
         mids = [it.media_id for it in items]
         face_map = self._load_face_rects_batch(mids)
-        blobs = self.thumb_repo.get_webp_blobs_batch(mids) if (self.thumb_repo and mids) else {}
-        for it in items:
+        need_decode = [
+            it for it in items
+            if bool(face_map.get(it.media_id)) or it.sharpness <= 0.0
+        ]
+        if not need_decode:
+            return
+        need_mids = [it.media_id for it in need_decode]
+        blobs = self.thumb_repo.get_webp_blobs_batch(need_mids) if (self.thumb_repo and need_mids) else {}
+        for it in need_decode:
             arr_gray = None
             blob = blobs.get(it.media_id)
             if blob:
@@ -920,7 +966,7 @@ class DuplicateDetectionEngine:
                         arr_gray = None
             if arr_gray is None or arr_gray.size == 0:
                 continue
-            global_sharp = compute_sharpness_score(arr_gray)
+            global_sharp = it.sharpness if it.sharpness > 0.0 else compute_sharpness_score(arr_gray)
             rects = face_map.get(it.media_id) or []
             face_score, has_face = compute_face_eye_sharpness(arr_gray, rects)
             if has_face:
@@ -1083,6 +1129,7 @@ def auto_recommend_rules(
                 key=lambda it: (
                     it.width * it.height,
                     it.file_size,
+                    round(float(it.sharpness or 0.0), 1),
                     it.metadata_score,
                     -_filename_copy_penalty(it.filename),
                     -len(it.filename),

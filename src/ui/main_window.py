@@ -1360,6 +1360,9 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.engine.catalog_path.parent / "semantic_vectors.db"
             )
             self.semantic_engine: Any = SemanticEngine()
+            from src.db.repository import set_smart_album_semantic_provider
+
+            set_smart_album_semantic_provider(self.semantic_repo, self.semantic_engine)
         except Exception:
             self.semantic_repo = None
             self.semantic_engine = None
@@ -11050,7 +11053,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         detail = self.catalog_repo.get_media_detail(target_mid)
         seed_name = str(detail["filename"]) if detail and detail.get("filename") else f"Photo #{target_mid}"
 
-        engine = DuplicateDetectionEngine(self.catalog_repo, self.thumb_repo)
+        engine = DuplicateDetectionEngine(
+            self.catalog_repo,
+            self.thumb_repo,
+            semantic_repo=getattr(self, "semantic_repo", None),
+            semantic_engine=getattr(self, "semantic_engine", None),
+        )
 
         class _SimilarWorker(QThread):
             progress_sig = Signal(int, int, str)
@@ -11185,7 +11193,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         else:
             from src.core.duplicate_finder import DuplicateDetectionEngine
 
-            engine = DuplicateDetectionEngine(self.catalog_repo, self.thumb_repo)
+            engine = DuplicateDetectionEngine(
+                self.catalog_repo,
+                self.thumb_repo,
+                semantic_repo=getattr(self, "semantic_repo", None),
+                semantic_engine=getattr(self, "semantic_engine", None),
+            )
             grp = engine.find_similar_to_photo(
                 seed_media_id=int(seed_id),
                 similarity_threshold=thresh,

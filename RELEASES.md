@@ -13,9 +13,23 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 - **Much Faster Navigation Pane at Scale:** Refreshing Ratings, Places, and Dates in the Navigation pane is now **6×–7× faster** overall (dropping from ~1.35 seconds to ~220 ms on a 500,000-photo library, and ~26 ms at 100,000 photos).
 - **Instant Batch People Tagging:** Opening Batch People Tagging on large libraries is now **up to 10× faster** (~28 ms at 500,000 photos / 333,000 faces).
 - **Zero-Freeze AI Straighten & Faster Semantic Search Startup:** Straightening or expanding a photo with AI Fill now runs in the background so the app stays responsive, and the local Semantic Search index loads faster and warms up quietly after launch.
+- **Smarter Find Similar, Faster Duplicate Scans & Semantic Smart Albums:**
+  - **Find Similar** (right-click any photo) now automatically blends local AI semantic understanding (when MobileCLIP-S1 is installed) with visual color/structure similarity—no extra menus or buttons needed.
+  - **Find Duplicates** reuses cached thumbnail-time visual signatures & sharpness to avoid unnecessary re-decoding and uses sharpness as a tie-breaker when Auto-Pick selects the best keeper.
+  - **Smart Albums** now support **Subject / Semantic Search (AI)** rules so you can build live Smart Albums matching any of the 12 built-in Subjects or any natural-language description (e.g. *"golden retriever on beach"*).
 
 <details>
 <summary>Full Technical Changelog</summary>
+
+- **Duplicate Finder `media_signatures` Reuse & Sharpness Tie-Breaker (`src/core/duplicate_finder.py`):**
+  - `_enrich_burst_face_sharpness()` skips decoding burst thumbnails/files when a photo has no detected faces and already carries cached `laplacian_sharpness > 0.0` from `media_signatures`.
+  - `auto_recommend_rules("highest_resolution")` now includes cached `sharpness` as a tie-breaker after pixel area and file size.
+- **Semantic-Blended `Find Similar` (`src/core/duplicate_finder.py`, `src/ui/main_window.py`):**
+  - `DuplicateDetectionEngine.find_similar_to_photo()` blends MobileCLIP-S1 cosine similarity (`0.45` weight) with visual color/pHash/dHash similarity (`0.55` weight) whenever the optional Semantic AI add-on is installed and the anchor photo is indexed.
+- **Smart Albums Semantic Subject / Search Filter (`src/ui/smart_album_dialog.py`, `src/db/repository.py`, `src/ui/main_window.py`):**
+  - Added `"semantic_subject"` (`"Subject / Semantic Search (AI)"`, `matches` / `not_matches`) to `SMART_FIELD_SPECS` with built-in Subject preset autocomplete and free-text query support, compiled via `set_smart_album_semantic_provider()` inside `compile_smart_album_where()`.
+- **Update Available Dialog Sizing (`src/ui/dialogs.py`):**
+  - Fixed clipped button labels (`Download & Install` / `Open Release Page`) in the Update Available dialog on Windows scaling.
 
 - **Covering Partial Indexes for Navigation SQL (`src/db/connection.py`, `src/db/repository.py`):**
   - Added `idx_media_rating_active`, `idx_media_date_active`, and `idx_media_places_active` (partial indexes on `is_missing = 0`).

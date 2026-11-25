@@ -8249,7 +8249,83 @@ def _compile_single_smart_rule(
             want_rej = not want_rej
         return f"COALESCE({alias}.is_rejected, 0) = ?", [1 if want_rej else 0]
 
+    # 23. Semantic Subject / AI Natural-Language Search (MobileCLIP-S1)
+    if raw_field in ("semantic_subject", "subject", "semantic", "ai_subject"):
+        q = val_str.strip()
+        if not q:
+            return None
+        negate = op in ("not_matches", "is_not", "not_contains", "neq", "!=")
+        matched_ids = _resolve_smart_album_semantic_ids(q)
+        if not matched_ids:
+            return ("1 = 1", []) if negate else ("1 = 0", [])
+        id_csv = ",".join(str(int(mid)) for mid in matched_ids)
+        if negate:
+            return f"{alias}.id NOT IN ({id_csv})", []
+        return f"{alias}.id IN ({id_csv})", []
+
     return None
+
+
+_SMART_ALBUM_SEMANTIC_PROVIDER: tuple[Any, Any] = (None, None)
+_SMART_ALBUM_TEXT_VEC_CACHE: dict[str, Any] = {}
+
+
+def set_smart_album_semantic_provider(semantic_repo: Any, semantic_engine: Any) -> None:
+    """Register the active (SemanticVectorRepository, SemanticEngine) for Smart Album rules."""
+    global _SMART_ALBUM_SEMANTIC_PROVIDER
+    _SMART_ALBUM_SEMANTIC_PROVIDER = (semantic_repo, semantic_engine)
+    _SMART_ALBUM_TEXT_VEC_CACHE.clear()
+
+
+def _resolve_smart_album_semantic_ids(query_text: str, limit: int = 5000) -> list[int]:
+    """
+    Resolve a Smart Album `semantic_subject` query (either one of the 12 built-in
+    Subject presets or any natural-language phrase) into matching `media_id`s.
+    """
+    sem_repo, sem_engine = _SMART_ALBUM_SEMANTIC_PROVIDER
+    q = str(query_text or "").strip()
+    if not q or sem_repo is None or sem_engine is None:
+        return []
+    try:
+        from src.core.semantic_engine import SUBJECT_PRESETS
+
+        q_low = q.lower()
+        preset_key: str | None = None
+        preset_thr: float = 0.145
+        for key, label, _prompts, thr in SUBJECT_PRESETS:
+            if q_low == key.lower() or q_low == label.lower():
+                preset_key = key
+                preset_thr = float(thr)
+                break
+
+        q_vec = None
+        if preset_key is not None:
+            subj_vecs = sem_repo.get_subject_vectors() or {}
+            q_vec = subj_vecs.get(preset_key)
+            if q_vec is None and hasattr(sem_engine, "is_available") and sem_engine.is_available():
+                subj_vecs = sem_engine.ensure_subject_vectors(sem_repo) or {}
+                q_vec = subj_vecs.get(preset_key)
+        else:
+            q_vec = _SMART_ALBUM_TEXT_VEC_CACHE.get(q_low)
+            if q_vec is None and hasattr(sem_engine, "is_available") and sem_engine.is_available():
+                q_vec = sem_engine.encode_text(q)
+                if q_vec is not None:
+                    if len(_SMART_ALBUM_TEXT_VEC_CACHE) >= 64:
+                        _SMART_ALBUM_TEXT_VEC_CACHE.clear()
+                    _SMART_ALBUM_TEXT_VEC_CACHE[q_low] = q_vec
+
+        if q_vec is None:
+            return []
+
+        hits = sem_engine.query_by_vector(
+            sem_repo,
+            q_vec,
+            threshold=preset_thr,
+            limit=int(limit),
+        )
+        return [int(mid) for mid, _score in hits]
+    except Exception:
+        return []
 
 
 def compile_smart_album_where(

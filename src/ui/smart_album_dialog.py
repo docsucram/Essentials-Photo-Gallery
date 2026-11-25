@@ -320,6 +320,16 @@ SMART_FIELD_SPECS: list[tuple[str, str, list[tuple[str, str]], str, Any]] = [
         "text",
         "Text inside photo (e.g. Claygate Station)...",
     ),
+    (
+        "semantic_subject",
+        "Subject / Semantic Search (AI)",
+        [
+            ("matches", "matches"),
+            ("not_matches", "does not match"),
+        ],
+        "autocomplete",
+        "Subject (e.g. Night, Beach & Coast) or phrase...",
+    ),
 ]
 
 _FIELD_SPEC_MAP: dict[str, tuple[str, str, list[tuple[str, str]], str, Any]] = {
@@ -716,7 +726,14 @@ class SmartAlbumDialog(QDialog):
             "camera_make": [],
             "file_ext": [],
             "folder": [],
+            "semantic_subject": [],
         }
+        try:
+            from src.core.semantic_engine import SUBJECT_PRESETS
+
+            out["semantic_subject"] = [lbl for _k, lbl, _p, _t in SUBJECT_PRESETS]
+        except Exception:
+            pass
         try:
             people = self._repo.get_people_list()
             out["people"] = [
