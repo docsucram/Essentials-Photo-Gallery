@@ -136,8 +136,10 @@ def _parse_ini_sections(ini_path: Path) -> dict[str, dict[str, str]]:
 def scan_picasa_tree(
     root_dir: Path | str,
     contacts_xml_path: Path | str | None = None,
+    *,
+    include_subfolders: bool = True,
 ) -> PicasaImportPlan:
-    """Recursively scans `root_dir` for `.picasa.ini` / `Picasa.ini` metadata without modifying the DB."""
+    """Scans `root_dir` (and optionally subfolders) for `.picasa.ini` / `Picasa.ini` metadata without modifying the DB."""
     root = Path(root_dir)
     plan = PicasaImportPlan(root_dir=root)
     if not root.is_dir():
@@ -146,7 +148,9 @@ def scan_picasa_tree(
     global_contacts = parse_picasa_contacts_xml(contacts_xml_path)
     ini_names = {".picasa.ini", "picasa.ini"}
 
-    for dirpath, _dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        if not include_subfolders:
+            dirnames.clear()
         for fn in filenames:
             if fn.lower() not in ini_names:
                 continue

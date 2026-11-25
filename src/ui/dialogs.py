@@ -435,6 +435,7 @@ class AppSettingsDialog(QDialog):
 
     settings_applied = Signal()
     picasa_import_requested = Signal()
+    picasa_folders_requested = Signal()
     semantic_addon_downloaded = Signal()
 
     def __init__(
@@ -774,15 +775,26 @@ class AppSettingsDialog(QDialog):
         picasa_lay = QVBoxLayout(picasa_group)
         picasa_lay.setSpacing(6)
         lbl_picasa = QLabel(
-            "Bring in starred photos, captions, tags, people, and albums from Google Picasa folders.",
+            "Bring in starred photos, captions, tags, people, and albums from Google Picasa folders (and subfolders).",
             picasa_group,
         )
         lbl_picasa.setWordWrap(True)
         picasa_lay.addWidget(lbl_picasa)
+        picasa_btn_row = QHBoxLayout()
+        picasa_btn_row.setSpacing(8)
         self.btn_import_picasa = QPushButton("Import Picasa Metadata...", picasa_group)
         self.btn_import_picasa.setFixedWidth(190)
         self.btn_import_picasa.clicked.connect(self.picasa_import_requested.emit)
-        picasa_lay.addWidget(self.btn_import_picasa)
+        picasa_btn_row.addWidget(self.btn_import_picasa)
+        self.btn_view_picasa_folders = QPushButton("View Picasa Folders...", picasa_group)
+        self.btn_view_picasa_folders.setFixedWidth(170)
+        self.btn_view_picasa_folders.setToolTip(
+            "See all library folders with Picasa metadata, check import status, import with one click, or open the folder"
+        )
+        self.btn_view_picasa_folders.clicked.connect(self.picasa_folders_requested.emit)
+        picasa_btn_row.addWidget(self.btn_view_picasa_folders)
+        picasa_btn_row.addStretch(1)
+        picasa_lay.addLayout(picasa_btn_row)
         v_imp.addWidget(picasa_group)
 
         v_imp.addStretch(1)

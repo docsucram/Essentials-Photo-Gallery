@@ -5,7 +5,7 @@ A QTimer on the Qt main GUI thread updates a monotonic heartbeat timestamp every
 `heartbeat_ms` (default 200 ms). A daemon thread checks that timestamp periodically;
 whenever the main GUI thread fails to respond for >= `threshold_ms` (default 600 ms),
 the watchdog dumps the exact Python stack traces of the main thread and every active
-background thread to `%LOCALAPPDATA%/PhotoGallery/freeze_traces.log`.
+background thread to `%LOCALAPPDATA%/PhotoGallery/logs/freeze_traces.log`.
 
 Overhead during normal operation is negligible (one float assignment every 200 ms).
 """
@@ -25,13 +25,15 @@ from PySide6.QtCore import QObject, QTimer
 from src.utils.paths import get_app_data_dir
 
 
-MAX_LOG_BYTES = 2 * 1024 * 1024  # 2 MB cap with automatic rotation
+MAX_LOG_BYTES = 512 * 1024  # 512 KB cap (trimmed in-place to keep latest ~256 KB)
+TRIM_KEEP_BYTES = 256 * 1024
 
 
 def get_freeze_log_path(base_dir: Path | str | None = None) -> Path:
     root = Path(base_dir) if base_dir is not None else get_app_data_dir()
-    root.mkdir(parents=True, exist_ok=True)
-    return root / "freeze_traces.log"
+    logs_dir = root / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    return logs_dir / "freeze_traces.log"
 
 
 def _format_all_thread_stacks(main_tid: int, watchdog_tid: int) -> str:
@@ -125,11 +127,13 @@ class MainThreadFreezeWatchdog(QObject):
         try:
             self._log_path.parent.mkdir(parents=True, exist_ok=True)
             if self._log_path.exists() and self._log_path.stat().st_size > MAX_LOG_BYTES:
-                bak = self._log_path.with_suffix(".log.old")
                 try:
-                    if bak.exists():
-                        bak.unlink()
-                    self._log_path.rename(bak)
+                    raw = self._log_path.read_bytes()
+                    tail = raw[-TRIM_KEEP_BYTES:]
+                    nl = tail.find(b"\n")
+                    if nl != -1:
+                        tail = tail[nl + 1 :]
+                    self._log_path.write_bytes(tail)
                 except OSError:
                     pass
             with self._log_path.open("a", encoding="utf-8", errors="replace") as fh:

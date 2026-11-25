@@ -5428,7 +5428,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             msg = QMessageBox(self)
             msg.setWindowTitle("Google Picasa Metadata Found")
             msg.setIcon(QMessageBox.Information)
-            msg.setText(f"Found Google Picasa metadata for {len(plan.entries)} photo(s) in '{rp.name}'.")
+            msg.setText(f"Found Google Picasa metadata for {len(plan.entries)} photo(s) in folder '{rp.name}'.")
             msg.setInformativeText(f"Includes: {detail_line}.\n\nImport into your library now?")
             msg.setStyleSheet(
                 f"QMessageBox {{ background-color: {tok.bg_surface}; color: {tok.text_primary}; }} "
@@ -5444,7 +5444,10 @@ class PhotoGalleryMainWindow(QMainWindow):
 
             clicked = msg.clickedButton()
             if clicked == btn_import:
+                from src.ui.picasa_import_dialog import mark_picasa_folders_imported
+
                 stats = apply_picasa_import(self.catalog_repo, plan)
+                mark_picasa_folders_imported({e.folder_path for e in plan.entries} | {rp})
                 self.refresh_navigation_and_autocomplete()
                 self.rebuild_and_run_query()
                 self.show_status_message(
@@ -5474,6 +5477,16 @@ class PhotoGalleryMainWindow(QMainWindow):
                 f"✓ Picasa import: {st['matched']} matched ({st['stars']} ♥, {st['tags']} tags, {st['faces']} faces, {st['albums']} albums)",
                 5000,
             )
+
+    def open_picasa_folders_dialog(self) -> None:
+        from src.ui.picasa_import_dialog import PicasaFoldersDialog
+
+        dlg = PicasaFoldersDialog(self.catalog_repo, parent=self)
+        dlg.exec()
+        if dlg.any_imported:
+            self.refresh_navigation_and_autocomplete()
+            self.rebuild_and_run_query()
+            self.show_status_message("✓ Picasa metadata imported", 4000)
 
     def _advance_after_cull(self) -> None:
         """Advance to the next photo after a Shift+Rating/Flag culling action."""
@@ -9830,15 +9843,27 @@ class PhotoGalleryMainWindow(QMainWindow):
         ):
             return
         try:
-            if not getattr(self, "nav_show_subjects", False):
+            show_subj = bool(
+                getattr(self, "nav_show_subjects", False)
+                or getattr(self.left_nav_dock, "_show_subjects", False)
+            )
+            if not show_subj:
                 return
             if getattr(self, "_active_semantic_worker", None) is not None:
-                return
+                now_ts = time.monotonic()
+                if (now_ts - getattr(self, "_last_subjects_count_ts", 0.0)) < 5.0 and getattr(
+                    self.left_nav_dock, "_subject_counts", None
+                ):
+                    return
+                self._last_subjects_count_ts = now_ts
             subj_vecs = self.semantic_repo.get_subject_vectors()
             if not subj_vecs:
-                if self.semantic_engine.is_available() and getattr(self, "_active_semantic_worker", None) is None:
-                    self._start_semantic_worker()
-                return
+                if self.semantic_engine.is_available():
+                    subj_vecs = self.semantic_engine.ensure_subject_vectors(self.semantic_repo)
+                if not subj_vecs:
+                    if self.semantic_engine.is_available() and getattr(self, "_active_semantic_worker", None) is None:
+                        self._start_semantic_worker()
+                    return
 
             engine = getattr(self, "engine", None)
             if engine is not None and "PYTEST_CURRENT_TEST" not in os.environ:
@@ -9921,6 +9946,8 @@ class PhotoGalleryMainWindow(QMainWindow):
     def _on_subjects_section_clicked(self) -> None:
         if getattr(self, "semantic_engine", None) is not None and not self.semantic_engine.is_available():
             self._ensure_semantic_addon_with_prompt()
+        else:
+            self._refresh_subjects_nav_counts()
 
     def _on_subjects_selected(self, subjects: Sequence[tuple[str, str]]) -> None:
         """Filters gallery by one or more selected AI Subject presets (union ranked by best match)."""
@@ -10742,6 +10769,7 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         dlg.settings_applied.connect(_apply_dlg_settings)
         dlg.picasa_import_requested.connect(self.open_picasa_import_dialog)
+        dlg.picasa_folders_requested.connect(self.open_picasa_folders_dialog)
         dlg.semantic_addon_downloaded.connect(lambda: self._start_semantic_worker(force=True))
         if dlg.exec() == AppSettingsDialog.Accepted:
             _apply_dlg_settings()
