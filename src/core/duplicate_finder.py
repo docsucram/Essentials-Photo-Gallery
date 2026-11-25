@@ -434,10 +434,29 @@ class DuplicateDetectionEngine:
 
     def _build_items_dict(self, records: Sequence[Any]) -> dict[int, DuplicateMediaItem]:
         items: dict[int, DuplicateMediaItem] = {}
+        folder_map: dict[int, str] | None = None
+
+        def _resolve_folder_path(fid_raw: Any) -> str:
+            nonlocal folder_map
+            if not fid_raw or self.catalog_repo is None:
+                return ""
+            if folder_map is None:
+                try:
+                    conn = self.catalog_repo.engine.catalog_conn()
+                    folder_map = {
+                        int(row[0]): str(row[1] or "")
+                        for row in conn.execute("SELECT id, path FROM folders;").fetchall()
+                    }
+                except Exception:
+                    folder_map = {}
+            return folder_map.get(int(fid_raw), "")
+
         for r in records:
             if isinstance(r, dict):
                 mid = int(r["id"])
                 folder_path = str(r.get("folder_path") or "")
+                if not folder_path and r.get("folder_id"):
+                    folder_path = _resolve_folder_path(r.get("folder_id"))
                 filename = str(r.get("filename") or "")
                 file_size = int(r.get("size") or r.get("file_size") or 0)
                 width = int(r.get("width") or 0)
@@ -451,6 +470,8 @@ class DuplicateDetectionEngine:
             else:
                 mid = int(getattr(r, "id"))
                 folder_path = str(getattr(r, "folder_path", "") or "")
+                if not folder_path:
+                    folder_path = _resolve_folder_path(getattr(r, "folder_id", None))
                 filename = str(getattr(r, "filename", "") or "")
                 file_size = int(getattr(r, "size", 0) or getattr(r, "file_size", 0) or 0)
                 width = int(getattr(r, "width", 0) or 0)

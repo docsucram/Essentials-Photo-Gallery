@@ -848,7 +848,8 @@ class MediaCardDelegate(QStyledItemDelegate):
         if tag_badge_keys:
             badge_sz = fl_rect.width()
             badge_gap = 3
-            next_right = (fl_rect.left() - badge_gap) if flag_drawn else fl_rect.right()
+            reserve_flag_slot = bool(getattr(self, "show_flag_badges", True))
+            next_right = (fl_rect.left() - badge_gap) if reserve_flag_slot else fl_rect.right()
             stroke_col = QColor("#E2E8F0") if (is_mosaic_layout or self.dark_mode) else QColor("#64748B")
             painter.save()
             painter.setRenderHint(QPainter.Antialiasing, True)
