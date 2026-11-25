@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -244,6 +245,7 @@ class SearchScopeBar(QFrame):
     exclude_tag_remove_requested = Signal(int)
     camera_clear_requested = Signal()
     similarity_threshold_changed = Signal(int)  # 70..98 %
+    similar_scan_stop_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -471,6 +473,44 @@ class SearchScopeBar(QFrame):
             "color: #1E395B; font-weight: bold; font-family: 'Segoe UI'; font-size: 8.5pt; min-width: 28px;"
         )
         sim_hbox.addWidget(self.lbl_similarity_val)
+
+        # Inline non-blocking background indexing strip (visible only while indexing uncached photos)
+        self.similar_progress_widget = QWidget(self.similar_controls_widget)
+        self.similar_progress_widget.setStyleSheet("background: transparent;")
+        prog_hbox = QHBoxLayout(self.similar_progress_widget)
+        prog_hbox.setContentsMargins(8, 0, 0, 0)
+        prog_hbox.setSpacing(5)
+
+        self.prg_similar = QProgressBar(self.similar_progress_widget)
+        self.prg_similar.setFixedSize(88, 12)
+        self.prg_similar.setTextVisible(False)
+        self.prg_similar.setStyleSheet(
+            "QProgressBar { border: 1px solid #B5CBE2; border-radius: 3px; background: #E9EFF6; }"
+            "QProgressBar::chunk { background-color: #2563EB; border-radius: 2px; }"
+        )
+        prog_hbox.addWidget(self.prg_similar)
+
+        self.lbl_similar_progress = QLabel("", self.similar_progress_widget)
+        self.lbl_similar_progress.setStyleSheet(
+            "color: #475569; font-family: 'Segoe UI'; font-size: 8pt;"
+        )
+        prog_hbox.addWidget(self.lbl_similar_progress)
+
+        self.btn_stop_similar = QToolButton(self.similar_progress_widget)
+        self.btn_stop_similar.setText("Stop")
+        self.btn_stop_similar.setCursor(Qt.PointingHandCursor)
+        self.btn_stop_similar.setToolTip("Stop background indexing (keeps matches already found)")
+        self.btn_stop_similar.setStyleSheet(
+            "QToolButton { color: #1E395B; background: #F1F5F9; border: 1px solid #B5CBE2; "
+            "border-radius: 3px; padding: 1px 6px; font-family: 'Segoe UI'; font-size: 8pt; }"
+            "QToolButton:hover { background: #E2ECF8; border-color: #3C7FB1; }"
+        )
+        self.btn_stop_similar.clicked.connect(self.similar_scan_stop_requested.emit)
+        prog_hbox.addWidget(self.btn_stop_similar)
+
+        self.similar_progress_widget.setVisible(False)
+        sim_hbox.addWidget(self.similar_progress_widget)
+
         self.similar_controls_widget.setVisible(False)
         self.r2_layout.addWidget(self.similar_controls_widget)
 
@@ -1004,6 +1044,8 @@ class SearchScopeBar(QFrame):
     def set_similarity_controls(self, visible: bool, threshold_pct: int = 81) -> None:
         if hasattr(self, "similar_controls_widget"):
             self.similar_controls_widget.setVisible(bool(visible))
+        if not visible and hasattr(self, "similar_progress_widget"):
+            self.similar_progress_widget.setVisible(False)
         if hasattr(self, "slider_similarity"):
             pct = max(70, min(98, int(threshold_pct)))
             self.slider_similarity.blockSignals(True)
@@ -1011,6 +1053,30 @@ class SearchScopeBar(QFrame):
             self.slider_similarity.blockSignals(False)
             if hasattr(self, "lbl_similarity_val"):
                 self.lbl_similarity_val.setText(f"{pct}%")
+
+    def set_similar_scan_progress(
+        self,
+        active: bool,
+        current: int = 0,
+        total: int = 0,
+        text: str = "",
+    ) -> None:
+        if not hasattr(self, "similar_progress_widget"):
+            return
+        self.similar_progress_widget.setVisible(bool(active))
+        if not active:
+            return
+        if total > 0:
+            self.prg_similar.setRange(0, int(total))
+            self.prg_similar.setValue(min(int(current), int(total)))
+        else:
+            self.prg_similar.setRange(0, 0)
+        if text:
+            self.lbl_similar_progress.setText(text)
+        elif total > 0:
+            self.lbl_similar_progress.setText(f"Indexing {int(current):,}/{int(total):,}…")
+        else:
+            self.lbl_similar_progress.setText("Searching…")
 
     def _on_similarity_slider_changed(self, val: int) -> None:
         if hasattr(self, "lbl_similarity_val"):

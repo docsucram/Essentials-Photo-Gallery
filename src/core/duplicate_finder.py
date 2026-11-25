@@ -724,6 +724,34 @@ class DuplicateDetectionEngine:
 
         return valid_cands
 
+    def _compute_item_signature(
+        self,
+        it: DuplicateMediaItem,
+        blob: bytes | None,
+    ) -> tuple[int, int, int, int, float, bytes] | None:
+        """Compute visual signatures for a single DuplicateMediaItem and return DB tuple if valid."""
+        arr_bgr = None
+        if blob:
+            arr_bgr = cv2.imdecode(np.frombuffer(blob, np.uint8), cv2.IMREAD_COLOR)
+        elif it.full_path.exists():
+            from src.utils.paths import is_cloud_only_file
+            if not is_cloud_only_file(it.full_path):
+                try:
+                    arr_bgr = cv2.imread(str(it.full_path), cv2.IMREAD_REDUCED_COLOR_8)
+                    if arr_bgr is None or arr_bgr.size == 0:
+                        arr_bgr = cv2.imread(str(it.full_path), cv2.IMREAD_COLOR)
+                except Exception:
+                    arr_bgr = None
+        if arr_bgr is None or arr_bgr.size == 0:
+            return None
+        arr_gray = cv2.cvtColor(arr_bgr, cv2.COLOR_BGR2GRAY)
+        it.phash = compute_image_phash(arr_gray)
+        it.dhash = compute_image_dhash(arr_gray)
+        if it.sharpness <= 0.0:
+            it.sharpness = compute_sharpness_score(arr_gray)
+        it.lab_haar = compute_lab_haar_signature(arr_bgr)
+        return (it.media_id, int(it.mtime), it.phash, it.dhash, it.sharpness, it.lab_haar)
+
     def find_similar_to_photo(
         self,
         seed_media_id: int,
@@ -731,11 +759,21 @@ class DuplicateDetectionEngine:
         media_records: Sequence[dict[str, Any]] | None = None,
         max_results: int = 40,
         progress_cb: Any = None,
+        partial_cb: Any = None,
     ) -> DuplicateGroup | None:
-        """Rank photos visually similar to seed_media_id using 24-byte LAB Haar + pHash/dHash."""
+        """
+        Rank photos visually similar to seed_media_id using 24-byte LAB Haar + pHash/dHash
+        (and optional MobileCLIP-S1 semantic boost).
+
+        When ``partial_cb(group, done_uncached, total_uncached)`` is provided, immediately scores
+        already-cached signatures (<200ms) and streams progressive updates while indexing any
+        remaining uncached photos in chunks.
+        """
+        import time as _time
+
         self._is_cancelled = False
         if progress_cb:
-            progress_cb(10, 100, "Loading catalog photos for similarity search...")
+            progress_cb(0, 100, "Loading catalog photos for similarity search...")
         if media_records is None:
             media_records = self._fetch_all_catalog_records()
         if not media_records:
@@ -745,16 +783,47 @@ class DuplicateDetectionEngine:
         if not cands:
             return None
 
-        valid_cands = self._populate_visual_signatures(cands, progress_cb=progress_cb)
-        if self._is_cancelled:
-            return None
+        # 1. Fast load of all already-cached visual signatures
+        mids = [it.media_id for it in cands]
+        cached_sigs = (
+            self.thumb_repo.get_signatures_batch(mids)
+            if (self.thumb_repo and mids and hasattr(self.thumb_repo, "get_signatures_batch"))
+            else {}
+        )
+        cached_cands: list[DuplicateMediaItem] = []
+        uncached_cands: list[DuplicateMediaItem] = []
+        seed: DuplicateMediaItem | None = None
+        for it in cands:
+            sig = cached_sigs.get(it.media_id)
+            if sig is not None and sig[0] == int(it.mtime) and (sig[1] != 0 or sig[2] != 0) and sig[4]:
+                it.phash = sig[1]
+                it.dhash = sig[2]
+                if sig[3] > 0.0:
+                    it.sharpness = sig[3]
+                it.lab_haar = sig[4]
+                cached_cands.append(it)
+            else:
+                uncached_cands.append(it)
+            if it.media_id == int(seed_media_id):
+                seed = it
 
-        seed = next((it for it in valid_cands if it.media_id == int(seed_media_id)), None)
         if seed is None:
             return None
 
-        if progress_cb:
-            progress_cb(90, 100, "Ranking spatial color & composition similarity...")
+        # Ensure the seed photo itself has a signature before scoring anything
+        if not seed.lab_haar:
+            seed_blobs = (
+                self.thumb_repo.get_webp_blobs_batch([seed.media_id])
+                if self.thumb_repo
+                else {}
+            )
+            seed_row = self._compute_item_signature(seed, seed_blobs.get(seed.media_id))
+            if seed_row is None:
+                return None
+            if self.thumb_repo and hasattr(self.thumb_repo, "upsert_signatures_batch"):
+                self.thumb_repo.upsert_signatures_batch([seed_row])
+            uncached_cands = [it for it in uncached_cands if it.media_id != seed.media_id]
+            cached_cands.append(seed)
 
         # Optional MobileCLIP-S1 semantic boost when installed & seed is indexed
         sem_score_map: dict[int, float] = {}
@@ -776,49 +845,102 @@ class DuplicateDetectionEngine:
             except Exception:
                 sem_score_map = {}
 
-        scored: list[tuple[float, DuplicateMediaItem]] = []
-        for other in valid_cands:
-            if other.media_id == seed.media_id:
-                continue
-            haar_sim = compute_lab_haar_similarity(seed.lab_haar, other.lab_haar)
-            pal_sim = compute_lab_palette_similarity(seed.lab_haar, other.lab_haar)
-            dist = min(hamming_distance(seed.phash, other.phash), hamming_distance(seed.dhash, other.dhash))
-            hash_sim = similarity_from_distance(dist)
-            visual_combined = 0.35 * haar_sim + 0.40 * pal_sim + 0.25 * hash_sim
-            sem_sim = sem_score_map.get(other.media_id)
-            if sem_sim is not None:
-                # Blend semantic similarity with visual similarity; allow strong semantic matches
-                # even when lighting/crop differs slightly.
-                if sem_sim < 0.72 and (hash_sim < 0.42 or pal_sim < 0.62):
-                    continue
-                combined = 0.45 * sem_sim + 0.55 * visual_combined
-            else:
-                if hash_sim < 0.42 or pal_sim < 0.62:
-                    continue
-                combined = visual_combined
-            if combined >= similarity_threshold:
-                other.similarity_score = round(combined, 3)
-                other.is_recommended_keep = False
-                other.is_selected_for_removal = False
-                scored.append((combined, other))
+        best_by_id: dict[int, tuple[float, DuplicateMediaItem]] = {}
 
-        if not scored:
-            return None
+        def _score_batch(batch: list[DuplicateMediaItem]) -> bool:
+            added_or_improved = False
+            for other in batch:
+                if other.media_id == seed.media_id or not other.lab_haar:
+                    continue
+                haar_sim = compute_lab_haar_similarity(seed.lab_haar, other.lab_haar)
+                pal_sim = compute_lab_palette_similarity(seed.lab_haar, other.lab_haar)
+                dist = min(hamming_distance(seed.phash, other.phash), hamming_distance(seed.dhash, other.dhash))
+                hash_sim = similarity_from_distance(dist)
+                visual_combined = 0.35 * haar_sim + 0.40 * pal_sim + 0.25 * hash_sim
+                sem_sim = sem_score_map.get(other.media_id)
+                if sem_sim is not None:
+                    if sem_sim < 0.72 and (hash_sim < 0.42 or pal_sim < 0.62):
+                        continue
+                    combined = 0.45 * sem_sim + 0.55 * visual_combined
+                else:
+                    if hash_sim < 0.42 or pal_sim < 0.62:
+                        continue
+                    combined = visual_combined
+                if combined >= similarity_threshold:
+                    other.similarity_score = round(combined, 3)
+                    other.is_recommended_keep = False
+                    other.is_selected_for_removal = False
+                    prev = best_by_id.get(other.media_id)
+                    if prev is None or combined > prev[0]:
+                        best_by_id[other.media_id] = (combined, other)
+                        added_or_improved = True
+            return added_or_improved
 
-        scored.sort(key=lambda pair: pair[0], reverse=True)
-        top_items = [it for _s, it in scored[:max_results]]
-        seed.similarity_score = 1.0
-        seed.is_recommended_keep = True
-        seed.is_selected_for_removal = False
-        avg_sim = round(float(np.mean([s for s, _it in scored[:max_results]])), 2)
+        def _build_group() -> DuplicateGroup | None:
+            if not best_by_id:
+                return None
+            scored = sorted(best_by_id.values(), key=lambda pair: pair[0], reverse=True)
+            top_items = [it for _s, it in scored[:max_results]]
+            seed.similarity_score = 1.0
+            seed.is_recommended_keep = True
+            seed.is_selected_for_removal = False
+            avg_sim = round(float(np.mean([s for s, _it in scored[:max_results]])), 2)
+            return DuplicateGroup(
+                group_id=f"similar_{seed.media_id}",
+                match_type="similar",
+                similarity=avg_sim,
+                items=[seed, *top_items],
+            )
+
+        # 2. Score all already-cached photos immediately
+        _score_batch(cached_cands)
+        total_uncached = len(uncached_cands)
+        if partial_cb is not None:
+            partial_cb(_build_group(), 0, total_uncached)
+
+        # 3. Incrementally index & score any remaining uncached photos
+        if total_uncached > 0:
+            chunk_size = 200
+            last_emit = _time.monotonic()
+            dirty_matches = False
+            for chunk_start in range(0, total_uncached, chunk_size):
+                if self._is_cancelled:
+                    break
+                chunk_items = uncached_cands[chunk_start : chunk_start + chunk_size]
+                chunk_mids = [it.media_id for it in chunk_items]
+                blobs = self.thumb_repo.get_webp_blobs_batch(chunk_mids) if (self.thumb_repo and chunk_mids) else {}
+                to_persist: list[tuple[int, int, int, int, float, bytes]] = []
+                newly_valid: list[DuplicateMediaItem] = []
+                for it in chunk_items:
+                    if self._is_cancelled:
+                        break
+                    row = self._compute_item_signature(it, blobs.get(it.media_id))
+                    if row is not None:
+                        newly_valid.append(it)
+                        to_persist.append(row)
+                if to_persist and self.thumb_repo and hasattr(self.thumb_repo, "upsert_signatures_batch"):
+                    self.thumb_repo.upsert_signatures_batch(to_persist)
+                if newly_valid and _score_batch(newly_valid):
+                    dirty_matches = True
+
+                done_cnt = min(total_uncached, chunk_start + len(chunk_items))
+                now = _time.monotonic()
+                if progress_cb:
+                    progress_cb(done_cnt, total_uncached, f"Indexing ({done_cnt:,}/{total_uncached:,})...")
+                if partial_cb is not None and (
+                    (dirty_matches and (now - last_emit) >= 0.8)
+                    or (now - last_emit) >= 1.5
+                    or done_cnt >= total_uncached
+                ):
+                    partial_cb(_build_group(), done_cnt, total_uncached)
+                    last_emit = now
+                    dirty_matches = False
+
+        final_grp = _build_group()
         if progress_cb:
-            progress_cb(100, 100, f"Found {len(top_items)} visually similar photos.")
-        return DuplicateGroup(
-            group_id=f"similar_{seed.media_id}",
-            match_type="similar",
-            similarity=avg_sim,
-            items=[seed, *top_items],
-        )
+            cnt = max(0, len(final_grp.items) - 1) if final_grp else 0
+            progress_cb(100, 100, f"Found {cnt} visually similar photos.")
+        return final_grp
 
     def _find_visual_duplicates(
         self,

@@ -1791,6 +1791,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.scope_bar.search_all_requested.connect(self._on_search_all_requested)
         self.scope_bar.location_clear_requested.connect(self._on_clear_location_filter)
         self.scope_bar.similarity_threshold_changed.connect(self._on_similar_threshold_changed)
+        self.scope_bar.similar_scan_stop_requested.connect(self._stop_similar_search)
         self.scope_bar.pin_toggled.connect(self._on_scope_bar_pin_toggled)
         self.scope_bar.close_requested.connect(self.hide_search_scope_bar)
         self.scope_bar.person_remove_requested.connect(self.left_nav_dock.unselect_person)
@@ -3584,6 +3585,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             sel = self.grid_view.selected_media_ids() if hasattr(self, "grid_view") else []
             focus_mid = int(sel[0]) if sel else int(self._active_similar_seed_id)
 
+        self._stop_similar_search()
         self._active_map_media_ids = None
         self._active_similar_order = None
         self._active_similar_scored = None
@@ -3667,6 +3669,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._active_date_label = None
         self._active_bbox = None
         self._active_map_media_ids = None
+        self._stop_similar_search()
         self._active_map_location_label = None
         self._active_similar_order = None
         self._active_similar_scored = None
@@ -11183,6 +11186,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._pending_disk_decode_ids.clear()
         self._selected_ids = []
         self._lead_selected_id = None
+        self._stop_similar_search()
         self._active_map_media_ids = None
         self._active_similar_order = None
         self._active_similar_scored = None
@@ -11318,14 +11322,35 @@ class PhotoGalleryMainWindow(QMainWindow):
         """Opens the modern integrated duplicate & burst finder view."""
         self.show_duplicate_finder_view()
 
+    def _stop_similar_search(self) -> None:
+        """Cancel any active background Find Similar indexing while preserving matches already found."""
+        eng = getattr(self, "_similar_search_engine", None)
+        if eng is not None:
+            try:
+                eng.cancel()
+            except Exception:
+                pass
+        if hasattr(self, "scope_bar") and hasattr(self.scope_bar, "set_similar_scan_progress"):
+            self.scope_bar.set_similar_scan_progress(False)
+
     def open_find_similar_for_media(self, media_id: int, similarity_threshold: float = 0.81) -> None:
-        """Finds visually similar photos in the background with a progress bar and filters the Gallery Grid."""
+        """
+        Non-blocking progressive Find Similar:
+        1. Immediately shows results from already-cached visual/semantic signatures (<200ms).
+        2. Streams progressive matches while indexing any remaining uncached photos in the
+           background with a slim inline progress bar + Stop button in the Scope Bar.
+        """
         from PySide6.QtCore import QThread, Signal
-        from PySide6.QtWidgets import QProgressDialog
         from src.core.duplicate_finder import DuplicateDetectionEngine
+
+        # Cancel any prior background Find Similar run
+        self._stop_similar_search()
+        run_seq = int(getattr(self, "_similar_search_seq", 0)) + 1
+        self._similar_search_seq = run_seq
 
         target_mid = int(media_id)
         thresh = max(0.55, min(0.99, float(similarity_threshold)))
+        pct = int(round(thresh * 100))
 
         if self.central_stack.currentWidget() != self.grid_view:
             self.show_grid_view()
@@ -11333,123 +11358,119 @@ class PhotoGalleryMainWindow(QMainWindow):
         detail = self.catalog_repo.get_media_detail(target_mid)
         seed_name = str(detail["filename"]) if detail and detail.get("filename") else f"Photo #{target_mid}"
 
+        # Enter Similar Photos scope immediately (non-blocking)
+        self._active_similar_seed_id = target_mid
+        self._active_similar_seed_name = seed_name
+        self._active_similar_pct = pct
+        self._active_similar_scored = [(target_mid, 1.0)]
+        self._active_similar_order = [target_mid]
+        self._active_similar_label = f"Similar to '{seed_name}' (searching…)"
+        self._active_map_media_ids = [target_mid]
+        self.scope_bar.set_similarity_controls(True, pct)
+        self.scope_bar.set_similar_scan_progress(True, 0, 0, "Searching cached signatures…")
+        self._update_scope_bar_visibility()
+        self.rebuild_and_run_query(preserve_selection=False)
+        self.grid_view.select_media_id(target_mid)
+
         engine = DuplicateDetectionEngine(
             self.catalog_repo,
             self.thumb_repo,
             semantic_repo=getattr(self, "semantic_repo", None),
             semantic_engine=getattr(self, "semantic_engine", None),
         )
+        self._similar_search_engine = engine
 
         class _SimilarWorker(QThread):
-            progress_sig = Signal(int, int, str)
+            partial_sig = Signal(object, int, int)
             done_sig = Signal(object, str)
 
             def run(self) -> None:
                 try:
-                    # Pre-compute down to the slider minimum (70%) once so live slider scrubbing is instant
                     grp = engine.find_similar_to_photo(
                         seed_media_id=target_mid,
                         similarity_threshold=min(0.70, thresh),
                         media_records=None,
                         max_results=200,
-                        progress_cb=lambda c, t, m: self.progress_sig.emit(int(c), int(t), str(m)),
+                        partial_cb=lambda g, d, t: self.partial_sig.emit(g, int(d), int(t)),
                     )
                     self.done_sig.emit(grp, "")
                 except Exception as exc:
                     logger.exception("Find Similar failed for media_id=%s", target_mid)
                     self.done_sig.emit(None, str(exc))
 
-        dlg = QProgressDialog(f"Finding photos similar to '{seed_name}'...", "Cancel", 0, 100, self)
-        dlg.setWindowTitle("Find Similar Photos")
-        dlg.setWindowModality(Qt.WindowModal)
-        dlg.setMinimumWidth(420)
-        dlg.setMinimumDuration(0)
-        dlg.setAutoClose(False)
-        dlg.setAutoReset(False)
-        dlg.setValue(5)
-        if getattr(self, "_dark_mode", False):
-            dlg.setStyleSheet(
-                "QProgressDialog { background-color: #1E242C; color: #E2E8F0; }"
-                "QLabel { color: #E2E8F0; font-size: 9.5pt; }"
-                "QProgressBar { border: 1px solid #3B4252; border-radius: 4px; background: #14171C; text-align: center; color: #E2E8F0; min-height: 18px; }"
-                "QProgressBar::chunk { background-color: #2563EB; border-radius: 3px; }"
-                "QPushButton { background: #262B34; color: #E2E8F0; border: 1px solid #3B4252; border-radius: 3px; padding: 4px 12px; }"
-            )
-        else:
-            dlg.setStyleSheet(
-                "QProgressDialog { background-color: #FBFDFF; color: #1E395B; }"
-                "QLabel { color: #1E395B; font-size: 9.5pt; }"
-                "QProgressBar { border: 1px solid #B5CBE2; border-radius: 4px; background: #E9EFF6; text-align: center; color: #1E395B; min-height: 18px; }"
-                "QProgressBar::chunk { background-color: #0078D7; border-radius: 3px; }"
-                "QPushButton { background: #F1F5F9; color: #1E395B; border: 1px solid #94A3B8; border-radius: 3px; padding: 4px 12px; }"
-            )
-
         worker = _SimilarWorker(self)
         self._similar_search_worker = worker
-        self._similar_search_dlg = dlg
 
-        def _on_prog(cur: int, tot: int, msg: str) -> None:
-            if tot > 0:
-                dlg.setMaximum(tot)
-                dlg.setValue(cur)
-            if msg:
-                dlg.setLabelText(msg)
-
-        def _on_cancel() -> None:
-            engine.cancel()
-
-        def _on_done(grp: Any, err_msg: str = "") -> None:
-            dlg.blockSignals(True)
-            dlg.accept()
-            if engine._is_cancelled:
+        def _apply_similar_group(grp: Any, *, force_refresh: bool = False) -> None:
+            if getattr(self, "_similar_search_seq", 0) != run_seq:
                 return
-            if err_msg:
-                QMessageBox.warning(self, "Find Similar Photos", f"Could not search for similar photos:\n{err_msg}")
+            if getattr(self, "_active_similar_seed_id", None) != target_mid:
                 return
+            cur_pct = int(getattr(self, "_active_similar_pct", pct))
+            cur_thresh = cur_pct / 100.0
             if grp is None or len(getattr(grp, "items", [])) <= 1:
                 scored_pairs: list[tuple[int, float]] = [(target_mid, 1.0)]
                 ordered_ids = [target_mid]
                 match_cnt = 0
             else:
                 scored_pairs = [
-                    (int(it.media_id), float(getattr(it, "similarity_score", 1.0 if int(it.media_id) == target_mid else thresh)))
+                    (int(it.media_id), float(getattr(it, "similarity_score", 1.0 if int(it.media_id) == target_mid else cur_thresh)))
                     for it in grp.items
                 ]
                 ordered_ids = [
                     mid for mid, sc in scored_pairs
-                    if mid == target_mid or sc >= thresh
+                    if mid == target_mid or sc >= cur_thresh
                 ][:60]
                 if not ordered_ids:
                     ordered_ids = [target_mid]
                 match_cnt = max(0, len(ordered_ids) - 1)
-            pct = int(round(thresh * 100))
-            self._active_similar_seed_id = target_mid
-            self._active_similar_seed_name = seed_name
-            self._active_similar_pct = pct
+
+            prev_order = list(getattr(self, "_active_similar_order", []))
             self._active_similar_scored = scored_pairs
             self._active_similar_order = ordered_ids
             self._active_similar_label = (
-                f"Similar to '{seed_name}' ({match_cnt} matches ≥ {pct}%)"
+                f"Similar to '{seed_name}' ({match_cnt} matches ≥ {cur_pct}%)"
             )
             self._active_map_media_ids = ordered_ids
-            self.scope_bar.set_similarity_controls(True, pct)
             self._update_scope_bar_visibility()
-            recs = self.rebuild_and_run_query(preserve_selection=False)
-            actual_matches = max(0, len(recs) - 1)
-            if actual_matches != match_cnt:
-                self._active_similar_label = (
-                    f"Similar to '{seed_name}' ({actual_matches} matches ≥ {pct}%)"
-                )
-                self._update_scope_bar_visibility()
-            self.grid_view.select_media_id(target_mid)
-            self._update_status_counts()
+            if force_refresh or ordered_ids != prev_order:
+                recs = self.rebuild_and_run_query(preserve_selection=False)
+                actual_matches = max(0, len(recs) - 1)
+                if actual_matches != match_cnt:
+                    self._active_similar_label = (
+                        f"Similar to '{seed_name}' ({actual_matches} matches ≥ {cur_pct}%)"
+                    )
+                    self._update_scope_bar_visibility()
+                self.grid_view.select_media_id(target_mid)
+                self._update_status_counts()
 
-        worker.progress_sig.connect(_on_prog)
-        dlg.canceled.connect(_on_cancel)
+        def _on_partial(grp: Any, done_cnt: int, total_uncached: int) -> None:
+            if getattr(self, "_similar_search_seq", 0) != run_seq:
+                return
+            if total_uncached > 0 and done_cnt < total_uncached:
+                self.scope_bar.set_similar_scan_progress(
+                    True,
+                    done_cnt,
+                    total_uncached,
+                    f"Indexing {done_cnt:,}/{total_uncached:,}…",
+                )
+            else:
+                self.scope_bar.set_similar_scan_progress(False)
+            _apply_similar_group(grp, force_refresh=(done_cnt == 0))
+
+        def _on_done(grp: Any, err_msg: str = "") -> None:
+            if getattr(self, "_similar_search_seq", 0) != run_seq:
+                return
+            self.scope_bar.set_similar_scan_progress(False)
+            if err_msg and not engine._is_cancelled:
+                QMessageBox.warning(self, "Find Similar Photos", f"Could not search for similar photos:\n{err_msg}")
+                return
+            _apply_similar_group(grp, force_refresh=False)
+
+        worker.partial_sig.connect(_on_partial)
         worker.done_sig.connect(_on_done)
         worker.finished.connect(worker.deleteLater)
         worker.start()
-        dlg.exec()
 
     def _on_similar_threshold_changed(self, pct: int) -> None:
         """Live-updates the Find Similar Photos gallery filter when the Scope Bar slider changes."""
