@@ -10132,6 +10132,14 @@ class RibbonToolbar(QWidget):
             lambda checked: self.action_triggered.emit(f"compare_focus_peaking:{1 if checked else 0}")
         )
 
+        self.btn_cmp_af_points = self._make_btn("AF Focus\nPoints", "camera", self.grp_cmp_inspect, large=True, checkable=True)
+        self.btn_cmp_af_points.setToolTip(
+            "Show Camera AF Focus Points\nOverlay DSLR / mirrorless MakerNote autofocus boxes on photos that contain camera AF metadata."
+        )
+        self.btn_cmp_af_points.clicked.connect(
+            lambda checked: self.action_triggered.emit(f"compare_af_points:{1 if checked else 0}")
+        )
+
         self.btn_cmp_clipping = self._make_btn("Clipping\nWarnings", "auto_adjust", self.grp_cmp_inspect, large=True, checkable=True)
         self.btn_cmp_clipping.setProperty("_compare_icon_kind", "clipping")
         self.btn_cmp_clipping.setIcon(self._make_compare_icon("clipping"))
@@ -10158,6 +10166,7 @@ class RibbonToolbar(QWidget):
             self.btn_cmp_1to1,
             self.btn_cmp_fit,
             self.btn_cmp_peaking,
+            self.btn_cmp_af_points,
             self.btn_cmp_clipping,
             self.btn_cmp_dark_bg,
         ):

@@ -3741,64 +3741,58 @@ class ThumbnailGridView(QListView):
 
             menu.addSeparator()
 
-            # 2. Quick Actions (Classic WLPG Order)
+            # 2. Desktop Background
             act_bg = menu.addAction("Set as desktop background")
             act_bg.setEnabled(len(target_mids) == 1)
             if is_mw and len(target_mids) == 1:
                 act_bg.triggered.connect(lambda: main_win.set_desktop_background_for_media(media_id))
 
-            act_rr = menu.addAction("Rotate right")
-            act_rr.setShortcut("Ctrl+.")
-            if is_mw:
-                act_rr.triggered.connect(lambda: main_win.rotate_selection(clockwise=True))
-
-            act_rl = menu.addAction("Rotate left")
-            act_rl.setShortcut("Ctrl+,")
-            if is_mw:
-                act_rl.triggered.connect(lambda: main_win.rotate_selection(clockwise=False))
-
             menu.addSeparator()
 
-            # 3. Organize & AI
-            if (
-                is_mw
-                and hasattr(main_win, "apply_favourite_to_selection")
-                and getattr(self.card_delegate, "favourites_enabled", True)
-            ):
+            # 3. Organize & Flag (Unified: Flag ▸, Add to Album ▸, Create ▸)
+            if is_mw:
                 sel_ids = self.selected_media_ids() or ([int(media_id)] if media_id is not None else [])
-                all_fav = bool(sel_ids) and all(
-                    bool(getattr(self.catalog_model.record_by_id(int(mid)), "is_favourite", 0))
-                    for mid in sel_ids
-                )
-                target_fav_state = not all_fav
-                fav_label = "Unfavourite" if all_fav else "Favourite"
+                flag_menu = menu.addMenu(make_wlpg_icon("flag", 16), "Flag")
+                menu._flag_menu = flag_menu
+                flag_menu.setFont(QFont("Segoe UI", 9))
 
-                hpm = QPixmap(32, 32)
-                hpm.fill(Qt.transparent)
-                hp = QPainter(hpm)
-                hp.setRenderHint(QPainter.Antialiasing, True)
-                hpath = QPainterPath()
-                hpath.moveTo(16.0, 26.5)
-                hpath.cubicTo(5.5, 19.8, 4.0, 11.5, 8.8, 7.2)
-                hpath.cubicTo(12.2, 4.4, 15.0, 6.6, 16.0, 9.2)
-                hpath.cubicTo(17.0, 6.6, 19.8, 4.4, 23.2, 7.2)
-                hpath.cubicTo(28.0, 11.5, 26.5, 19.8, 16.0, 26.5)
-                if all_fav:
-                    hp.setPen(QPen(QColor("#F43F5E"), 2.4))
-                    hp.setBrush(Qt.NoBrush)
-                else:
-                    hp.setPen(Qt.NoPen)
-                    hp.setBrush(QColor("#F43F5E"))
-                hp.drawPath(hpath)
-                hp.end()
-                hpm.setDevicePixelRatio(2.0)
-                act_fav = menu.addAction(QIcon(hpm), fav_label)
-                act_fav.setShortcut("F")
-                act_fav.triggered.connect(
-                    lambda _c=False, st=target_fav_state, tids=list(sel_ids): main_win.apply_favourite_to_selection(
-                        st, target_ids=tids
+                if (
+                    hasattr(main_win, "apply_favourite_to_selection")
+                    and getattr(self.card_delegate, "favourites_enabled", True)
+                ):
+                    all_fav = bool(sel_ids) and all(
+                        bool(getattr(self.catalog_model.record_by_id(int(mid)), "is_favourite", 0))
+                        for mid in sel_ids
                     )
-                )
+                    target_fav_state = not all_fav
+                    fav_label = "Remove from Favourites" if all_fav else "Mark as Favourite"
+                    fav_ico = main_win.ribbon._make_cull_menu_icon("heart") if hasattr(main_win, "ribbon") and hasattr(main_win.ribbon, "_make_cull_menu_icon") else make_wlpg_icon("star_filled", 16)
+                    act_fav = flag_menu.addAction(fav_ico, fav_label)
+                    act_fav.setShortcut("F")
+                    act_fav.triggered.connect(
+                        lambda _c=False, st=target_fav_state, tids=list(sel_ids): main_win.apply_favourite_to_selection(
+                            st, target_ids=tids
+                        )
+                    )
+                    flag_menu.addSeparator()
+
+                if hasattr(main_win, "apply_flag_to_selection"):
+                    _mk_ico = (
+                        main_win.ribbon._make_cull_menu_icon
+                        if hasattr(main_win, "ribbon") and hasattr(main_win.ribbon, "_make_cull_menu_icon")
+                        else (lambda _k: make_wlpg_icon("flag", 16))
+                    )
+                    act_pick = flag_menu.addAction(_mk_ico("flag_picked"), "Pick")
+                    act_pick.setShortcut("P")
+                    act_pick.triggered.connect(lambda: main_win.apply_flag_to_selection(1))
+
+                    act_rej = flag_menu.addAction(_mk_ico("flag_rejected"), "Reject")
+                    act_rej.setShortcut("X")
+                    act_rej.triggered.connect(lambda: main_win.apply_flag_to_selection(-1))
+
+                    act_unf = flag_menu.addAction(_mk_ico("flag_unflagged"), "Unflag")
+                    act_unf.setShortcut("U")
+                    act_unf.triggered.connect(lambda: main_win.apply_flag_to_selection(0))
 
             self._append_album_menu_actions(menu, media_id, main_win)
 
@@ -3813,15 +3807,44 @@ class ThumbnailGridView(QListView):
                 act_fuse.triggered.connect(main_win.open_photo_fuse_dialog)
                 act_col.triggered.connect(main_win.open_collage_dialog)
 
-            ai_menu = menu.addMenu("AI && Scan")
-            menu._ai_scan_menu = ai_menu
-            ai_menu.setFont(QFont("Segoe UI", 9))
-            act_sim = ai_menu.addAction("Find Similar Photos...")
+            menu.addSeparator()
+
+            # 4. Edit ▸ & Scan ▸ (Unified across Grid & Single Image View)
+            edit_menu = menu.addMenu(make_wlpg_icon("edited", 16), "Edit")
+            menu._edit_menu = edit_menu
+            edit_menu.setFont(QFont("Segoe UI", 9))
+
+            act_rl = edit_menu.addAction(make_wlpg_icon("rotate_ccw", 16), "Rotate left")
+            act_rl.setShortcut("Ctrl+,")
+            if is_mw:
+                act_rl.triggered.connect(lambda: main_win.rotate_selection(clockwise=False))
+
+            act_rr = edit_menu.addAction(make_wlpg_icon("rotate_cw", 16), "Rotate right")
+            act_rr.setShortcut("Ctrl+.")
+            if is_mw:
+                act_rr.triggered.connect(lambda: main_win.rotate_selection(clockwise=True))
+
+            edit_menu.addSeparator()
+
+            act_copy_subj = edit_menu.addAction("Copy subject to clipboard")
+            act_copy_subj.setEnabled(len(target_mids) == 1)
+            if is_mw and len(target_mids) == 1 and hasattr(main_win, "copy_subject_for_media"):
+                act_copy_subj.triggered.connect(lambda _c=False, mid=int(media_id): main_win.copy_subject_for_media(mid))
+
+            act_rm_bg = edit_menu.addAction("Remove background")
+            act_rm_bg.setEnabled(len(target_mids) == 1)
+            if is_mw and len(target_mids) == 1 and hasattr(main_win, "remove_background_for_media"):
+                act_rm_bg.triggered.connect(lambda _c=False, mid=int(media_id): main_win.remove_background_for_media(mid))
+
+            scan_menu = menu.addMenu(make_wlpg_icon("search", 16), "Scan")
+            menu._ai_scan_menu = scan_menu
+            scan_menu.setFont(QFont("Segoe UI", 9))
+            act_sim = scan_menu.addAction("Find Similar Photos...")
             act_sim.triggered.connect(lambda _chk=False, mid=int(media_id): self.find_similar_requested.emit(mid))
-            act_rescan = ai_menu.addAction("Rescan for faces")
+            act_rescan = scan_menu.addAction("Rescan for faces")
             if is_mw:
                 act_rescan.triggered.connect(lambda checked=False, t_ids=list(target_mids): main_win.rescan_faces_for_selection(t_ids))
-            act_ocr = ai_menu.addAction("Scan for text (OCR)")
+            act_ocr = scan_menu.addAction("Scan for text (OCR)")
             if is_mw and hasattr(main_win, "scan_ocr_for_selection"):
                 act_ocr.triggered.connect(lambda checked=False, t_ids=list(target_mids): main_win.scan_ocr_for_selection(t_ids))
 

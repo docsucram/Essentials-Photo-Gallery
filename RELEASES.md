@@ -37,6 +37,10 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 - **Quick-Tag Shortcuts & Navigation Pane Context Menus (`src/ui/tag_hierarchy_dialog.py`, `src/ui/shortcuts_dialog.py`, `src/ui/left_nav_dock.py`, `src/ui/right_tag_dock.py`):**
   - Added `Alt+1..9` Quick-Tag shortcut assignment & badges directly inside **Manage Tags** (`TagHierarchyDialog`) and in tag right-click menus (Left Nav & Right Tag Pane) alongside **Manage Tags...**.
   - Added **Expand all** / **Collapse all** to Navigation Pane root context menus (**Albums**, **Date taken**, **Descriptive tags**, **Places**) and **Collapse** / **Expand** to **Folders**, **People**, **Ratings**, **Cameras**, and **Subjects**.
+- **Faster App Launch & Unified Image Context Menu (`src/ui/main_window.py`, `src/ui/grid_view.py`, `src/ui/media_viewer.py`, `src/ui/compare_view.py`, `src/ui/ribbon_toolbar.py`):**
+  - Eliminated duplicate startup `apply_theme()` (~500 ms), removed the redundant unfiltered full-library `rebuild_and_run_query()` before restored filters apply, and deferred `deduplicate_media_people()` to 2.2 s post-launch.
+  - Unified the photo right-click context menu across **Thumbnail Grid** and **Single Image View** with clean **Flag ▸** (*Mark as Favourite*, *Pick*, *Reject*, *Unflag*), **Edit ▸** (*Rotate left/right*, *Copy subject to clipboard*, *Remove background*), and **Scan ▸** (*Find Similar Photos*, *Rescan for faces*, *Scan for text (OCR)*) submenus.
+  - Moved **AF Focus Points** out of the image right-click menu onto the **Compare** Ribbon tab (**Inspect & Sync**).
 
 - **Covering Partial Indexes for Navigation SQL (`src/db/connection.py`, `src/db/repository.py`):**
   - Added `idx_media_rating_active`, `idx_media_date_active`, and `idx_media_places_active` (partial indexes on `is_missing = 0`).

@@ -386,6 +386,8 @@ class _CompareCanvas(QWidget):
         self._focus_peaking: bool = False
         self._clipping_pixmap: QPixmap | None = None
         self._clipping_warnings: bool = False
+        self._af_overlay: bool = False
+        self._af_areas: list[Any] = []
         self._cx_norm: float = 0.5
         self._cy_norm: float = 0.5
         self._zoom_factor: float = 1.0  # 1.0 = fit to pane
@@ -527,6 +529,12 @@ class _CompareCanvas(QWidget):
             self._clipping_pixmap = QPixmap.fromImage(ov) if not ov.isNull() else QPixmap()
         self.update()
 
+    def set_af_overlay(self, enabled: bool, areas: Sequence[Any] | None = None) -> None:
+        self._af_overlay = bool(enabled)
+        if areas is not None:
+            self._af_areas = list(areas)
+        self.update()
+
     def viewport_state(self) -> tuple[float, float, float, bool]:
         return (self._cx_norm, self._cy_norm, self._zoom_factor, self._fit_mode)
 
@@ -630,6 +638,18 @@ class _CompareCanvas(QWidget):
         if self._clipping_warnings and self._clipping_pixmap is not None and not self._clipping_pixmap.isNull():
             cl_src = QRectF(0, 0, self._clipping_pixmap.width(), self._clipping_pixmap.height())
             painter.drawPixmap(target_rect, self._clipping_pixmap, cl_src)
+
+        if self._af_overlay and self._af_areas:
+            for area in self._af_areas:
+                w = max(0.018, float(area.width)) * target_rect.width()
+                h = max(0.018, float(area.height)) * target_rect.height()
+                ax = target_rect.left() + float(area.x) * target_rect.width()
+                ay = target_rect.top() + float(area.y) * target_rect.height()
+                col = QColor("#22C55E" if area.focused else "#F59E0B")
+                fill = QColor(34, 197, 94, 38) if area.focused else QColor(245, 158, 11, 20)
+                painter.setPen(QPen(col, 2.0))
+                painter.setBrush(fill)
+                painter.drawRect(QRectF(ax, ay, w, h))
 
         # Subtle highlight box on active zoomed face
         if 0 <= self._active_face_idx < len(self._face_boxes) and not self._fit_mode:
@@ -1246,6 +1266,8 @@ class CompareMediaView(QWidget):
         self._lock_sync: bool = True
         self._focus_peaking: bool = False
         self._clipping_warnings: bool = False
+        self._af_overlay: bool = False
+        self._af_areas: list[Any] = []
         self._auto_advance: bool = False
         self._layout_mode: str = "side_by_side"  # side_by_side | top_bottom | three_up | quad | wipe
         self._candidate_ids: list[int] = []
@@ -1769,6 +1791,27 @@ class CompareMediaView(QWidget):
             p.canvas.set_clipping_warnings(self._clipping_warnings)
         if self._wipe_canvas is not None:
             self._wipe_canvas.set_clipping_warnings(self._clipping_warnings)
+
+    def set_af_overlay(self, enabled: bool) -> int:
+        """Toggle camera MakerNote AF focus point boxes across Compare panes; returns count of AF boxes found."""
+        self._af_overlay = bool(enabled)
+        total_areas = 0
+        from src.core.af_area_parser import get_af_areas
+
+        for idx, p in enumerate(self._panes):
+            areas: list[Any] = []
+            if self._af_overlay and idx < len(self._active_ids):
+                mid = self._active_ids[idx]
+                det = self.catalog_repo.get_media_detail(int(mid)) if self.catalog_repo is not None else None
+                fp = det.get("full_path") if det else None
+                if fp:
+                    try:
+                        areas = list(get_af_areas(fp) or [])
+                    except Exception:
+                        areas = []
+            total_areas += len(areas)
+            p.canvas.set_af_overlay(self._af_overlay, areas)
+        return total_areas
 
     def set_auto_advance(self, enabled: bool) -> None:
         self._auto_advance = bool(enabled)

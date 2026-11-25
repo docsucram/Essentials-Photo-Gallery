@@ -9997,23 +9997,55 @@ class SingleMediaViewer(QWidget):
 
         menu.addSeparator()
 
-        # 2. Quick Actions (Classic WLPG Order)
+        # 2. Desktop Background
         if not is_vid:
             act_bg = menu.addAction("Set as desktop background")
             if is_mw and hasattr(mw, "set_desktop_background_for_media") and mid is not None:
                 act_bg.triggered.connect(lambda: mw.set_desktop_background_for_media(mid))
 
-        act_rot_cw = menu.addAction("Rotate right")
-        act_rot_cw.setShortcut("Ctrl+.")
-        act_rot_cw.triggered.connect(lambda: self.rotate_media(clockwise=True))
-
-        act_rot_ccw = menu.addAction("Rotate left")
-        act_rot_ccw.setShortcut("Ctrl+,")
-        act_rot_ccw.triggered.connect(lambda: self.rotate_media(clockwise=False))
-
         menu.addSeparator()
 
-        # 3. Organize & AI
+        # 3. Organize & Flag (Unified: Flag ▸, Add to Album ▸)
+        if is_mw and mid is not None:
+            flag_menu = menu.addMenu(make_wlpg_icon("flag", 16), "Flag")
+            menu._flag_menu = flag_menu
+            flag_menu.setFont(QFont("Segoe UI", 9))
+
+            repo_for_fav = getattr(mw, "catalog_repo", None)
+            if hasattr(mw, "apply_favourite_to_selection") and getattr(mw, "favourites_enabled", True):
+                cur_fav = False
+                if repo_for_fav is not None:
+                    try:
+                        det_f = repo_for_fav.get_media_detail(int(mid))
+                        cur_fav = bool(det_f and det_f.get("is_favourite"))
+                    except Exception:
+                        cur_fav = False
+                fav_ico = mw.ribbon._make_cull_menu_icon("heart") if hasattr(mw, "ribbon") and hasattr(mw.ribbon, "_make_cull_menu_icon") else make_wlpg_icon("star_filled", 16)
+                act_fav = flag_menu.addAction(fav_ico, "Remove from Favourites" if cur_fav else "Mark as Favourite")
+                act_fav.setShortcut("F")
+                act_fav.triggered.connect(
+                    lambda _c=False, st=(not cur_fav), target_id=int(mid): mw.apply_favourite_to_selection(st, target_ids=[target_id])
+                )
+                flag_menu.addSeparator()
+
+            if hasattr(mw, "apply_flag_to_selection"):
+                _mk_ico = (
+                    mw.ribbon._make_cull_menu_icon
+                    if hasattr(mw, "ribbon") and hasattr(mw.ribbon, "_make_cull_menu_icon")
+                    else (lambda _k: make_wlpg_icon("flag", 16))
+                )
+                act_pick = flag_menu.addAction(_mk_ico("flag_picked"), "Pick")
+                act_pick.setShortcut("P")
+                act_pick.triggered.connect(lambda: mw.apply_flag_to_selection(1))
+
+                act_rej = flag_menu.addAction(_mk_ico("flag_rejected"), "Reject")
+                act_rej.setShortcut("X")
+                act_rej.triggered.connect(lambda: mw.apply_flag_to_selection(-1))
+
+                act_unf = flag_menu.addAction(_mk_ico("flag_unflagged"), "Unflag")
+                act_unf.setShortcut("U")
+                act_unf.triggered.connect(lambda: mw.apply_flag_to_selection(0))
+
         add_album_menu = menu.addMenu("Add to Album")
         menu._add_album_menu = add_album_menu
         add_album_menu.setFont(QFont("Segoe UI", 9))
@@ -10031,7 +10063,7 @@ class SingleMediaViewer(QWidget):
                 act_alb.triggered.connect(
                     lambda _chk=False, album_id=aid, album_name=aname, target_id=int(mid): (
                         repo.add_media_to_album(album_id, [target_id]),
-                        mw.refresh_navigation_and_autocomplete() if hasattr(mw, "refresh_navigation_and_autocomplete") else None,
+                        mw.refresh_navigation_and_autocomplete({"albums"}) if hasattr(mw, "refresh_navigation_and_autocomplete") else None,
                         mw.show_status_message(f"✓ Added to album '{album_name}'", 3000) if hasattr(mw, "show_status_message") else None,
                     )
                 )
@@ -10041,28 +10073,39 @@ class SingleMediaViewer(QWidget):
             if hasattr(mw, "create_new_album_with_media"):
                 act_new_alb.triggered.connect(lambda _chk=False, target_id=int(mid): mw.create_new_album_with_media([target_id]))
 
-        ai_menu = menu.addMenu("AI && Scan")
-        menu._ai_scan_menu = ai_menu
-        ai_menu.setFont(QFont("Segoe UI", 9))
+        menu.addSeparator()
+
+        # 4. Edit ▸ & Scan ▸ (Unified across Grid & Single Image View)
+        edit_menu = menu.addMenu(make_wlpg_icon("edited", 16), "Edit")
+        menu._edit_menu = edit_menu
+        edit_menu.setFont(QFont("Segoe UI", 9))
+
+        act_rot_ccw = edit_menu.addAction(make_wlpg_icon("rotate_ccw", 16), "Rotate left")
+        act_rot_ccw.setShortcut("Ctrl+,")
+        act_rot_ccw.triggered.connect(lambda: self.rotate_media(clockwise=False))
+
+        act_rot_cw = edit_menu.addAction(make_wlpg_icon("rotate_cw", 16), "Rotate right")
+        act_rot_cw.setShortcut("Ctrl+.")
+        act_rot_cw.triggered.connect(lambda: self.rotate_media(clockwise=True))
 
         if not is_vid:
-            act_sim = ai_menu.addAction("Find Similar Photos...")
+            edit_menu.addSeparator()
+            act_copy_subj = edit_menu.addAction("Copy subject to clipboard")
+            act_copy_subj.triggered.connect(self.copy_subject_to_clipboard)
+
+            act_rm_bg = edit_menu.addAction("Remove background")
+            act_rm_bg.triggered.connect(self.remove_background_cutout)
+
+        scan_menu = menu.addMenu(make_wlpg_icon("search", 16), "Scan")
+        menu._ai_scan_menu = scan_menu
+        scan_menu.setFont(QFont("Segoe UI", 9))
+
+        if not is_vid:
+            act_sim = scan_menu.addAction("Find Similar Photos...")
             if is_mw and hasattr(mw, "open_find_similar_for_media") and mid is not None:
                 act_sim.triggered.connect(lambda: mw.open_find_similar_for_media(mid))
 
-            act_copy_subj = ai_menu.addAction("Copy subject to clipboard")
-            act_copy_subj.triggered.connect(self.copy_subject_to_clipboard)
-
-            act_rm_bg = ai_menu.addAction("Remove background")
-            act_rm_bg.triggered.connect(self.remove_background_cutout)
-
-            act_af = ai_menu.addAction("Show AF Focus Points")
-            act_af.setShortcut("A")
-            act_af.setCheckable(True)
-            act_af.setChecked(bool(getattr(self, "_show_af_overlay", False)))
-            act_af.triggered.connect(self.toggle_af_overlay)
-
-        act_rescan = ai_menu.addAction("Rescan for faces")
+        act_rescan = scan_menu.addAction("Rescan for faces")
         if is_mw and mid is not None:
             act_rescan.triggered.connect(lambda: mw.rescan_faces_for_selection([mid]))
 
@@ -10075,11 +10118,11 @@ class SingleMediaViewer(QWidget):
                 except Exception:
                     already_ocr = False
             ocr_label = "Rescan for text (OCR)" if already_ocr else "Scan for text (OCR)"
-            act_ocr = ai_menu.addAction(ocr_label)
+            act_ocr = scan_menu.addAction(ocr_label)
             if is_mw and hasattr(mw, "scan_ocr_for_selection") and mid is not None:
                 act_ocr.triggered.connect(lambda: mw.scan_ocr_for_selection([mid]))
 
-        # Boxless tag quick-healing options in AI & Scan submenu
+        # Boxless tag quick-healing options in Scan submenu
         boxless_tags = [
             p for p in getattr(self, "_current_people_regions", [])
             if int(p.get("state", 1)) == 1
@@ -10087,11 +10130,11 @@ class SingleMediaViewer(QWidget):
             and (p.get("person_name") or p.get("name"))
         ]
         if boxless_tags:
-            ai_menu.addSeparator()
+            scan_menu.addSeparator()
             for bt in boxless_tags:
                 b_name = str(bt.get("person_name") or bt.get("name"))
                 b_pid = int(bt.get("person_id") or bt.get("id") or 0)
-                act_b = ai_menu.addAction(f"Locate {b_name} on photo...")
+                act_b = scan_menu.addAction(f"Locate {b_name} on photo...")
                 act_b.triggered.connect(
                     lambda checked=False, pid_val=b_pid, name_val=b_name: self.start_face_tag_mode_for_person(pid_val, name_val)
                 )

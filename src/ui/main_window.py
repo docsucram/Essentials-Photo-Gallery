@@ -1373,18 +1373,34 @@ class PhotoGalleryMainWindow(QMainWindow):
         # 5. Wire Qt Signals & Slots
         self._connect_signals()
 
-        # 6. Apply WLPG Classic Aero Theme & Initial Refresh
-        self.apply_theme("wlpg_aero")
+        # 6. Apply saved (or default WLPG Aero) Theme ONCE & Initial Nav Refresh
+        initial_theme = "wlpg_aero"
+        if "PYTEST_CURRENT_TEST" not in os.environ:
+            try:
+                _s = QSettings("PhotoGallery64", "PhotoGallery64")
+                _t = _s.value("theme", type=str)
+                if _t in ("wlpg_aero", "modern", "dark"):
+                    initial_theme = _t
+                _it = _s.value("icon_theme", type=str)
+                if _it in ("wlpg_aero", "fluent", "minimal"):
+                    self.current_icon_theme = _it
+                    icon_provider.set_icon_theme(_it)
+            except Exception:
+                pass
+        self.apply_theme(initial_theme)
         self.refresh_navigation_and_autocomplete()
-        self.rebuild_and_run_query()
 
         # Seed initial navigation state into history stack
         self._nav_history = [self.left_nav_dock.current_filter_state()]
         self._nav_index = 0
         self._update_nav_buttons()
 
-        # 7. Restore persisted application state (folder, view, docks, geometry)
+        # 7. Restore persisted application state (runs single initial query with restored filter)
+        self._did_initial_query = False
         self._restore_app_state()
+        if not self._did_initial_query:
+            self.rebuild_and_run_query()
+            self._did_initial_query = True
 
         # 8. Stagger background startup tasks so initial UI, thumbnails, and scrolling stay responsive
         QTimer.singleShot(400, self._check_stale_scan_crash_trace)
@@ -9475,6 +9491,11 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.compare_view.zoom_fit()
         elif action_id.startswith("compare_focus_peaking:"):
             self.compare_view.set_focus_peaking(action_id.endswith(":1"))
+        elif action_id.startswith("compare_af_points:"):
+            enabled = action_id.endswith(":1")
+            found = self.compare_view.set_af_overlay(enabled)
+            if enabled and found == 0:
+                self.show_status_message("No camera AF focus point metadata in compared photos", 3000)
         elif action_id.startswith("compare_clipping_warnings:"):
             self.compare_view.set_clipping_warnings(action_id.endswith(":1"))
         elif action_id.startswith("compare_auto_advance:"):
@@ -11045,6 +11066,18 @@ class PhotoGalleryMainWindow(QMainWindow):
             dirty = self.catalog_repo.count_dirty_media()
             pending_txt = f" ({dirty:,} pending)" if dirty > 0 else ""
             self.statusBar().showMessage(f"Write to files turned off (Catalog-only mode{pending_txt})", 3000)
+
+    def copy_subject_for_media(self, media_id: int) -> None:
+        """Open single viewer if needed and copy the foreground subject cutout to clipboard."""
+        if getattr(self.media_viewer, "current_media_id", None) != int(media_id):
+            self.open_single_viewer(int(media_id))
+        self.media_viewer.copy_subject_to_clipboard()
+
+    def remove_background_for_media(self, media_id: int) -> None:
+        """Open single viewer if needed and save a background-removed cutout copy."""
+        if getattr(self.media_viewer, "current_media_id", None) != int(media_id):
+            self.open_single_viewer(int(media_id))
+        self.media_viewer.remove_background_cutout()
 
     def open_tag_hierarchy_dialog(self) -> None:
         """Opens the 'All of your tags' dialog matching WLPG with drag-and-drop hierarchy organization."""
@@ -12865,6 +12898,13 @@ class PhotoGalleryMainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _safe_deduplicate_media_people_async(self) -> None:
+        """Runs phantom/duplicate person-tag cleanup after startup without blocking launch."""
+        try:
+            self.catalog_repo.deduplicate_media_people()
+        except Exception:
+            pass
+
     def _restore_app_state(self, force: bool = False) -> None:
         """Restores window geometry, filter query, selected folder, docks, and view mode from QSettings."""
         if not force and "PYTEST_CURRENT_TEST" in os.environ:
@@ -13032,18 +13072,20 @@ class PhotoGalleryMainWindow(QMainWindow):
 
             saved_theme = _get_val("theme", "wlpg_aero")
             if saved_theme and saved_theme in ("wlpg_aero", "modern", "dark"):
-                self.apply_theme(saved_theme)
+                if getattr(self, "current_theme", None) != saved_theme:
+                    self.apply_theme(saved_theme)
 
             saved_icon_theme = _get_val("icon_theme", "wlpg_aero")
             if saved_icon_theme and saved_icon_theme in ("wlpg_aero", "fluent", "minimal"):
-                self.current_icon_theme = saved_icon_theme
-                icon_provider.set_icon_theme(saved_icon_theme)
+                if getattr(self, "current_icon_theme", None) != saved_icon_theme:
+                    self.current_icon_theme = saved_icon_theme
+                    icon_provider.set_icon_theme(saved_icon_theme)
 
-            # Clean up any phantom/duplicate person tags on startup
-            try:
-                self.catalog_repo.deduplicate_media_people()
-            except Exception:
-                pass
+            # Defer phantom/duplicate person-tag cleanup so it never blocks app launch
+            QTimer.singleShot(
+                2200,
+                lambda: self._safe_deduplicate_media_people_async(),
+            )
 
             # Restore un-pinned private folders visibility across restarts
             try:
@@ -13057,6 +13099,7 @@ class PhotoGalleryMainWindow(QMainWindow):
 
             # Re-run query with restored filter
             records = self.rebuild_and_run_query()
+            self._did_initial_query = True
             if len(records) == 0 and self.catalog_repo.get_total_media_count() > 0:
                 # Restored filter produced 0 results (e.g. stale/conflicting sub-filter from prior session).
                 # Reset to All Media so the user never starts with an empty/blank gallery.
