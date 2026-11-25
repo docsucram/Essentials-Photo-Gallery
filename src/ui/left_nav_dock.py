@@ -1135,6 +1135,8 @@ class LeftNavigationDock(QDockWidget):
             self._show_cameras = bool(visible)
             if hasattr(self, "root_cameras"):
                 self.root_cameras.setHidden(not self._show_cameras)
+                if self._show_cameras and not self._camera_items and getattr(self, "_repo", None) is not None:
+                    self.refresh_trees(self._repo, sections={"cameras"})
         elif "subject" in sec:
             self._show_subjects = bool(visible)
             if hasattr(self, "root_subjects"):
@@ -1700,7 +1702,12 @@ class LeftNavigationDock(QDockWidget):
                 if not full_rebuild and hasattr(self, "root_cameras") and self.root_cameras is not None:
                     self.root_cameras.takeChildren()
                 self._camera_items.clear()
-                if hasattr(self, "root_cameras") and self.root_cameras is not None and hasattr(repo, "query_camera_counts"):
+                if (
+                    self._show_cameras
+                    and hasattr(self, "root_cameras")
+                    and self.root_cameras is not None
+                    and hasattr(repo, "query_camera_counts")
+                ):
                     cam_icon = make_wlpg_icon("camera", 16)
                     for cam_name, cam_cnt in repo.query_camera_counts():
                         disp_name = "No camera info" if cam_name == "__NO_CAMERA__" else cam_name

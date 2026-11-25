@@ -241,25 +241,42 @@ class DualDatabaseEngine:
         except Exception as exc:
             logger.warning("Error migrating media_people schema: %s", exc)
 
-        # 3. Data Migration: Mark existing manual/imported face tags as confirmed (state = 1)
+        # 3. One-time Data Migration: Mark legacy manual/imported face tags as confirmed (state = 1)
+        #    Guarded by schema_flags so we never run a 7+ second correlated UPDATE on every launch.
         try:
-            cur.execute(
-                """
-                UPDATE media_people
-                SET state = 1, is_manual = 1
-                WHERE person_id IS NOT NULL AND state = 0 AND suggested_person_id IS NULL;
-                """
-            )
-            cur.execute(
-                """
-                UPDATE people
-                SET confirmed_count = (
-                    SELECT COUNT(*)
-                    FROM media_people mp
-                    WHERE mp.person_id = people.id AND mp.state = 1
-                );
-                """
-            )
+            cur.execute("CREATE TABLE IF NOT EXISTS schema_flags (name TEXT PRIMARY KEY);")
+            mig_people_done = cur.execute(
+                "SELECT 1 FROM schema_flags WHERE name = 'migrate_confirmed_people_v1';"
+            ).fetchone()
+            if not mig_people_done:
+                cur.execute(
+                    """
+                    UPDATE media_people
+                    SET state = 1, is_manual = 1
+                    WHERE person_id IS NOT NULL AND state = 0 AND suggested_person_id IS NULL;
+                    """
+                )
+                cur.execute(
+                    """
+                    UPDATE people
+                    SET confirmed_count = COALESCE(
+                        (
+                            SELECT cnt
+                            FROM (
+                                SELECT person_id, COUNT(*) AS cnt
+                                FROM media_people
+                                WHERE state = 1 AND person_id IS NOT NULL
+                                GROUP BY person_id
+                            ) agg
+                            WHERE agg.person_id = people.id
+                        ),
+                        0
+                    );
+                    """
+                )
+                cur.execute(
+                    "INSERT OR IGNORE INTO schema_flags(name) VALUES ('migrate_confirmed_people_v1');"
+                )
         except Exception:
             pass
 
