@@ -1310,8 +1310,14 @@ class LeftNavigationDock(QDockWidget):
         repo: CatalogRepository,
         preloaded_people: list[dict[str, Any]] | None = None,
         preloaded_tags: list[dict[str, Any]] | None = None,
+        sections: set[str] | frozenset[str] | Sequence[str] | None = None,
     ) -> None:
-        """Populates Folders, Date Taken, Descriptive Tags, People, and Ratings from catalog.db."""
+        """Populates Folders, Date Taken, Descriptive Tags, People, Ratings, Places, Cameras, and Subjects.
+
+        When ``sections`` is provided (e.g. ``{"tags", "albums"}``) and the tree is already
+        initialized, only those sections are queried and rebuilt—avoiding unnecessary SQL and
+        QTreeWidget churn across untouched sections.
+        """
         self._repo = repo
         self._updating_tree = True
         sb = self.tree.verticalScrollBar()
@@ -1320,6 +1326,15 @@ class LeftNavigationDock(QDockWidget):
         self.tree.setUpdatesEnabled(False)
         try:
             had_existing_tree = hasattr(self, "root_all") and self.root_all is not None
+            full_rebuild = (sections is None) or (not had_existing_tree)
+            target_sections: set[str] = (
+                {"folders", "albums", "dates", "tags", "people", "ratings", "places", "cameras", "subjects"}
+                if full_rebuild
+                else {str(s).strip().lower() for s in sections if str(s).strip()}
+            )
+            if not target_sections:
+                return
+
             was_all_expanded = self.root_all.isExpanded() if hasattr(self, "root_all") else True
             was_dates_expanded = self.root_dates.isExpanded() if hasattr(self, "root_dates") else True
             was_tags_expanded = self.root_tags.isExpanded() if hasattr(self, "root_tags") else True
@@ -1333,14 +1348,18 @@ class LeftNavigationDock(QDockWidget):
             was_smart_albums_expanded = (
                 self.root_smart_albums.isExpanded() if hasattr(self, "root_smart_albums") else True
             )
-            expanded_folder_ids = {
-                fid for fid, itm in self._folder_items.items() if itm.isExpanded()
-            }
-            expanded_tag_ids = {
-                tid for tid, itm in self._tag_items.items() if itm.isExpanded()
-            }
+            expanded_folder_ids = (
+                {fid for fid, itm in self._folder_items.items() if itm.isExpanded()}
+                if "folders" in target_sections
+                else set()
+            )
+            expanded_tag_ids = (
+                {tid for tid, itm in self._tag_items.items() if itm.isExpanded()}
+                if "tags" in target_sections
+                else set()
+            )
             expanded_date_payloads: set[tuple] = set()
-            if hasattr(self, "root_dates") and self.root_dates is not None:
+            if "dates" in target_sections and hasattr(self, "root_dates") and self.root_dates is not None:
                 def _collect_expanded_payloads(parent_item: QTreeWidgetItem, out: set[tuple]) -> None:
                     for idx in range(parent_item.childCount()):
                         ch = parent_item.child(idx)
@@ -1351,7 +1370,7 @@ class LeftNavigationDock(QDockWidget):
                             _collect_expanded_payloads(ch, out)
                 _collect_expanded_payloads(self.root_dates, expanded_date_payloads)
             expanded_place_payloads: set[tuple] = set()
-            if hasattr(self, "root_places") and self.root_places is not None:
+            if "places" in target_sections and hasattr(self, "root_places") and self.root_places is not None:
                 def _collect_expanded_places(parent_item: QTreeWidgetItem, out: set[tuple]) -> None:
                     for idx in range(parent_item.childCount()):
                         ch = parent_item.child(idx)
@@ -1362,316 +1381,344 @@ class LeftNavigationDock(QDockWidget):
                             _collect_expanded_places(ch, out)
                 _collect_expanded_places(self.root_places, expanded_place_payloads)
 
-            self._init_root_sections()
-            self.tree.blockSignals(True)
+            if full_rebuild:
+                self._init_root_sections()
+                self.tree.blockSignals(True)
 
-            self._populate_albums_section(repo)
-            self.root_albums.setExpanded(was_albums_expanded)
-            self.root_my_albums.setExpanded(was_my_albums_expanded)
-            self.root_smart_albums.setExpanded(was_smart_albums_expanded)
-
-            folder_icon = make_wlpg_icon("folder", 16)
-            cal_icon = make_wlpg_icon("calendar", 16)
-            tag_icon = make_wlpg_icon("tag", 16)
-            person_icon = make_wlpg_icon("person", 16)
-            star_icon = make_wlpg_icon("star_filled", 16)
-            empty_star_icon = make_wlpg_icon("star_empty", 16)
+            if "albums" in target_sections:
+                self._populate_albums_section(repo)
+                self.root_albums.setExpanded(was_albums_expanded)
+                self.root_my_albums.setExpanded(was_my_albums_expanded)
+                self.root_smart_albums.setExpanded(was_smart_albums_expanded)
 
             # 1. Populate Folders hierarchy under All photos and videos
-            folders = repo.get_folders()
-            for f in folders:
-                fid = int(f["id"])
-                fname = str(f["name"])
-                fpath_str = str(f["path"])
-                fname_lower = fname.lower()
-                if "picture" in fname_lower:
-                    f_icon = make_wlpg_icon("pictures_library", 16)
-                elif "video" in fname_lower:
-                    f_icon = make_wlpg_icon("videos_library", 16)
-                else:
-                    f_icon = folder_icon
-
-                is_priv = int(f.get("is_private") or 0) == 1
-                display_name = f"🔒 {fname}" if is_priv else fname
-                item = QTreeWidgetItem([display_name])
-                item.setData(0, _NODE_TYPE_ROLE, "folder")
-                item.setData(0, _NODE_PAYLOAD_ROLE, fid)
-                item.setData(0, _OLD_NAME_ROLE, fname)
-                item.setData(0, _OLD_PATH_ROLE, fpath_str)
-                item.setIcon(0, f_icon)
-                item.setToolTip(0, f"{fpath_str} (Private)" if is_priv else fpath_str)
-                self._folder_items[fid] = item
-
-            path_to_fid = {
-                os.path.normcase(str(f["path"]).rstrip("\\/")): int(f["id"])
-                for f in folders
-                if f.get("path")
-            }
-
-            for f in folders:
-                fid = int(f["id"])
-                pid = f["parent_id"]
-                item = self._folder_items[fid]
-                if pid is not None and int(pid) in self._folder_items and int(pid) != fid:
-                    self._folder_items[int(pid)].addChild(item)
-                else:
-                    parent_path = os.path.normcase(str(Path(str(f["path"])).parent).rstrip("\\/"))
-                    inferred_pid = path_to_fid.get(parent_path)
-                    if inferred_pid is not None and inferred_pid != fid and inferred_pid in self._folder_items:
-                        self._folder_items[inferred_pid].addChild(item)
+            if "folders" in target_sections:
+                if not full_rebuild:
+                    self.root_all.takeChildren()
+                    self._folder_items.clear()
+                folder_icon = make_wlpg_icon("folder", 16)
+                folders = repo.get_folders()
+                for f in folders:
+                    fid = int(f["id"])
+                    fname = str(f["name"])
+                    fpath_str = str(f["path"])
+                    fname_lower = fname.lower()
+                    if "picture" in fname_lower:
+                        f_icon = make_wlpg_icon("pictures_library", 16)
+                    elif "video" in fname_lower:
+                        f_icon = make_wlpg_icon("videos_library", 16)
                     else:
-                        self.root_all.addChild(item)
+                        f_icon = folder_icon
 
-            for fid, item in self._folder_items.items():
-                if fid in expanded_folder_ids:
-                    item.setExpanded(True)
+                    is_priv = int(f.get("is_private") or 0) == 1
+                    display_name = f"🔒 {fname}" if is_priv else fname
+                    item = QTreeWidgetItem([display_name])
+                    item.setData(0, _NODE_TYPE_ROLE, "folder")
+                    item.setData(0, _NODE_PAYLOAD_ROLE, fid)
+                    item.setData(0, _OLD_NAME_ROLE, fname)
+                    item.setData(0, _OLD_PATH_ROLE, fpath_str)
+                    item.setIcon(0, f_icon)
+                    item.setToolTip(0, f"{fpath_str} (Private)" if is_priv else fpath_str)
+                    self._folder_items[fid] = item
+
+                path_to_fid = {
+                    os.path.normcase(str(f["path"]).rstrip("\\/")): int(f["id"])
+                    for f in folders
+                    if f.get("path")
+                }
+
+                for f in folders:
+                    fid = int(f["id"])
+                    pid = f["parent_id"]
+                    item = self._folder_items[fid]
+                    if pid is not None and int(pid) in self._folder_items and int(pid) != fid:
+                        self._folder_items[int(pid)].addChild(item)
+                    else:
+                        parent_path = os.path.normcase(str(Path(str(f["path"])).parent).rstrip("\\/"))
+                        inferred_pid = path_to_fid.get(parent_path)
+                        if inferred_pid is not None and inferred_pid != fid and inferred_pid in self._folder_items:
+                            self._folder_items[inferred_pid].addChild(item)
+                        else:
+                            self.root_all.addChild(item)
+
+                for fid, item in self._folder_items.items():
+                    if fid in expanded_folder_ids:
+                        item.setExpanded(True)
+                if hasattr(self, "root_all") and self.root_all is not None:
+                    self.root_all.setExpanded(was_all_expanded if had_existing_tree else True)
 
             # 2. Populate Date Taken hierarchy (Year -> Month, with Day nodes lazily populated on expand)
-            self._date_days_by_ym.clear()
-            self._populated_date_months.clear()
-            date_rows = repo.get_date_tree_counts()
-            # Strict nested aggregation: year -> month -> list of (day, day_label, cnt)
-            years_data: dict[int, dict[int, list[tuple[int, str, int]]]] = {}
-            for d in date_rows:
-                y = int(d["year"])
-                m = int(d["month"])
-                day = int(d["day"])
-                day_label = str(d["day_label"])
-                cnt = int(d["count"])
-                years_data.setdefault(y, {}).setdefault(m, []).append((day, day_label, cnt))
+            if "dates" in target_sections:
+                if not full_rebuild:
+                    self.root_dates.takeChildren()
+                cal_icon = make_wlpg_icon("calendar", 16)
+                self._date_days_by_ym.clear()
+                self._populated_date_months.clear()
+                date_rows = repo.get_date_tree_counts()
+                # Strict nested aggregation: year -> month -> list of (day, day_label, cnt)
+                years_data: dict[int, dict[int, list[tuple[int, str, int]]]] = {}
+                for d in date_rows:
+                    y = int(d["year"])
+                    m = int(d["month"])
+                    day = int(d["day"])
+                    day_label = str(d["day_label"])
+                    cnt = int(d["count"])
+                    years_data.setdefault(y, {}).setdefault(m, []).append((day, day_label, cnt))
 
-            year_items: list[QTreeWidgetItem] = []
-            for y in sorted(years_data.keys(), reverse=True):
-                months_data = years_data[y]
-                year_total = sum(cnt for m_days in months_data.values() for (_, _, cnt) in m_days)
-                y_item = QTreeWidgetItem([f"{y} ({year_total})"])
-                y_item.setData(0, _NODE_TYPE_ROLE, "date")
-                y_item.setData(0, _NODE_PAYLOAD_ROLE, (y, None, None))
-                y_item.setIcon(0, cal_icon)
+                year_items: list[QTreeWidgetItem] = []
+                for y in sorted(years_data.keys(), reverse=True):
+                    months_data = years_data[y]
+                    year_total = sum(cnt for m_days in months_data.values() for (_, _, cnt) in m_days)
+                    y_item = QTreeWidgetItem([f"{y} ({year_total})"])
+                    y_item.setData(0, _NODE_TYPE_ROLE, "date")
+                    y_item.setData(0, _NODE_PAYLOAD_ROLE, (y, None, None))
+                    y_item.setIcon(0, cal_icon)
 
-                month_items: list[QTreeWidgetItem] = []
-                for m in sorted(months_data.keys(), reverse=True):
-                    days_list = sorted(months_data[m], key=lambda x: x[0], reverse=True)
-                    month_total = sum(cnt for (_, _, cnt) in days_list)
-                    m_name = calendar.month_name[m] if 1 <= m <= 12 else f"Month {m}"
-                    m_item = QTreeWidgetItem([f"{m_name} ({month_total})"])
-                    m_item.setData(0, _NODE_TYPE_ROLE, "date")
-                    m_item.setData(0, _NODE_PAYLOAD_ROLE, (y, m, None))
-                    m_item.setIcon(0, cal_icon)
-                    if days_list:
-                        self._date_days_by_ym[(y, m)] = days_list
-                        m_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
-                    month_items.append(m_item)
-                if month_items:
-                    y_item.addChildren(month_items)
-                year_items.append(y_item)
-            if year_items:
-                self.root_dates.addChildren(year_items)
+                    month_items: list[QTreeWidgetItem] = []
+                    for m in sorted(months_data.keys(), reverse=True):
+                        days_list = sorted(months_data[m], key=lambda x: x[0], reverse=True)
+                        month_total = sum(cnt for (_, _, cnt) in days_list)
+                        m_name = calendar.month_name[m] if 1 <= m <= 12 else f"Month {m}"
+                        m_item = QTreeWidgetItem([f"{m_name} ({month_total})"])
+                        m_item.setData(0, _NODE_TYPE_ROLE, "date")
+                        m_item.setData(0, _NODE_PAYLOAD_ROLE, (y, m, None))
+                        m_item.setIcon(0, cal_icon)
+                        if days_list:
+                            self._date_days_by_ym[(y, m)] = days_list
+                            m_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+                        month_items.append(m_item)
+                    if month_items:
+                        y_item.addChildren(month_items)
+                    year_items.append(y_item)
+                if year_items:
+                    self.root_dates.addChildren(year_items)
+                if hasattr(self, "root_dates") and self.root_dates is not None:
+                    self.root_dates.setExpanded(was_dates_expanded if had_existing_tree else True)
+                    if expanded_date_payloads:
+                        for yi in range(self.root_dates.childCount()):
+                            y_itm = self.root_dates.child(yi)
+                            if y_itm is None:
+                                continue
+                            if y_itm.data(0, _NODE_PAYLOAD_ROLE) in expanded_date_payloads:
+                                y_itm.setExpanded(True)
+                            for mi in range(y_itm.childCount()):
+                                m_itm = y_itm.child(mi)
+                                if m_itm is not None and m_itm.data(0, _NODE_PAYLOAD_ROLE) in expanded_date_payloads:
+                                    self._ensure_date_month_days_populated(m_itm)
+                                    m_itm.setExpanded(True)
 
             # 3. Populate Descriptive Tags hierarchy + "Not tagged" node
-            self.item_untagged = QTreeWidgetItem(["Not tagged"])
-            self.item_untagged.setData(0, _NODE_TYPE_ROLE, "untagged")
-            self.item_untagged.setIcon(0, tag_icon)
-            if self._untagged_only:
-                self.item_untagged.setSelected(True)
-            self.root_tags.addChild(self.item_untagged)
+            if "tags" in target_sections:
+                if not full_rebuild:
+                    self.root_tags.takeChildren()
+                    self._tag_items.clear()
+                tag_icon = make_wlpg_icon("tag", 16)
+                self.item_untagged = QTreeWidgetItem(["Not tagged"])
+                self.item_untagged.setData(0, _NODE_TYPE_ROLE, "untagged")
+                self.item_untagged.setIcon(0, tag_icon)
+                if self._untagged_only:
+                    self.item_untagged.setSelected(True)
+                self.root_tags.addChild(self.item_untagged)
 
-            tag_rows = preloaded_tags if preloaded_tags is not None else repo.get_tag_tree()
-            for t in tag_rows:
-                tid = int(t["id"])
-                tname = str(t["name"])
-                cnt = int(t["direct_count"])
-                label = f"{tname} ({cnt})" if cnt > 0 else tname
-                t_item = QTreeWidgetItem([label])
-                t_item.setData(0, _NODE_TYPE_ROLE, "tag")
-                t_item.setData(0, _NODE_PAYLOAD_ROLE, tid)
-                t_item.setData(0, _TAG_FILTER_STATE_ROLE, "neutral")
-                t_item.setData(0, _OLD_NAME_ROLE, tname)
-                t_item.setData(0, _OLD_PATH_ROLE, str(t["full_path"]))
-                t_item.setIcon(0, tag_icon)
-                t_item.setToolTip(0, f"{t['full_path']} (Click to select, Ctrl+click to multi-select)")
-                self._tag_items[tid] = t_item
+                tag_rows = preloaded_tags if preloaded_tags is not None else repo.get_tag_tree()
+                for t in tag_rows:
+                    tid = int(t["id"])
+                    tname = str(t["name"])
+                    cnt = int(t["direct_count"])
+                    label = f"{tname} ({cnt})" if cnt > 0 else tname
+                    t_item = QTreeWidgetItem([label])
+                    t_item.setData(0, _NODE_TYPE_ROLE, "tag")
+                    t_item.setData(0, _NODE_PAYLOAD_ROLE, tid)
+                    t_item.setData(0, _TAG_FILTER_STATE_ROLE, "neutral")
+                    t_item.setData(0, _OLD_NAME_ROLE, tname)
+                    t_item.setData(0, _OLD_PATH_ROLE, str(t["full_path"]))
+                    t_item.setIcon(0, tag_icon)
+                    t_item.setToolTip(0, f"{t['full_path']} (Click to select, Ctrl+click to multi-select)")
+                    self._tag_items[tid] = t_item
 
-            for t in tag_rows:
-                tid = int(t["id"])
-                pid = t["parent_id"]
-                t_item = self._tag_items[tid]
-                if pid is not None and int(pid) in self._tag_items:
-                    self._tag_items[int(pid)].addChild(t_item)
-                else:
-                    self.root_tags.addChild(t_item)
-                if tid in self._include_tag_ids:
-                    t_item.setSelected(True)
-                    self._apply_tag_item_visual_state(t_item, "include")
-                elif tid in self._exclude_tag_ids:
-                    self._apply_tag_item_visual_state(t_item, "exclude")
+                for t in tag_rows:
+                    tid = int(t["id"])
+                    pid = t["parent_id"]
+                    t_item = self._tag_items[tid]
+                    if pid is not None and int(pid) in self._tag_items:
+                        self._tag_items[int(pid)].addChild(t_item)
+                    else:
+                        self.root_tags.addChild(t_item)
+                    if tid in self._include_tag_ids:
+                        t_item.setSelected(True)
+                        self._apply_tag_item_visual_state(t_item, "include")
+                    elif tid in self._exclude_tag_ids:
+                        self._apply_tag_item_visual_state(t_item, "exclude")
+                if hasattr(self, "root_tags") and self.root_tags is not None:
+                    self.root_tags.setExpanded(was_tags_expanded if had_existing_tree else True)
+                    for tid_exp in expanded_tag_ids:
+                        t_itm = self._tag_items.get(tid_exp)
+                        if t_itm is not None:
+                            t_itm.setExpanded(True)
 
             # 4. Populate People nodes (with real face avatar icon when available)
-            people_rows = preloaded_people if preloaded_people is not None else repo.get_people_list()
-            for p in people_rows:
-                pid = int(p["id"])
-                pname = str(p["name"])
-                cnt = int(p["media_count"])
-                blob = p.get("thumbnail_blob")
-                p_item = QTreeWidgetItem([f"{pname} ({cnt})" if cnt > 0 else pname])
-                p_item.setData(0, _NODE_TYPE_ROLE, "person")
-                p_item.setData(0, _NODE_PAYLOAD_ROLE, pid)
-                p_item.setData(0, _HAS_AVATAR_ROLE, bool(blob))
-                if blob:
-                    cache_key = (pid, len(blob))
-                    av_icon = self._person_avatar_icon_cache.get(cache_key)
-                    if av_icon is None:
-                        av_icon = QIcon(make_person_avatar_pixmap(pname, blob, 18))
-                        self._person_avatar_icon_cache[cache_key] = av_icon
-                    p_item.setIcon(0, av_icon)
-                else:
-                    p_item.setIcon(0, person_icon)
-                if pid in self._person_ids:
-                    p_item.setSelected(True)
-                self.root_people.addChild(p_item)
-                self._person_items[pid] = p_item
+            if "people" in target_sections:
+                if not full_rebuild:
+                    self.root_people.takeChildren()
+                    self._person_items.clear()
+                person_icon = make_wlpg_icon("person", 16)
+                people_rows = preloaded_people if preloaded_people is not None else repo.get_people_list()
+                for p in people_rows:
+                    pid = int(p["id"])
+                    pname = str(p["name"])
+                    cnt = int(p["media_count"])
+                    blob = p.get("thumbnail_blob")
+                    p_item = QTreeWidgetItem([f"{pname} ({cnt})" if cnt > 0 else pname])
+                    p_item.setData(0, _NODE_TYPE_ROLE, "person")
+                    p_item.setData(0, _NODE_PAYLOAD_ROLE, pid)
+                    p_item.setData(0, _HAS_AVATAR_ROLE, bool(blob))
+                    if blob:
+                        cache_key = (pid, len(blob))
+                        av_icon = self._person_avatar_icon_cache.get(cache_key)
+                        if av_icon is None:
+                            av_icon = QIcon(make_person_avatar_pixmap(pname, blob, 18))
+                            self._person_avatar_icon_cache[cache_key] = av_icon
+                        p_item.setIcon(0, av_icon)
+                    else:
+                        p_item.setIcon(0, person_icon)
+                    if pid in self._person_ids:
+                        p_item.setSelected(True)
+                    self.root_people.addChild(p_item)
+                    self._person_items[pid] = p_item
+                self.root_people.setExpanded(was_people_expanded)
 
             # 5. Populate Ratings nodes (5 stars .. 1 star, Unrated)
-            rating_counts = repo.get_rating_counts()
-            rating_labels = [
-                (5, "★★★★★ (5 stars)"),
-                (4, "★★★★☆ (4 stars)"),
-                (3, "★★★☆☆ (3 stars)"),
-                (2, "★★☆☆☆ (2 stars)"),
-                (1, "★☆☆☆☆ (1 star)"),
-                (0, "Unrated"),
-            ]
-            for r_val, r_label in rating_labels:
-                cnt = rating_counts.get(r_val, 0)
-                r_item = QTreeWidgetItem([f"{r_label} ({cnt})"])
-                r_item.setData(0, _NODE_TYPE_ROLE, "rating")
-                r_item.setData(0, _NODE_PAYLOAD_ROLE, r_val)
-                r_item.setIcon(0, star_icon if r_val > 0 else empty_star_icon)
-                r_item.setFlags(r_item.flags() | Qt.ItemIsUserCheckable)
-                r_item.setCheckState(
-                    0, Qt.Checked if r_val in self._ratings else Qt.Unchecked
-                )
-                self.root_ratings.addChild(r_item)
-                self._rating_items[r_val] = r_item
+            if "ratings" in target_sections:
+                if not full_rebuild:
+                    self.root_ratings.takeChildren()
+                    self._rating_items.clear()
+                star_icon = make_wlpg_icon("star_filled", 16)
+                empty_star_icon = make_wlpg_icon("star_empty", 16)
+                rating_counts = repo.get_rating_counts()
+                rating_labels = [
+                    (5, "★★★★★ (5 stars)"),
+                    (4, "★★★★☆ (4 stars)"),
+                    (3, "★★★☆☆ (3 stars)"),
+                    (2, "★★☆☆☆ (2 stars)"),
+                    (1, "★☆☆☆☆ (1 star)"),
+                    (0, "Unrated"),
+                ]
+                for r_val, r_label in rating_labels:
+                    cnt = rating_counts.get(r_val, 0)
+                    r_item = QTreeWidgetItem([f"{r_label} ({cnt})"])
+                    r_item.setData(0, _NODE_TYPE_ROLE, "rating")
+                    r_item.setData(0, _NODE_PAYLOAD_ROLE, r_val)
+                    r_item.setIcon(0, star_icon if r_val > 0 else empty_star_icon)
+                    r_item.setFlags(r_item.flags() | Qt.ItemIsUserCheckable)
+                    r_item.setCheckState(
+                        0, Qt.Checked if r_val in self._ratings else Qt.Unchecked
+                    )
+                    self.root_ratings.addChild(r_item)
+                    self._rating_items[r_val] = r_item
+                if hasattr(self, "root_ratings") and self.root_ratings is not None:
+                    self.root_ratings.setExpanded(was_ratings_expanded)
 
             # 6. Populate Places hierarchy (Country -> State/Region -> City)
-            places_icon = make_wlpg_icon("geotag", 16)
-            if hasattr(repo, "get_places_hierarchy"):
-                places_data = repo.get_places_hierarchy()
-                countries: dict[str, dict[str, dict[str, int]]] = {}
-                for p in places_data:
-                    c = (p.get("country") or "").strip()
-                    s = (p.get("state") or "").strip()
-                    city = (p.get("city") or "").strip()
-                    cnt = int(p.get("count", 0))
+            if "places" in target_sections:
+                if not full_rebuild:
+                    self.root_places.takeChildren()
+                places_icon = make_wlpg_icon("geotag", 16)
+                if hasattr(repo, "get_places_hierarchy"):
+                    places_data = repo.get_places_hierarchy()
+                    countries: dict[str, dict[str, dict[str, int]]] = {}
+                    for p in places_data:
+                        c = (p.get("country") or "").strip()
+                        s = (p.get("state") or "").strip()
+                        city = (p.get("city") or "").strip()
+                        cnt = int(p.get("count", 0))
 
-                    # Normalize UK subdivision codes (ENG -> England)
-                    if c in ("United Kingdom", "GB", "UK"):
-                        if s.upper() in ("ENG", "ENGLAND"):
-                            s = "England"
-                        elif s.upper() in ("WLS", "WALES"):
-                            s = "Wales"
-                        elif s.upper() in ("SCT", "SCOTLAND"):
-                            s = "Scotland"
-                        elif s.upper() in ("NIR", "NORTHERN IRELAND"):
-                            s = "Northern Ireland"
+                        # Normalize UK subdivision codes (ENG -> England)
+                        if c in ("United Kingdom", "GB", "UK"):
+                            if s.upper() in ("ENG", "ENGLAND"):
+                                s = "England"
+                            elif s.upper() in ("WLS", "WALES"):
+                                s = "Wales"
+                            elif s.upper() in ("SCT", "SCOTLAND"):
+                                s = "Scotland"
+                            elif s.upper() in ("NIR", "NORTHERN IRELAND"):
+                                s = "Northern Ireland"
 
-                    # If state is numeric code (e.g. '01', '07', '39'), treat as empty so city attaches directly to country
-                    if s.isdigit():
-                        s = ""
+                        # If state is numeric code (e.g. '01', '07', '39'), treat as empty so city attaches directly to country
+                        if s.isdigit():
+                            s = ""
 
-                    countries.setdefault(c, {}).setdefault(s, {})[city] = (
-                        countries.setdefault(c, {}).setdefault(s, {}).get(city, 0) + cnt
-                    )
+                        countries.setdefault(c, {}).setdefault(s, {})[city] = (
+                            countries.setdefault(c, {}).setdefault(s, {}).get(city, 0) + cnt
+                        )
 
-                for c_name in sorted(countries.keys(), key=str.casefold):
-                    states = countries[c_name]
-                    c_total = sum(cnt for s_cities in states.values() for cnt in s_cities.values())
-                    c_label = c_name or "Unknown Country"
-                    c_item = QTreeWidgetItem([f"{c_label} ({c_total})"])
-                    c_item.setData(0, _NODE_TYPE_ROLE, "place")
-                    c_item.setData(0, _NODE_PAYLOAD_ROLE, (c_name, "", ""))
-                    c_item.setIcon(0, places_icon)
-                    self.root_places.addChild(c_item)
+                    for c_name in sorted(countries.keys(), key=str.casefold):
+                        states = countries[c_name]
+                        c_total = sum(cnt for s_cities in states.values() for cnt in s_cities.values())
+                        c_label = c_name or "Unknown Country"
+                        c_item = QTreeWidgetItem([f"{c_label} ({c_total})"])
+                        c_item.setData(0, _NODE_TYPE_ROLE, "place")
+                        c_item.setData(0, _NODE_PAYLOAD_ROLE, (c_name, "", ""))
+                        c_item.setIcon(0, places_icon)
+                        self.root_places.addChild(c_item)
 
-                    for s_name in sorted(states.keys(), key=str.casefold):
-                        cities = states[s_name]
-                        if s_name:
-                            s_total = sum(cities.values())
-                            s_item = QTreeWidgetItem([f"{s_name} ({s_total})"])
-                            s_item.setData(0, _NODE_TYPE_ROLE, "place")
-                            s_item.setData(0, _NODE_PAYLOAD_ROLE, (c_name, s_name, ""))
-                            s_item.setIcon(0, places_icon)
-                            c_item.addChild(s_item)
-                            parent_for_city = s_item
-                        else:
-                            parent_for_city = c_item
+                        for s_name in sorted(states.keys(), key=str.casefold):
+                            cities = states[s_name]
+                            if s_name:
+                                s_total = sum(cities.values())
+                                s_item = QTreeWidgetItem([f"{s_name} ({s_total})"])
+                                s_item.setData(0, _NODE_TYPE_ROLE, "place")
+                                s_item.setData(0, _NODE_PAYLOAD_ROLE, (c_name, s_name, ""))
+                                s_item.setIcon(0, places_icon)
+                                c_item.addChild(s_item)
+                                parent_for_city = s_item
+                            else:
+                                parent_for_city = c_item
 
-                        for city_name, city_cnt in sorted(cities.items(), key=lambda kv: kv[0].casefold()):
-                            if city_name:
-                                ct_item = QTreeWidgetItem([f"{city_name} ({city_cnt})"])
-                                ct_item.setData(0, _NODE_TYPE_ROLE, "place")
-                                ct_item.setData(0, _NODE_PAYLOAD_ROLE, (c_name, s_name, city_name))
-                                ct_item.setIcon(0, places_icon)
-                                parent_for_city.addChild(ct_item)
+                            for city_name, city_cnt in sorted(cities.items(), key=lambda kv: kv[0].casefold()):
+                                if city_name:
+                                    ct_item = QTreeWidgetItem([f"{city_name} ({city_cnt})"])
+                                    ct_item.setData(0, _NODE_TYPE_ROLE, "place")
+                                    ct_item.setData(0, _NODE_PAYLOAD_ROLE, (c_name, s_name, city_name))
+                                    ct_item.setIcon(0, places_icon)
+                                    parent_for_city.addChild(ct_item)
+                if hasattr(self, "root_places") and self.root_places is not None:
+                    self.root_places.setExpanded(was_places_expanded)
+                    if expanded_place_payloads:
+                        def _restore_expanded_places(parent_item: QTreeWidgetItem) -> None:
+                            for idx in range(parent_item.childCount()):
+                                ch = parent_item.child(idx)
+                                if ch is not None:
+                                    if ch.data(0, _NODE_PAYLOAD_ROLE) in expanded_place_payloads:
+                                        ch.setExpanded(True)
+                                    if ch.childCount() > 0:
+                                        _restore_expanded_places(ch)
+                        _restore_expanded_places(self.root_places)
 
             # 7. Populate Cameras (Optional section, default hidden)
-            self._camera_items.clear()
-            if hasattr(self, "root_cameras") and self.root_cameras is not None and hasattr(repo, "query_camera_counts"):
-                cam_icon = make_wlpg_icon("camera", 16)
-                for cam_name, cam_cnt in repo.query_camera_counts():
-                    disp_name = "No camera info" if cam_name == "__NO_CAMERA__" else cam_name
-                    c_item = QTreeWidgetItem([f"{disp_name} ({cam_cnt})"])
-                    c_item.setData(0, _NODE_TYPE_ROLE, "camera_item")
-                    c_item.setData(0, _NODE_PAYLOAD_ROLE, cam_name)
-                    c_item.setIcon(0, cam_icon)
-                    if self._camera_model and self._camera_model.lower() == cam_name.lower():
-                        c_item.setSelected(True)
-                    self.root_cameras.addChild(c_item)
-                    self._camera_items[cam_name.lower()] = c_item
+            if "cameras" in target_sections:
+                if not full_rebuild and hasattr(self, "root_cameras") and self.root_cameras is not None:
+                    self.root_cameras.takeChildren()
+                self._camera_items.clear()
+                if hasattr(self, "root_cameras") and self.root_cameras is not None and hasattr(repo, "query_camera_counts"):
+                    cam_icon = make_wlpg_icon("camera", 16)
+                    for cam_name, cam_cnt in repo.query_camera_counts():
+                        disp_name = "No camera info" if cam_name == "__NO_CAMERA__" else cam_name
+                        c_item = QTreeWidgetItem([f"{disp_name} ({cam_cnt})"])
+                        c_item.setData(0, _NODE_TYPE_ROLE, "camera_item")
+                        c_item.setData(0, _NODE_PAYLOAD_ROLE, cam_name)
+                        c_item.setIcon(0, cam_icon)
+                        if self._camera_model and self._camera_model.lower() == cam_name.lower():
+                            c_item.setSelected(True)
+                        self.root_cameras.addChild(c_item)
+                        self._camera_items[cam_name.lower()] = c_item
+                if hasattr(self, "root_cameras"):
+                    self.root_cameras.setExpanded(was_cameras_expanded or bool(self._camera_models or self._camera_model))
 
-            if hasattr(self, "root_all") and self.root_all is not None:
-                self.root_all.setExpanded(was_all_expanded if had_existing_tree else True)
-            if hasattr(self, "root_dates") and self.root_dates is not None:
-                self.root_dates.setExpanded(was_dates_expanded if had_existing_tree else True)
-                if expanded_date_payloads:
-                    for yi in range(self.root_dates.childCount()):
-                        y_itm = self.root_dates.child(yi)
-                        if y_itm is None:
-                            continue
-                        if y_itm.data(0, _NODE_PAYLOAD_ROLE) in expanded_date_payloads:
-                            y_itm.setExpanded(True)
-                        for mi in range(y_itm.childCount()):
-                            m_itm = y_itm.child(mi)
-                            if m_itm is not None and m_itm.data(0, _NODE_PAYLOAD_ROLE) in expanded_date_payloads:
-                                self._ensure_date_month_days_populated(m_itm)
-                                m_itm.setExpanded(True)
-            if hasattr(self, "root_tags") and self.root_tags is not None:
-                self.root_tags.setExpanded(was_tags_expanded if had_existing_tree else True)
-                for tid_exp in expanded_tag_ids:
-                    t_itm = self._tag_items.get(tid_exp)
-                    if t_itm is not None:
-                        t_itm.setExpanded(True)
-            if hasattr(self, "root_ratings") and self.root_ratings is not None:
-                self.root_ratings.setExpanded(was_ratings_expanded)
-            self.root_people.setExpanded(was_people_expanded)
-            if hasattr(self, "root_places") and self.root_places is not None:
-                self.root_places.setExpanded(was_places_expanded)
-                if expanded_place_payloads:
-                    def _restore_expanded_places(parent_item: QTreeWidgetItem) -> None:
-                        for idx in range(parent_item.childCount()):
-                            ch = parent_item.child(idx)
-                            if ch is not None:
-                                if ch.data(0, _NODE_PAYLOAD_ROLE) in expanded_place_payloads:
-                                    ch.setExpanded(True)
-                                if ch.childCount() > 0:
-                                    _restore_expanded_places(ch)
-                    _restore_expanded_places(self.root_places)
-            if hasattr(self, "root_cameras"):
-                self.root_cameras.setExpanded(was_cameras_expanded or bool(self._camera_models or self._camera_model))
-            self._populate_subjects_children(self._subject_counts)
-            if hasattr(self, "root_subjects"):
-                self.root_subjects.setExpanded(was_subjects_expanded or bool(self._active_subject_keys or self._active_subject_key))
+            if "subjects" in target_sections:
+                self._populate_subjects_children(self._subject_counts)
+                if hasattr(self, "root_subjects"):
+                    self.root_subjects.setExpanded(was_subjects_expanded or bool(self._active_subject_keys or self._active_subject_key))
+
             if getattr(self, "_dark_mode", False):
                 self._sync_tree_item_colors()
             self._sync_tree_selection(scroll_to_selected=False)

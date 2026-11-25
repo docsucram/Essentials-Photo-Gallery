@@ -356,7 +356,7 @@ class _GeotagUndoCommand(QUndoCommand):
                 self.main_win.catalog_repo,
             )
         if hasattr(self.main_win, "refresh_navigation_and_autocomplete"):
-            self.main_win.refresh_navigation_and_autocomplete()
+            self.main_win.refresh_navigation_and_autocomplete({"places", "albums"})
 
 
     def undo(self) -> None:
@@ -374,7 +374,7 @@ class _GeotagUndoCommand(QUndoCommand):
                 self.main_win.catalog_repo,
             )
         if hasattr(self.main_win, "refresh_navigation_and_autocomplete"):
-            self.main_win.refresh_navigation_and_autocomplete()
+            self.main_win.refresh_navigation_and_autocomplete({"places", "albums"})
 
 
 class _BatchGpsMatchUndoCommand(QUndoCommand):
@@ -415,7 +415,7 @@ class _BatchGpsMatchUndoCommand(QUndoCommand):
                 self.main_win.catalog_repo,
             )
         if hasattr(self.main_win, "refresh_navigation_and_autocomplete"):
-            self.main_win.refresh_navigation_and_autocomplete()
+            self.main_win.refresh_navigation_and_autocomplete({"places", "albums"})
 
     def redo(self) -> None:
         for m in self.matches:
@@ -2283,7 +2283,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.folder_watcher.update_watched_paths()
         if getattr(self.left_nav_dock, "_folder_name", "") == Path(old_path).name:
             self.left_nav_dock._folder_name = new_name
-        self.refresh_navigation_and_autocomplete()
+        self.refresh_navigation_and_autocomplete({"folders"})
         self.rebuild_and_run_query()
         self.statusBar().showMessage(f"Renamed folder to '{new_name}'.", 4000)
 
@@ -2291,7 +2291,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         """Handles newly created folders."""
         if hasattr(self, "folder_watcher") and self.folder_watcher is not None:
             self.folder_watcher.update_watched_paths()
-        self.refresh_navigation_and_autocomplete()
+        self.refresh_navigation_and_autocomplete({"folders"})
         self.statusBar().showMessage(f"Created new folder '{Path(new_dir_str).name}'.", 4000)
 
     def _on_folder_deleted(self, folder_id: int, folder_path: str) -> None:
@@ -3240,7 +3240,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             people = self.left_nav_dock.refresh_people_only(self.catalog_repo)
             self.ribbon.populate_face_carousel(people)
         else:
-            self.refresh_navigation_and_autocomplete()
+            self.refresh_navigation_and_autocomplete({"people", "albums"})
         if hasattr(self, "batch_people_view") and self.central_stack.currentWidget() == self.batch_people_view:
             self.batch_people_view.refresh_suggestions(debounce=True)
 
@@ -3315,40 +3315,61 @@ class PhotoGalleryMainWindow(QMainWindow):
         except Exception:
             pass
 
-    def refresh_navigation_and_autocomplete(self) -> None:
-        if getattr(self, "_map_view", None) is not None and hasattr(self._map_view, "mark_data_dirty"):
-            self._map_view.mark_data_dirty()
-        self._update_private_menu_visibility()
-        people = self.catalog_repo.get_people_list()
-        tags = self.catalog_repo.get_tag_tree()
+    def refresh_navigation_and_autocomplete(
+        self,
+        sections: set[str] | frozenset[str] | Sequence[str] | None = None,
+    ) -> None:
+        sec_set: set[str] | None = (
+            {str(s).strip().lower() for s in sections if str(s).strip()}
+            if sections is not None
+            else None
+        )
+        if sec_set is None or bool(sec_set & {"places", "folders"}):
+            if getattr(self, "_map_view", None) is not None and hasattr(self._map_view, "mark_data_dirty"):
+                self._map_view.mark_data_dirty()
+        if sec_set is None or "folders" in sec_set:
+            self._update_private_menu_visibility()
+
+        need_people = sec_set is None or "people" in sec_set
+        need_tags = sec_set is None or "tags" in sec_set
+        people = self.catalog_repo.get_people_list() if need_people else None
+        tags = self.catalog_repo.get_tag_tree() if need_tags else None
         self.left_nav_dock.refresh_trees(
-            self.catalog_repo, preloaded_people=people, preloaded_tags=tags
+            self.catalog_repo,
+            preloaded_people=people,
+            preloaded_tags=tags,
+            sections=sec_set,
         )
-        all_tag_paths = [str(t["full_path"]) for t in tags]
-        canon_by_lower = {p.lower(): p for p in all_tag_paths}
-        mru_valid: list[str] = []
-        seen_low: set[str] = set()
-        for t in getattr(self, "_mru_descriptive_tags", []):
-            low = t.lower()
-            if low in canon_by_lower and low not in seen_low:
-                mru_valid.append(canon_by_lower[low])
-                seen_low.add(low)
-        db_recent = self.catalog_repo.get_recent_tags(12)
-        for t in db_recent:
-            low = t.lower()
-            if low not in seen_low:
-                mru_valid.append(t)
-                seen_low.add(low)
-            if len(mru_valid) >= 12:
-                break
-        self.ribbon.populate_face_carousel(people)
-        self.ribbon.populate_tags_menu(tags)
-        self._refresh_subjects_nav_counts()
-        self.right_tag_dock.set_autocomplete_lists(
-            all_tag_paths,
-            [str(p["name"]) for p in people],
-            recent_tags=mru_valid[:12],
-        )
+
+        if need_people and people is not None:
+            self.ribbon.populate_face_carousel(people)
+            if hasattr(self.right_tag_dock, "_people_model"):
+                self.right_tag_dock._people_model.setStringList([str(p["name"]) for p in people])
+
+        if need_tags and tags is not None:
+            all_tag_paths = [str(t["full_path"]) for t in tags]
+            canon_by_lower = {p.lower(): p for p in all_tag_paths}
+            mru_valid: list[str] = []
+            seen_low: set[str] = set()
+            for t in getattr(self, "_mru_descriptive_tags", []):
+                low = t.lower()
+                if low in canon_by_lower and low not in seen_low:
+                    mru_valid.append(canon_by_lower[low])
+                    seen_low.add(low)
+            db_recent = self.catalog_repo.get_recent_tags(12)
+            for t in db_recent:
+                low = t.lower()
+                if low not in seen_low:
+                    mru_valid.append(t)
+                    seen_low.add(low)
+                if len(mru_valid) >= 12:
+                    break
+            self.ribbon.populate_tags_menu(tags)
+            if hasattr(self.right_tag_dock, "txt_add_tag"):
+                self.right_tag_dock.txt_add_tag.set_tag_lists(all_tag_paths, mru_valid[:12])
+
+        if sec_set is None or "subjects" in sec_set:
+            self._refresh_subjects_nav_counts()
 
     def refresh_people_navigation_and_autocomplete(self) -> None:
         """Fast people-only navigation and autocomplete refresh (avoids full tree rebuild)."""
@@ -6092,15 +6113,22 @@ class PhotoGalleryMainWindow(QMainWindow):
         )
         cmd = _GeotagUndoCommand(self, ids, float(lat), float(lon), final_label)
         self.undo_stack.push(cmd)
-        self._schedule_tag_nav_refresh()
+        self._schedule_tag_nav_refresh({"places", "albums"})
         if self.right_tag_dock.lbl_geotag_status is not None:
             self.right_tag_dock.lbl_geotag_status.setVisible(False)
         self.show_status_message(
             f"✓ Updated location '{final_label}' on {len(ids)} item(s)", 3500
         )
 
-    def _schedule_tag_nav_refresh(self) -> None:
-        """Debounces heavy left-nav tree & grid rebuilds after rapid tag edits."""
+    def _schedule_tag_nav_refresh(self, sections: set[str] | None = None) -> None:
+        """Debounces left-nav tree & grid rebuilds after rapid tag/geotag edits."""
+        pending: set[str] | None = getattr(self, "_pending_nav_refresh_sections", set())
+        if sections is None:
+            self._pending_nav_refresh_sections = None
+        elif pending is not None:
+            pending.update(sections)
+            self._pending_nav_refresh_sections = pending
+
         timer = getattr(self, "_tag_nav_refresh_timer", None)
         if timer is None:
             timer = QTimer(self)
@@ -6108,7 +6136,11 @@ class PhotoGalleryMainWindow(QMainWindow):
             timer.setInterval(120)
 
             def _flush() -> None:
-                self.refresh_navigation_and_autocomplete()
+                sec = getattr(self, "_pending_nav_refresh_sections", None)
+                self._pending_nav_refresh_sections = set()
+                self.refresh_navigation_and_autocomplete(
+                    sections=sec if sec else None
+                )
                 if self.central_stack.currentWidget() == self.grid_view:
                     self.rebuild_and_run_query(preserve_selection=True)
 
@@ -6137,7 +6169,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.metadata_sync_daemon.notify_dirty()
         summary = self.catalog_repo.get_selection_summary(target_ids)
         self.right_tag_dock.bind_selection(target_ids, summary)
-        self._schedule_tag_nav_refresh()
+        self._schedule_tag_nav_refresh({"tags", "albums"})
         self.show_status_message(f"✓ Added tag '{canon_path}' to {len(target_ids)} item(s)", 3000)
 
     def on_selection_tag_removed(self, tag_id: int) -> None:
@@ -6151,7 +6183,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.metadata_sync_daemon.notify_dirty()
         summary = self.catalog_repo.get_selection_summary(target_ids)
         self.right_tag_dock.bind_selection(target_ids, summary)
-        self._schedule_tag_nav_refresh()
+        self._schedule_tag_nav_refresh({"tags", "albums"})
         self.show_status_message(f"✓ Removed tag from {len(target_ids)} item(s)", 3000)
 
     def on_selection_tag_assign_to_all(self, tag_id: int) -> None:
@@ -6168,7 +6200,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.metadata_sync_daemon.notify_dirty()
         summary = self.catalog_repo.get_selection_summary(target_ids)
         self.right_tag_dock.bind_selection(target_ids, summary)
-        self._schedule_tag_nav_refresh()
+        self._schedule_tag_nav_refresh({"tags", "albums"})
         tag_lbl = f"'{canon_path}'" if canon_path else "tag"
         self.show_status_message(f"✓ Applied {tag_lbl} to {len(target_ids)} item(s)", 3000)
 
@@ -6275,7 +6307,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             pid = self.catalog_repo.assign_person(mid, person_name.strip())
             pids_added.append(int(pid))
             self.invalidate_face_crop_ui(media_id=int(mid), person_ids=[int(pid)])
-        self.refresh_navigation_and_autocomplete()
+        self.refresh_navigation_and_autocomplete({"people", "albums"})
         summary = self.catalog_repo.get_selection_summary(target_ids)
         self.right_tag_dock.bind_selection(target_ids, summary)
         if (
@@ -6300,7 +6332,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         for mid in target_ids:
             self.catalog_repo.remove_person_tag(mid, person_id)
             self.invalidate_face_crop_ui(media_id=int(mid), person_ids=[int(person_id)])
-        self.refresh_navigation_and_autocomplete()
+        self.refresh_navigation_and_autocomplete({"people", "albums"})
         summary = self.catalog_repo.get_selection_summary(target_ids)
         self.right_tag_dock.bind_selection(target_ids, summary)
         if (
@@ -6354,7 +6386,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         """Links a boxless person tag directly to a detected face box."""
         self.catalog_repo.assign_face_to_person(int(face_id), int(person_id))
         self.invalidate_face_crop_ui(person_ids=[int(person_id)])
-        self.refresh_navigation_and_autocomplete()
+        self.refresh_navigation_and_autocomplete({"people", "albums"})
         if (
             self.central_stack.currentWidget() == self.media_viewer
             and self.media_viewer.current_media_id is not None
@@ -6422,7 +6454,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 media_id=int(mid),
                 person_ids=[p for p in (int(person_id), int(assigned_pid)) if p > 0],
             )
-        self.refresh_navigation_and_autocomplete()
+        self.refresh_navigation_and_autocomplete({"people", "albums"})
         summary = self.catalog_repo.get_selection_summary(target_ids)
         self.right_tag_dock.bind_selection(target_ids, summary)
         if (
@@ -6532,7 +6564,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         )
         self.catalog_repo.assign_face_to_person(int(face_id), person_name)
         self._notify_batch_people_face_changed([int(face_id)])
-        self.refresh_navigation_and_autocomplete()
+        self.refresh_navigation_and_autocomplete({"people", "albums"})
         if target_ids:
             summary = self.catalog_repo.get_selection_summary(target_ids)
             self.right_tag_dock.bind_selection(target_ids, summary)
@@ -6576,7 +6608,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             else list(self._selected_ids)
         )
         self.catalog_repo.remove_face_assignment(int(face_id))
-        self.refresh_navigation_and_autocomplete()
+        self.refresh_navigation_and_autocomplete({"people", "albums"})
         if target_ids:
             summary = self.catalog_repo.get_selection_summary(target_ids)
             self.right_tag_dock.bind_selection(target_ids, summary)
@@ -6601,7 +6633,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             if hasattr(self, "person_header_bar") and self.person_header_bar.isVisible():
                 if getattr(self.person_header_bar, "current_person_id", None) == person_id:
                     self.person_header_bar.load_person(person_id)
-            self.refresh_navigation_and_autocomplete()
+            self.refresh_navigation_and_autocomplete({"people", "albums"})
             target_ids = [media_id]
             summary = self.catalog_repo.get_selection_summary(target_ids)
             self.right_tag_dock.bind_selection(target_ids, summary)
@@ -6627,7 +6659,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.catalog_repo.remove_person_tag(mid, person_id)
         for mid in media_ids:
             self.invalidate_face_crop_ui(media_id=int(mid), person_ids=[int(person_id)])
-        self.refresh_navigation_and_autocomplete()
+        self.refresh_navigation_and_autocomplete({"people", "albums"})
         self.rebuild_and_run_query(preserve_selection=False)
         if hasattr(self, "person_header_bar") and self.person_header_bar.isVisible():
             if getattr(self.person_header_bar, "current_person_id", None) == person_id:
@@ -6683,7 +6715,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 media_id=int(mid),
                 person_ids=[int(person_id)] if person_id and person_id > 0 else [],
             )
-        self.refresh_navigation_and_autocomplete()
+        self.refresh_navigation_and_autocomplete({"people", "albums"})
         self.rebuild_and_run_query(preserve_selection=False)
         if hasattr(self, "person_header_bar") and self.person_header_bar.isVisible():
             if person_id and getattr(self.person_header_bar, "current_person_id", None) == person_id:
@@ -6726,7 +6758,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 media_id=int(mid),
                 person_ids=[p for p in (int(person_id), int(assigned_pid)) if p > 0],
             )
-        self.refresh_navigation_and_autocomplete()
+        self.refresh_navigation_and_autocomplete({"people", "albums"})
         self.rebuild_and_run_query(preserve_selection=False)
         if hasattr(self, "person_header_bar") and self.person_header_bar.isVisible():
             if getattr(self.person_header_bar, "current_person_id", None) == person_id:
@@ -6792,7 +6824,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 return
             self.catalog_repo.merge_people(source_person_id, target_id)
 
-        self.refresh_navigation_and_autocomplete()
+        self.refresh_navigation_and_autocomplete({"people", "albums"})
         if hasattr(self, "people_directory_view"):
             self.people_directory_view.refresh_directory()
         if hasattr(self, "left_nav_dock"):
@@ -6828,7 +6860,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         if not ok or not new_name.strip() or new_name.strip() == old_name:
             return
         actual_id = self.catalog_repo.rename_person(person_id, new_name.strip())
-        self.refresh_navigation_and_autocomplete()
+        self.refresh_navigation_and_autocomplete({"people", "albums"})
         if actual_id != person_id:
             if hasattr(self, "left_nav_dock"):
                 curr_pids = self.left_nav_dock.current_filter_state().get("person_ids", ())
@@ -6918,7 +6950,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         else:
             lead_id = self._lead_selected_id or target_ids[0]
             self.catalog_repo.apply_relative_time_shift(target_ids, lead_id, new_ts)
-        self.refresh_navigation_and_autocomplete()
+        self.refresh_navigation_and_autocomplete({"dates", "albums"})
         self.rebuild_and_run_query()
         summary = self.catalog_repo.get_selection_summary(target_ids)
         self.right_tag_dock.bind_selection(target_ids, summary)
@@ -6982,7 +7014,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         pid = self.catalog_repo.assign_person(media_id, person_name, (rx, ry, rw, rh))
         self._notify_batch_people_face_changed()
         self.invalidate_face_crop_ui(media_id=int(media_id), person_ids=[int(pid)])
-        self.refresh_navigation_and_autocomplete()
+        self.refresh_navigation_and_autocomplete({"people", "albums"})
         detail = self.catalog_repo.get_media_detail(media_id)
         self.media_viewer.render_face_regions(detail.get("people", []))
         target_ids = (
@@ -7022,7 +7054,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.catalog_repo.apply_relative_time_shift(
                 self._selected_ids, lead_id, int(auto_accept_timestamp)
             )
-            self.refresh_navigation_and_autocomplete()
+            self.refresh_navigation_and_autocomplete({"dates", "albums"})
             self.rebuild_and_run_query()
             summary = self.catalog_repo.get_selection_summary(self._selected_ids)
             self.right_tag_dock.bind_selection(self._selected_ids, summary)
@@ -7032,7 +7064,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.catalog_repo.apply_relative_time_shift(
                 self._selected_ids, lead_id, dlg.new_lead_timestamp()
             )
-            self.refresh_navigation_and_autocomplete()
+            self.refresh_navigation_and_autocomplete({"dates", "albums"})
             self.rebuild_and_run_query()
             summary = self.catalog_repo.get_selection_summary(self._selected_ids)
             self.right_tag_dock.bind_selection(self._selected_ids, summary)
@@ -8123,7 +8155,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                     self.right_tag_dock.bind_selection([self.media_viewer.current_media_id], summary)
                 except Exception:
                     pass
-        self.refresh_navigation_and_autocomplete()
+        self.refresh_navigation_and_autocomplete({"people", "albums"})
 
     def rotate_selection(self, clockwise: bool = True) -> None:
         target_ids = (
@@ -9833,7 +9865,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 tid = self.catalog_repo.create_tag(tag_name)
             self.catalog_repo.assign_tag([mid], tid)
             self.show_status_message(f"✓ Tagged photo with '{tag_name}' (Alt+{slot})", 3000)
-            self._schedule_tag_nav_refresh()
+            self._schedule_tag_nav_refresh({"tags", "albums"})
             return
         target_ids = self.get_active_target_ids()
         if target_ids:
@@ -11351,7 +11383,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self._last_tag_cleanup_backup.append((rname, hid, [int(mr["media_id"]) for mr in m_rows]))
                 self.catalog_repo.merge_tags(rid, hid)
                 merged_count += 1
-            self.refresh_navigation_and_autocomplete()
+            self.refresh_navigation_and_autocomplete({"tags", "albums"})
             self.statusBar().showMessage(
                 f"✓ Merged {merged_count} duplicate root tag(s) into hierarchy. (Restore available from Descriptive tag menu)",
                 6000,
@@ -11386,7 +11418,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             restored += 1
 
         self._last_tag_cleanup_backup = []
-        self.refresh_navigation_and_autocomplete()
+        self.refresh_navigation_and_autocomplete({"tags", "albums"})
         self.statusBar().showMessage(f"✓ Restored {restored} root tag(s) and photo assignments", 5000)
         QMessageBox.information(
             self,

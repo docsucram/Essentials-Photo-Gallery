@@ -10,7 +10,7 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 
 ### Highlights
 
-- **Much Faster Navigation Pane at Scale:** Refreshing Ratings, Places, and Dates in the Navigation pane is now **6×–7× faster** overall (dropping from ~1.35 seconds to ~220 ms on a 500,000-photo library, and ~26 ms at 100,000 photos).
+- **Much Faster Navigation Pane at Scale & Scoped Incremental Refresh:** Refreshing Ratings, Places, and Dates in the Navigation pane is now **6×–7× faster** overall (dropping from ~1.35 seconds to ~220 ms on a 500,000-photo library, and ~26 ms at 100,000 photos). Everyday edits—tagging, people tagging, geotagging, date adjustments, and folder renames—now refresh only the affected Navigation sections instead of rebuilding the entire tree.
 - **Instant Batch People Tagging:** Opening Batch People Tagging on large libraries is now **up to 10× faster** (~28 ms at 500,000 photos / 333,000 faces).
 - **Zero-Freeze AI Straighten & Faster Semantic Search Startup:** Straightening or expanding a photo with AI Fill now runs in the background so the app stays responsive, and the local Semantic Search index loads faster and warms up quietly after launch.
 - **Smarter Find Similar, Faster Duplicate Scans & Semantic Smart Albums:**
