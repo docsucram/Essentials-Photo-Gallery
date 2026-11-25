@@ -278,6 +278,9 @@ class MediaItemRecord:
     stack_pos: int = 0
     is_raw_jpg_stack: bool = False
     is_favourite: int = 0
+    has_geotag: int = 0
+    has_desc_tags: int = 0
+    has_people_tags: int = 0
 
 
 _EPOCH_UTC = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
@@ -2010,7 +2013,93 @@ class CatalogRepository:
                     r.stack_count = total_cnt
                     r.stack_pos = 0
                     r.is_raw_jpg_stack = is_rj
+        if (
+            getattr(self, "include_geotag_badge", False)
+            or getattr(self, "include_desc_tag_badge", False)
+            or getattr(self, "include_people_tag_badge", False)
+        ):
+            self.annotate_tag_badges(
+                records,
+                geotagged=bool(getattr(self, "include_geotag_badge", False)),
+                desc_tagged=bool(getattr(self, "include_desc_tag_badge", False)),
+                people_tagged=bool(getattr(self, "include_people_tag_badge", False)),
+                cur=cur,
+            )
         return records
+
+    def annotate_tag_badges(
+        self,
+        records: list[MediaItemRecord],
+        *,
+        geotagged: bool = False,
+        desc_tagged: bool = False,
+        people_tagged: bool = False,
+        cur: sqlite3.Cursor | None = None,
+    ) -> None:
+        """Annotate optional default-off tag-presence badges on MediaItemRecord rows."""
+        if not records or not (geotagged or desc_tagged or people_tagged):
+            return
+        if cur is None:
+            conn = self.engine.catalog_conn()
+            cur = conn.cursor()
+            cur.row_factory = None
+        compact = len(records) <= 500
+        rec_ids = [int(r.id) for r in records] if compact else []
+        ph = ",".join("?" for _ in rec_ids) if compact else ""
+
+        geo_ids: set[int] = set()
+        if geotagged:
+            if compact:
+                rows = cur.execute(
+                    f"""
+                    SELECT id FROM media
+                    WHERE id IN ({ph})
+                      AND ((lat IS NOT NULL AND lon IS NOT NULL)
+                           OR (location_name IS NOT NULL AND location_name != ''));
+                    """,
+                    rec_ids,
+                ).fetchall()
+            else:
+                rows = cur.execute(
+                    """
+                    SELECT id FROM media
+                    WHERE (lat IS NOT NULL AND lon IS NOT NULL)
+                       OR (location_name IS NOT NULL AND location_name != '');
+                    """
+                ).fetchall()
+            geo_ids = {int(r[0]) for r in rows}
+
+        desc_ids: set[int] = set()
+        if desc_tagged:
+            if compact:
+                rows = cur.execute(
+                    f"SELECT DISTINCT media_id FROM media_tags WHERE media_id IN ({ph});",
+                    rec_ids,
+                ).fetchall()
+            else:
+                rows = cur.execute("SELECT DISTINCT media_id FROM media_tags;").fetchall()
+            desc_ids = {int(r[0]) for r in rows}
+
+        people_ids: set[int] = set()
+        if people_tagged:
+            if compact:
+                rows = cur.execute(
+                    f"SELECT DISTINCT media_id FROM media_people WHERE state = 1 AND media_id IN ({ph});",
+                    rec_ids,
+                ).fetchall()
+            else:
+                rows = cur.execute(
+                    "SELECT DISTINCT media_id FROM media_people WHERE state = 1;"
+                ).fetchall()
+            people_ids = {int(r[0]) for r in rows}
+
+        for rec in records:
+            if geotagged:
+                rec.has_geotag = 1 if rec.id in geo_ids else 0
+            if desc_tagged:
+                rec.has_desc_tags = 1 if rec.id in desc_ids else 0
+            if people_tagged:
+                rec.has_people_tags = 1 if rec.id in people_ids else 0
 
     def batch_update_favourite(self, media_ids: Sequence[int], is_favourite: bool) -> int:
         ids = [int(x) for x in dict.fromkeys(media_ids) if int(x) > 0]

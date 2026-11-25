@@ -546,6 +546,10 @@ class MediaCardDelegate(QStyledItemDelegate):
         self.show_flag_badges: bool = True
         self.show_favourite_badges: bool = True
         self.show_group_badges: bool = True
+        self.show_geotag_badges: bool = False
+        self.show_desc_tag_badges: bool = False
+        self.show_people_tag_badges: bool = False
+        self._tag_badge_pixmaps: dict[str, QPixmap] = {}
         self._face_crop_cache: dict[tuple[int, int], QPixmap] = {}
         self._person_face_rects: dict[tuple[int, int], tuple[float, float, float, float]] = {}
         self._scaled_pixmap_cache: dict[tuple[int, int, int], QPixmap] = {}
@@ -663,7 +667,7 @@ class MediaCardDelegate(QStyledItemDelegate):
         return QRect(card_rect.right() - 28, card_rect.top() + 4, 24, 24)
 
     def heart_rect(self, card_rect: QRect, img_box: QRect | None = None) -> QRect:
-        if not getattr(self, "favourites_enabled", True) or not getattr(self, "show_favourite_badges", True):
+        if not getattr(self, "show_favourite_badges", True):
             return QRect()
         box = img_box if img_box is not None else self._estimate_img_box(card_rect)
         sz = 26
@@ -733,9 +737,11 @@ class MediaCardDelegate(QStyledItemDelegate):
 
         # Top-Right WLPG Flag (Pick = 1 shaded red pennant + silver pole / Reject = -1 hollow with strike / Unreviewed = 0 on hover)
         is_mosaic_layout = getattr(self, "_layout_mode", "wlpg_grid") in ("tiles", "mosaic", "masonry")
+        fl_rect = self.flag_rect(card_rect, img_box)
+        flag_drawn = False
         if getattr(self, "show_flag_badges", True):
             if flag == -1 or flag == 1 or is_hovered:
-                fl_rect = self.flag_rect(card_rect, img_box)
+                flag_drawn = True
                 painter.save()
                 painter.setRenderHint(QPainter.Antialiasing, True)
                 if is_mosaic_layout:
@@ -785,10 +791,53 @@ class MediaCardDelegate(QStyledItemDelegate):
         if rec_meta is None:
             return
 
+        # Optional Top-Right Tag Badges (default-off), stacking right-to-left in priority order:
+        # Flagged (furthest right) -> Geotagged -> Descriptive tagged -> People tagged
+        tag_badge_keys: list[str] = []
+        if getattr(self, "show_geotag_badges", False) and getattr(rec_meta, "has_geotag", 0):
+            tag_badge_keys.append("geotag")
+        if getattr(self, "show_desc_tag_badges", False) and getattr(rec_meta, "has_desc_tags", 0):
+            tag_badge_keys.append("tag")
+        if getattr(self, "show_people_tag_badges", False) and getattr(rec_meta, "has_people_tags", 0):
+            tag_badge_keys.append("person")
+        if tag_badge_keys:
+            if not self._tag_badge_pixmaps:
+                self._tag_badge_pixmaps = {
+                    "geotag": make_wlpg_icon("geotag", 16).pixmap(16, 16),
+                    "tag": make_wlpg_icon("tag", 16).pixmap(16, 16),
+                    "person": make_wlpg_icon("person", 16).pixmap(16, 16),
+                }
+            badge_sz = fl_rect.width()
+            badge_gap = 3
+            next_right = (fl_rect.left() - badge_gap) if flag_drawn else fl_rect.right()
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            for b_key in tag_badge_keys:
+                b_rect = QRect(next_right - badge_sz + 1, fl_rect.top(), badge_sz, badge_sz)
+                if b_rect.left() < img_box.left() + 2:
+                    break
+                if is_mosaic_layout:
+                    painter.setBrush(QColor(15, 23, 42, 185))
+                    painter.setPen(QPen(QColor(255, 255, 255, 60), 1.0))
+                    painter.drawRoundedRect(QRectF(b_rect).adjusted(0.5, 0.5, -0.5, -0.5), 6.0, 6.0)
+                else:
+                    bg = QColor(30, 41, 59, 175) if self.dark_mode else QColor(255, 255, 255, 210)
+                    bd = QColor(255, 255, 255, 45) if self.dark_mode else QColor(148, 163, 184, 140)
+                    painter.setBrush(bg)
+                    painter.setPen(QPen(bd, 1.0))
+                    painter.drawRoundedRect(QRectF(b_rect).adjusted(1.0, 1.0, -1.0, -1.0), 5.0, 5.0)
+                pm = self._tag_badge_pixmaps.get(b_key)
+                if pm is not None and not pm.isNull():
+                    px = b_rect.left() + (b_rect.width() - pm.width()) // 2
+                    py = b_rect.top() + (b_rect.height() - pm.height()) // 2
+                    painter.drawPixmap(px, py, pm)
+                next_right = b_rect.left() - badge_gap - 1
+            painter.restore()
+
         # Option A: Bottom-right squircle pill
         # - In Mosaic mode: Lap-style star-turns-into-heart when favourited (+ rating digit)
         # - In Standard Grid mode: Centered heart squircle (solid rose when fav, outline on hover)
-        fav_enabled = bool(getattr(self, "favourites_enabled", True)) and bool(getattr(self, "show_favourite_badges", True))
+        fav_enabled = bool(getattr(self, "show_favourite_badges", True))
         is_fav = bool(getattr(rec_meta, "is_favourite", 0)) if fav_enabled else False
         rating_val = int(getattr(rec_meta, "rating", 0) or 0)
         is_mosaic = (getattr(self, "_layout_mode", "wlpg_grid") in ("tiles", "mosaic", "masonry"))
@@ -1775,7 +1824,7 @@ class MediaCardDelegate(QStyledItemDelegate):
                     return True
 
                 # 1b. Check bottom-right photo-corner heart (favourite) pill hit
-                if getattr(self, "favourites_enabled", True) and self.heart_rect(card_rect).contains(pos):
+                if self.heart_rect(card_rect).contains(pos):
                     rec_fav = index.data(CatalogRoles.RecordRole)
                     cur_fav = bool(getattr(rec_fav, "is_favourite", 0)) if rec_fav is not None else False
                     self.favourite_toggled.emit(int(media_id), not cur_fav)
@@ -3279,7 +3328,7 @@ class ThumbnailGridView(QListView):
                     main_win.rename_selection()
                     event.accept()
                     return
-            if event.key() == Qt.Key_F and getattr(self.card_delegate, "favourites_enabled", True):
+            if event.key() == Qt.Key_F:
                 main_win = getattr(self, "main_window", None) or self.window()
                 if hasattr(main_win, "toggle_favourite_selection"):
                     main_win.toggle_favourite_selection(advance=shift_held)
@@ -3561,7 +3610,7 @@ class ThumbnailGridView(QListView):
             else [int(media_id)]
         )
 
-        add_album_menu = menu.addMenu("Add to Album")
+        add_album_menu = menu.addMenu(make_wlpg_icon("albums", 16), "Add to Album")
         menu._add_album_menu = add_album_menu
         add_album_menu.setFont(QFont("Segoe UI", 9))
 
@@ -3642,7 +3691,7 @@ class ThumbnailGridView(QListView):
                 act_play.triggered.connect(lambda: self.media_activated.emit(media_id))
 
             # 2. Open with ▸ (Populated with Windows registered apps)
-            open_with_menu = menu.addMenu("Open with")
+            open_with_menu = menu.addMenu(make_wlpg_icon("folder_open", 16), "Open with")
             menu._open_with_menu = open_with_menu
             open_with_menu.setFont(QFont("Segoe UI", 9))
 
@@ -3719,7 +3768,7 @@ class ThumbnailGridView(QListView):
                 act_cmp.setShortcut("C")
                 act_cmp.triggered.connect(lambda _chk=False, ids=list(sel_mids): self.compare_requested.emit(ids))
 
-            open_with_menu = menu.addMenu("Open with")
+            open_with_menu = menu.addMenu(make_wlpg_icon("folder_open", 16), "Open with")
             menu._open_with_menu = open_with_menu
             open_with_menu.setFont(QFont("Segoe UI", 9))
 
@@ -3766,7 +3815,7 @@ class ThumbnailGridView(QListView):
             menu.addSeparator()
 
             # 2. Desktop Background
-            act_bg = menu.addAction("Set as desktop background")
+            act_bg = menu.addAction(make_wlpg_icon("slideshow", 16), "Set as desktop background")
             act_bg.setEnabled(len(target_mids) == 1)
             if is_mw and len(target_mids) == 1:
                 act_bg.triggered.connect(lambda: main_win.set_desktop_background_for_media(media_id))
@@ -3780,10 +3829,7 @@ class ThumbnailGridView(QListView):
                 menu._flag_menu = flag_menu
                 flag_menu.setFont(QFont("Segoe UI", 9))
 
-                if (
-                    hasattr(main_win, "apply_favourite_to_selection")
-                    and getattr(self.card_delegate, "favourites_enabled", True)
-                ):
+                if hasattr(main_win, "apply_favourite_to_selection"):
                     all_fav = bool(sel_ids) and all(
                         bool(getattr(self.catalog_model.record_by_id(int(mid)), "is_favourite", 0))
                         for mid in sel_ids
@@ -3850,12 +3896,12 @@ class ThumbnailGridView(QListView):
 
             edit_menu.addSeparator()
 
-            act_copy_subj = edit_menu.addAction("Copy subject to clipboard")
+            act_copy_subj = edit_menu.addAction(make_wlpg_icon("copy_subject", 16), "Copy subject to clipboard")
             act_copy_subj.setEnabled(len(target_mids) == 1)
             if is_mw and len(target_mids) == 1 and hasattr(main_win, "copy_subject_for_media"):
                 act_copy_subj.triggered.connect(lambda _c=False, mid=int(media_id): main_win.copy_subject_for_media(mid))
 
-            act_rm_bg = edit_menu.addAction("Remove background")
+            act_rm_bg = edit_menu.addAction(make_wlpg_icon("remove_background", 16), "Remove background")
             act_rm_bg.setEnabled(len(target_mids) == 1)
             if is_mw and len(target_mids) == 1 and hasattr(main_win, "remove_background_for_media"):
                 act_rm_bg.triggered.connect(lambda _c=False, mid=int(media_id): main_win.remove_background_for_media(mid))
@@ -3863,12 +3909,12 @@ class ThumbnailGridView(QListView):
             scan_menu = menu.addMenu(make_wlpg_icon("text_search", 16), "Scan")
             menu._ai_scan_menu = scan_menu
             scan_menu.setFont(QFont("Segoe UI", 9))
-            act_sim = scan_menu.addAction("Find Similar Photos...")
+            act_sim = scan_menu.addAction(make_wlpg_icon("compare", 16), "Find Similar Photos...")
             act_sim.triggered.connect(lambda _chk=False, mid=int(media_id): self.find_similar_requested.emit(mid))
-            act_rescan = scan_menu.addAction("Rescan for faces")
+            act_rescan = scan_menu.addAction(make_wlpg_icon("face", 16), "Rescan for faces")
             if is_mw:
                 act_rescan.triggered.connect(lambda checked=False, t_ids=list(target_mids): main_win.rescan_faces_for_selection(t_ids))
-            act_ocr = scan_menu.addAction("Scan for text (OCR)")
+            act_ocr = scan_menu.addAction(make_wlpg_icon("text_search", 16), "Scan for text (OCR)")
             if is_mw and hasattr(main_win, "scan_ocr_for_selection"):
                 act_ocr.triggered.connect(lambda checked=False, t_ids=list(target_mids): main_win.scan_ocr_for_selection(t_ids))
 
@@ -3890,14 +3936,14 @@ class ThumbnailGridView(QListView):
             if is_mw:
                 act_ren.triggered.connect(main_win.rename_selection)
 
-            act_res = menu.addAction(make_wlpg_icon("export", 16), "Export / Resize...")
+            act_res = menu.addAction(make_wlpg_icon("make_copy", 16), "Export / Resize...")
             if is_mw:
                 act_res.triggered.connect(main_win.open_resize_dialog)
 
             menu.addSeparator()
 
             # 5. Properties (Always last)
-            act_prop = menu.addAction("Properties")
+            act_prop = menu.addAction(make_wlpg_icon("view_details", 16), "Properties")
             act_prop.setShortcut("Alt+Enter")
             if is_mw and hasattr(main_win, "open_file_properties"):
                 target_mid = media_id if (media_id is not None) else (target_mids[0] if target_mids else None)
@@ -4012,10 +4058,7 @@ class ThumbnailGridView(QListView):
             ("Media type", "media_type"),
             ("Rating", "rating"),
             ("Flag", "flag"),
-        ]
-        if getattr(self.card_delegate, "favourites_enabled", True):
-            group_criteria.append(("Favourites", "favourites"))
-        group_criteria.extend([
+            ("Favourites", "favourites"),
             ("Folder", "folder"),
             ("Tag", "tag"),
             ("People", "people"),
@@ -4023,7 +4066,7 @@ class ThumbnailGridView(QListView):
             ("Geotag", "geotag"),
             ("Camera", "camera"),
             ("None", "none"),
-        ])
+        ]
 
         curr_group = getattr(main_win, "_group_by", "month") if is_mw else "month"
         curr_grp_rev = getattr(main_win, "_group_reverse", False) if is_mw else False

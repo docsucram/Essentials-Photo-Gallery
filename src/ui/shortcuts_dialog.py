@@ -157,9 +157,9 @@ def populate_quick_tag_shortcut_submenu(
     for slot in range(1, 10):
         existing = mapping.get(slot, "")
         if cur_slot == slot:
-            lbl = f"Alt+{slot}  ✓ (Assigned)"
+            lbl = f"Alt+{slot}  (This tag)"
         elif existing:
-            lbl = f"Alt+{slot}  ({existing})"
+            lbl = f"Alt+{slot}  — {existing}"
         else:
             lbl = f"Alt+{slot}"
         act = sub.addAction(lbl)

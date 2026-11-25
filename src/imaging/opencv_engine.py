@@ -1730,45 +1730,79 @@ def analyze_auto_adjust(master_rgb: np.ndarray) -> PhotoAdjustmentRecipe:
     p50 = float(np.percentile(gray, 50))
     p98 = float(np.percentile(gray, 98))
 
-    # Auto Exposure (target median around 118..125)
-    target_median = 120.0
+    # Key-aware & highlight-safe Auto Exposure
+    target_median = 122.0
     brightness_shift = 0.0
-    if p50 > 5 and abs(p50 - target_median) > 6.0:
-        brightness_shift = float(np.clip((target_median - p50) / 128.0 * 55.0, -45.0, 45.0))
+    if p50 > 4.0 and abs(p50 - target_median) > 7.0:
+        raw_b = (target_median - p50) / 128.0 * 48.0
+        # Dampen shifts on intentional low-key (night) or high-key (snow/bright) scenes
+        if p50 < 55.0 and p98 < 220.0:
+            raw_b *= 0.65
+        elif p50 > 180.0:
+            raw_b *= 0.65
+        # Protect near-clipping highlights from positive brightness push
+        if raw_b > 0.0 and p98 > 232.0:
+            headroom = max(0.15, (255.0 - p98) / 23.0)
+            raw_b *= headroom
+        brightness_shift = float(np.clip(raw_b, -40.0, 40.0))
+        if abs(brightness_shift) < 2.5:
+            brightness_shift = 0.0
 
     # Dynamic Range & Contrast
     dyn_range = p98 - p2
     contrast_shift = 0.0
-    if dyn_range < 195:
-        contrast_shift = float(np.clip((195.0 - dyn_range) / 195.0 * 35.0, 5.0, 35.0))
+    if dyn_range < 195.0:
+        contrast_shift = float(np.clip((195.0 - dyn_range) / 195.0 * 32.0, 4.0, 32.0))
 
     # Shadow & Highlight recovery
     shadows_shift = 0.0
     highlights_shift = 0.0
-    if p2 < 15 and p50 < 90:
-        shadows_shift = float(np.clip((15.0 - p2) * 2.0, 0.0, 30.0))
-    if p98 > 242 and p50 > 140:
-        highlights_shift = float(np.clip(-(p98 - 240.0) * 2.0, -35.0, 0.0))
+    if p2 < 20.0 and p50 < 105.0:
+        shadows_shift = float(np.clip((20.0 - p2) * 1.6, 0.0, 32.0))
+    if p98 > 240.0 and p50 > 125.0:
+        highlights_shift = float(np.clip(-(p98 - 238.0) * 1.8, -35.0, 0.0))
 
-    # 2. White Balance / Color Cast Analysis (Gray-World with highlight/shadow exclusion)
-    valid_mask = (gray > 20) & (gray < 235)
-    if np.count_nonzero(valid_mask) > 100:
-        r_mean = float(np.mean(small[:, :, 0][valid_mask]))
-        g_mean = float(np.mean(small[:, :, 1][valid_mask]))
-        b_mean = float(np.mean(small[:, :, 2][valid_mask]))
-        avg_mean = (r_mean + g_mean + b_mean) / 3.0
+    # 2. White Balance / Color Cast Analysis
+    # Prefer near-neutral midtones in CIE Lab so large saturated areas (sky, grass, sunsets)
+    # do not skew white balance; fall back to damped Gray-World if neutral area is scarce.
+    lab = cv2.cvtColor(small, cv2.COLOR_RGB2LAB).astype(np.float32)
+    L_ch = lab[:, :, 0]
+    a_off = lab[:, :, 1] - 128.0
+    b_off = lab[:, :, 2] - 128.0
+    chroma = np.hypot(a_off, b_off)
 
-        # Temperature (R vs B)
-        rb_diff = r_mean - b_mean
-        temp_shift = float(np.clip(-rb_diff / max(avg_mean, 10.0) * 80.0, -25.0, 25.0))
+    midtone_mask = (L_ch > 28.0) & (L_ch < 228.0)
+    neutral_mask = midtone_mask & (chroma < 24.0)
+    total_mid = int(np.count_nonzero(midtone_mask))
+    neutral_cnt = int(np.count_nonzero(neutral_mask))
 
-        # Tint (G vs (R+B)/2)
-        rb_avg = (r_mean + b_mean) / 2.0
-        g_diff = g_mean - rb_avg
-        tint_shift = float(np.clip(g_diff / max(avg_mean, 10.0) * 60.0, -20.0, 20.0))
-    else:
+    temp_shift = 0.0
+    tint_shift = 0.0
+    if neutral_cnt >= max(80, int(total_mid * 0.05)):
+        # Neutral pixels directly reveal ambient illuminant cast in Lab (a = green..magenta, b = blue..yellow)
+        mean_a = float(np.mean(a_off[neutral_mask]))
+        mean_b = float(np.mean(b_off[neutral_mask]))
+        temp_shift = float(np.clip(-mean_b * 2.2, -25.0, 25.0))
+        tint_shift = float(np.clip(-mean_a * 2.0, -20.0, 20.0))
+    elif total_mid > 100:
+        # Damped Gray-World fallback for scenes dominated by saturated colors
+        mean_a = float(np.mean(a_off[midtone_mask]))
+        mean_b = float(np.mean(b_off[midtone_mask]))
+        temp_shift = float(np.clip(-mean_b * 1.1, -18.0, 18.0))
+        tint_shift = float(np.clip(-mean_a * 1.0, -14.0, 14.0))
+
+    if abs(temp_shift) < 2.5:
         temp_shift = 0.0
+    if abs(tint_shift) < 2.0:
         tint_shift = 0.0
+
+    # Adaptive saturation: gently lift flat/muted photos without oversaturating already vivid scenes
+    hsv_s = cv2.cvtColor(small, cv2.COLOR_RGB2HSV)[:, :, 1]
+    mean_sat = float(np.mean(hsv_s[midtone_mask])) if total_mid > 100 else float(np.mean(hsv_s))
+    if mean_sat < 105.0:
+        sat_shift = float(np.clip((105.0 - mean_sat) / 105.0 * 14.0, 2.0, 12.0))
+    else:
+        sat_shift = 0.0
 
     return PhotoAdjustmentRecipe(
         brightness=round(brightness_shift, 1),
@@ -1778,7 +1812,7 @@ def analyze_auto_adjust(master_rgb: np.ndarray) -> PhotoAdjustmentRecipe:
         clarity=10.0,     # Subtle modern clarity
         temperature=round(temp_shift, 1),
         tint=round(tint_shift, 1),
-        saturation=10.0,  # Subtle pleasing vibrance boost
+        saturation=round(sat_shift, 1),
         sharpen=15.0,     # Clean natural sharpness
     )
 

@@ -334,15 +334,36 @@ class TagHierarchyDialog(QDialog):
         main_vbox.addWidget(lbl_header)
 
         # 2. Subtitle: "Select tags to add to your search, or drag tags to organize them into categories."
-        lbl_sub = QLabel("Select tags to add to your search, or drag tags to organize them.", self)
+        lbl_sub = QLabel(
+            "Select tags to add to your search, drag tags to organize them, or right-click a tag for Alt+1..9 shortcuts.",
+            self,
+        )
+        lbl_sub.setWordWrap(True)
         lbl_sub.setStyleSheet(
-            "color: #555555; font-family: 'Segoe UI'; font-size: 9pt; margin-bottom: 4px;"
+            "color: #555555; font-family: 'Segoe UI'; font-size: 9pt; margin-bottom: 2px;"
         )
         main_vbox.addWidget(lbl_sub)
 
-        # 3. Tree view of tags
+        self.lbl_shortcuts_summary = QLabel("", self)
+        self.lbl_shortcuts_summary.setWordWrap(True)
+        self.lbl_shortcuts_summary.setStyleSheet(
+            "color: #2B5C9B; background: #F1F6FC; border: 1px solid #D3E2F4; "
+            "border-radius: 3px; padding: 3px 7px; font-family: 'Segoe UI'; font-size: 8.5pt;"
+        )
+        self.lbl_shortcuts_summary.setVisible(False)
+        main_vbox.addWidget(self.lbl_shortcuts_summary)
+
+        # 3. Tree view of tags (2 columns: tag name + right-aligned Alt+1..9 shortcut badge)
+        from PySide6.QtWidgets import QHeaderView
+
         self.tree = _TagHierarchyTree(self)
+        self.tree.setColumnCount(2)
         self.tree.setHeaderHidden(True)
+        hdr = self.tree.header()
+        hdr.setStretchLastSection(False)
+        hdr.setSectionResizeMode(0, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.Fixed)
+        self.tree.setColumnWidth(1, 68)
         self.tree.setIndentation(16)
         self.tree.setIconSize(QSize(16, 16))
         self.tree.setAnimated(True)
@@ -376,7 +397,6 @@ class TagHierarchyDialog(QDialog):
         self.tree.tag_dropped.connect(self._on_tag_dropped)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._on_tree_context_menu)
-        self.tree.itemSelectionChanged.connect(self._sync_shortcut_button_state)
         main_vbox.addWidget(self.tree, 1)
 
         # 4. Bottom Button Row: [Clean up duplicates] [Add] [Cancel]
@@ -416,14 +436,6 @@ class TagHierarchyDialog(QDialog):
         self.btn_clean_orphans.clicked.connect(self._on_clean_duplicate_tags_clicked)
         btn_box.addWidget(self.btn_clean_orphans)
 
-        self.btn_quick_shortcut = QPushButton("Shortcut (Alt+1..9) ▾", self)
-        self.btn_quick_shortcut.setStyleSheet(btn_style)
-        self.btn_quick_shortcut.setMinimumWidth(145)
-        self.btn_quick_shortcut.setToolTip("Assign or clear an Alt+1..9 Quick-Tag shortcut for the selected tag")
-        self.btn_quick_shortcut.setEnabled(False)
-        self.btn_quick_shortcut.clicked.connect(self._on_shortcut_button_clicked)
-        btn_box.addWidget(self.btn_quick_shortcut)
-
         btn_box.addStretch(1)
 
         self.btn_add = QPushButton("Add", self)
@@ -457,8 +469,13 @@ class TagHierarchyDialog(QDialog):
         # First pass: instantiate nodes
         from src.ui.shortcuts_dialog import load_quick_tag_hotkeys
 
-        hotkey_by_tag = {name.strip().lower(): slot for slot, name in load_quick_tag_hotkeys().items()}
+        hotkeys = load_quick_tag_hotkeys()
+        hotkey_by_tag = {name.strip().lower(): slot for slot, name in hotkeys.items()}
+        self._update_shortcuts_summary(hotkeys)
         self._last_tag_rows = list(tag_rows)
+        shortcut_font = QFont("Segoe UI", 8)
+        shortcut_font.setBold(True)
+        shortcut_color = QColor("#2B5C9B")
         for t in tag_rows:
             tid = int(t["id"])
             tname = str(t["name"])
@@ -466,16 +483,19 @@ class TagHierarchyDialog(QDialog):
             cnt = int(t.get("direct_count", 0) or t.get("media_count", 0))
             slot = hotkey_by_tag.get(full_path.strip().lower()) or hotkey_by_tag.get(tname.strip().lower())
             base_lbl = f"{tname} ({cnt})" if cnt > 0 else tname
-            label = f"{base_lbl}  [Alt+{slot}]" if slot is not None else base_lbl
-            item = QTreeWidgetItem([label])
+            slot_lbl = f"Alt+{slot}" if slot is not None else ""
+            item = QTreeWidgetItem([base_lbl, slot_lbl])
             item.setIcon(0, tag_icon)
-            item.setData(0, Qt.UserRole, tid)
             item.setData(0, _NODE_TYPE_ROLE, "tag")
             item.setData(0, _NODE_PAYLOAD_ROLE, tid)
             item.setData(0, _OLD_NAME_ROLE, tname)
             item.setData(0, 260, full_path)
             if slot is not None:
+                item.setFont(1, shortcut_font)
+                item.setForeground(1, shortcut_color)
+                item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
                 item.setToolTip(0, f"{full_path} — Quick-Tag Shortcut: Alt+{slot}")
+                item.setToolTip(1, f"Quick-Tag Shortcut: Alt+{slot}")
             else:
                 item.setToolTip(0, full_path)
             self._tag_items[tid] = item
@@ -599,11 +619,24 @@ class TagHierarchyDialog(QDialog):
             self.populate(self.repo.get_tag_tree())
             self.tag_hierarchy_changed.emit()
 
+    def _update_shortcuts_summary(self, hotkeys: dict[int, str]) -> None:
+        if not hasattr(self, "lbl_shortcuts_summary"):
+            return
+        if not hotkeys:
+            self.lbl_shortcuts_summary.setVisible(False)
+            self.lbl_shortcuts_summary.setText("")
+            return
+        parts = [f"<b>Alt+{slot}</b> {name}" for slot, name in sorted(hotkeys.items())]
+        self.lbl_shortcuts_summary.setText("Shortcuts: " + " &nbsp;·&nbsp; ".join(parts))
+        self.lbl_shortcuts_summary.setVisible(True)
+
     def selected_tag_ids(self) -> list[int]:
         """Returns list of selected tag IDs."""
         ids: list[int] = []
         for item in self.tree.selectedItems():
-            tid = item.data(0, Qt.UserRole)
+            if item.data(0, _NODE_TYPE_ROLE) != "tag":
+                continue
+            tid = item.data(0, _NODE_PAYLOAD_ROLE)
             if tid is not None:
                 ids.append(int(tid))
         return ids
@@ -615,12 +648,6 @@ class TagHierarchyDialog(QDialog):
         it = sel[0]
         return str(it.data(0, 260) or it.data(0, _OLD_NAME_ROLE) or "").strip()
 
-    def _sync_shortcut_button_state(self) -> None:
-        if not hasattr(self, "btn_quick_shortcut"):
-            return
-        tpath = self._selected_single_tag_path()
-        self.btn_quick_shortcut.setEnabled(bool(tpath))
-
     def _refresh_after_shortcut_change(self) -> None:
         rows = self.repo.get_tag_tree() if self.repo is not None else getattr(self, "_last_tag_rows", [])
         sel_ids = set(self.selected_tag_ids())
@@ -629,21 +656,7 @@ class TagHierarchyDialog(QDialog):
             it = self._tag_items.get(tid)
             if it is not None:
                 it.setSelected(True)
-        self._sync_shortcut_button_state()
-
-    def _on_shortcut_button_clicked(self) -> None:
-        from PySide6.QtWidgets import QMenu
-        from src.ui.shortcuts_dialog import populate_quick_tag_shortcut_submenu
-
-        tpath = self._selected_single_tag_path()
-        if not tpath:
-            return
-        menu = QMenu(self)
-        populate_quick_tag_shortcut_submenu(menu, tpath, on_changed=self._refresh_after_shortcut_change)
-        # Flatten the single submenu directly onto the popup for 1-click ergonomics
-        sub = menu.actions()[0].menu() if menu.actions() else None
-        if sub is not None:
-            sub.exec(self.btn_quick_shortcut.mapToGlobal(QPoint(0, self.btn_quick_shortcut.height())))
+                self.tree.scrollToItem(it)
 
     def _on_tree_context_menu(self, pos: QPoint) -> None:
         from PySide6.QtWidgets import QMenu
@@ -657,6 +670,9 @@ class TagHierarchyDialog(QDialog):
             return
         menu = QMenu(self)
         populate_quick_tag_shortcut_submenu(menu, tpath, on_changed=self._refresh_after_shortcut_change)
+        parent_win = self.parent() or self.window()
+        if hasattr(parent_win, "ribbon") and hasattr(parent_win.ribbon, "_apply_menu_polish"):
+            parent_win.ribbon._apply_menu_polish(menu)
         menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     def _on_add_clicked(self) -> None:

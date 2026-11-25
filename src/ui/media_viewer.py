@@ -2811,7 +2811,7 @@ class SingleMediaViewer(QWidget):
             pm.setDevicePixelRatio(2.0)
             return QIcon(pm)
 
-        self.btn_hud_fav.setVisible(bool(getattr(self, "_favourites_enabled", True)))
+        self.btn_hud_fav.setVisible(True)
         self.btn_hud_fav.setIcon(_make_hud_icon("heart", "#F43F5E" if is_fav else "#CBD5E1", filled=is_fav))
         if flag == 1:
             self.btn_hud_flag.setIcon(_make_hud_icon("flag", "#E81123", filled=True))
@@ -10074,7 +10074,7 @@ class SingleMediaViewer(QWidget):
         is_vid = getattr(self, "current_is_video", False)
 
         # 1. Open: Open with ▸, Open file location
-        open_with_menu = menu.addMenu("Open with")
+        open_with_menu = menu.addMenu(make_wlpg_icon("folder_open", 16), "Open with")
         menu._open_with_menu = open_with_menu
         open_with_menu.setFont(QFont("Segoe UI", 9))
 
@@ -10122,7 +10122,7 @@ class SingleMediaViewer(QWidget):
 
         act_choose.triggered.connect(_on_open_choose)
 
-        act_loc = menu.addAction("Open file location")
+        act_loc = menu.addAction(make_wlpg_icon("folder", 16), "Open file location")
         if hasattr(mw, "open_file_location_for_media") and mid is not None:
             act_loc.triggered.connect(lambda: mw.open_file_location_for_media(mid))
 
@@ -10130,7 +10130,7 @@ class SingleMediaViewer(QWidget):
 
         # 2. Desktop Background
         if not is_vid:
-            act_bg = menu.addAction("Set as desktop background")
+            act_bg = menu.addAction(make_wlpg_icon("slideshow", 16), "Set as desktop background")
             if is_mw and hasattr(mw, "set_desktop_background_for_media") and mid is not None:
                 act_bg.triggered.connect(lambda: mw.set_desktop_background_for_media(mid))
 
@@ -10143,7 +10143,7 @@ class SingleMediaViewer(QWidget):
             flag_menu.setFont(QFont("Segoe UI", 9))
 
             repo_for_fav = getattr(mw, "catalog_repo", None)
-            if hasattr(mw, "apply_favourite_to_selection") and getattr(mw, "favourites_enabled", True):
+            if hasattr(mw, "apply_favourite_to_selection"):
                 cur_fav = False
                 if repo_for_fav is not None:
                     try:
@@ -10177,7 +10177,7 @@ class SingleMediaViewer(QWidget):
                 act_unf.setShortcut("U")
                 act_unf.triggered.connect(lambda: mw.apply_flag_to_selection(0))
 
-        add_album_menu = menu.addMenu("Add to Album")
+        add_album_menu = menu.addMenu(make_wlpg_icon("albums", 16), "Add to Album")
         menu._add_album_menu = add_album_menu
         add_album_menu.setFont(QFont("Segoe UI", 9))
         repo = getattr(mw, "catalog_repo", None)
@@ -10221,10 +10221,10 @@ class SingleMediaViewer(QWidget):
 
         if not is_vid:
             edit_menu.addSeparator()
-            act_copy_subj = edit_menu.addAction("Copy subject to clipboard")
+            act_copy_subj = edit_menu.addAction(make_wlpg_icon("copy_subject", 16), "Copy subject to clipboard")
             act_copy_subj.triggered.connect(self.copy_subject_to_clipboard)
 
-            act_rm_bg = edit_menu.addAction("Remove background")
+            act_rm_bg = edit_menu.addAction(make_wlpg_icon("remove_background", 16), "Remove background")
             act_rm_bg.triggered.connect(self.remove_background_cutout)
 
         scan_menu = menu.addMenu(make_wlpg_icon("text_search", 16), "Scan")
@@ -10232,11 +10232,11 @@ class SingleMediaViewer(QWidget):
         scan_menu.setFont(QFont("Segoe UI", 9))
 
         if not is_vid:
-            act_sim = scan_menu.addAction("Find Similar Photos...")
+            act_sim = scan_menu.addAction(make_wlpg_icon("compare", 16), "Find Similar Photos...")
             if is_mw and hasattr(mw, "open_find_similar_for_media") and mid is not None:
                 act_sim.triggered.connect(lambda: mw.open_find_similar_for_media(mid))
 
-        act_rescan = scan_menu.addAction("Rescan for faces")
+        act_rescan = scan_menu.addAction(make_wlpg_icon("face", 16), "Rescan for faces")
         if is_mw and mid is not None:
             act_rescan.triggered.connect(lambda: mw.rescan_faces_for_selection([mid]))
 
@@ -10249,7 +10249,7 @@ class SingleMediaViewer(QWidget):
                 except Exception:
                     already_ocr = False
             ocr_label = "Rescan for text (OCR)" if already_ocr else "Scan for text (OCR)"
-            act_ocr = scan_menu.addAction(ocr_label)
+            act_ocr = scan_menu.addAction(make_wlpg_icon("text_search", 16), ocr_label)
             if is_mw and hasattr(mw, "scan_ocr_for_selection") and mid is not None:
                 act_ocr.triggered.connect(lambda: mw.scan_ocr_for_selection([mid]))
 
@@ -10289,7 +10289,7 @@ class SingleMediaViewer(QWidget):
             act_ren.triggered.connect(mw.rename_selection)
 
         if not is_vid:
-            act_res = menu.addAction(make_wlpg_icon("export", 16), "Export / Resize...")
+            act_res = menu.addAction(make_wlpg_icon("make_copy", 16), "Export / Resize...")
             if hasattr(mw, "dispatch_ribbon_action"):
                 act_res.triggered.connect(lambda: mw.dispatch_ribbon_action("save_as_resized_copy"))
             elif hasattr(mw, "open_resize_dialog"):
@@ -10298,7 +10298,7 @@ class SingleMediaViewer(QWidget):
         menu.addSeparator()
 
         # 5. Properties (Always final item)
-        act_prop = menu.addAction("Properties")
+        act_prop = menu.addAction(make_wlpg_icon("view_details", 16), "Properties")
         act_prop.setShortcut("Alt+Enter")
         if hasattr(mw, "open_file_properties") and mid is not None:
             act_prop.triggered.connect(lambda: mw.open_file_properties(mid))

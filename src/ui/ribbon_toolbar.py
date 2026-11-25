@@ -3297,6 +3297,7 @@ class _ExposureMenuWidget(QWidget):
         layout.addWidget(lbl_auto)
 
         self.btn_auto = _AutoAdjustTile(make_wlpg_icon("adjust_exposure", 36), self)
+        self.btn_auto.setToolTip("Automatically balance brightness, contrast, shadows, and highlights.")
         self.btn_auto.hovered.connect(self.auto_preview_requested.emit)
         self.btn_auto.unhovered.connect(self.preview_cancelled.emit)
         self.btn_auto.clicked.connect(self.auto_selected.emit)
@@ -3316,14 +3317,27 @@ class _ExposureMenuWidget(QWidget):
         grid.setContentsMargins(0, 0, 0, 0)
 
         self.tiles: list[tuple[float, float, _VariationTile]] = []
-        brightnesses = [-25.0, 0.0, 25.0]
+        # WLPG 2D grid: Top = Brighter -> Bottom = Darker; Left = Lower contrast -> Right = Higher contrast
+        brightnesses = [25.0, 0.0, -25.0]
         contrasts = [-20.0, 0.0, 20.0]
+        _exp_tips = {
+            (25.0, -20.0): "Higher brightness, lower contrast.",
+            (25.0, 0.0): "Higher brightness.",
+            (25.0, 20.0): "Higher brightness, higher contrast.",
+            (0.0, -20.0): "Lower contrast.",
+            (0.0, 0.0): "Original exposure (no change).",
+            (0.0, 20.0): "Higher contrast.",
+            (-25.0, -20.0): "Lower brightness, lower contrast.",
+            (-25.0, 0.0): "Lower brightness.",
+            (-25.0, 20.0): "Lower brightness, higher contrast.",
+        }
 
         for r_idx, b_val in enumerate(brightnesses):
             for c_idx, c_val in enumerate(contrasts):
                 is_center = (r_idx == 1 and c_idx == 1)
                 tile = _VariationTile(is_center=is_center, parent=self)
                 tile.setIconSize(QSize(54, 38))
+                tile.setToolTip(_exp_tips.get((b_val, c_val), ""))
                 tile.hovered.connect(lambda b=b_val, c=c_val: self.preview_requested.emit(b, c))
                 tile.unhovered.connect(self.preview_cancelled.emit)
                 tile.clicked.connect(lambda _, b=b_val, c=c_val: self.adjustment_selected.emit(b, c))
@@ -3385,6 +3399,7 @@ class _ColorMenuWidget(QWidget):
         layout.addWidget(lbl_auto)
 
         self.btn_auto = _AutoAdjustTile(make_wlpg_icon("color_spectrum", 36), self)
+        self.btn_auto.setToolTip("Automatically correct white balance, tint, and color vibrancy.")
         self.btn_auto.hovered.connect(self.auto_preview_requested.emit)
         self.btn_auto.unhovered.connect(self.preview_cancelled.emit)
         self.btn_auto.clicked.connect(self.auto_selected.emit)
@@ -3404,14 +3419,28 @@ class _ColorMenuWidget(QWidget):
         grid.setContentsMargins(0, 0, 0, 0)
 
         self.tiles: list[tuple[float, float, _VariationTile]] = []
-        tints = [-25.0, 0.0, 25.0]
+        # WLPG 2D grid: Top = High tint (magenta) -> Bottom = Low tint (green);
+        # Left = Low temperature (cooler) -> Right = High temperature (warmer)
+        tints = [25.0, 0.0, -25.0]
         temps = [-25.0, 0.0, 25.0]
+        _color_tips = {
+            (-25.0, 25.0): "Low temperature, high tint (cooler, magenta).",
+            (0.0, 25.0): "Normal temperature, high tint (magenta).",
+            (25.0, 25.0): "High temperature, high tint (warmer, magenta).",
+            (-25.0, 0.0): "Low temperature (cooler).",
+            (0.0, 0.0): "Original color (no change).",
+            (25.0, 0.0): "High temperature (warmer).",
+            (-25.0, -25.0): "Low temperature, low tint (cooler, green).",
+            (0.0, -25.0): "Normal temperature, low tint (green).",
+            (25.0, -25.0): "High temperature, low tint (warmer, green).",
+        }
 
         for r_idx, tint_val in enumerate(tints):
             for c_idx, temp_val in enumerate(temps):
                 is_center = (r_idx == 1 and c_idx == 1)
                 tile = _VariationTile(is_center=is_center, parent=self)
                 tile.setIconSize(QSize(54, 38))
+                tile.setToolTip(_color_tips.get((temp_val, tint_val), ""))
                 tile.hovered.connect(lambda t=temp_val, ti=tint_val: self.preview_requested.emit(t, ti))
                 tile.unhovered.connect(self.preview_cancelled.emit)
                 tile.clicked.connect(lambda _, t=temp_val, ti=tint_val: self.adjustment_selected.emit(t, ti))
@@ -6870,6 +6899,29 @@ class RibbonToolbar(QWidget):
             lambda chk: self.action_triggered.emit(f"toggle_badge_groups:{1 if chk else 0}")
         )
 
+        menu.addSeparator()
+
+        self.act_badge_geotagged = menu.addAction("Geotagged")
+        self.act_badge_geotagged.setCheckable(True)
+        self.act_badge_geotagged.setChecked(False)
+        self.act_badge_geotagged.toggled.connect(
+            lambda chk: self.action_triggered.emit(f"toggle_badge_geotagged:{1 if chk else 0}")
+        )
+
+        self.act_badge_desc_tags = menu.addAction("Descriptive tagged")
+        self.act_badge_desc_tags.setCheckable(True)
+        self.act_badge_desc_tags.setChecked(False)
+        self.act_badge_desc_tags.toggled.connect(
+            lambda chk: self.action_triggered.emit(f"toggle_badge_desc_tags:{1 if chk else 0}")
+        )
+
+        self.act_badge_people_tags = menu.addAction("People tagged")
+        self.act_badge_people_tags.setCheckable(True)
+        self.act_badge_people_tags.setChecked(False)
+        self.act_badge_people_tags.toggled.connect(
+            lambda chk: self.action_triggered.emit(f"toggle_badge_people_tags:{1 if chk else 0}")
+        )
+
         btn_bot.setMenu(menu)
         vbox.addWidget(btn_bot)
 
@@ -6888,12 +6940,24 @@ class RibbonToolbar(QWidget):
 
         return container, btn_top
 
-    def set_badges_state(self, *, show_flags: bool, show_favourites: bool, show_groups: bool) -> None:
+    def set_badges_state(
+        self,
+        *,
+        show_flags: bool,
+        show_favourites: bool,
+        show_groups: bool,
+        show_geotagged: bool = False,
+        show_desc_tags: bool = False,
+        show_people_tags: bool = False,
+    ) -> None:
         """Sync View -> Badges dropdown checkmarks and master top button checked state."""
         for act, val in (
             (getattr(self, "act_badge_flags", None), show_flags),
             (getattr(self, "act_badge_favourites", None), show_favourites),
             (getattr(self, "act_badge_groups", None), show_groups),
+            (getattr(self, "act_badge_geotagged", None), show_geotagged),
+            (getattr(self, "act_badge_desc_tags", None), show_desc_tags),
+            (getattr(self, "act_badge_people_tags", None), show_people_tags),
         ):
             if act is not None:
                 act.blockSignals(True)
@@ -6901,7 +6965,16 @@ class RibbonToolbar(QWidget):
                 act.blockSignals(False)
         if hasattr(self, "btn_detail_badges"):
             self.btn_detail_badges.blockSignals(True)
-            self.btn_detail_badges.setChecked(bool(show_flags or show_favourites or show_groups))
+            self.btn_detail_badges.setChecked(
+                bool(
+                    show_flags
+                    or show_favourites
+                    or show_groups
+                    or show_geotagged
+                    or show_desc_tags
+                    or show_people_tags
+                )
+            )
             self.btn_detail_badges.blockSignals(False)
 
     def _make_split_mosaic_button(self, parent: QWidget) -> tuple[QWidget, QToolButton]:
@@ -7986,23 +8059,11 @@ class RibbonToolbar(QWidget):
         pm.setDevicePixelRatio(2.0)
         return QIcon(pm)
 
-    def set_favourites_enabled(self, enabled: bool) -> None:
-        self._favourites_enabled = bool(enabled)
-        for act in getattr(self, "_ribbon_fav_actions", []):
-            try:
-                act.setVisible(self._favourites_enabled)
-            except RuntimeError:
-                pass
-
     def _build_flagged_menu(self, btn: QToolButton) -> None:
         menu = QMenu(btn)
         menu.setFont(QFont("Segoe UI", 9))
         act_all = menu.addAction("All items")
         act_fav = menu.addAction(self._make_cull_menu_icon("heart"), "Favourites")
-        act_fav.setVisible(bool(getattr(self, "_favourites_enabled", True)))
-        if not hasattr(self, "_ribbon_fav_actions"):
-            self._ribbon_fav_actions = []
-        self._ribbon_fav_actions.append(act_fav)
         act_flagged = menu.addAction(self._make_cull_menu_icon("flag_picked"), "Picked")
         act_rejected = menu.addAction(self._make_cull_menu_icon("flag_rejected"), "Rejected")
         act_unflagged = menu.addAction(self._make_cull_menu_icon("flag_unflagged"), "Not flagged")
@@ -9603,10 +9664,7 @@ class RibbonToolbar(QWidget):
             ("Media type", "media_type"),
             ("Rating", "rating"),
             ("Flag", "flag"),
-        ]
-        if getattr(self, "_favourites_enabled", True):
-            group_criteria.append(("Favourites", "favourites"))
-        group_criteria.extend([
+            ("Favourites", "favourites"),
             ("Folder", "folder"),
             ("Tag", "tag"),
             ("People", "people"),
@@ -9614,7 +9672,7 @@ class RibbonToolbar(QWidget):
             ("Geotag", "geotag"),
             ("Camera", "camera"),
             ("None", "none"),
-        ])
+        ]
 
         curr = getattr(self, "_arrange_by", "date")
 

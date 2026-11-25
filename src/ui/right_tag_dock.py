@@ -2436,11 +2436,36 @@ class _GeotagInput(QLineEdit):
 
     def contextMenuEvent(self, event: Any) -> None:
         menu = self.createStandardContextMenu()
-        if self.text().strip():
+        coords = str(getattr(self, "_current_coords_str", "") or "").strip()
+        if coords or self.text().strip():
             menu.addSeparator()
-            act_rm = menu.addAction("Remove geotag")
+        if coords:
+            act_copy_coords = menu.addAction(make_wlpg_icon("copy", 16), "Copy coordinates")
+            act_copy_coords.triggered.connect(self._copy_coordinates)
+        if self.text().strip():
+            act_rm = menu.addAction(make_wlpg_icon("delete", 16), "Remove geotag")
             act_rm.triggered.connect(self.clear_geotag)
+        mw_ref = self.window()
+        if hasattr(mw_ref, "ribbon") and hasattr(mw_ref.ribbon, "_apply_menu_polish"):
+            mw_ref.ribbon._apply_menu_polish(menu)
         menu.exec(event.globalPos())
+
+    def _copy_coordinates(self) -> None:
+        coords = str(getattr(self, "_current_coords_str", "") or "").strip()
+        if not coords:
+            return
+        cb = QApplication.clipboard()
+        if cb is not None:
+            cb.setText(coords)
+        if self.lbl_status is not None:
+            self.lbl_status.setText("✓ Copied")
+            self.lbl_status.setVisible(True)
+            QTimer.singleShot(
+                1800,
+                lambda: self.lbl_status.setVisible(False)
+                if self.lbl_status is not None and self.lbl_status.text() == "✓ Copied"
+                else None,
+            )
 
 
 class _FineTuneGroup(QFrame):
@@ -3264,15 +3289,8 @@ class TagAndCaptionDock(QDockWidget):
         top_vbox.addWidget(self.txt_geotag)
 
         self._current_coords_str: str = ""
-        self.lbl_geotag_coords = _ClickableFolderLabel("", top_content)
-        self.lbl_geotag_coords.setObjectName("GeotagCoordsLabel")
-        self.lbl_geotag_coords.setVisible(False)
-        self.lbl_geotag_coords.setStyleSheet(
-            "QLabel#GeotagCoordsLabel { color: #64748B; font-family: 'Segoe UI'; font-size: 8pt; padding-left: 2px; }"
-            "QLabel#GeotagCoordsLabel:hover { color: #0066CC; text-decoration: underline; }"
-        )
-        self.lbl_geotag_coords.clicked.connect(self._on_geotag_coords_clicked)
-        top_vbox.addWidget(self.lbl_geotag_coords)
+        self.txt_geotag._current_coords_str = ""
+        self.txt_geotag.setToolTip("Add a geotag location (city, landmark, or address)")
 
         # 3. Caption
         lbl_cap = QLabel("Caption", top_content)
@@ -7370,11 +7388,6 @@ class TagAndCaptionDock(QDockWidget):
         self._current_rating = max(0, min(5, int(rating)))
         self.star_rating_widget.set_rating(self._current_rating)
 
-    def set_favourites_enabled(self, enabled: bool) -> None:
-        self._favourites_enabled = bool(enabled)
-        if hasattr(self, "btn_info_fav"):
-            self.btn_info_fav.setVisible(self._favourites_enabled)
-
     def _make_info_cull_icon(self, kind: str, active: bool) -> QIcon:
         from PySide6.QtCore import QPointF
         from PySide6.QtGui import QLinearGradient, QPainterPath, QPolygonF
@@ -7449,7 +7462,7 @@ class TagAndCaptionDock(QDockWidget):
             self.btn_flag.setToolTip("Unflagged — click to mark Picked (P / X / U)")
             flag_bg = "transparent"
         if hasattr(self, "btn_info_fav"):
-            self.btn_info_fav.setVisible(bool(getattr(self, "_favourites_enabled", True)))
+            self.btn_info_fav.setVisible(True)
             self.btn_info_fav.setIcon(self._make_info_cull_icon("fav", self._current_favourite))
             self.btn_info_fav.setToolTip("Unfavourite (F)" if self._current_favourite else "Favourite (F)")
 
@@ -7496,39 +7509,26 @@ class TagAndCaptionDock(QDockWidget):
         return f"{head}...{tail}"
 
     def _set_geotag_coords_display(self, lat: Any, lon: Any) -> None:
-        if not hasattr(self, "lbl_geotag_coords"):
-            return
         if lat is not None and lon is not None:
             try:
                 coord_txt = f"{float(lat):.5f}, {float(lon):.5f}"
                 self._current_coords_str = coord_txt
-                self.lbl_geotag_coords.setText(f"Coords: {coord_txt}")
-                self.lbl_geotag_coords.setToolTip(f"{coord_txt}\nClick to copy GPS coordinates")
-                self.lbl_geotag_coords.set_clickable(True)
-                self.lbl_geotag_coords.setVisible(True)
+                if hasattr(self, "txt_geotag"):
+                    self.txt_geotag._current_coords_str = coord_txt
+                    self.txt_geotag.setToolTip(
+                        f"Coordinates: {coord_txt}\nRight-click to copy coordinates"
+                    )
                 return
             except Exception:
                 pass
         self._current_coords_str = ""
-        self.lbl_geotag_coords.setText("")
-        self.lbl_geotag_coords.set_clickable(False)
-        self.lbl_geotag_coords.setVisible(False)
+        if hasattr(self, "txt_geotag"):
+            self.txt_geotag._current_coords_str = ""
+            self.txt_geotag.setToolTip("Add a geotag location (city, landmark, or address)")
 
     def _on_geotag_coords_clicked(self) -> None:
-        coords = getattr(self, "_current_coords_str", "")
-        if not coords:
-            return
-        cb = QApplication.clipboard()
-        if cb is not None:
-            cb.setText(coords)
-        if hasattr(self, "lbl_geotag_coords"):
-            self.lbl_geotag_coords.setText(f"✓ Copied {coords}")
-            QTimer.singleShot(
-                1800,
-                lambda c=coords: self.lbl_geotag_coords.setText(f"Coords: {c}")
-                if getattr(self, "_current_coords_str", "") == c
-                else None,
-            )
+        if hasattr(self, "txt_geotag"):
+            self.txt_geotag._copy_coordinates()
 
     def _set_folder_display(self, folder_path: str, folder_name: str = "", *, multiple: bool = False) -> None:
         if not hasattr(self, "lbl_folder"):
@@ -7639,7 +7639,7 @@ class TagAndCaptionDock(QDockWidget):
         self.flag_edited.emit(new_flag)
 
     def _on_favourite_button_clicked(self) -> None:
-        if self._updating_ui or not self._selected_ids or not getattr(self, "_favourites_enabled", True):
+        if self._updating_ui or not self._selected_ids:
             return
         new_fav = not self._current_favourite
         self._update_flag_button(self._current_flag, new_fav)

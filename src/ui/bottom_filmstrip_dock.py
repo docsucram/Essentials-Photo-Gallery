@@ -107,7 +107,7 @@ class _FilmstripItemDelegate(QStyledItemDelegate):
         self._thumb_repo: Any = None
         self._local_thumbs: OrderedDict[int, QPixmap] = OrderedDict()
         self._theme_name: str = "wlpg_aero"
-        self.favourites_enabled: bool = True
+        self.favourites_enabled: bool = True  # Always enabled (kept for API compatibility)
 
     def set_sources(self, pixmap_cache: dict[int, QPixmap] | None, thumb_repo: Any) -> None:
         self._pixmap_cache = pixmap_cache
@@ -256,8 +256,7 @@ class _FilmstripItemDelegate(QStyledItemDelegate):
                 painter.drawLine(fr.left() + 2, fr.bottom() - 2, fr.right() - 2, fr.top() + 2)
 
         # Bottom-right squircle pill: Lap-style star-turns-into-heart when favourited (+ rating digit)
-        show_fav = bool(is_fav and getattr(self, "favourites_enabled", True))
-        if show_fav or rating_val > 0:
+        if bool(is_fav) or rating_val > 0:
             from PySide6.QtCore import QPointF, QRectF
             from PySide6.QtGui import QLinearGradient, QPolygonF
 
@@ -357,7 +356,7 @@ class BottomFilmstripDock(QDockWidget):
         self.setTitleBarWidget(_empty_tb)  # 0px hidden QDockWidget title bar
 
         self._theme_name: str = "wlpg_aero"
-        self.favourites_enabled: bool = True
+        self.favourites_enabled: bool = True  # Always enabled (kept for API compatibility)
         self._catalog_model: Any = None
         self._pixmap_cache: dict[int, QPixmap] | None = None
         self._thumb_repo: Any = None

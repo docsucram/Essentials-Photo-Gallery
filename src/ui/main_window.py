@@ -1352,7 +1352,10 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._badge_show_flags: bool = True
         self._badge_show_favourites: bool = True
         self._badge_show_groups: bool = True
-        self._saved_badge_prefs: tuple[bool, bool, bool] = (True, True, True)
+        self._badge_show_geotagged: bool = False
+        self._badge_show_desc_tags: bool = False
+        self._badge_show_people_tags: bool = False
+        self._saved_badge_prefs: tuple[bool, ...] = (True, True, True, False, False, False)
         try:
             from src.core.semantic_engine import SemanticEngine, SemanticVectorRepository
 
@@ -5358,8 +5361,6 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._advance_after_cull()
 
     def toggle_favourite_selection(self, *, advance: bool = False) -> None:
-        if not getattr(self, "favourites_enabled", True):
-            return
         ids = self.get_active_target_ids()
         if not ids:
             return
@@ -5368,12 +5369,10 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.apply_favourite_to_selection(any_unfav, target_ids=ids, advance=advance)
 
     def _on_card_favourite_toggled(self, media_id: int, is_fav: bool) -> None:
-        if not getattr(self, "favourites_enabled", True):
-            return
         self.apply_favourite_to_selection(is_fav, target_ids=[int(media_id)])
 
     def _on_favourite_filter_selected(self, enabled: bool) -> None:
-        self._favourites_only = bool(enabled) and bool(getattr(self, "favourites_enabled", True))
+        self._favourites_only = bool(enabled)
         if self._favourites_only:
             # Clear folder/album/flag scope so the permanent Favourites smart album shows all favourites
             self.left_nav_dock._folder_id = None
@@ -5400,42 +5399,6 @@ class PhotoGalleryMainWindow(QMainWindow):
         settings.setValue("smart_show_picked", getattr(self.left_nav_dock, "_show_smart_picked", True))
         settings.setValue("smart_show_rejected", getattr(self.left_nav_dock, "_show_smart_rejected", True))
         settings.setValue("smart_show_unflagged", getattr(self.left_nav_dock, "_show_smart_unflagged", True))
-
-    def set_favourites_enabled(self, enabled: bool) -> None:
-        enabled = bool(enabled)
-        self.favourites_enabled = enabled
-        if hasattr(self, "grid_view") and self.grid_view is not None and self.grid_view.card_delegate is not None:
-            self.grid_view.card_delegate.favourites_enabled = enabled
-            self.grid_view.viewport().update()
-        if hasattr(self, "media_viewer") and self.media_viewer is not None:
-            self.media_viewer._favourites_enabled = enabled
-            try:
-                self.media_viewer._update_cull_hud()
-            except Exception:
-                pass
-        if hasattr(self, "filmstrip_dock") and self.filmstrip_dock is not None:
-            dlg = getattr(self.filmstrip_dock, "_delegate", None)
-            if dlg is not None:
-                dlg.favourites_enabled = enabled
-            lv = getattr(self.filmstrip_dock, "list_view", None)
-            if lv is not None:
-                lv.viewport().update()
-        if hasattr(self, "ribbon") and self.ribbon is not None:
-            self.ribbon.set_favourites_enabled(enabled)
-        if hasattr(self, "left_nav_dock") and self.left_nav_dock is not None:
-            self.left_nav_dock.set_favourites_enabled(enabled)
-        if hasattr(self, "right_tag_dock") and self.right_tag_dock is not None:
-            self.right_tag_dock.set_favourites_enabled(enabled)
-        if not enabled:
-            needs_requery = False
-            if getattr(self, "_favourites_only", False):
-                self._favourites_only = False
-                needs_requery = True
-            if getattr(self, "_group_by", "month") == "favourites":
-                self.set_group_by("month")
-                needs_requery = False  # set_group_by already triggers rebuild
-            if needs_requery:
-                self.rebuild_and_run_query()
 
     def select_all_rejected(self) -> list[int]:
         rejected = self.catalog_repo.get_rejected_media_ids()
@@ -5611,7 +5574,6 @@ class PhotoGalleryMainWindow(QMainWindow):
             rating=rating,
             flag=flag,
             is_favourite=is_fav,
-            favourites_enabled=bool(getattr(self, "favourites_enabled", True)),
         )
         if not dlg.isVisible():
             dlg.show()
@@ -5650,8 +5612,6 @@ class PhotoGalleryMainWindow(QMainWindow):
                 pass
 
     def _on_quick_preview_favourite(self, media_id: int) -> None:
-        if not getattr(self, "favourites_enabled", True):
-            return
         fav_map = self.catalog_repo.get_field_map_for_ids([int(media_id)], "is_favourite")
         cur_fav = bool(fav_map.get(int(media_id), 0))
         self.apply_favourite_to_selection(not cur_fav, target_ids=[int(media_id)])
@@ -5755,20 +5715,42 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._badge_show_flags
             or self._badge_show_favourites
             or self._badge_show_groups
+            or self._badge_show_geotagged
+            or self._badge_show_desc_tags
+            or self._badge_show_people_tags
         )
         if any_on:
             self._saved_badge_prefs = (
                 bool(self._badge_show_flags),
                 bool(self._badge_show_favourites),
                 bool(self._badge_show_groups),
+                bool(self._badge_show_geotagged),
+                bool(self._badge_show_desc_tags),
+                bool(self._badge_show_people_tags),
             )
-            self.set_badge_visibility(flags=False, favourites=False, groups=False)
+            self.set_badge_visibility(
+                flags=False,
+                favourites=False,
+                groups=False,
+                geotagged=False,
+                desc_tags=False,
+                people_tags=False,
+            )
             self.show_status_message("Thumbnail badges hidden", 2000)
         else:
-            saved = getattr(self, "_saved_badge_prefs", (True, True, True))
+            saved = getattr(self, "_saved_badge_prefs", (True, True, True, False, False, False))
+            if len(saved) < 6:
+                saved = tuple(saved) + (False,) * (6 - len(saved))
             if not any(saved):
-                saved = (True, True, True)
-            self.set_badge_visibility(flags=saved[0], favourites=saved[1], groups=saved[2])
+                saved = (True, True, True, False, False, False)
+            self.set_badge_visibility(
+                flags=saved[0],
+                favourites=saved[1],
+                groups=saved[2],
+                geotagged=saved[3],
+                desc_tags=saved[4],
+                people_tags=saved[5],
+            )
             self.show_status_message("Thumbnail badges shown", 2000)
 
     def set_badge_visibility(
@@ -5777,29 +5759,66 @@ class PhotoGalleryMainWindow(QMainWindow):
         flags: bool | None = None,
         favourites: bool | None = None,
         groups: bool | None = None,
+        geotagged: bool | None = None,
+        desc_tags: bool | None = None,
+        people_tags: bool | None = None,
         save: bool = True,
     ) -> None:
+        need_geo = False
+        need_desc = False
+        need_people = False
         if flags is not None:
             self._badge_show_flags = bool(flags)
         if favourites is not None:
             self._badge_show_favourites = bool(favourites)
         if groups is not None:
             self._badge_show_groups = bool(groups)
+        if geotagged is not None:
+            need_geo = bool(geotagged) and not self._badge_show_geotagged
+            self._badge_show_geotagged = bool(geotagged)
+        if desc_tags is not None:
+            need_desc = bool(desc_tags) and not self._badge_show_desc_tags
+            self._badge_show_desc_tags = bool(desc_tags)
+        if people_tags is not None:
+            need_people = bool(people_tags) and not self._badge_show_people_tags
+            self._badge_show_people_tags = bool(people_tags)
+        if hasattr(self, "catalog_repo") and self.catalog_repo is not None:
+            self.catalog_repo.include_geotag_badge = self._badge_show_geotagged
+            self.catalog_repo.include_desc_tag_badge = self._badge_show_desc_tags
+            self.catalog_repo.include_people_tag_badge = self._badge_show_people_tags
+            if (need_geo or need_desc or need_people) and hasattr(self, "catalog_model"):
+                recs = getattr(self.catalog_model, "_records", None)
+                if recs:
+                    self.catalog_repo.annotate_tag_badges(
+                        recs,
+                        geotagged=need_geo,
+                        desc_tagged=need_desc,
+                        people_tagged=need_people,
+                    )
         if hasattr(self, "card_delegate") and self.card_delegate is not None:
             self.card_delegate.show_flag_badges = self._badge_show_flags
             self.card_delegate.show_favourite_badges = self._badge_show_favourites
             self.card_delegate.show_group_badges = self._badge_show_groups
+            self.card_delegate.show_geotag_badges = self._badge_show_geotagged
+            self.card_delegate.show_desc_tag_badges = self._badge_show_desc_tags
+            self.card_delegate.show_people_tag_badges = self._badge_show_people_tags
         if hasattr(self, "ribbon") and hasattr(self.ribbon, "set_badges_state"):
             self.ribbon.set_badges_state(
                 show_flags=self._badge_show_flags,
                 show_favourites=self._badge_show_favourites,
                 show_groups=self._badge_show_groups,
+                show_geotagged=self._badge_show_geotagged,
+                show_desc_tags=self._badge_show_desc_tags,
+                show_people_tags=self._badge_show_people_tags,
             )
         if save:
             settings = QSettings("PhotoGallery64", "PhotoGallery64")
             settings.setValue("badge_show_flags", self._badge_show_flags)
             settings.setValue("badge_show_favourites", self._badge_show_favourites)
             settings.setValue("badge_show_groups", self._badge_show_groups)
+            settings.setValue("badge_show_geotagged", self._badge_show_geotagged)
+            settings.setValue("badge_show_desc_tags", self._badge_show_desc_tags)
+            settings.setValue("badge_show_people_tags", self._badge_show_people_tags)
         if hasattr(self, "grid_view") and self.grid_view is not None:
             self.grid_view.viewport().update()
 
@@ -9400,6 +9419,12 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.set_badge_visibility(favourites=action_id.endswith(":1"))
         elif action_id in ("toggle_badge_groups:1", "toggle_badge_groups:0"):
             self.set_badge_visibility(groups=action_id.endswith(":1"))
+        elif action_id in ("toggle_badge_geotagged:1", "toggle_badge_geotagged:0"):
+            self.set_badge_visibility(geotagged=action_id.endswith(":1"))
+        elif action_id in ("toggle_badge_desc_tags:1", "toggle_badge_desc_tags:0"):
+            self.set_badge_visibility(desc_tags=action_id.endswith(":1"))
+        elif action_id in ("toggle_badge_people_tags:1", "toggle_badge_people_tags:0"):
+            self.set_badge_visibility(people_tags=action_id.endswith(":1"))
         elif action_id == "batch_people_tag":
             self.open_batch_people_view()
         elif action_id == "batch_select_all":
@@ -10933,7 +10958,6 @@ class PhotoGalleryMainWindow(QMainWindow):
             show_albums=getattr(self.left_nav_dock, "_show_albums", True),
             show_cameras=getattr(self.left_nav_dock, "_show_cameras", False),
             show_subjects=getattr(self.left_nav_dock, "_show_subjects", False),
-            favourites_enabled=getattr(self, "favourites_enabled", True),
             find_people_enabled=getattr(self, "find_people_enabled", True),
             tooltip_previews=getattr(self, "tooltip_previews", True),
             jpeg_quality=getattr(self, "jpeg_quality", 83),
@@ -11006,8 +11030,6 @@ class PhotoGalleryMainWindow(QMainWindow):
                 ):
                     self._start_semantic_worker()
 
-            self.set_favourites_enabled(dlg.favourites_enabled())
-
             old_find_people = getattr(self, "find_people_enabled", True)
             self.find_people_enabled = dlg.find_people_enabled()
             if self.find_people_enabled and not old_find_people:
@@ -11034,7 +11056,6 @@ class PhotoGalleryMainWindow(QMainWindow):
             settings.setValue("nav_show_albums", self.nav_show_albums)
             settings.setValue("nav_show_cameras", self.nav_show_cameras)
             settings.setValue("nav_show_subjects", self.nav_show_subjects)
-            settings.setValue("favourites_enabled", self.favourites_enabled)
             settings.setValue("find_people_enabled", self.find_people_enabled)
             settings.setValue("tooltip_previews", self.tooltip_previews)
             settings.setValue("jpeg_quality", self.jpeg_quality)
@@ -12795,7 +12816,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                     self.apply_flag_to_selection(0, advance=shift_held)
                     event.accept()
                     return
-            if event.key() == Qt.Key_F and getattr(self, "favourites_enabled", True):
+            if event.key() == Qt.Key_F:
                 if self.get_active_target_ids():
                     self.toggle_favourite_selection(advance=shift_held)
                     event.accept()
@@ -13221,6 +13242,9 @@ class PhotoGalleryMainWindow(QMainWindow):
                 flags=_to_bool(_get_val("badge_show_flags", True), True),
                 favourites=_to_bool(_get_val("badge_show_favourites", True), True),
                 groups=_to_bool(_get_val("badge_show_groups", True), True),
+                geotagged=_to_bool(_get_val("badge_show_geotagged", False), False),
+                desc_tags=_to_bool(_get_val("badge_show_desc_tags", False), False),
+                people_tags=_to_bool(_get_val("badge_show_people_tags", False), False),
                 save=False,
             )
             self.tooltip_previews = _to_bool(_get_val("tooltip_previews", True), True)
@@ -13260,7 +13284,6 @@ class PhotoGalleryMainWindow(QMainWindow):
                 unflagged=_to_bool(_get_val("smart_show_unflagged", True), True),
                 emit_signal=False,
             )
-            self.set_favourites_enabled(_to_bool(_get_val("favourites_enabled", True), True))
 
             saved_theme = _get_val("theme", "wlpg_aero")
             if saved_theme and saved_theme in ("wlpg_aero", "modern", "dark"):

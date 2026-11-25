@@ -563,7 +563,6 @@ class LeftNavigationDock(QDockWidget):
         self._show_places: bool = True
         self._show_cameras: bool = False
         self._show_subjects: bool = False
-        self._favourites_enabled: bool = True
         self._show_smart_favourites: bool = True
         self._show_smart_picked: bool = True
         self._show_smart_rejected: bool = True
@@ -1918,7 +1917,7 @@ class LeftNavigationDock(QDockWidget):
             pm.setDevicePixelRatio(2.0)
             return QIcon(pm)
 
-        if getattr(self, "_favourites_enabled", True) and getattr(self, "_show_smart_favourites", True):
+        if getattr(self, "_show_smart_favourites", True):
             fav_item = QTreeWidgetItem([f"Favourites ({fav_cnt})"])
             fav_item.setData(0, _NODE_TYPE_ROLE, "favourites")
             fav_item.setData(0, _NODE_PAYLOAD_ROLE, True)
@@ -1996,11 +1995,6 @@ class LeftNavigationDock(QDockWidget):
                 sb.setValue(prev_scroll_y)
             self._updating_tree = False
         self._update_summary_label()
-
-    def set_favourites_enabled(self, enabled: bool) -> None:
-        self._favourites_enabled = bool(enabled)
-        if getattr(self, "_repo", None) is not None:
-            self.refresh_albums_only(self._repo)
 
     def set_builtin_smart_albums_visibility(
         self,
@@ -3174,14 +3168,13 @@ class LeftNavigationDock(QDockWidget):
             menu.addAction(act_save_smart)
 
             menu.addSeparator()
-            if getattr(self, "_favourites_enabled", True):
-                act_show_fav = QAction("Show Favourites", menu)
-                act_show_fav.setCheckable(True)
-                act_show_fav.setChecked(bool(getattr(self, "_show_smart_favourites", True)))
-                act_show_fav.toggled.connect(
-                    lambda checked: self.set_builtin_smart_albums_visibility(favourites=checked)
-                )
-                menu.addAction(act_show_fav)
+            act_show_fav = QAction("Show Favourites", menu)
+            act_show_fav.setCheckable(True)
+            act_show_fav.setChecked(bool(getattr(self, "_show_smart_favourites", True)))
+            act_show_fav.toggled.connect(
+                lambda checked: self.set_builtin_smart_albums_visibility(favourites=checked)
+            )
+            menu.addAction(act_show_fav)
 
             act_show_pick = QAction("Show Picked", menu)
             act_show_pick.setCheckable(True)

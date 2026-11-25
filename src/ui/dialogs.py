@@ -450,7 +450,6 @@ class AppSettingsDialog(QDialog):
         show_albums: bool = True,
         show_cameras: bool = False,
         show_subjects: bool = False,
-        favourites_enabled: bool = True,
         find_people_enabled: bool = False,
         tooltip_previews: bool = True,
         jpeg_quality: int = 83,
@@ -576,13 +575,6 @@ class AppSettingsDialog(QDialog):
         nav_grid.addWidget(self.chk_show_subjects, 3, 1)
 
         v_gen.addLayout(nav_grid)
-
-        self.chk_favourites_enabled = QCheckBox(
-            "Enable Favourites (heart icon, Favourites smart album, Group by & filters)",
-            tab_general,
-        )
-        self.chk_favourites_enabled.setChecked(bool(favourites_enabled))
-        v_gen.addWidget(self.chk_favourites_enabled)
 
         sep3 = QFrame(tab_general)
         sep3.setFrameShape(QFrame.HLine)
@@ -2014,9 +2006,6 @@ class AppSettingsDialog(QDialog):
 
     def show_subjects(self) -> bool:
         return self.chk_show_subjects.isChecked()
-
-    def favourites_enabled(self) -> bool:
-        return self.chk_favourites_enabled.isChecked()
 
     def tooltip_previews_enabled(self) -> bool:
         return True

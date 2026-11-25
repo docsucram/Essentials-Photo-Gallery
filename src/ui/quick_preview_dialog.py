@@ -264,7 +264,6 @@ class QuickPreviewDialog(QDialog):
         self._rating: int = 0
         self._flag: int = 0
         self._is_favourite: bool = False
-        self._favourites_enabled: bool = True
         self._image_rect: QRect = QRect()
         self._app_filter_installed: bool = False
 
@@ -391,20 +390,15 @@ class QuickPreviewDialog(QDialog):
             self.lbl_flag_icon.hide()
             self.lbl_flag_text.hide()
 
-        if self._favourites_enabled and self._is_favourite:
+        if self._is_favourite:
             self.lbl_fav_icon.setPixmap(self._make_badge_pixmap("fav"))
             self.lbl_fav_icon.show()
         else:
             self.lbl_fav_icon.hide()
 
-        if self._favourites_enabled:
-            self.lbl_hint.setText(
-                "Space / Esc: Close   •   ← / →: Prev / Next   •   0–5: Rate   •   P: Pick   •   X: Reject   •   F: Fav   •   Enter: Full View"
-            )
-        else:
-            self.lbl_hint.setText(
-                "Space / Esc: Close   •   ← / →: Prev / Next   •   0–5: Rate   •   P: Pick   •   X: Reject   •   Enter: Full View"
-            )
+        self.lbl_hint.setText(
+            "Space / Esc: Close   •   ← / →: Prev / Next   •   0–5: Rate   •   P: Pick   •   X: Reject   •   F: Fav   •   Enter: Full View"
+        )
         self._position_floating_overlays()
 
     def _position_floating_overlays(self) -> None:
@@ -429,14 +423,12 @@ class QuickPreviewDialog(QDialog):
         flag: int = 0,
         fallback_pixmap: QPixmap | None = None,
         is_favourite: bool = False,
-        favourites_enabled: bool = True,
     ) -> None:
         self._current_media_id = int(media_id)
         self._filename = filename
         self._rating = int(rating or 0)
         self._flag = int(flag or 0)
         self._is_favourite = bool(is_favourite)
-        self._favourites_enabled = bool(favourites_enabled)
 
         # Span the full screen containing the parent window
         screen = None
@@ -643,7 +635,7 @@ class QuickPreviewDialog(QDialog):
                 self.navigate_requested.emit(1)
             event.accept()
             return
-        if key == Qt.Key.Key_F and self._favourites_enabled and self._current_media_id is not None:
+        if key == Qt.Key.Key_F and self._current_media_id is not None:
             self._is_favourite = not self._is_favourite
             self._update_header()
             self.favourite_requested.emit(self._current_media_id)
