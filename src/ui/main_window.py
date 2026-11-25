@@ -9911,7 +9911,12 @@ class PhotoGalleryMainWindow(QMainWindow):
                 worker.signals.finished.connect(
                     lambda *_args, w=worker: self._release_pool_worker(w)
                 )
-                QThreadPool.globalInstance().start(worker)
+                pool = getattr(self, "_subjects_count_pool", None)
+                if pool is None:
+                    pool = QThreadPool(self)
+                    pool.setMaxThreadCount(1)
+                    self._subjects_count_pool = pool
+                pool.start(worker)
                 return
 
             scope_ids = self._visible_non_private_media_ids()
@@ -10017,6 +10022,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.show_grid_view()
         self._update_scope_bar_visibility()
         self.rebuild_and_run_query()
+        if ordered and not getattr(self.left_nav_dock, "_subject_counts", None):
+            self._refresh_subjects_nav_counts()
         self.show_status_message(f"✓ Subjects '{joined_label}': {len(ordered):,} match(es)", 3500)
 
     def _on_subject_selected(self, subject_key: str, label: str) -> None:
@@ -10069,6 +10076,10 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.show_grid_view()
         self._update_scope_bar_visibility()
         self.rebuild_and_run_query()
+        if self._active_subject_ids and int(
+            getattr(self.left_nav_dock, "_subject_counts", {}).get(subject_key, 0)
+        ) == 0:
+            self._refresh_subjects_nav_counts()
         self.show_status_message(f"✓ Subject '{label}': {len(self._active_subject_ids):,} match(es)", 3500)
 
     def open_print_dialog(self) -> None:
@@ -12935,6 +12946,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                 show_cameras=self.nav_show_cameras,
                 show_subjects=self.nav_show_subjects,
             )
+            if self.nav_show_subjects:
+                self._refresh_subjects_nav_counts()
             self.left_nav_dock.set_builtin_smart_albums_visibility(
                 favourites=_to_bool(_get_val("smart_show_favourites", True), True),
                 picked=_to_bool(_get_val("smart_show_picked", True), True),
