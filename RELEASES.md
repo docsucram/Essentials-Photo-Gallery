@@ -4,30 +4,42 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 
 ---
 
-## Essentials Photo Gallery v0.17.0 (Pre-Release)
+## Essentials Photo Gallery v0.17.0
 
-> **Highlights:** Thumbnail-time Visual Signatures & undoable hardened Auto-Stacking, **Tiles** & portrait-priority **Masonry** grid layouts, optional **Cameras** & AI **Subjects** nav sections, `F1` Keyboard Shortcuts modal + `Alt+1..9` Quick-Tag hotkeys, and optional **MobileCLIP-S1** local semantic search (`File → Options → Add-ons`).
+**Essentials Photo Gallery 0.17.0** introduces **brand-new Gallery Views** (**Tiles** and portrait-priority **Masonry** alongside **Grid** and **Mosaic**), a **new way to discover photos through local AI Subjects & Semantic Search (`MobileCLIP-S1`)**, **hardened Auto-Stacking / Photo Grouping**, **multi-selection across the Navigation Pane**, major **Batch People Tagging** and **Create Studio** upgrades, and sweeping **freeze-elimination & stability improvements**.
 
-### Key Additions
-- **Thumbnail-Time Visual Signatures & Undoable Hardened Auto-Stacking:**
-  - `ThumbnailDecodeWorker` now computes `phash64`, `dhash64`, `laplacian_sharpness`, and `lab_haar` directly from the decoded in-memory `QImage` during thumbnail generation and coalesces writes into `thumbnails.db` (`media_signatures`) without re-opening source files.
-  - Hardened `auto_stack_raw_jpeg_pairs()` and `auto_stack_bursts()` skip existing stacks, enforce `30.0s` burst windows + `dhash64` anchor Hamming distance checks, exclude single-stem RAW+JPEG pairs from burst clustering, pick the sharpest/best-rated/flagged head, scope to the current folder/view, support single-step `Ctrl+Z` undo/redo (`_StackMutationUndoCommand`), and automatically promote a new head via `reconcile_stack_after_delete()` if a stack head is deleted.
-  - Added a **`Photo grouping ▾`** split button in **Home → Organize** (replacing `Caption`) with checkable **`Auto-group bursts`** and **`Auto-group RAW + JPEG`** toggles (automatically maintained on folder scan and cleanly ungrouped by source when unticked), **Expand / Collapse all groups**, visual stacked-deck card edges + bottom-left frosted squircle group/`RAW+JPG` badges matching Favourites, and pressing **`S`** to expand/collapse or **`C`** on a collapsed group to inspect all frames in Compare View.
-  - Replaced **View → Flags** with a **`Badges ▾`** split button (master toggle to hide/show all thumbnail overlay badges at once, plus individual checkboxes for **Flags**, **Favourites**, and **Photo groups**), and defaulted **Compare Mode** to a dark background when using the **Dark Studio** theme.
-- **Additional Photo Layouts (`Tiles` & `Masonry`):**
-  - Added **Tiles** (`"tiles"`, uniform square 4px-rounded tiles) and portrait-priority **Masonry** (`"masonry"`, shortest-first column waterfall) alongside existing **Grid** (`"wlpg_grid"`) and landscape **Mosaic** (`"mosaic"`) views—condensed in the Ribbon **View → Photo layout** group into a vertical split **`View mosaic ▾`** button (top button cycles Mosaic → Tiles → Masonry; bottom dropdown lets you pick directly) with `[♥/★ N]` squircle badges and `QSettings` persistence.
-- **Optional Left Nav `Cameras` Section (Default Off) & `Places` Backfill:**
-  - Added an optional **Cameras** collapsible section (toggled in **File → Options → General → Show Cameras**, default off) sorted alphabetically (`A–Z`) with live camera model counts, Make prefix deduplication, `__NO_CAMERA__` filter support, and `FilterQuerySpec.camera_model` SQL filtering.
-  - Added automatic idempotent startup and write-path (`bulk_upsert_media`, `set_geotag`) resolution of `Country → State → City` via `resolve_location_hierarchy()` so geotagged libraries populate the **Places** tree immediately.
-- **Keyboard Ergonomics & Discoverability (`F1` & `Alt+1..9`):**
-  - Added `KeyboardShortcutsDialog` (`F1` / Ribbon **`?`** button next to the Settings cog) featuring a searchable shortcut catalog across navigation, rating/culling, viewer, Compare Mode, and batch face confirmation, plus type-to-filter `Alt+1..Alt+9` Quick-Tag hotkey pickers working across Grid View, Single Media Viewer, and Spacebar Quick Preview (and renamed **File → About and updates**).
-- **Create Collage Overhaul & Right-Pane Clickable Folder Link:**
-  - Replaced the Create Collage bottom card tray with a headerless, full-bleed 4:3 filmstrip featuring hover-only `✕` removal, mouse-wheel & edge-chevron scrolling, and smooth `OutCubic` animated drag-and-drop reordering that glides sibling tiles aside into a dashed destination socket.
-  - Defaulted Create Collage to **Grid**, ensured all Grid/Masonry/Hero layouts fill 100% of the canvas with zero white gaps and dynamically adapt when adding/removing photos, deselected Grid tiles after click-swapping, fixed individual photo zoom affecting canvas zoom, fixed Polaroid cards growing taller during fast preview edits, preserved Polaroid slot positions/orientations when reordering photos, added a **Polaroid Border Caption** selector (`Caption`, `Date`, `File Name`, `Tagged People` as `John + Jean`, `None`), and added Google Photos-style **Canvas Rotation** (`-45°` to `+45°` + `Reset`, styled in the dark canvas zone above the bottom bar) with constant border widths, automatic zoom-to-fill, and rotated hit-testing.
-  - Added a clickable **`Folder:`** row directly beneath `Filename:` in the right-hand **Information** pane to open the selected item's folder directly in Windows File Explorer (`Multiple folders` when a multi-selection spans directories).
-- **Optional `MobileCLIP-S1` Semantic Search & AI Subjects Add-On:**
-  - Added `SemanticEngine` (with pure-Python CLIP BPE `tokenizer.json`, shortest-edge 256 center-crop image preprocessing, and `input_ids`/`attention_mask` ONNX inference), `SemanticVectorRepository` (`semantic_vectors.db` with float16 vectors + cached L2-normalized search matrix), and background `SemanticIndexWorker` (automatically scheduled on startup, folder sync, worker resume, and add-on download, reading strictly from cached `thumbnails.db` blobs) alongside HTTP `Range` resumable model download in **File → Options → Add-ons** (with an automatic 1-click download prompt when **Subjects** is enabled or clicked before installation).
-  - Powers privacy- and scope-aware Reciprocal Rank Fusion (`fuse_semantic_and_fts_scores`) in the Search Box and an optional **Subjects** left-nav section (`Show Subjects (AI)`, default off) covering 12 built-in visual concepts (`Family`, `Kids`, `Pets`, `Portraits`, `Food`, `Sports`, `Landscape`, `Night`, etc.).
+### New Gallery Views (`Grid`, `Mosaic`, `Tiles` & `Masonry`)
+
+- **Four Gallery Layouts with Instant Cycling:** Added **Tiles** (edge-to-edge uniform square tiles with 4px corners) and portrait-priority **Masonry** (shortest-first column waterfall) alongside classic **Grid** and landscape **Mosaic**. Access them via the condensed **View → Photo layout → `View mosaic ▾`** split button (click the top icon to cycle Mosaic → Tiles → Masonry, or open the dropdown to pick directly).
+- **Consistent Selection & Anchor Preservation:** Switching between Grid, Tiles, Mosaic, and Masonry—or resizing the window—keeps your selected photos selected and your viewport anchored on the same photo without jumping to the top.
+- **Refined Media Overlays:** Unified `[♥/★ N]` squircle badges, crisp filmstrip perforations on video tiles in Tiles/Mosaic/Masonry, a vector Motion Photo icon, and a **`Badges ▾`** split button in **View** (master toggle + per-badge toggles for Flags, Favourites, and Photo groups).
+
+![Tiles gallery view with squircle rating badges and multi-selected folder subtrees in Dark Studio theme](docs/images/release-0.17.0/tiles-gallery-view.jpg)
+
+### New Way to Find Photos: AI Subjects & Local Semantic Search
+
+- **12 Built-In AI Subjects in the Navigation Pane:** Enable **Subjects** (`File → Options → General → Show Subjects (AI)`) to browse your library by visual concept—**Family**, **Kids**, **Pets**, **Portraits**, **Food**, **Sports**, **Landscape**, **Night**, **Architecture**, **Beach & Coast**, **Nature & Flowers**, and **Documents & Notes**—with live calibrated photo counts and multi-select support.
+- **Optional Local `MobileCLIP-S1` Add-On (`File → Options → Add-ons`):** Runs 100% locally on CPU from cached `thumbnails.db` blobs with resumable HTTP `Range` download and an automatic 1-click prompt when enabling or clicking Subjects. Powers privacy- and scope-aware Reciprocal Rank Fusion (`fuse_semantic_and_fts_scores`) in the Search Box so natural-language queries blend seamlessly with keyword, tag, and OCR matches.
+
+![AI Subjects in the Navigation Pane filtering the library to Architecture matches in Dark Studio theme](docs/images/release-0.17.0/subjects-ai-search.jpg)
+
+### Photo Grouping (Auto-Stacking) & Multi-Selection Navigation
+
+- **Thumbnail-Time Visual Signatures & Undoable Auto-Stacking:** `ThumbnailDecodeWorker` computes `phash64`, `dhash64`, `laplacian_sharpness`, and `lab_haar` in memory during thumbnail decode without re-opening files. Hardened `auto_stack_raw_jpeg_pairs()` and `auto_stack_bursts()` pick the sharpest/best-rated head, support single-step `Ctrl+Z` undo/redo, and auto-promote a new head if a stack head is deleted.
+- **`Photo grouping ▾` Split Button (Home → Organize):** Includes checkable **Auto-group bursts** and **Auto-group RAW + JPEG** toggles, **Expand / Collapse all groups**, stacked-deck card edges + bottom-left group/`RAW+JPG` badges, **`S`** to expand/collapse, and **`C`** on a collapsed group to compare all frames in Compare View.
+- **Navigation Pane Multi-Selection & Subtree Highlighting:** Multi-select across **Folders**, **Places**, **Cameras**, **Tags**, **Dates**, and **Subjects**; when **Subfolders** is enabled, nested child folders/dates/tags/places highlight as selected (matching WLPG). Added optional **Cameras** nav section (`A–Z` with live counts) and automatic `Country → State → City` **Places** backfill.
+- **Find Bar & Picasa Enhancements:** Unified **Flagged** menu (`Picked` label), clean **Media type** filter (`Photos`, `RAW`, `Motion photos`, `Video`), improved Dark Studio Search Scope Bar contrast, clearer Picasa folder prompt (`in folder '<name>'`), **Include subfolders** toggle, and a new **View Picasa Folders...** manager in **Options → Import** with per-folder import status, one-click import, and Open Folder.
+
+### Create Studio, Editor, Batch People Tagging & Discoverability
+
+- **Create Collage Overhaul & Colour Pop Quick Styles:** Grid default, gap-free canvas fill, animated drag-and-drop filmstrip tray, **Polaroid Border Caption** selector (`Caption`, `Date`, `File Name`, `Tagged People`, `None`), and `-45°..+45°` **Canvas Rotation**. Fixed **Colour Pop** Quick Styles (`Red`, `Blue`, `Green`, `Warm`, `Cool`) for natural HSV hue isolation, **Depth & Light** Reset to also reset **Remove Background**, **Spot Fix** Object Eraser mask downsampling + async execution + hover circle cursor, and **Fine Tune** Straighten framing.
+- **Batch People Tagging Polish:** Right-click any person's name or avatar chip to **View '<name>' photos**, persistent person filter across Single Image View round-trips, preserved `0.42–0.51` candidates on partial confirm/reject, restored Navigation Pane on Back, and eliminated idle refresh flicker.
+- **Keyboard Ergonomics (`F1` & `Alt+1..9`):** Searchable `KeyboardShortcutsDialog` (`F1` / Ribbon **`?`** button), type-to-filter `Alt+1..Alt+9` Quick-Tag hotkeys, clickable **Folder:** link in the Information pane, and motion-photo playback hiding the filmstrip pull-tab.
+
+### Performance, Freeze Elimination & Stability
+
+- **Main-Thread Freeze Watchdog & Elimination:** Added a lightweight watchdog (`%LOCALAPPDATA%\PhotoGallery\logs\freeze_traces.log`, capped at 512 KB) and eliminated main-thread stalls across Folder Watcher XMP loops, `PeopleDirectoryView` batch loading, `BatchPeopleView` async rematch, `Spot Fix` Object Eraser ONNX inference, `on_face_worker_finished`, Save-as-Copy folder scans, and post-launch Map pre-warming.
+- **Stability & Native Crash Logging:** Enabled `faulthandler` native crash logging (`logs/crash.log`), fixed cross-thread `QRunnable` signal lifecycle crashes, fixed `_on_dock_person_confirm_requested` `NameError`, and updated [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) with v0.17.0 scale & subsystem benchmarks.
 
 ---
 

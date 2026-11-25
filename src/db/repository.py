@@ -1893,10 +1893,10 @@ class CatalogRepository:
                        COALESCE(is_rejected, 0), stack_parent_id, LOWER(COALESCE(ext, '')),
                        live_companion_for_id
                 FROM media
-                WHERE id IN ({placeholders})
+                WHERE (id IN ({placeholders}) OR stack_parent_id IN ({placeholders}))
                   AND (is_live_photo = 1 OR is_favourite = 1 OR is_rejected = 1 OR stack_parent_id IS NOT NULL);
                 """,
-                rec_ids,
+                list(rec_ids) + list(rec_ids),
             ).fetchall()
         else:
             # Avoid COALESCE() wrapper on filter predicates so SQLite can evaluate/index directly
