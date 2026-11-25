@@ -2412,6 +2412,38 @@ class PhotoGalleryMainWindow(QMainWindow):
             folder_lookup[norm_key] = (fid, f_raw)
 
         conn = self.catalog_repo.engine.catalog_conn()
+
+        # Expand any dragged collapsed stack heads (e.g. RAW+JPEG pairs or Burst groups)
+        # so hidden stack members are not accidentally stranded in the old folder.
+        initial_mids: list[int] = []
+        seen_initial_paths: set[str] = set()
+        for fpath in file_paths:
+            p = Path(fpath)
+            seen_initial_paths.add(os.path.normcase(str(p)))
+            parent_posix = p.parent.as_posix().rstrip("/").lower()
+            folder_match = folder_lookup.get(parent_posix)
+            if folder_match is not None:
+                row_m = conn.execute(
+                    "SELECT id FROM media WHERE folder_id = ? AND filename = ? COLLATE NOCASE;",
+                    (folder_match[0], p.name),
+                ).fetchone()
+                if row_m is not None:
+                    initial_mids.append(int(row_m["id"]))
+        if initial_mids:
+            expanded_move_ids = self.expand_stack_targets_if_collapsed(initial_mids, action_label="move")
+            if expanded_move_ids is None:
+                return
+            extra_ids = [m for m in expanded_move_ids if m not in set(initial_mids)]
+            if extra_ids:
+                file_paths = list(file_paths)
+                for ex_mid in extra_ids:
+                    det = self.catalog_repo.get_media_detail(ex_mid)
+                    if det and det.get("folder_path") and det.get("filename"):
+                        ex_p = os.path.normpath(os.path.join(str(det["folder_path"]), str(det["filename"])))
+                        if os.path.normcase(ex_p) not in seen_initial_paths:
+                            seen_initial_paths.add(os.path.normcase(ex_p))
+                            file_paths.append(ex_p)
+
         for fpath in file_paths:
             p = Path(fpath)
             if not p.exists():
@@ -5842,35 +5874,125 @@ class PhotoGalleryMainWindow(QMainWindow):
 
     def expand_stack_targets_if_collapsed(
         self, target_ids: Sequence[int], *, action_label: str = "modify"
-    ) -> list[int]:
-        """If any selected ID is a collapsed stack head, include all stack members (with prompt)."""
+    ) -> list[int] | None:
+        """If any selected ID is a collapsed stack head, prompt with clear scope choices.
+
+        Returns the resolved list of media IDs to act on, or ``None`` if the user cancelled.
+        """
+        from src.db.repository import RAW_EXTENSIONS
+
         out: list[int] = []
         seen: set[int] = set()
         extra_count = 0
-        expanded_groups: list[tuple[int, list[int]]] = []
+        total_stacked_items = 0
+        collapsed_sources: set[str] = set()
+        expanded_groups: list[tuple[int, list[int], bool, str]] = []
+        conn = self.engine.catalog_conn()
+
         for mid in target_ids:
             imid = int(mid)
             members = self.catalog_repo.get_stack_member_ids(imid)
             if len(members) > 1 and imid not in self._expanded_stack_ids and members[0] == imid:
                 extra_count += len(members) - 1
-                expanded_groups.append((imid, members))
+                total_stacked_items += len(members)
+                src_row = conn.execute(
+                    "SELECT COALESCE(stack_source, '') FROM media WHERE id = ?;", (imid,)
+                ).fetchone()
+                st_src = str(src_row[0] or "").lower() if src_row else ""
+                collapsed_sources.add(st_src or "burst")
+                expanded_groups.append((imid, members, True, st_src))
             else:
-                expanded_groups.append((imid, [imid]))
+                expanded_groups.append((imid, [imid], False, ""))
 
-        include_children = False
+        choice = "all"
         if extra_count > 0:
-            reply = QMessageBox.question(
-                self,
-                "Collapsed Stack Scope",
-                f"Your selection includes collapsed stack(s) with {extra_count} hidden item(s).\n\n"
-                f"Include all items in the stack(s) when you {action_label}?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-            include_children = reply == QMessageBox.Yes
+            is_pure_raw_jpeg = collapsed_sources == {"raw_jpeg"}
+            auto_choice = getattr(self, "_auto_stack_scope_choice", None)
+            if auto_choice is not None:
+                choice = str(auto_choice)
+            elif action_label == "delete" and is_pure_raw_jpeg:
+                box = QMessageBox(self)
+                box.setWindowTitle("Delete RAW + JPEG Pair")
+                box.setIcon(QMessageBox.Question)
+                box.setText(
+                    f"Your selection includes collapsed RAW + JPEG pair(s) ({total_stacked_items} files total).\n\n"
+                    "Which files would you like to move to the Recycle Bin?"
+                )
+                btn_both = box.addButton("Delete Both (RAW + JPEG)", QMessageBox.AcceptRole)
+                btn_jpg = box.addButton("Delete JPEG Only", QMessageBox.ActionRole)
+                btn_raw = box.addButton("Delete RAW Only", QMessageBox.ActionRole)
+                btn_cancel = box.addButton(QMessageBox.Cancel)
+                box.setDefaultButton(btn_both)
+                box.exec()
+                clicked = box.clickedButton()
+                if clicked is btn_cancel or clicked is None:
+                    return None
+                if clicked is btn_jpg:
+                    choice = "jpeg_only"
+                elif clicked is btn_raw:
+                    choice = "raw_only"
+                else:
+                    choice = "all"
+            elif action_label in ("delete", "move"):
+                verb = "Delete" if action_label == "delete" else "Move"
+                box = QMessageBox(self)
+                box.setWindowTitle(f"{verb} Collapsed Photo Group")
+                box.setIcon(QMessageBox.Question)
+                if is_pure_raw_jpeg:
+                    box.setText(
+                        f"Your selection includes collapsed RAW + JPEG pair(s) ({total_stacked_items} files total).\n\n"
+                        f"How would you like to {action_label} them?"
+                    )
+                    btn_all = box.addButton(f"{verb} Both (RAW + JPEG)", QMessageBox.AcceptRole)
+                else:
+                    box.setText(
+                        f"Your selection includes collapsed photo group(s) with {extra_count} hidden item(s).\n\n"
+                        f"How would you like to {action_label} them?"
+                    )
+                    btn_all = box.addButton(f"{verb} All {total_stacked_items} Photos", QMessageBox.AcceptRole)
+                btn_top = box.addButton(f"{verb} Top Photo Only", QMessageBox.ActionRole)
+                btn_cancel = box.addButton(QMessageBox.Cancel)
+                box.setDefaultButton(btn_all)
+                box.exec()
+                clicked = box.clickedButton()
+                if clicked is btn_cancel or clicked is None:
+                    return None
+                choice = "top" if clicked is btn_top else "all"
+            else:
+                reply = QMessageBox.question(
+                    self,
+                    "Collapsed Stack Scope",
+                    f"Your selection includes collapsed stack(s) with {extra_count} hidden item(s).\n\n"
+                    f"Include all items in the stack(s) when you {action_label}?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                choice = "all" if reply == QMessageBox.Yes else "top"
 
-        for imid, members in expanded_groups:
-            use_list = members if include_children else [imid]
+        if choice == "cancel":
+            return None
+
+        for imid, members, is_collapsed, _src in expanded_groups:
+            if not is_collapsed or choice == "all":
+                use_list = members
+            elif choice == "top":
+                use_list = [imid]
+            elif choice in ("jpeg_only", "raw_only"):
+                # Partition RAW vs non-RAW (JPEG/HEIC) members cleanly
+                ph = ",".join("?" for _ in members)
+                ext_rows = conn.execute(
+                    f"SELECT id, LOWER(COALESCE(ext, '')) FROM media WHERE id IN ({ph});",
+                    tuple(members),
+                ).fetchall()
+                ext_map = {int(r[0]): str(r[1]).lstrip(".") for r in ext_rows}
+                want_raw = (choice == "raw_only")
+                use_list = [
+                    m for m in members
+                    if ((ext_map.get(m, "") in RAW_EXTENSIONS) == want_raw)
+                ]
+            else:
+                use_list = [imid]
+
             for m in use_list:
                 if m not in seen:
                     seen.add(m)
@@ -6914,6 +7036,89 @@ class PhotoGalleryMainWindow(QMainWindow):
                 return
         self.media_viewer.start_face_tagging_mode()
 
+    def _rename_single_media_with_companions(self, mid: int, new_fname: str) -> tuple[bool, str]:
+        """Rename a single cataloged photo along with its .xmp/.OriginalFiles companions,
+        and keep collapsed RAW+JPEG pair stems synchronized.
+        Returns ``(ok, status_or_error_message)``.
+        """
+        detail = self.catalog_repo.get_media_detail(mid)
+        if not detail:
+            return False, "Item not found in catalog."
+        old_fname = str(detail["filename"])
+        if old_fname == new_fname:
+            return False, ""
+        folder_p = Path(detail["folder_path"])
+        old_path = folder_p / old_fname
+        new_path = folder_p / new_fname
+        if new_path.exists():
+            return False, f"A file named '{new_fname}' already exists."
+
+        # Check if this is a collapsed RAW+JPEG stack head so we keep the paired companion in sync
+        paired_companions: list[tuple[int, Path, Path, str]] = []
+        conn = self.engine.catalog_conn()
+        st_row = conn.execute(
+            "SELECT COALESCE(stack_source, '') FROM media WHERE id = ?;", (mid,)
+        ).fetchone()
+        is_collapsed_raw_pair = (
+            st_row is not None
+            and str(st_row[0] or "").lower() == "raw_jpeg"
+            and mid not in self._expanded_stack_ids
+        )
+        if is_collapsed_raw_pair:
+            members = self.catalog_repo.get_stack_member_ids(mid)
+            if len(members) > 1 and members[0] == mid:
+                new_stem = Path(new_fname).stem
+                for comp_id in members[1:]:
+                    c_det = self.catalog_repo.get_media_detail(comp_id)
+                    if not c_det:
+                        continue
+                    c_folder = Path(c_det["folder_path"])
+                    c_old_fname = str(c_det["filename"])
+                    c_ext = Path(c_old_fname).suffix
+                    c_new_fname = f"{new_stem}{c_ext}"
+                    c_old_path = c_folder / c_old_fname
+                    c_new_path = c_folder / c_new_fname
+                    if c_new_path.exists() and c_new_path != c_old_path:
+                        return False, f"Cannot rename paired file: '{c_new_fname}' already exists."
+                    paired_companions.append((comp_id, c_old_path, c_new_path, c_new_fname))
+
+        def _rename_sidecars(src_p: Path, dst_p: Path) -> None:
+            for s_old, s_new in (
+                (src_p.with_name(src_p.name + ".xmp"), dst_p.with_name(dst_p.name + ".xmp")),
+                (src_p.with_suffix(".xmp"), dst_p.with_suffix(".xmp")),
+                (src_p.parent / ".OriginalFiles" / src_p.name, dst_p.parent / ".OriginalFiles" / dst_p.name),
+            ):
+                if s_old.exists() and s_old != src_p and not s_new.exists():
+                    try:
+                        s_old.rename(s_new)
+                    except OSError:
+                        pass
+
+        if old_path.exists():
+            old_path.rename(new_path)
+            _rename_sidecars(old_path, new_path)
+        self.catalog_repo.rename_media(mid, new_fname)
+        self._media_meta_lookup.pop(mid, None)
+
+        renamed_exts = [Path(new_fname).suffix]
+        for comp_id, c_old_p, c_new_p, c_new_fname in paired_companions:
+            if c_old_p.exists():
+                c_old_p.rename(c_new_p)
+                _rename_sidecars(c_old_p, c_new_p)
+            self.catalog_repo.rename_media(comp_id, c_new_fname)
+            self._media_meta_lookup.pop(comp_id, None)
+            renamed_exts.append(Path(c_new_fname).suffix)
+
+        if getattr(self.media_viewer, "current_media_id", None) == mid:
+            self.media_viewer.current_file_path = new_path
+            if self.central_stack.currentWidget() == self.media_viewer:
+                self.setWindowTitle(f"{new_fname} - Essentials Photo Gallery")
+
+        if paired_companions:
+            ext_txt = " + ".join(renamed_exts)
+            return True, f"✓ Renamed pair to '{Path(new_fname).stem}' ({ext_txt})"
+        return True, f"✓ Renamed file to '{new_fname}'"
+
     def on_selection_filename_committed(self, new_fname: str) -> None:
         target_ids = (
             [self.media_viewer.current_media_id]
@@ -6928,30 +7133,17 @@ class PhotoGalleryMainWindow(QMainWindow):
         if not new_fname:
             return
         try:
-            detail = self.catalog_repo.get_media_detail(mid)
-            old_fname = str(detail["filename"])
-            if old_fname == new_fname:
+            ok, msg = self._rename_single_media_with_companions(mid, new_fname)
+            if not ok:
+                if msg:
+                    QMessageBox.warning(self, "Rename Error", msg)
+                    summary = self.catalog_repo.get_selection_summary(target_ids)
+                    self.right_tag_dock.bind_selection(target_ids, summary)
                 return
-            folder_p = Path(detail["folder_path"])
-            old_path = folder_p / old_fname
-            new_path = folder_p / new_fname
-            if new_path.exists():
-                QMessageBox.warning(self, "File Exists", f"A file named '{new_fname}' already exists.")
-                summary = self.catalog_repo.get_selection_summary(target_ids)
-                self.right_tag_dock.bind_selection(target_ids, summary)
-                return
-            if old_path.exists():
-                old_path.rename(new_path)
-            self.catalog_repo.rename_media(mid, new_fname)
-            self._media_meta_lookup.pop(mid, None)
-            if getattr(self.media_viewer, "current_media_id", None) == mid:
-                self.media_viewer.current_file_path = new_path
-                if self.central_stack.currentWidget() == self.media_viewer:
-                    self.setWindowTitle(f"{new_fname} - Essentials Photo Gallery")
             self.rebuild_and_run_query()
             summary = self.catalog_repo.get_selection_summary(target_ids)
             self.right_tag_dock.bind_selection(target_ids, summary)
-            self.show_status_message(f"✓ Renamed file to '{new_fname}'", 3500)
+            self.show_status_message(msg, 3500)
         except Exception as e:
             QMessageBox.warning(self, "Rename Error", f"Could not rename file: {e}")
 
@@ -8459,7 +8651,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         if not target_ids:
             return 0
         if not in_viewer:
-            target_ids = self.expand_stack_targets_if_collapsed(target_ids, action_label="delete")
+            expanded = self.expand_stack_targets_if_collapsed(target_ids, action_label="delete")
+            if expanded is None:
+                return 0
+            target_ids = expanded
+            if not target_ids:
+                return 0
         try:
             from send2trash import send2trash
         except ImportError:
@@ -8788,23 +8985,16 @@ class PhotoGalleryMainWindow(QMainWindow):
                 if not ok or not new_stem.strip() or new_stem.strip() == stem:
                     return
                 new_fname = f"{new_stem.strip()}{ext}"
-                new_path = folder_p / new_fname
-                if new_path.exists():
-                    QMessageBox.warning(self, "File Exists", f"A file named '{new_fname}' already exists.")
+                ok, msg = self._rename_single_media_with_companions(mid, new_fname)
+                if not ok:
+                    if msg:
+                        QMessageBox.warning(self, "Rename Error", msg)
                     return
-                if old_path.exists():
-                    old_path.rename(new_path)
-                self.catalog_repo.rename_media(mid, new_fname)
-                self._media_meta_lookup.pop(mid, None)
-                if getattr(self.media_viewer, "current_media_id", None) == mid:
-                    self.media_viewer.current_file_path = new_path
-                    if self.central_stack.currentWidget() == self.media_viewer:
-                        self.setWindowTitle(f"{new_fname} - Essentials Photo Gallery")
                 if hasattr(self, "right_tag_dock") and self.right_tag_dock is not None:
                     summary = self.catalog_repo.get_selection_summary([mid])
                     self.right_tag_dock.bind_selection([mid], summary)
                 self.rebuild_and_run_query()
-                self.show_status_message(f"✓ Renamed file to '{new_fname}'", 4000)
+                self.show_status_message(msg, 4000)
             except Exception as e:
                 QMessageBox.warning(self, "Rename Error", f"Could not rename file: {e}")
         else:

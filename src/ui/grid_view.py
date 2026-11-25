@@ -3339,6 +3339,29 @@ class ThumbnailGridView(QListView):
         self.viewport().update()
         super().leaveEvent(event)
 
+    @staticmethod
+    def _format_card_tooltip(record: Any) -> str:
+        dt = _epoch_to_datetime_utc(record.date_taken) if getattr(record, "date_taken", None) else None
+        dt_str = dt.strftime("%d %B %Y %H:%M") if dt else ""
+        lines = [str(record.filename)]
+        if dt_str:
+            lines.append(dt_str)
+        stack_cnt = int(getattr(record, "stack_count", 1) or 1)
+        if stack_cnt > 1:
+            stack_pos = int(getattr(record, "stack_pos", 0) or 0)
+            is_raw_jpg = bool(getattr(record, "is_raw_jpg_stack", False))
+            if stack_pos == 0:
+                if is_raw_jpg:
+                    lines.append(f"RAW + JPEG pair ({stack_cnt} files) — Click badge to expand")
+                else:
+                    lines.append(f"Photo group ({stack_cnt} photos) — Click badge to expand")
+            else:
+                if is_raw_jpg:
+                    lines.append(f"RAW + JPEG pair (file {stack_pos} of {stack_cnt}) — Click badge on first photo to collapse")
+                else:
+                    lines.append(f"Photo {stack_pos} of {stack_cnt} in group — Click badge on first photo to collapse")
+        return "\n".join(lines)
+
     def viewportEvent(self, event: QEvent) -> bool:
         if event.type() == QEvent.ToolTip:
             pos = getattr(event, "pos", lambda: QPoint())()
@@ -3346,9 +3369,7 @@ class ThumbnailGridView(QListView):
             if idx.isValid() and not idx.data(CatalogRoles.IsGroupHeaderRole):
                 record = idx.data(CatalogRoles.RecordRole)
                 if record is not None:
-                    dt = _epoch_to_datetime_utc(record.date_taken) if record.date_taken else None
-                    dt_str = dt.strftime("%d %B %Y %H:%M") if dt else ""
-                    tip_text = f"{record.filename}\n{dt_str}" if dt_str else record.filename
+                    tip_text = self._format_card_tooltip(record)
                     g_pos = getattr(event, "globalPos", lambda: self.mapToGlobal(pos))()
                     QToolTip.showText(g_pos, tip_text, self.viewport())
                     return True

@@ -44,6 +44,11 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
   - Moved **AF Focus Points** out of the image right-click menu onto the **Compare** Ribbon tab (**Inspect & Sync**).
 - **Video Frame Capture (`src/imaging/video_frame_capture.py`, `src/ui/media_viewer.py`):**
   - Added **"Save still frame as photo"** to the video right-click context menu in Single Media Viewer—extracting the current full-resolution frame as a collision-safe JPEG in the same folder with offset EXIF capture date + GPS coordinates and immediate catalog indexing.
+- **Stack-Aware Delete, Move, Rename & Improved Stack Tooltips (`src/ui/main_window.py`, `src/ui/grid_view.py`):**
+  - Upgraded collapsed-stack **Delete** prompts with explicit choices (**Delete Both (RAW + JPEG)** / **Delete JPEG Only** / **Delete RAW Only** / **Cancel** for RAW+JPEG pairs; **Delete All N Photos** / **Delete Top Photo Only** / **Cancel** for Burst groups).
+  - Made drag-and-drop **Move** stack-aware so dragging a collapsed RAW+JPEG pair or photo group prompts to move the full stack together instead of stranding hidden members.
+  - Upgraded single-file **Rename** (`F2` & Info pane) to automatically rename `.xmp` sidecars / `.OriginalFiles` backups and keep collapsed RAW+JPEG pair stems in sync.
+  - Improved hover tooltip text over stacks to clearly show RAW + JPEG pair / photo group counts and click-to-expand/collapse hints.
 
 - **Covering Partial Indexes for Navigation SQL (`src/db/connection.py`, `src/db/repository.py`):**
   - Added `idx_media_rating_active`, `idx_media_date_active`, and `idx_media_places_active` (partial indexes on `is_missing = 0`).
