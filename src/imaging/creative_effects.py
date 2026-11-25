@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -2960,7 +2961,7 @@ class LaMaInpaintEngine:
         if not model_path:
             return False
 
-        loaded = False
+        loaded = self._session is not None or self._cv_net is not None
         if self._backend in ("auto", "onnxruntime") and self._session is None:
             loaded = self._init_onnxruntime(model_path) or loaded
         if self._backend in ("auto", "opencv_dnn") and self._cv_net is None:
@@ -2985,9 +2986,13 @@ class LaMaInpaintEngine:
         self, roi_rgb: np.ndarray, bin_mask: np.ndarray, target_w: int = 512, target_h: int = 512
     ) -> np.ndarray:
         """Run LaMa ONNX inference on OpenCV 5.0's graph-based CPU DNN engine."""
+        rh, rw = roi_rgb.shape[:2]
         img_512 = cv2.resize(roi_rgb, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
-        mask_512 = cv2.resize(bin_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
-        mask_512 = (mask_512 > 0).astype(np.float32)
+        mask_512_f = cv2.resize(bin_mask.astype(np.float32), (target_w, target_h), interpolation=cv2.INTER_AREA)
+        mask_512 = (mask_512_f > 0.0).astype(np.uint8)
+        if max(rh, rw) > max(target_w, target_h):
+            mask_512 = cv2.dilate(mask_512, np.ones((3, 3), dtype=np.uint8), iterations=1)
+        mask_512 = mask_512.astype(np.float32)
 
         img_tensor = np.ascontiguousarray(
             (img_512.astype(np.float32) / 255.0).transpose(2, 0, 1)[None, ...]
@@ -3010,9 +3015,13 @@ class LaMaInpaintEngine:
         target_h = in_shape[2] if len(in_shape) == 4 and isinstance(in_shape[2], int) and in_shape[2] > 0 else 512
         target_w = in_shape[3] if len(in_shape) == 4 and isinstance(in_shape[3], int) and in_shape[3] > 0 else 512
 
+        rh, rw = roi_rgb.shape[:2]
         img_512 = cv2.resize(roi_rgb, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
-        mask_512 = cv2.resize(bin_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
-        mask_512 = (mask_512 > 0).astype(np.float32)
+        mask_512_f = cv2.resize(bin_mask.astype(np.float32), (target_w, target_h), interpolation=cv2.INTER_AREA)
+        mask_512 = (mask_512_f > 0.0).astype(np.uint8)
+        if max(rh, rw) > max(target_w, target_h):
+            mask_512 = cv2.dilate(mask_512, np.ones((3, 3), dtype=np.uint8), iterations=1)
+        mask_512 = mask_512.astype(np.float32)
 
         img_tensor = (img_512.astype(np.float32) / 255.0).transpose(2, 0, 1)[None, ...]
         mask_tensor = mask_512[None, None, ...]
@@ -3111,12 +3120,15 @@ class LaMaInpaintEngine:
 
 
 _SHARED_LAMA_ENGINE: LaMaInpaintEngine | None = None
+_SHARED_LAMA_LOCK = threading.Lock()
 
 
 def get_lama_inpaint_engine() -> LaMaInpaintEngine:
     global _SHARED_LAMA_ENGINE
     if _SHARED_LAMA_ENGINE is None:
-        _SHARED_LAMA_ENGINE = LaMaInpaintEngine()
+        with _SHARED_LAMA_LOCK:
+            if _SHARED_LAMA_ENGINE is None:
+                _SHARED_LAMA_ENGINE = LaMaInpaintEngine()
     return _SHARED_LAMA_ENGINE
 
 

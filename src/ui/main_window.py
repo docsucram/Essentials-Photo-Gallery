@@ -2519,7 +2519,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                                     )
                                 except OSError:
                                     pass
-                self.refresh_navigation_and_autocomplete()
+                if include_subfolders:
+                    self.refresh_navigation_and_autocomplete()
             except Exception:
                 pass
 
@@ -3250,7 +3251,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.batch_people_view.refresh_suggestions(debounce=True)
         if total_faces > 0:
             self.statusBar().showMessage(f"✓ Face scan complete: {total_faces:,} face(s) found", 4000)
-            self.refresh_navigation_and_autocomplete()
+            self.refresh_people_navigation_and_autocomplete()
 
     # -------------------------------------------------------------------------
     # Sub-10ms Query Execution & Viewport Thumbnail Prefetching
@@ -6438,7 +6439,14 @@ class PhotoGalleryMainWindow(QMainWindow):
         if face_id > 0 and person_id > 0:
             self.catalog_repo.confirm_faces(face_id, person_id)
             self._notify_batch_people_face_changed([face_id])
-        self.refresh_navigation_and_autocomplete()
+        person_name = "person"
+        if person_id > 0:
+            p_row = self.catalog_repo.engine.catalog_conn().execute(
+                "SELECT name FROM people WHERE id = ?;", (person_id,)
+            ).fetchone()
+            if p_row and p_row["name"]:
+                person_name = str(p_row["name"])
+        self.refresh_people_navigation_and_autocomplete()
         if target_ids:
             summary = self.catalog_repo.get_selection_summary(target_ids)
             self.right_tag_dock.bind_selection(target_ids, summary)
@@ -7970,7 +7978,6 @@ class PhotoGalleryMainWindow(QMainWindow):
         if p.exists() and self._is_path_in_library(p.parent):
             try:
                 self.scan_folder(p.parent, include_subfolders=False)
-                self.rebuild_and_run_query()
             except Exception as e:
                 logger.debug("Failed scanning newly saved copy: %s", e)
 
