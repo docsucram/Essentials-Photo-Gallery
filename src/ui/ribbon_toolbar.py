@@ -1243,6 +1243,28 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         ]
         p.drawPolygon(QPolygonF(pts))
 
+    elif kind == "line_straighten":
+        # Horizon spirit-level icon: horizontal line with a centered circle & level dot
+        cy = s * 0.5
+        cx = s * 0.5
+        r = s * 0.20
+        line_col = QColor("#334E68")
+        accent_col = QColor("#0078D7")
+        p.setPen(QPen(line_col, max(1.4, s * 0.10), Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.08, cy), QPointF(cx - r - s * 0.02, cy))
+        p.drawLine(QPointF(cx + r + s * 0.02, cy), QPointF(s * 0.92, cy))
+        # Subtle vertical end ticks
+        p.setPen(QPen(line_col, max(1.1, s * 0.08), Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.08, cy - s * 0.12), QPointF(s * 0.08, cy + s * 0.12))
+        p.drawLine(QPointF(s * 0.92, cy - s * 0.12), QPointF(s * 0.92, cy + s * 0.12))
+        # Center level circle + blue bubble dot
+        p.setPen(QPen(accent_col, max(1.4, s * 0.10)))
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawEllipse(QPointF(cx, cy), r, r)
+        p.setPen(Qt.NoPen)
+        p.setBrush(accent_col)
+        p.drawEllipse(QPointF(cx, cy), max(1.2, s * 0.075), max(1.2, s * 0.075))
+
     elif kind == "straighten":
         p.save()
         p.translate(s * 0.5, s * 0.5)

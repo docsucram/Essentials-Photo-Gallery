@@ -2394,7 +2394,7 @@ class SingleMediaViewer(QWidget):
         self.btn_crop_straighten_line.setCheckable(True)
         self.btn_crop_straighten_line.setChecked(False)
         self.btn_crop_straighten_line.setFixedHeight(24)
-        self.btn_crop_straighten_line.setIcon(make_wlpg_icon("straighten", 14))
+        self.btn_crop_straighten_line.setIcon(make_wlpg_icon("line_straighten", 14))
         self.btn_crop_straighten_line.setIconSize(QSize(14, 14))
         self.btn_crop_straighten_line.setToolTip(
             "Straighten the image by drawing a line on it"

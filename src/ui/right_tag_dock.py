@@ -4358,7 +4358,7 @@ class TagAndCaptionDock(QDockWidget):
 
         self.btn_draw_straighten = QPushButton("", grp_str)
         self.btn_draw_straighten.setObjectName("FineTuneActionBtn")
-        self.btn_draw_straighten.setIcon(make_wlpg_icon("straighten", 14))
+        self.btn_draw_straighten.setIcon(make_wlpg_icon("line_straighten", 14))
         self.btn_draw_straighten.setIconSize(QSize(14, 14))
         self.btn_draw_straighten.setFixedSize(26, 22)
         self.btn_draw_straighten.setCursor(Qt.PointingHandCursor)
@@ -5067,28 +5067,41 @@ class TagAndCaptionDock(QDockWidget):
             p.drawPath(half)
 
         elif kind == "eyedropper":
-            # Crisp vector eyedropper oriented 45 deg
-            p.setPen(QPen(fg, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            p.setBrush(fill_soft)
-            # Tip + barrel
+            # Distinct pipette silhouette: hollow glass tube + collar flange + colored bulb + tip droplet
+            glass_bg = QColor("#1E242E") if is_dark else QColor("#FFFFFF")
+            outline_col = QColor("#FFFFFF") if is_checked else fg
+            bulb_col = QColor("#FFFFFF") if is_checked else accent
+
+            # 1. Hollow tapered glass barrel (bottom-left to center)
             barrel = QPainterPath()
-            barrel.moveTo(s * 0.18, s * 0.82)
-            barrel.lineTo(s * 0.24, s * 0.68)
-            barrel.lineTo(s * 0.54, s * 0.38)
-            barrel.lineTo(s * 0.62, s * 0.46)
-            barrel.lineTo(s * 0.32, s * 0.76)
+            barrel.moveTo(s * 0.14, s * 0.86)
+            barrel.lineTo(s * 0.24, s * 0.65)
+            barrel.lineTo(s * 0.50, s * 0.39)
+            barrel.lineTo(s * 0.61, s * 0.50)
+            barrel.lineTo(s * 0.35, s * 0.76)
             barrel.closeSubpath()
+            p.setBrush(glass_bg)
+            p.setPen(QPen(outline_col, 1.35, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             p.drawPath(barrel)
-            # Collar + rubber bulb
-            p.setPen(QPen(accent, 1.8, Qt.SolidLine, Qt.RoundCap))
-            p.drawLine(QPointF(s * 0.49, s * 0.33), QPointF(s * 0.67, s * 0.51))
+
+            # 2. Perpendicular collar flange
+            p.setPen(QPen(outline_col, 1.8, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(QPointF(s * 0.45, s * 0.34), QPointF(s * 0.66, s * 0.55))
+
+            # 3. Rounded rubber bulb at top-right
             bulb = QPainterPath()
-            bulb.moveTo(s * 0.56, s * 0.36)
-            bulb.quadTo(s * 0.74, s * 0.14, s * 0.84, s * 0.24)
-            bulb.quadTo(s * 0.90, s * 0.32, s * 0.64, s * 0.44)
-            p.setBrush(accent)
-            p.setPen(QPen(fg, 1.3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            bulb.moveTo(s * 0.54, s * 0.36)
+            bulb.cubicTo(s * 0.68, s * 0.16, s * 0.78, s * 0.14, s * 0.84, s * 0.20)
+            bulb.cubicTo(s * 0.90, s * 0.26, s * 0.86, s * 0.36, s * 0.64, s * 0.46)
+            bulb.closeSubpath()
+            p.setBrush(bulb_col)
+            p.setPen(QPen(outline_col, 1.1, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             p.drawPath(bulb)
+
+            # 4. Small sample droplet below tip
+            p.setPen(Qt.NoPen)
+            p.setBrush(bulb_col)
+            p.drawEllipse(QPointF(s * 0.14, s * 0.90), s * 0.06, s * 0.06)
 
         if has_edits:
             p.setPen(Qt.NoPen)
@@ -8541,15 +8554,27 @@ class TagAndCaptionDock(QDockWidget):
             self._refresh_region_indicators()
 
         combo_css = (
-            "QComboBox { background-color: #22262E; color: #E2E8F0; border: 1px solid #475569; "
-            "border-radius: 3px; padding: 2px 6px; font-size: 12px; }"
-            "QComboBox:hover { border-color: #60A5FA; }"
+            "QComboBox { background-color: #252B36; color: #F1F5F9; border: 1px solid #475569; "
+            "border-radius: 4px; padding: 1px 22px 1px 7px; font-family: 'Segoe UI'; font-size: 8.5pt; }"
+            "QComboBox:hover { border-color: #60A5FA; background-color: #2C3442; }"
+            "QComboBox:focus { border-color: #3B82F6; }"
+            "QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; "
+            "width: 18px; border-left: 1px solid #3A4454; border-top-right-radius: 4px; border-bottom-right-radius: 4px; "
+            "background: transparent; }"
+            "QComboBox::down-arrow { width: 0px; height: 0px; border-left: 4px solid transparent; "
+            "border-right: 4px solid transparent; border-top: 5px solid #CBD5E1; }"
             "QComboBox QAbstractItemView { background-color: #1B1E24; color: #E2E8F0; "
             "border: 1px solid #3E4756; selection-background-color: #2563EB; selection-color: #FFFFFF; outline: none; }"
             if is_dark
             else "QComboBox { background-color: #FFFFFF; color: #1E293B; border: 1px solid #CBD5E1; "
-            "border-radius: 3px; padding: 2px 6px; font-size: 12px; }"
-            "QComboBox:hover { border-color: #7BA7C9; }"
+            "border-radius: 4px; padding: 1px 22px 1px 7px; font-family: 'Segoe UI'; font-size: 8.5pt; }"
+            "QComboBox:hover { border-color: #7BA7C9; background-color: #F8FBFF; }"
+            "QComboBox:focus { border-color: #2563EB; }"
+            "QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; "
+            "width: 18px; border-left: 1px solid #E2E8F0; border-top-right-radius: 4px; border-bottom-right-radius: 4px; "
+            "background: #F8FAFC; }"
+            "QComboBox::down-arrow { width: 0px; height: 0px; border-left: 4px solid transparent; "
+            "border-right: 4px solid transparent; border-top: 5px solid #475569; }"
             "QComboBox QAbstractItemView { background-color: #FFFFFF; color: #1E293B; "
             "border: 1px solid #CBD5E1; selection-background-color: #E4F0FC; selection-color: #0F172A; outline: none; }"
         )

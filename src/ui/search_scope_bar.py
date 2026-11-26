@@ -460,17 +460,24 @@ class SearchScopeBar(QFrame):
         self.slider_similarity = QSlider(Qt.Horizontal, self.similar_controls_widget)
         self.slider_similarity.setRange(70, 98)
         self.slider_similarity.setValue(81)
-        self.slider_similarity.setFixedWidth(105)
+        self.slider_similarity.setFixedWidth(98)
         self.slider_similarity.setFixedHeight(16)
         self.slider_similarity.setCursor(Qt.PointingHandCursor)
         self.slider_similarity.setToolTip("Adjust minimum visual similarity threshold (70%–98%)")
+        self.slider_similarity.setStyleSheet(
+            "QSlider::groove:horizontal { height: 4px; background: #D2DFEE; border-radius: 2px; }"
+            "QSlider::sub-page:horizontal { background: #3B82F6; border-radius: 2px; }"
+            "QSlider::handle:horizontal { width: 12px; height: 12px; margin: -4px 0; "
+            "border-radius: 6px; background: #FFFFFF; border: 2px solid #2563EB; }"
+            "QSlider::handle:horizontal:hover { background: #EFF6FF; border-color: #1D4ED8; }"
+        )
         self.slider_similarity.valueChanged.connect(self._on_similarity_slider_changed)
         self.slider_similarity.sliderReleased.connect(self._emit_similarity_threshold)
         sim_hbox.addWidget(self.slider_similarity)
 
         self.lbl_similarity_val = QLabel("81%", self.similar_controls_widget)
         self.lbl_similarity_val.setStyleSheet(
-            "color: #1E395B; font-weight: bold; font-family: 'Segoe UI'; font-size: 8.5pt; min-width: 28px;"
+            "color: #1E395B; font-weight: 600; font-family: 'Segoe UI'; font-size: 8.5pt; min-width: 28px;"
         )
         sim_hbox.addWidget(self.lbl_similarity_val)
 
@@ -478,35 +485,43 @@ class SearchScopeBar(QFrame):
         self.similar_progress_widget = QWidget(self.similar_controls_widget)
         self.similar_progress_widget.setStyleSheet("background: transparent;")
         prog_hbox = QHBoxLayout(self.similar_progress_widget)
-        prog_hbox.setContentsMargins(8, 0, 0, 0)
-        prog_hbox.setSpacing(5)
+        prog_hbox.setContentsMargins(6, 0, 0, 0)
+        prog_hbox.setSpacing(6)
+
+        prog_sep = QFrame(self.similar_progress_widget)
+        prog_sep.setFrameShape(QFrame.VLine)
+        prog_sep.setFixedHeight(14)
+        prog_sep.setStyleSheet("color: #C7D7E8; background: #C7D7E8; max-width: 1px;")
+        prog_hbox.addWidget(prog_sep)
 
         self.prg_similar = QProgressBar(self.similar_progress_widget)
-        self.prg_similar.setFixedSize(88, 12)
+        self.prg_similar.setFixedSize(96, 6)
         self.prg_similar.setTextVisible(False)
         self.prg_similar.setStyleSheet(
-            "QProgressBar { border: 1px solid #B5CBE2; border-radius: 3px; background: #E9EFF6; }"
-            "QProgressBar::chunk { background-color: #2563EB; border-radius: 2px; }"
+            "QProgressBar { border: none; border-radius: 3px; background: #D8E4F0; min-height: 6px; max-height: 6px; }"
+            "QProgressBar::chunk { background-color: #2563EB; border-radius: 3px; }"
         )
-        prog_hbox.addWidget(self.prg_similar)
+        prog_hbox.addWidget(self.prg_similar, 0, Qt.AlignVCenter)
 
         self.lbl_similar_progress = QLabel("", self.similar_progress_widget)
         self.lbl_similar_progress.setStyleSheet(
-            "color: #475569; font-family: 'Segoe UI'; font-size: 8pt;"
+            "color: #55687C; font-family: 'Segoe UI'; font-size: 8pt;"
         )
-        prog_hbox.addWidget(self.lbl_similar_progress)
+        prog_hbox.addWidget(self.lbl_similar_progress, 0, Qt.AlignVCenter)
 
         self.btn_stop_similar = QToolButton(self.similar_progress_widget)
         self.btn_stop_similar.setText("Stop")
+        self.btn_stop_similar.setFixedHeight(19)
         self.btn_stop_similar.setCursor(Qt.PointingHandCursor)
         self.btn_stop_similar.setToolTip("Stop background indexing (keeps matches already found)")
         self.btn_stop_similar.setStyleSheet(
-            "QToolButton { color: #1E395B; background: #F1F5F9; border: 1px solid #B5CBE2; "
-            "border-radius: 3px; padding: 1px 6px; font-family: 'Segoe UI'; font-size: 8pt; }"
-            "QToolButton:hover { background: #E2ECF8; border-color: #3C7FB1; }"
+            "QToolButton { color: #334E68; background: #EBF2FA; border: 1px solid #C2D5E8; "
+            "border-radius: 9px; padding: 0px 8px; font-family: 'Segoe UI'; font-size: 7.5pt; font-weight: 600; }"
+            "QToolButton:hover { background: #DCEAF8; border-color: #6B9ED4; color: #102A43; }"
+            "QToolButton:pressed { background: #C9DFF5; }"
         )
         self.btn_stop_similar.clicked.connect(self.similar_scan_stop_requested.emit)
-        prog_hbox.addWidget(self.btn_stop_similar)
+        prog_hbox.addWidget(self.btn_stop_similar, 0, Qt.AlignVCenter)
 
         self.similar_progress_widget.setVisible(False)
         sim_hbox.addWidget(self.similar_progress_widget)
@@ -1074,7 +1089,8 @@ class SearchScopeBar(QFrame):
         if text:
             self.lbl_similar_progress.setText(text)
         elif total > 0:
-            self.lbl_similar_progress.setText(f"Indexing {int(current):,}/{int(total):,}…")
+            pct = int(round((min(int(current), int(total)) / float(total)) * 100.0))
+            self.lbl_similar_progress.setText(f"{pct}% · {int(current):,}/{int(total):,}")
         else:
             self.lbl_similar_progress.setText("Searching…")
 

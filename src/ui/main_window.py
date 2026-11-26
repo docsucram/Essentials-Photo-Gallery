@@ -11448,11 +11448,12 @@ class PhotoGalleryMainWindow(QMainWindow):
             if getattr(self, "_similar_search_seq", 0) != run_seq:
                 return
             if total_uncached > 0 and done_cnt < total_uncached:
+                pct_done = int(round((done_cnt / float(total_uncached)) * 100.0))
                 self.scope_bar.set_similar_scan_progress(
                     True,
                     done_cnt,
                     total_uncached,
-                    f"Indexing {done_cnt:,}/{total_uncached:,}…",
+                    f"{pct_done}% · {done_cnt:,}/{total_uncached:,}",
                 )
             else:
                 self.scope_bar.set_similar_scan_progress(False)
