@@ -2766,9 +2766,16 @@ class SingleMediaViewer(QWidget):
         if hud is None:
             return
         vp = self.graphics_view.viewport()
+        in_canvas_tool = bool(
+            getattr(self, "is_crop_mode", False)
+            or getattr(self, "is_retouch_mode", False)
+            or getattr(self, "is_red_eye_mode", False)
+            or getattr(self, "is_straighten_active", False)
+            or getattr(self, "is_markup_mode", False)
+        )
         if (
             self.current_media_id is None
-            or self.is_in_edit_mode()
+            or in_canvas_tool
             or self.media_stack.currentWidget() != self.graphics_view
             or vp is None
             or vp.width() < 160
