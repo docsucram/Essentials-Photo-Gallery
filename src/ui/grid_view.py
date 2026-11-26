@@ -3946,16 +3946,17 @@ class ThumbnailGridView(QListView):
             scan_menu = menu.addMenu(make_wlpg_icon("text_search", 16), "Scan")
             menu._ai_scan_menu = scan_menu
             scan_menu.setFont(QFont("Segoe UI", 9))
-            act_sim = scan_menu.addAction(make_wlpg_icon("compare", 16), "Find Similar Photos...")
-            act_sim.setEnabled(len(target_mids) == 1)
-            if len(target_mids) == 1:
-                act_sim.triggered.connect(lambda _chk=False, mid=int(media_id): self.find_similar_requested.emit(mid))
             act_rescan = scan_menu.addAction(make_wlpg_icon("face", 16), "Rescan for faces")
             if is_mw:
                 act_rescan.triggered.connect(lambda checked=False, t_ids=list(target_mids): main_win.rescan_faces_for_selection(t_ids))
             act_ocr = scan_menu.addAction(make_wlpg_icon("text_search", 16), "Scan for text (OCR)")
             if is_mw and hasattr(main_win, "scan_ocr_for_selection"):
                 act_ocr.triggered.connect(lambda checked=False, t_ids=list(target_mids): main_win.scan_ocr_for_selection(t_ids))
+
+            act_sim = menu.addAction(make_wlpg_icon("compare", 16), "Find Similar Photos...")
+            act_sim.setEnabled(len(target_mids) == 1)
+            if len(target_mids) == 1:
+                act_sim.triggered.connect(lambda _chk=False, mid=int(media_id): self.find_similar_requested.emit(mid))
 
             menu.addSeparator()
 

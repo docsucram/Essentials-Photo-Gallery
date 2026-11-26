@@ -3063,10 +3063,24 @@ class PhotoGalleryMainWindow(QMainWindow):
     def _on_startup_reconciliation_completed(
         self, added: int, modified: int, deleted: int, folders_changed: int
     ) -> None:
-        if added > 0 or modified > 0 or deleted > 0 or folders_changed > 0:
+        media_changed = (added > 0 or modified > 0 or deleted > 0)
+        if media_changed or folders_changed > 0:
             self._media_meta_lookup.clear()
-            self.refresh_navigation_and_autocomplete()
-            self.rebuild_and_run_query()
+            if media_changed:
+                # Stagger scoped nav updates across event-loop ticks so startup never stalls the GUI
+                self.refresh_navigation_and_autocomplete({"folders", "dates", "albums"})
+                QTimer.singleShot(
+                    250,
+                    lambda: self.refresh_navigation_and_autocomplete({"tags", "people", "ratings"}),
+                )
+                QTimer.singleShot(
+                    600,
+                    lambda: self.refresh_navigation_and_autocomplete({"places", "cameras"}),
+                )
+                self.rebuild_and_run_query()
+            else:
+                # Only folder metadata changed (0 added/modified/deleted media): refresh folders only
+                self.refresh_navigation_and_autocomplete({"folders"})
             parts: list[str] = []
             if added > 0:
                 parts.append(f"+{added} item(s)")
@@ -4680,7 +4694,11 @@ class PhotoGalleryMainWindow(QMainWindow):
             headers_enabled = False
         self.catalog_model.set_records(records, group_headers_enabled=headers_enabled)
         if hasattr(self, "bottom_dock") and self.bottom_dock is not None:
-            self.bottom_dock.refresh_items()
+            if self.bottom_dock.isVisible():
+                self.bottom_dock.refresh_items()
+                self._bottom_dock_dirty = False
+            else:
+                self._bottom_dock_dirty = True
 
         if hasattr(self, "scope_bar") and self.scope_bar is not None:
             self._update_scope_bar_visibility()
@@ -8087,7 +8105,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self, media_ids: list[int], location_label: str = ""
     ) -> None:
         if hasattr(self, "left_nav_dock") and self.left_nav_dock is not None:
-            self.left_nav_dock.clear_all_filters()
+            self.left_nav_dock.clear_all_filters(emit_signal=False)
         self._search_text = ""
         if hasattr(self, "scope_bar"):
             self.scope_bar.clear_search_input()

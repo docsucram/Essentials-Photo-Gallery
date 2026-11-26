@@ -3861,7 +3861,7 @@ class LeftNavigationDock(QDockWidget):
         self._update_summary_label()
         self.filter_changed.emit()
 
-    def clear_all_filters(self) -> None:
+    def clear_all_filters(self, *, emit_signal: bool = True) -> None:
         self._updating_tree = True
         try:
             self._album_id = None
@@ -3875,7 +3875,8 @@ class LeftNavigationDock(QDockWidget):
         finally:
             self._updating_tree = False
         self._update_summary_label()
-        self.filter_changed.emit()
+        if emit_signal:
+            self.filter_changed.emit()
 
     def selected_scope_description(self) -> str:
         parts: list[str] = []

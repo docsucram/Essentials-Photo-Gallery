@@ -10231,11 +10231,6 @@ class SingleMediaViewer(QWidget):
         menu._ai_scan_menu = scan_menu
         scan_menu.setFont(QFont("Segoe UI", 9))
 
-        if not is_vid:
-            act_sim = scan_menu.addAction(make_wlpg_icon("compare", 16), "Find Similar Photos...")
-            if is_mw and hasattr(mw, "open_find_similar_for_media") and mid is not None:
-                act_sim.triggered.connect(lambda: mw.open_find_similar_for_media(mid))
-
         act_rescan = scan_menu.addAction(make_wlpg_icon("face", 16), "Rescan for faces")
         if is_mw and mid is not None:
             act_rescan.triggered.connect(lambda: mw.rescan_faces_for_selection([mid]))
@@ -10269,6 +10264,11 @@ class SingleMediaViewer(QWidget):
                 act_b.triggered.connect(
                     lambda checked=False, pid_val=b_pid, name_val=b_name: self.start_face_tag_mode_for_person(pid_val, name_val)
                 )
+
+        if not is_vid:
+            act_sim = menu.addAction(make_wlpg_icon("compare", 16), "Find Similar Photos...")
+            if is_mw and hasattr(mw, "open_find_similar_for_media") and mid is not None:
+                act_sim.triggered.connect(lambda: mw.open_find_similar_for_media(mid))
 
         menu.addSeparator()
 
