@@ -5184,11 +5184,12 @@ class SingleMediaViewer(QWidget):
             self._clear_retouch_overlay()
             return
 
+        import os
+
         before = self.master_np_rgb.copy()
 
         # If in Object Eraser mode, use LaMa ONNX / Multi-Scale Structure-Texture Inpainting
         if getattr(self, "spot_fix_sub_mode", "retouch") == "erase":
-            import os
             from src.imaging.creative_effects import inpaint_object_lama
 
             def _apply_erased_result(result_rgb: np.ndarray | None, err: Exception | None) -> None:
