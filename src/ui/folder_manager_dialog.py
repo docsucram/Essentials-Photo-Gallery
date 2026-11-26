@@ -1200,7 +1200,11 @@ class FolderManagerDialog(QDialog):
 
         btn_tess = QPushButton("Select tesseract.exe...", dlg)
         btn_rapid = QPushButton("Select RapidOCR Models Folder...", dlg)
+        from src.ui.ribbon_toolbar import make_wlpg_icon
+
         btn_reset = QPushButton("Auto-Detect / Reset to Default", dlg)
+        btn_reset.setIcon(make_wlpg_icon("restore", 14))
+        btn_reset.setIconSize(QSize(14, 14))
         btn_close = QPushButton("Close", dlg)
 
         def _pick_tess() -> None:

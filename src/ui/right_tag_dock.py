@@ -3838,7 +3838,7 @@ class TagAndCaptionDock(QDockWidget):
         self.btn_mask_hide.setToolTip("Hide mask overlay (adjustments still apply to the selected region)")
 
         self.btn_mask_fill = QPushButton("", self.region_scope_widget)
-        self.btn_mask_fill.setObjectName("FineTuneSubBtn")
+        self.btn_mask_fill.setObjectName("FineTuneMaskFillBtn")
         self.btn_mask_fill.setCheckable(True)
         self.btn_mask_fill.setChecked(True)
         self.btn_mask_fill.setFixedSize(26, 24)
@@ -4540,6 +4540,8 @@ class TagAndCaptionDock(QDockWidget):
 
         self.btn_reset_default = QPushButton("Reset to default", content)
         self.btn_reset_default.setObjectName("FineTuneResetBtn")
+        self.btn_reset_default.setIcon(make_wlpg_icon("restore", 14))
+        self.btn_reset_default.setIconSize(QSize(14, 14))
         self.btn_reset_default.setFixedHeight(26)
         self.btn_reset_default.setCursor(Qt.PointingHandCursor)
         self.btn_reset_default.setToolTip("Reset all adjustments and levels back to default")
@@ -5957,6 +5959,8 @@ class TagAndCaptionDock(QDockWidget):
         action_bar.addWidget(self.btn_dl_hold_compare)
 
         self.btn_dl_reset = QPushButton("Reset All Depth && Light", content)
+        self.btn_dl_reset.setIcon(make_wlpg_icon("restore", 14))
+        self.btn_dl_reset.setIconSize(QSize(14, 14))
         self.btn_dl_reset.setObjectName("FineTuneResetBtn")
         self.btn_dl_reset.setFixedHeight(26)
         self.btn_dl_reset.setCursor(Qt.PointingHandCursor)
@@ -8553,6 +8557,28 @@ class TagAndCaptionDock(QDockWidget):
         if hasattr(self, "_refresh_region_indicators"):
             self._refresh_region_indicators()
 
+        if hasattr(self, "btn_mask_fill") and self.btn_mask_fill is not None:
+            mask_fill_css = (
+                "QPushButton { background-color: #252B36; border: 1px solid #475569; border-radius: 3px; padding: 0px; }"
+                "QPushButton:hover { background-color: #334155; border-color: #60A5FA; }"
+                "QPushButton:checked { background-color: #252B36; border: 1px solid #475569; }"
+                "QPushButton:checked:hover { background-color: #334155; border-color: #60A5FA; }"
+                if is_dark
+                else "QPushButton { background-color: #F1F5F9; border: 1px solid #CBD5E1; border-radius: 3px; padding: 0px; }"
+                "QPushButton:hover { background-color: #E4F0FC; border-color: #7BA7C9; }"
+                "QPushButton:checked { background-color: #F1F5F9; border: 1px solid #CBD5E1; }"
+                "QPushButton:checked:hover { background-color: #E4F0FC; border-color: #7BA7C9; }"
+            )
+            self.btn_mask_fill.setStyleSheet(mask_fill_css)
+
+        from src.utils.paths import get_icons_dir
+
+        icons_posix = get_icons_dir().as_posix()
+        arrow_svg = (
+            f"{icons_posix}/arrow_dropdown_mini_dark.svg"
+            if is_dark
+            else f"{icons_posix}/arrow_dropdown_mini.svg"
+        )
         combo_css = (
             "QComboBox { background-color: #252B36; color: #F1F5F9; border: 1px solid #475569; "
             "border-radius: 4px; padding: 1px 22px 1px 7px; font-family: 'Segoe UI'; font-size: 8.5pt; }"
@@ -8561,8 +8587,7 @@ class TagAndCaptionDock(QDockWidget):
             "QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; "
             "width: 18px; border-left: 1px solid #3A4454; border-top-right-radius: 4px; border-bottom-right-radius: 4px; "
             "background: transparent; }"
-            "QComboBox::down-arrow { width: 0px; height: 0px; border-left: 4px solid transparent; "
-            "border-right: 4px solid transparent; border-top: 5px solid #CBD5E1; }"
+            f"QComboBox::down-arrow {{ image: url({arrow_svg}); width: 10px; height: 10px; }}"
             "QComboBox QAbstractItemView { background-color: #1B1E24; color: #E2E8F0; "
             "border: 1px solid #3E4756; selection-background-color: #2563EB; selection-color: #FFFFFF; outline: none; }"
             if is_dark
@@ -8573,8 +8598,7 @@ class TagAndCaptionDock(QDockWidget):
             "QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; "
             "width: 18px; border-left: 1px solid #E2E8F0; border-top-right-radius: 4px; border-bottom-right-radius: 4px; "
             "background: #F8FAFC; }"
-            "QComboBox::down-arrow { width: 0px; height: 0px; border-left: 4px solid transparent; "
-            "border-right: 4px solid transparent; border-top: 5px solid #475569; }"
+            f"QComboBox::down-arrow {{ image: url({arrow_svg}); width: 10px; height: 10px; }}"
             "QComboBox QAbstractItemView { background-color: #FFFFFF; color: #1E293B; "
             "border: 1px solid #CBD5E1; selection-background-color: #E4F0FC; selection-color: #0F172A; outline: none; }"
         )

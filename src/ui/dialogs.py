@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from PIL import Image, ImageOps
-from PySide6.QtCore import QDate, QObject, QRect, QSettings, QThread, QTime, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QDate, QObject, QRect, QSettings, QSize, QThread, QTime, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
@@ -758,6 +758,8 @@ class AppSettingsDialog(QDialog):
         v_imp.addWidget(lbl_autoplay)
 
         self.btn_restore_import_defaults = QPushButton("Restore defaults", tab_import)
+        self.btn_restore_import_defaults.setIcon(make_wlpg_icon("restore", 14))
+        self.btn_restore_import_defaults.setIconSize(QSize(14, 14))
         self.btn_restore_import_defaults.setFixedWidth(110)
         self.btn_restore_import_defaults.clicked.connect(self._restore_import_defaults)
         v_imp.addWidget(self.btn_restore_import_defaults)
