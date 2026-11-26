@@ -929,42 +929,11 @@ class MediaCardDelegate(QStyledItemDelegate):
             painter.drawPath(hpath)
             painter.restore()
 
-        # Optional Bottom-Right Monochrome Tag Badges (default-off), stacking right-to-left with NO gap:
-        # Priority (furthest right -> left): Rating/Fav pill -> Geotagged -> Descriptive tagged -> People tagged
-        tag_badge_keys: list[str] = []
-        if getattr(self, "show_geotag_badges", False) and getattr(rec_meta, "has_geotag", 0):
-            tag_badge_keys.append("geotag")
-        if getattr(self, "show_desc_tag_badges", False) and getattr(rec_meta, "has_desc_tags", 0):
-            tag_badge_keys.append("tag")
-        if getattr(self, "show_people_tag_badges", False) and getattr(rec_meta, "has_people_tags", 0):
-            tag_badge_keys.append("person")
-        if tag_badge_keys:
-            badge_sz = 26
-            badge_gap = 3
-            badge_top = img_box.bottom() - badge_sz - 4
-            next_right = (
-                (bottom_right_pill_rect.left() - badge_gap)
-                if bottom_right_pill_rect is not None
-                else (img_box.right() - 4)
-            )
-            stroke_col = QColor("#E2E8F0")
-            painter.save()
-            painter.setRenderHint(QPainter.Antialiasing, True)
-            for b_key in tag_badge_keys:
-                b_rect = QRect(next_right - badge_sz + 1, badge_top, badge_sz, badge_sz)
-                if b_rect.left() < img_box.left() + 4:
-                    break
-                painter.setBrush(QColor(15, 23, 42, 185))
-                painter.setPen(QPen(QColor(255, 255, 255, 55), 1.0))
-                painter.drawRoundedRect(QRectF(b_rect).adjusted(0.5, 0.5, -0.5, -0.5), 6.0, 6.0)
-                self._draw_vector_tag_badge(painter, QRectF(b_rect), b_key, stroke_col)
-                next_right = b_rect.left() - badge_gap - 1
-            painter.restore()
-
         is_live = bool(getattr(rec_meta, "is_live_photo", 0))
         is_offline = bool(getattr(rec_meta, "is_offline", 0))
         stack_cnt = int(getattr(rec_meta, "stack_count", 1) or 1)
         show_grp = bool(getattr(self, "show_group_badges", True)) and stack_cnt > 1
+        bottom_left_right_edge: int | None = None
         if is_live or is_offline or show_grp:
             painter.save()
             painter.setRenderHint(QPainter.Antialiasing, True)
@@ -975,6 +944,7 @@ class MediaCardDelegate(QStyledItemDelegate):
                 is_wide = bool((is_rj and stack_pos == 0) or stack_pos > 0 or stack_cnt >= 10)
                 st_rect = self.stack_badge_rect(card_rect, img_box, wide=is_wide)
                 group_rect = st_rect
+                bottom_left_right_edge = st_rect.right()
                 # Match Favourite bottom-right squircle aesthetic (frosted dark pill + subtle white rim)
                 if stack_pos > 0:
                     pill_bg = QColor(14, 116, 144, 210)
@@ -1012,6 +982,7 @@ class MediaCardDelegate(QStyledItemDelegate):
             if is_live:
                 lx = (group_rect.right() + 4) if group_rect is not None else (img_box.left() + 4)
                 live_rect = QRect(lx, img_box.bottom() - 30, 26, 26)
+                bottom_left_right_edge = live_rect.right()
                 painter.setPen(QPen(QColor(255, 255, 255, 65), 1.0))
                 painter.setBrush(QColor(15, 23, 42, 190))
                 painter.drawRoundedRect(QRectF(live_rect).adjusted(0.5, 0.5, -0.5, -0.5), 6.0, 6.0)
@@ -1023,6 +994,43 @@ class MediaCardDelegate(QStyledItemDelegate):
                 painter.drawRoundedRect(off_rect, 3, 3)
                 painter.setPen(QColor("#FEF3C7"))
                 painter.drawText(off_rect, Qt.AlignCenter, "OFFLINE")
+            painter.restore()
+
+        # Optional Bottom-Left Monochrome Tag Badges (default-off), stacking left-to-right with NO gap:
+        # Order (left -> right): [Stack/Live pill if any] -> Geotagged -> Descriptive tagged -> People tagged
+        tag_badge_keys: list[str] = []
+        if getattr(self, "show_geotag_badges", False) and getattr(rec_meta, "has_geotag", 0):
+            tag_badge_keys.append("geotag")
+        if getattr(self, "show_desc_tag_badges", False) and getattr(rec_meta, "has_desc_tags", 0):
+            tag_badge_keys.append("tag")
+        if getattr(self, "show_people_tag_badges", False) and getattr(rec_meta, "has_people_tags", 0):
+            tag_badge_keys.append("person")
+        if tag_badge_keys:
+            badge_sz = 26
+            badge_gap = 3
+            badge_top = img_box.bottom() - badge_sz - 4
+            next_left = (
+                (bottom_left_right_edge + 4)
+                if bottom_left_right_edge is not None
+                else (img_box.left() + 4)
+            )
+            max_right = (
+                (bottom_right_pill_rect.left() - 3)
+                if bottom_right_pill_rect is not None
+                else (img_box.right() - 4)
+            )
+            stroke_col = QColor("#E2E8F0")
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            for b_key in tag_badge_keys:
+                b_rect = QRect(next_left, badge_top, badge_sz, badge_sz)
+                if b_rect.right() > max_right:
+                    break
+                painter.setBrush(QColor(15, 23, 42, 185))
+                painter.setPen(QPen(QColor(255, 255, 255, 55), 1.0))
+                painter.drawRoundedRect(QRectF(b_rect).adjusted(0.5, 0.5, -0.5, -0.5), 6.0, 6.0)
+                self._draw_vector_tag_badge(painter, QRectF(b_rect), b_key, stroke_col)
+                next_left = b_rect.right() + badge_gap + 1
             painter.restore()
 
     def stars_bar_rect(self, card_rect: QRect) -> QRect:
@@ -3426,7 +3434,10 @@ class ThumbnailGridView(QListView):
         super().leaveEvent(event)
 
     @staticmethod
-    def _format_card_tooltip(record: Any) -> str:
+    def _format_card_tooltip(
+        record: Any,
+        stack_filenames: Sequence[str] | None = None,
+    ) -> str:
         dt = _epoch_to_datetime_utc(record.date_taken) if getattr(record, "date_taken", None) else None
         dt_str = dt.strftime("%d %B %Y %H:%M") if dt else ""
         lines = [str(record.filename)]
@@ -3438,15 +3449,47 @@ class ThumbnailGridView(QListView):
             is_raw_jpg = bool(getattr(record, "is_raw_jpg_stack", False))
             if stack_pos == 0:
                 if is_raw_jpg:
-                    lines.append(f"RAW + JPEG pair ({stack_cnt} files) — Click badge to expand")
+                    lines.append(f"RAW + JPEG stack ({stack_cnt} files) — Click badge to expand")
                 else:
-                    lines.append(f"Photo group ({stack_cnt} photos) — Click badge to expand")
+                    lines.append(f"Photo stack ({stack_cnt} photos) — Click badge to expand")
             else:
                 if is_raw_jpg:
-                    lines.append(f"RAW + JPEG pair (file {stack_pos} of {stack_cnt}) — Click badge on first photo to collapse")
+                    lines.append(f"RAW + JPEG stack (file {stack_pos} of {stack_cnt}) — Click badge on first photo to collapse")
                 else:
-                    lines.append(f"Photo {stack_pos} of {stack_cnt} in group — Click badge on first photo to collapse")
+                    lines.append(f"Photo {stack_pos} of {stack_cnt} in stack — Click badge on first photo to collapse")
+            if stack_filenames:
+                shown = list(stack_filenames[:5])
+                for fn in shown:
+                    lines.append(f"  • {fn}")
+                extra = len(stack_filenames) - len(shown)
+                if extra > 0:
+                    lines.append(f"  (and {extra} more)")
         return "\n".join(lines)
+
+    def _lookup_stack_filenames(self, record: Any) -> list[str]:
+        if int(getattr(record, "stack_count", 1) or 1) <= 1:
+            return []
+        repo = getattr(self, "catalog_repo", None)
+        if repo is None:
+            return []
+        sp = int(getattr(record, "stack_parent_id", None) or getattr(record, "id", 0) or 0)
+        if sp <= 0:
+            return []
+        try:
+            conn = repo.engine.catalog_conn()
+            rows = conn.execute(
+                """
+                SELECT filename FROM media
+                WHERE stack_parent_id = ? AND live_companion_for_id IS NULL
+                ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END,
+                         COALESCE(date_taken, mtime, 0) ASC,
+                         filename COLLATE NOCASE ASC;
+                """,
+                (sp, sp),
+            ).fetchall()
+            return [str(r[0]) for r in rows if r and r[0]]
+        except Exception:
+            return []
 
     def viewportEvent(self, event: QEvent) -> bool:
         if event.type() == QEvent.ToolTip:
@@ -3455,7 +3498,8 @@ class ThumbnailGridView(QListView):
             if idx.isValid() and not idx.data(CatalogRoles.IsGroupHeaderRole):
                 record = idx.data(CatalogRoles.RecordRole)
                 if record is not None:
-                    tip_text = self._format_card_tooltip(record)
+                    stack_names = self._lookup_stack_filenames(record)
+                    tip_text = self._format_card_tooltip(record, stack_filenames=stack_names)
                     g_pos = getattr(event, "globalPos", lambda: self.mapToGlobal(pos))()
                     QToolTip.showText(g_pos, tip_text, self.viewport())
                     return True

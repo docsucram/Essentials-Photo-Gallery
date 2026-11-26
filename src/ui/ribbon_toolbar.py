@@ -6796,8 +6796,8 @@ class RibbonToolbar(QWidget):
         btn_top.setIconSize(QSize(28, 28))
         btn_top.setToolButtonStyle(Qt.ToolButtonIconOnly)
         btn_top.setText("")
-        btn_top.setToolTip("Photo grouping: Click to expand/collapse groups, or use arrow for Auto-group toggles")
-        btn_top._tooltip_override = "Photo grouping: Click to expand/collapse groups, or use arrow for Auto-group toggles"
+        btn_top.setToolTip("Photo stacks: Click to expand/collapse stacks, or use arrow for Auto-stack toggles")
+        btn_top._tooltip_override = "Photo stacks: Click to expand/collapse stacks, or use arrow for Auto-stack toggles"
         btn_top.clicked.connect(lambda: self.action_triggered.emit("photo_grouping_primary"))
         vbox.addWidget(btn_top)
 
@@ -6805,28 +6805,28 @@ class RibbonToolbar(QWidget):
         btn_bot.setObjectName("PhotoGroupingBottomBtn")
         btn_bot.setFixedSize(74, 35)
         btn_bot.setCursor(Qt.PointingHandCursor)
-        btn_bot.setText("Photo\ngrouping ▾")
-        btn_bot.setToolTip("Photo grouping options (Auto-group bursts, Auto-group RAW + JPEG, Expand/Collapse)")
+        btn_bot.setText("Photo\nstacks ▾")
+        btn_bot.setToolTip("Photo stacks options (Auto-stack bursts, Auto-stack RAW + JPEG, Expand/Collapse)")
         btn_bot.setPopupMode(QToolButton.InstantPopup)
 
         menu = QMenu(btn_bot)
         menu.setFont(QFont("Segoe UI", 9))
 
-        self.act_auto_group_bursts = menu.addAction("Auto-group bursts")
+        self.act_auto_group_bursts = menu.addAction("Auto-stack bursts")
         self.act_auto_group_bursts.setCheckable(True)
         self.act_auto_group_bursts.toggled.connect(
             lambda chk: self.action_triggered.emit(f"toggle_auto_group_bursts:{1 if chk else 0}")
         )
 
-        self.act_auto_group_raw_jpeg = menu.addAction("Auto-group RAW + JPEG")
+        self.act_auto_group_raw_jpeg = menu.addAction("Auto-stack RAW + JPEG")
         self.act_auto_group_raw_jpeg.setCheckable(True)
         self.act_auto_group_raw_jpeg.toggled.connect(
             lambda chk: self.action_triggered.emit(f"toggle_auto_group_raw_jpeg:{1 if chk else 0}")
         )
 
         menu.addSeparator()
-        menu.addAction("Expand all groups", lambda: self.action_triggered.emit("expand_all_stacks"))
-        menu.addAction("Collapse all groups", lambda: self.action_triggered.emit("collapse_all_stacks"))
+        menu.addAction("Expand all stacks", lambda: self.action_triggered.emit("expand_all_stacks"))
+        menu.addAction("Collapse all stacks", lambda: self.action_triggered.emit("collapse_all_stacks"))
         btn_bot.setMenu(menu)
         vbox.addWidget(btn_bot)
 
@@ -6884,8 +6884,8 @@ class RibbonToolbar(QWidget):
         btn_top.setIconSize(QSize(28, 28))
         btn_top.setToolButtonStyle(Qt.ToolButtonIconOnly)
         btn_top.setText("")
-        btn_top.setToolTip("Show / hide all thumbnail overlay badges (Flags, Favourites, Photo groups)")
-        btn_top._tooltip_override = "Show / hide all thumbnail overlay badges (Flags, Favourites, Photo groups)"
+        btn_top.setToolTip("Show / hide all thumbnail overlay badges (Flags, Favourites, Photo stacks)")
+        btn_top._tooltip_override = "Show / hide all thumbnail overlay badges (Flags, Favourites, Photo stacks)"
         btn_top.clicked.connect(lambda: self.action_triggered.emit("toggle_all_badges"))
         vbox.addWidget(btn_top)
 
@@ -6914,7 +6914,7 @@ class RibbonToolbar(QWidget):
             lambda chk: self.action_triggered.emit(f"toggle_badge_favourites:{1 if chk else 0}")
         )
 
-        self.act_badge_groups = menu.addAction("Photo groups")
+        self.act_badge_groups = menu.addAction("Photo stacks")
         self.act_badge_groups.setCheckable(True)
         self.act_badge_groups.setChecked(True)
         self.act_badge_groups.toggled.connect(
@@ -8265,24 +8265,29 @@ class RibbonToolbar(QWidget):
 
         self.btn_geotag = self._make_btn("Geotag", "geotag", grp_org)
         self.btn_geotag.setPopupMode(QToolButton.MenuButtonPopup)
-        self.btn_geotag.setToolTip("Geotag photos, adjust map pin, or match GPS from timed photos")
-        self.btn_geotag._tooltip_override = "Geotag photos, adjust map pin, or match GPS from timed photos"
+        self.btn_geotag.setToolTip("Add or edit photo location, pick a map pin, or copy GPS from phone photos / GPX")
+        self.btn_geotag._tooltip_override = "Add or edit photo location, pick a map pin, or copy GPS from phone photos / GPX"
         self.btn_geotag.clicked.connect(lambda: self.action_triggered.emit("geotag"))
         geotag_menu = QMenu(self.btn_geotag)
+        geotag_menu.setFont(QFont("Segoe UI", 9))
         geotag_menu.addAction(
-            "Add / Edit Place Name...",
+            make_wlpg_icon("geotag", 16),
+            "Add or Edit Location...",
             lambda: self.action_triggered.emit("focus_geotag_box"),
         )
         geotag_menu.addAction(
+            make_wlpg_icon("pin_active", 16),
             "Adjust Location on Map...",
             lambda: self.action_triggered.emit("adjust_geotag_pin"),
         )
         geotag_menu.addAction(
-            "Match Locations from Timed Photos...",
+            make_wlpg_icon("camera", 16),
+            "Copy GPS from Phone Photos / GPX...",
             lambda: self.action_triggered.emit("match_gps_locations"),
         )
         geotag_menu.addSeparator()
         geotag_menu.addAction(
+            make_wlpg_icon("map_light", 16),
             "Open World Map",
             lambda: self.action_triggered.emit("open_map"),
         )
@@ -8318,7 +8323,7 @@ class RibbonToolbar(QWidget):
         self.btn_home_flag.setMenu(flag_menu)
 
         for _sp_btn in (self.btn_geotag, self.btn_home_rate, self.btn_home_flag):
-            _sp_btn.setMinimumWidth(max(_sp_btn.sizeHint().width() + 14, 78))
+            _sp_btn.setMinimumWidth(max(_sp_btn.sizeHint().width() + 20, 88))
 
         o_right_col.addWidget(self.btn_geotag)
         o_right_col.addWidget(self.btn_home_rate)

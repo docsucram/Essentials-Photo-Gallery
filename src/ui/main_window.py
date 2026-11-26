@@ -9417,7 +9417,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                     self.expand_all_stacks()
                 else:
                     self.show_status_message(
-                        "Click 'Photo grouping ▾' to enable Auto-group bursts or RAW + JPEG.",
+                        "Click 'Photo stacks ▾' to enable Auto-stack bursts or RAW + JPEG.",
                         3200,
                     )
         elif action_id in ("toggle_auto_group_bursts:1", "toggle_auto_group_bursts:0"):
