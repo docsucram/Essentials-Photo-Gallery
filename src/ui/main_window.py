@@ -1314,6 +1314,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.compare_view.focused_media_changed.connect(self._on_compare_focused_media_changed)
         self.central_stack.addWidget(self.compare_view)
         self._expanded_stack_ids: set[int] = set()
+        self._stacks_only: bool = False
         self._favourites_only: bool = False
         self.favourites_enabled: bool = True
         self.grid_view.compare_requested.connect(self.open_compare_view)
@@ -1355,10 +1356,11 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._badge_show_flags: bool = True
         self._badge_show_favourites: bool = True
         self._badge_show_groups: bool = True
+        self._badge_show_motion: bool = True
         self._badge_show_geotagged: bool = False
         self._badge_show_desc_tags: bool = False
         self._badge_show_people_tags: bool = False
-        self._saved_badge_prefs: tuple[bool, ...] = (True, True, True, False, False, False)
+        self._saved_badge_prefs: tuple[bool, ...] = (True, True, True, True, False, False, False)
         try:
             from src.core.semantic_engine import SemanticEngine, SemanticVectorRepository
 
@@ -1808,6 +1810,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         )
         self.scope_bar.favourites_clear_requested.connect(
             lambda: self._on_favourite_filter_selected(False)
+        )
+        self.scope_bar.stacks_clear_requested.connect(
+            lambda: self.set_stacks_only_filter(False)
         )
         self.scope_bar.date_clear_requested.connect(self._clear_date_filter)
         self.scope_bar.media_type_clear_requested.connect(
@@ -3554,6 +3559,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             or state.get("edited_only")
             or state.get("edited_filter") is not None
             or getattr(self, "_favourites_only", False)
+            or getattr(self, "_stacks_only", False)
             or has_media_filter
             or has_orientation_filter
             or bool(state.get("dates"))
@@ -3627,6 +3633,7 @@ class PhotoGalleryMainWindow(QMainWindow):
     def _update_scope_bar_visibility(self) -> None:
         state = dict(self.left_nav_dock.current_filter_state())
         state["favourites_only"] = bool(getattr(self, "_favourites_only", False))
+        state["stacks_only"] = bool(getattr(self, "_stacks_only", False))
         self.scope_bar.set_scope_label(self._active_scope_label(state))
 
         self.scope_bar.update_active_filter_chips(
@@ -3715,6 +3722,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         had_active_filters = bool(
             self._search_text
             or getattr(self, "_favourites_only", False)
+            or getattr(self, "_stacks_only", False)
             or (m_type and m_type not in ("all", "none"))
             or (o_filt and o_filt not in ("all", "none"))
             or state.get("person_ids")
@@ -3749,6 +3757,13 @@ class PhotoGalleryMainWindow(QMainWindow):
         )
         self._search_text = ""
         self._favourites_only = False
+        self._stacks_only = False
+        if hasattr(self, "ribbon") and hasattr(self.ribbon, "set_photo_grouping_state"):
+            self.ribbon.set_photo_grouping_state(
+                auto_bursts=self.auto_group_bursts,
+                auto_raw_jpeg=self.auto_group_raw_jpeg,
+                stacks_only=False,
+            )
         self._active_date_range = None
         self._active_date_label = None
         self._active_bbox = None
@@ -4762,6 +4777,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             rank_map = {int(mid): idx for idx, mid in enumerate(subj_order)}
             records.sort(key=lambda r: rank_map.get(int(r.id), len(rank_map)))
             headers_enabled = False
+        if getattr(self, "_stacks_only", False):
+            records = [r for r in records if int(getattr(r, "stack_count", 1) or 1) > 1]
         self.catalog_model.set_records(records, group_headers_enabled=headers_enabled)
         if hasattr(self, "bottom_dock") and self.bottom_dock is not None:
             if self.bottom_dock.isVisible():
@@ -5801,11 +5818,33 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.rebuild_and_run_query()
             self.show_status_message(f"✓ Auto-group RAW + JPEG disabled ({removed} photo(s) ungrouped)", 3500)
 
+    def set_stacks_only_filter(self, enabled: bool) -> None:
+        """Filter the current gallery view to show only stacked photos (bursts & RAW+JPEG stacks)."""
+        self._stacks_only = bool(enabled)
+        if hasattr(self, "ribbon") and hasattr(self.ribbon, "set_photo_grouping_state"):
+            self.ribbon.set_photo_grouping_state(
+                auto_bursts=self.auto_group_bursts,
+                auto_raw_jpeg=self.auto_group_raw_jpeg,
+                stacks_only=self._stacks_only,
+            )
+        if self._stacks_only and self.central_stack.currentWidget() != self.grid_view:
+            self.show_grid_view()
+        self._update_scope_bar_visibility()
+        recs = self.rebuild_and_run_query()
+        if self._stacks_only:
+            if recs:
+                self.show_status_message(f"Showing photo stacks only ({len(recs):,} item(s))", 2500)
+            else:
+                self.show_status_message("No photo stacks in current view", 2500)
+        else:
+            self.show_status_message("Cleared photo stacks filter", 2000)
+
     def toggle_all_badges(self) -> None:
         any_on = bool(
             self._badge_show_flags
             or self._badge_show_favourites
             or self._badge_show_groups
+            or self._badge_show_motion
             or self._badge_show_geotagged
             or self._badge_show_desc_tags
             or self._badge_show_people_tags
@@ -5815,6 +5854,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 bool(self._badge_show_flags),
                 bool(self._badge_show_favourites),
                 bool(self._badge_show_groups),
+                bool(self._badge_show_motion),
                 bool(self._badge_show_geotagged),
                 bool(self._badge_show_desc_tags),
                 bool(self._badge_show_people_tags),
@@ -5823,24 +5863,26 @@ class PhotoGalleryMainWindow(QMainWindow):
                 flags=False,
                 favourites=False,
                 groups=False,
+                motion=False,
                 geotagged=False,
                 desc_tags=False,
                 people_tags=False,
             )
             self.show_status_message("Thumbnail badges hidden", 2000)
         else:
-            saved = getattr(self, "_saved_badge_prefs", (True, True, True, False, False, False))
-            if len(saved) < 6:
-                saved = tuple(saved) + (False,) * (6 - len(saved))
+            saved = getattr(self, "_saved_badge_prefs", (True, True, True, True, False, False, False))
+            if len(saved) < 7:
+                saved = tuple(saved) + (False,) * (7 - len(saved))
             if not any(saved):
-                saved = (True, True, True, False, False, False)
+                saved = (True, True, True, True, False, False, False)
             self.set_badge_visibility(
                 flags=saved[0],
                 favourites=saved[1],
                 groups=saved[2],
-                geotagged=saved[3],
-                desc_tags=saved[4],
-                people_tags=saved[5],
+                motion=saved[3],
+                geotagged=saved[4],
+                desc_tags=saved[5],
+                people_tags=saved[6],
             )
             self.show_status_message("Thumbnail badges shown", 2000)
 
@@ -5850,6 +5892,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         flags: bool | None = None,
         favourites: bool | None = None,
         groups: bool | None = None,
+        motion: bool | None = None,
         geotagged: bool | None = None,
         desc_tags: bool | None = None,
         people_tags: bool | None = None,
@@ -5864,6 +5907,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._badge_show_favourites = bool(favourites)
         if groups is not None:
             self._badge_show_groups = bool(groups)
+        if motion is not None:
+            self._badge_show_motion = bool(motion)
         if geotagged is not None:
             need_geo = bool(geotagged) and not self._badge_show_geotagged
             self._badge_show_geotagged = bool(geotagged)
@@ -5890,6 +5935,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.card_delegate.show_flag_badges = self._badge_show_flags
             self.card_delegate.show_favourite_badges = self._badge_show_favourites
             self.card_delegate.show_group_badges = self._badge_show_groups
+            self.card_delegate.show_motion_badges = self._badge_show_motion
             self.card_delegate.show_geotag_badges = self._badge_show_geotagged
             self.card_delegate.show_desc_tag_badges = self._badge_show_desc_tags
             self.card_delegate.show_people_tag_badges = self._badge_show_people_tags
@@ -5898,6 +5944,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 show_flags=self._badge_show_flags,
                 show_favourites=self._badge_show_favourites,
                 show_groups=self._badge_show_groups,
+                show_motion=self._badge_show_motion,
                 show_geotagged=self._badge_show_geotagged,
                 show_desc_tags=self._badge_show_desc_tags,
                 show_people_tags=self._badge_show_people_tags,
@@ -5907,6 +5954,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             settings.setValue("badge_show_flags", self._badge_show_flags)
             settings.setValue("badge_show_favourites", self._badge_show_favourites)
             settings.setValue("badge_show_groups", self._badge_show_groups)
+            settings.setValue("badge_show_motion", self._badge_show_motion)
             settings.setValue("badge_show_geotagged", self._badge_show_geotagged)
             settings.setValue("badge_show_desc_tags", self._badge_show_desc_tags)
             settings.setValue("badge_show_people_tags", self._badge_show_people_tags)
@@ -9502,6 +9550,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.expand_all_stacks()
         elif action_id == "collapse_all_stacks":
             self.collapse_all_stacks()
+        elif action_id in ("toggle_stacks_only:1", "toggle_stacks_only:0"):
+            self.set_stacks_only_filter(action_id.endswith(":1"))
         elif action_id == "toggle_all_badges":
             self.toggle_all_badges()
         elif action_id in ("toggle_badge_flags:1", "toggle_badge_flags:0"):
@@ -9510,6 +9560,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.set_badge_visibility(favourites=action_id.endswith(":1"))
         elif action_id in ("toggle_badge_groups:1", "toggle_badge_groups:0"):
             self.set_badge_visibility(groups=action_id.endswith(":1"))
+        elif action_id in ("toggle_badge_motion:1", "toggle_badge_motion:0"):
+            self.set_badge_visibility(motion=action_id.endswith(":1"))
         elif action_id in ("toggle_badge_geotagged:1", "toggle_badge_geotagged:0"):
             self.set_badge_visibility(geotagged=action_id.endswith(":1"))
         elif action_id in ("toggle_badge_desc_tags:1", "toggle_badge_desc_tags:0"):
@@ -13369,6 +13421,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 flags=_to_bool(_get_val("badge_show_flags", True), True),
                 favourites=_to_bool(_get_val("badge_show_favourites", True), True),
                 groups=_to_bool(_get_val("badge_show_groups", True), True),
+                motion=_to_bool(_get_val("badge_show_motion", True), True),
                 geotagged=_to_bool(_get_val("badge_show_geotagged", False), False),
                 desc_tags=_to_bool(_get_val("badge_show_desc_tags", False), False),
                 people_tags=_to_bool(_get_val("badge_show_people_tags", False), False),

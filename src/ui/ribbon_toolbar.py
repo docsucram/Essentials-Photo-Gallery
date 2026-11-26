@@ -6827,6 +6827,13 @@ class RibbonToolbar(QWidget):
         menu.addSeparator()
         menu.addAction("Expand all stacks", lambda: self.action_triggered.emit("expand_all_stacks"))
         menu.addAction("Collapse all stacks", lambda: self.action_triggered.emit("collapse_all_stacks"))
+        menu.addSeparator()
+        self.act_view_stacks_only = menu.addAction("View stacks only")
+        self.act_view_stacks_only.setCheckable(True)
+        self.act_view_stacks_only.setChecked(False)
+        self.act_view_stacks_only.toggled.connect(
+            lambda chk: self.action_triggered.emit(f"toggle_stacks_only:{1 if chk else 0}")
+        )
         btn_bot.setMenu(menu)
         vbox.addWidget(btn_bot)
 
@@ -6845,8 +6852,14 @@ class RibbonToolbar(QWidget):
 
         return container, btn_top
 
-    def set_photo_grouping_state(self, *, auto_bursts: bool, auto_raw_jpeg: bool) -> None:
-        """Sync Photo grouping dropdown checkmarks and top button active indicator."""
+    def set_photo_grouping_state(
+        self,
+        *,
+        auto_bursts: bool,
+        auto_raw_jpeg: bool,
+        stacks_only: bool | None = None,
+    ) -> None:
+        """Sync Photo stacks dropdown checkmarks and top button active indicator."""
         if hasattr(self, "act_auto_group_bursts"):
             self.act_auto_group_bursts.blockSignals(True)
             self.act_auto_group_bursts.setChecked(bool(auto_bursts))
@@ -6855,9 +6868,18 @@ class RibbonToolbar(QWidget):
             self.act_auto_group_raw_jpeg.blockSignals(True)
             self.act_auto_group_raw_jpeg.setChecked(bool(auto_raw_jpeg))
             self.act_auto_group_raw_jpeg.blockSignals(False)
+        if stacks_only is not None and hasattr(self, "act_view_stacks_only"):
+            self.act_view_stacks_only.blockSignals(True)
+            self.act_view_stacks_only.setChecked(bool(stacks_only))
+            self.act_view_stacks_only.blockSignals(False)
+        eff_stacks_only = (
+            bool(stacks_only)
+            if stacks_only is not None
+            else bool(getattr(self, "act_view_stacks_only", None) and self.act_view_stacks_only.isChecked())
+        )
         if hasattr(self, "btn_photo_grouping"):
             self.btn_photo_grouping.blockSignals(True)
-            self.btn_photo_grouping.setChecked(bool(auto_bursts or auto_raw_jpeg))
+            self.btn_photo_grouping.setChecked(bool(auto_bursts or auto_raw_jpeg or eff_stacks_only))
             self.btn_photo_grouping.blockSignals(False)
 
     def _make_split_badges_button(self, parent: QWidget) -> tuple[QWidget, QToolButton]:
@@ -6921,6 +6943,13 @@ class RibbonToolbar(QWidget):
             lambda chk: self.action_triggered.emit(f"toggle_badge_groups:{1 if chk else 0}")
         )
 
+        self.act_badge_motion = menu.addAction("Motion photos")
+        self.act_badge_motion.setCheckable(True)
+        self.act_badge_motion.setChecked(True)
+        self.act_badge_motion.toggled.connect(
+            lambda chk: self.action_triggered.emit(f"toggle_badge_motion:{1 if chk else 0}")
+        )
+
         menu.addSeparator()
 
         self.act_badge_geotagged = menu.addAction("Geotagged")
@@ -6968,6 +6997,7 @@ class RibbonToolbar(QWidget):
         show_flags: bool,
         show_favourites: bool,
         show_groups: bool,
+        show_motion: bool = True,
         show_geotagged: bool = False,
         show_desc_tags: bool = False,
         show_people_tags: bool = False,
@@ -6977,6 +7007,7 @@ class RibbonToolbar(QWidget):
             (getattr(self, "act_badge_flags", None), show_flags),
             (getattr(self, "act_badge_favourites", None), show_favourites),
             (getattr(self, "act_badge_groups", None), show_groups),
+            (getattr(self, "act_badge_motion", None), show_motion),
             (getattr(self, "act_badge_geotagged", None), show_geotagged),
             (getattr(self, "act_badge_desc_tags", None), show_desc_tags),
             (getattr(self, "act_badge_people_tags", None), show_people_tags),
@@ -6992,6 +7023,7 @@ class RibbonToolbar(QWidget):
                     show_flags
                     or show_favourites
                     or show_groups
+                    or show_motion
                     or show_geotagged
                     or show_desc_tags
                     or show_people_tags

@@ -546,6 +546,7 @@ class MediaCardDelegate(QStyledItemDelegate):
         self.show_flag_badges: bool = True
         self.show_favourite_badges: bool = True
         self.show_group_badges: bool = True
+        self.show_motion_badges: bool = True
         self.show_geotag_badges: bool = False
         self.show_desc_tag_badges: bool = False
         self.show_people_tag_badges: bool = False
@@ -929,7 +930,9 @@ class MediaCardDelegate(QStyledItemDelegate):
             painter.drawPath(hpath)
             painter.restore()
 
-        is_live = bool(getattr(rec_meta, "is_live_photo", 0))
+        is_live = bool(getattr(rec_meta, "is_live_photo", 0)) and bool(
+            getattr(self, "show_motion_badges", True)
+        )
         is_offline = bool(getattr(rec_meta, "is_offline", 0))
         stack_cnt = int(getattr(rec_meta, "stack_count", 1) or 1)
         show_grp = bool(getattr(self, "show_group_badges", True)) and stack_cnt > 1

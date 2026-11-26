@@ -235,6 +235,7 @@ class SearchScopeBar(QFrame):
     rating_clear_requested = Signal()
     flagged_clear_requested = Signal()
     favourites_clear_requested = Signal()
+    stacks_clear_requested = Signal()
     date_clear_requested = Signal()
     location_clear_requested = Signal()
     special_people_clear_requested = Signal()
@@ -893,6 +894,11 @@ class SearchScopeBar(QFrame):
         if filter_state.get("favourites_only"):
             chip = FilterChip("♥ Favourites", self.chips_widget, dark_mode=self._dark_mode)
             chip.remove_clicked.connect(self.favourites_clear_requested.emit)
+            self.chips_layout.addWidget(chip)
+
+        if filter_state.get("stacks_only"):
+            chip = FilterChip("Photo stacks", self.chips_widget, dark_mode=self._dark_mode)
+            chip.remove_clicked.connect(self.stacks_clear_requested.emit)
             self.chips_layout.addWidget(chip)
 
         flag_flt = filter_state.get("flag_filter")
