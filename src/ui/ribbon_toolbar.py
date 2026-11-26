@@ -6726,8 +6726,8 @@ class RibbonToolbar(QWidget):
         """
         container = QWidget(parent)
         container.setObjectName("TagDescSplitContainer")
-        container.setFixedSize(80, 73)
-        container._orig_w = 80
+        container.setFixedSize(68, 73)
+        container._orig_w = 68
         vbox = QVBoxLayout(container)
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.setSpacing(0)
@@ -6735,7 +6735,7 @@ class RibbonToolbar(QWidget):
         # 1. Top button (icon only)
         btn_top = QToolButton(container)
         btn_top.setObjectName("TagDescTopBtn")
-        btn_top.setFixedSize(80, 38)
+        btn_top.setFixedSize(68, 38)
         btn_top.setCursor(Qt.PointingHandCursor)
         btn_top.setIcon(make_wlpg_icon("tag", 32))
         btn_top.setIconSize(QSize(28, 28))
@@ -6749,7 +6749,7 @@ class RibbonToolbar(QWidget):
         # 2. Bottom button (text: Descriptive\ntag ▾)
         btn_bot = QToolButton(container)
         btn_bot.setObjectName("TagDescBottomBtn")
-        btn_bot.setFixedSize(80, 35)
+        btn_bot.setFixedSize(68, 35)
         btn_bot.setCursor(Qt.PointingHandCursor)
         btn_bot.setText("Descriptive\ntag ▾")
         btn_bot.setToolTip("Descriptive tag (Ctrl+T)")
@@ -6781,15 +6781,15 @@ class RibbonToolbar(QWidget):
         """
         container = QWidget(parent)
         container.setObjectName("PhotoGroupingSplitContainer")
-        container.setFixedSize(74, 73)
-        container._orig_w = 74
+        container.setFixedSize(58, 73)
+        container._orig_w = 58
         vbox = QVBoxLayout(container)
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.setSpacing(0)
 
         btn_top = QToolButton(container)
         btn_top.setObjectName("PhotoGroupingTopBtn")
-        btn_top.setFixedSize(74, 38)
+        btn_top.setFixedSize(58, 38)
         btn_top.setCheckable(True)
         btn_top.setCursor(Qt.PointingHandCursor)
         btn_top.setIcon(make_wlpg_icon("photo_grouping", 32))
@@ -6803,7 +6803,7 @@ class RibbonToolbar(QWidget):
 
         btn_bot = QToolButton(container)
         btn_bot.setObjectName("PhotoGroupingBottomBtn")
-        btn_bot.setFixedSize(74, 35)
+        btn_bot.setFixedSize(58, 35)
         btn_bot.setCursor(Qt.PointingHandCursor)
         btn_bot.setText("Photo\nstacks ▾")
         btn_bot.setToolTip("Photo stacks options (Auto-stack bursts, Auto-stack RAW + JPEG, Expand/Collapse)")
