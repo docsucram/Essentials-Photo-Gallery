@@ -416,8 +416,8 @@ def handle_win32_native_event(
                 return None
 
             dpr = max(1.0, float(window.devicePixelRatioF()))
-            side_bw = max(8, int(round(8 * dpr)))
-            bottom_bw = max(8, int(round(8 * dpr)))
+            side_bw = max(4, int(round(4 * dpr)))
+            bottom_bw = max(6, int(round(6 * dpr)))
             # Keep top resize border tight so near-top-right Close/Max buttons remain easy to click
             top_bw = max(5, int(round(5 * dpr)))
             corner_bw = max(12, int(round(12 * dpr)))

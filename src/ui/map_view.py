@@ -1524,6 +1524,11 @@ class WorldMapView(QWidget):
         self._thumb_refresh_timer.setSingleShot(True)
         self._thumb_refresh_timer.setInterval(80)
         self._thumb_refresh_timer.timeout.connect(self._push_updated_cluster_thumbnails)
+        self._scheme_miss_queue: list[int] = []
+        self._scheme_miss_timer = QTimer(self)
+        self._scheme_miss_timer.setSingleShot(True)
+        self._scheme_miss_timer.setInterval(35)
+        self._scheme_miss_timer.timeout.connect(self._flush_scheme_thumb_misses)
 
         vbox = QVBoxLayout(self)
         vbox.setContentsMargins(0, 0, 0, 0)
@@ -1647,9 +1652,20 @@ class WorldMapView(QWidget):
 
     def _on_scheme_thumb_miss(self, media_id: int) -> None:
         """Triggered by gallerythumb://media/<id> when thumbnails.db lacks a cached blob."""
-        if media_id <= 0 or media_id in self._pending_thumb_ids or media_id in self._failed_thumb_ids:
+        mid = int(media_id)
+        if mid <= 0 or mid in self._pending_thumb_ids or mid in self._failed_thumb_ids:
             return
-        self._schedule_cluster_thumbnail_decode([int(media_id)])
+        if mid not in self._scheme_miss_queue:
+            self._scheme_miss_queue.append(mid)
+        if not self._scheme_miss_timer.isActive():
+            self._scheme_miss_timer.start()
+
+    def _flush_scheme_thumb_misses(self) -> None:
+        if not self._scheme_miss_queue:
+            return
+        batch = list(dict.fromkeys(self._scheme_miss_queue))
+        self._scheme_miss_queue.clear()
+        self._schedule_cluster_thumbnail_decode(batch, cancel_others=False)
 
     def refresh_overview_async(self, *, fit: bool = False) -> None:
         """
@@ -1870,7 +1886,12 @@ class WorldMapView(QWidget):
         if missing_sample_ids:
             self._schedule_cluster_thumbnail_decode(missing_sample_ids)
 
-    def _schedule_cluster_thumbnail_decode(self, sample_ids: list[int]) -> None:
+    def _schedule_cluster_thumbnail_decode(
+        self,
+        sample_ids: list[int],
+        *,
+        cancel_others: bool = True,
+    ) -> None:
         """Asynchronously decodes 1 sample thumbnail from disk for clusters with no cached thumb."""
         if self._repo is None or self._thumb_repo is None:
             return
@@ -1886,10 +1907,11 @@ class WorldMapView(QWidget):
             return
 
         # Cancel in-flight cluster decodes for IDs no longer in the active viewport sample set
-        self.cancel_pending_thumbnail_work(keep_ids=set(sample_ids))
+        if cancel_others:
+            self.cancel_pending_thumbnail_work(keep_ids=set(sample_ids))
 
         # Cap per-viewport decode burst so rapid panning stays responsive
-        to_decode = [mid for mid in sample_ids if mid not in self._pending_thumb_ids and mid not in self._failed_thumb_ids][:12]
+        to_decode = [mid for mid in sample_ids if mid not in self._pending_thumb_ids and mid not in self._failed_thumb_ids][:32]
         if not to_decode:
             return
 

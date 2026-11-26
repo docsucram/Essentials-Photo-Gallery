@@ -10227,14 +10227,14 @@ class SingleMediaViewer(QWidget):
             act_rm_bg = edit_menu.addAction(make_wlpg_icon("remove_background", 16), "Remove background")
             act_rm_bg.triggered.connect(self.remove_background_cutout)
 
-        if not is_vid:
-            act_sim = menu.addAction(make_wlpg_icon("compare", 16), "Find Similar Photos...")
-            if is_mw and hasattr(mw, "open_find_similar_for_media") and mid is not None:
-                act_sim.triggered.connect(lambda: mw.open_find_similar_for_media(mid))
-
         scan_menu = menu.addMenu(make_wlpg_icon("text_search", 16), "Scan")
         menu._ai_scan_menu = scan_menu
         scan_menu.setFont(QFont("Segoe UI", 9))
+
+        if not is_vid:
+            act_sim = scan_menu.addAction(make_wlpg_icon("compare", 16), "Find Similar Photos...")
+            if is_mw and hasattr(mw, "open_find_similar_for_media") and mid is not None:
+                act_sim.triggered.connect(lambda: mw.open_find_similar_for_media(mid))
 
         act_rescan = scan_menu.addAction(make_wlpg_icon("face", 16), "Rescan for faces")
         if is_mw and mid is not None:

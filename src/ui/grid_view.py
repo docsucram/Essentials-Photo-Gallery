@@ -836,41 +836,6 @@ class MediaCardDelegate(QStyledItemDelegate):
         if rec_meta is None:
             return
 
-        # Optional Top-Right Tag Badges (default-off), stacking right-to-left in priority order:
-        # Flagged (furthest right) -> Geotagged -> Descriptive tagged -> People tagged
-        tag_badge_keys: list[str] = []
-        if getattr(self, "show_geotag_badges", False) and getattr(rec_meta, "has_geotag", 0):
-            tag_badge_keys.append("geotag")
-        if getattr(self, "show_desc_tag_badges", False) and getattr(rec_meta, "has_desc_tags", 0):
-            tag_badge_keys.append("tag")
-        if getattr(self, "show_people_tag_badges", False) and getattr(rec_meta, "has_people_tags", 0):
-            tag_badge_keys.append("person")
-        if tag_badge_keys:
-            badge_sz = fl_rect.width()
-            badge_gap = 3
-            reserve_flag_slot = bool(getattr(self, "show_flag_badges", True))
-            next_right = (fl_rect.left() - badge_gap) if reserve_flag_slot else fl_rect.right()
-            stroke_col = QColor("#E2E8F0") if (is_mosaic_layout or self.dark_mode) else QColor("#64748B")
-            painter.save()
-            painter.setRenderHint(QPainter.Antialiasing, True)
-            for b_key in tag_badge_keys:
-                b_rect = QRect(next_right - badge_sz + 1, fl_rect.top(), badge_sz, badge_sz)
-                if b_rect.left() < img_box.left() + 2:
-                    break
-                if is_mosaic_layout:
-                    painter.setBrush(QColor(15, 23, 42, 185))
-                    painter.setPen(QPen(QColor(255, 255, 255, 55), 1.0))
-                    painter.drawRoundedRect(QRectF(b_rect).adjusted(0.5, 0.5, -0.5, -0.5), 6.0, 6.0)
-                else:
-                    bg = QColor(30, 41, 59, 175) if self.dark_mode else QColor(255, 255, 255, 200)
-                    bd = QColor(255, 255, 255, 40) if self.dark_mode else QColor(148, 163, 184, 110)
-                    painter.setBrush(bg)
-                    painter.setPen(QPen(bd, 1.0))
-                    painter.drawRoundedRect(QRectF(b_rect).adjusted(1.0, 1.0, -1.0, -1.0), 5.0, 5.0)
-                self._draw_vector_tag_badge(painter, QRectF(b_rect), b_key, stroke_col)
-                next_right = b_rect.left() - badge_gap - 1
-            painter.restore()
-
         # Option A: Bottom-right squircle pill
         # - In Mosaic mode: Lap-style star-turns-into-heart when favourited (+ rating digit)
         # - In Standard Grid mode: Centered heart squircle (solid rose when fav, outline on hover)
@@ -878,6 +843,7 @@ class MediaCardDelegate(QStyledItemDelegate):
         is_fav = bool(getattr(rec_meta, "is_favourite", 0)) if fav_enabled else False
         rating_val = int(getattr(rec_meta, "rating", 0) or 0)
         is_mosaic = (getattr(self, "_layout_mode", "wlpg_grid") in ("tiles", "mosaic", "masonry"))
+        bottom_right_pill_rect: QRect | None = None
 
         if is_mosaic:
             show_pill = is_fav or rating_val > 0 or (fav_enabled and is_hovered)
@@ -886,6 +852,7 @@ class MediaCardDelegate(QStyledItemDelegate):
                 pill_w = 36 if has_num else 26
                 pill_h = 26
                 hr_rect = QRect(img_box.right() - pill_w - 4, img_box.bottom() - pill_h - 4, pill_w, pill_h)
+                bottom_right_pill_rect = hr_rect
                 painter.save()
                 painter.setRenderHint(QPainter.Antialiasing, True)
                 pill_bg = QColor(15, 23, 42, 195 if (is_fav or has_num) else 135)
@@ -932,6 +899,7 @@ class MediaCardDelegate(QStyledItemDelegate):
                 painter.restore()
         elif fav_enabled and (is_fav or is_hovered):
             hr_rect = self.heart_rect(card_rect, img_box)
+            bottom_right_pill_rect = hr_rect
             painter.save()
             painter.setRenderHint(QPainter.Antialiasing, True)
             pill_bg = QColor(15, 23, 42, 190 if is_fav else 135)
@@ -959,6 +927,38 @@ class MediaCardDelegate(QStyledItemDelegate):
                 painter.setPen(QPen(QColor("#E2E8F0"), 1.5))
                 painter.setBrush(Qt.NoBrush)
             painter.drawPath(hpath)
+            painter.restore()
+
+        # Optional Bottom-Right Monochrome Tag Badges (default-off), stacking right-to-left with NO gap:
+        # Priority (furthest right -> left): Rating/Fav pill -> Geotagged -> Descriptive tagged -> People tagged
+        tag_badge_keys: list[str] = []
+        if getattr(self, "show_geotag_badges", False) and getattr(rec_meta, "has_geotag", 0):
+            tag_badge_keys.append("geotag")
+        if getattr(self, "show_desc_tag_badges", False) and getattr(rec_meta, "has_desc_tags", 0):
+            tag_badge_keys.append("tag")
+        if getattr(self, "show_people_tag_badges", False) and getattr(rec_meta, "has_people_tags", 0):
+            tag_badge_keys.append("person")
+        if tag_badge_keys:
+            badge_sz = 26
+            badge_gap = 3
+            badge_top = img_box.bottom() - badge_sz - 4
+            next_right = (
+                (bottom_right_pill_rect.left() - badge_gap)
+                if bottom_right_pill_rect is not None
+                else (img_box.right() - 4)
+            )
+            stroke_col = QColor("#E2E8F0")
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            for b_key in tag_badge_keys:
+                b_rect = QRect(next_right - badge_sz + 1, badge_top, badge_sz, badge_sz)
+                if b_rect.left() < img_box.left() + 4:
+                    break
+                painter.setBrush(QColor(15, 23, 42, 185))
+                painter.setPen(QPen(QColor(255, 255, 255, 55), 1.0))
+                painter.drawRoundedRect(QRectF(b_rect).adjusted(0.5, 0.5, -0.5, -0.5), 6.0, 6.0)
+                self._draw_vector_tag_badge(painter, QRectF(b_rect), b_key, stroke_col)
+                next_right = b_rect.left() - badge_gap - 1
             painter.restore()
 
         is_live = bool(getattr(rec_meta, "is_live_photo", 0))
@@ -3943,14 +3943,13 @@ class ThumbnailGridView(QListView):
             if is_mw and len(target_mids) == 1 and hasattr(main_win, "remove_background_for_media"):
                 act_rm_bg.triggered.connect(lambda _c=False, mid=int(media_id): main_win.remove_background_for_media(mid))
 
-            act_sim = menu.addAction(make_wlpg_icon("compare", 16), "Find Similar Photos...")
-            act_sim.setEnabled(len(target_mids) == 1)
-            if len(target_mids) == 1:
-                act_sim.triggered.connect(lambda _chk=False, mid=int(media_id): self.find_similar_requested.emit(mid))
-
             scan_menu = menu.addMenu(make_wlpg_icon("text_search", 16), "Scan")
             menu._ai_scan_menu = scan_menu
             scan_menu.setFont(QFont("Segoe UI", 9))
+            act_sim = scan_menu.addAction(make_wlpg_icon("compare", 16), "Find Similar Photos...")
+            act_sim.setEnabled(len(target_mids) == 1)
+            if len(target_mids) == 1:
+                act_sim.triggered.connect(lambda _chk=False, mid=int(media_id): self.find_similar_requested.emit(mid))
             act_rescan = scan_menu.addAction(make_wlpg_icon("face", 16), "Rescan for faces")
             if is_mw:
                 act_rescan.triggered.connect(lambda checked=False, t_ids=list(target_mids): main_win.rescan_faces_for_selection(t_ids))

@@ -299,13 +299,13 @@ QSlider::handle:horizontal:hover {
 QScrollBar:vertical {
     border: none;
     background: #181C22;
-    width: 5px;
-    margin: 0px 0px 0px 0px;
+    width: 10px;
+    margin: 0px 2px 0px 0px;
 }
 QScrollBar::handle:vertical {
     background: #64748B;
     min-height: 28px;
-    border-radius: 2px;
+    border-radius: 4px;
     margin: 0px;
 }
 QScrollBar::handle:vertical:hover {
