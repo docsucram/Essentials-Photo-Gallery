@@ -1108,7 +1108,8 @@ class PeopleDirectoryView(QWidget):
         self._unnamed_cache_ts = 0.0
 
     def refresh_directory(self, recluster_unnamed: bool = True, *, force: bool = False) -> None:
-        """Fetches named people immediately (<60ms) and computes unnamed clusters in background."""
+        """Fetches named people off the GUI thread (zero UI freeze) and computes unnamed clusters in background."""
+        import os
         import time
 
         now = time.monotonic()
@@ -1132,10 +1133,93 @@ class PeopleDirectoryView(QWidget):
         if named_cache_fresh and (not recluster_unnamed or unnamed_cache_fresh):
             return
 
-        if not named_cache_fresh:
-            self._all_named_people = self.repo.get_named_people_directory_data(min_confidence=min_conf)
-            self._named_cache_ts = now
+        if named_cache_fresh:
+            self._finish_refresh_directory(
+                min_conf=min_conf,
+                named_cache_fresh=True,
+                recluster_unnamed=recluster_unnamed,
+                unnamed_cache_fresh=unnamed_cache_fresh,
+            )
+            return
 
+        # In interactive GUI mode, run the heavy SQL query off the GUI thread so People view opens instantly
+        if self.isVisible() and "PYTEST_CURRENT_TEST" not in os.environ:
+            self._named_load_gen = int(getattr(self, "_named_load_gen", 0)) + 1
+            gen = self._named_load_gen
+            if not self._all_named_people:
+                self.lbl_total_count.setText("(loading…)")
+
+            class _NamedLoadSig(QObject):
+                done = Signal(int, object)
+
+            class _NamedLoadWorker(QRunnable):
+                def __init__(self, repo_obj: Any, conf_val: float, gen_id: int, sig_obj: _NamedLoadSig) -> None:
+                    super().__init__()
+                    self.setAutoDelete(False)
+                    self._repo = repo_obj
+                    self._conf = conf_val
+                    self._gen = gen_id
+                    self._sig = sig_obj
+
+                def run(self) -> None:
+                    try:
+                        rows = self._repo.get_named_people_directory_data(min_confidence=self._conf)
+                    except Exception:
+                        rows = []
+                    self._sig.done.emit(self._gen, rows)
+
+            if not hasattr(self, "_named_load_workers"):
+                self._named_load_workers: set[Any] = set()
+            sig = _NamedLoadSig(self)
+            worker = _NamedLoadWorker(self.repo, min_conf, gen, sig)
+            self._named_load_workers.add(worker)
+
+            def _on_named_loaded(
+                done_gen: int,
+                rows: Any,
+                w: Any = worker,
+                s: Any = sig,
+                rc: bool = recluster_unnamed,
+                ucf: bool = unnamed_cache_fresh,
+                mc: float = min_conf,
+            ) -> None:
+                self._named_load_workers.discard(w)
+                try:
+                    s.deleteLater()
+                except RuntimeError:
+                    pass
+                if done_gen != getattr(self, "_named_load_gen", 0):
+                    return
+                self._all_named_people = list(rows or [])
+                self._named_cache_ts = time.monotonic()
+                self._finish_refresh_directory(
+                    min_conf=mc,
+                    named_cache_fresh=False,
+                    recluster_unnamed=rc,
+                    unnamed_cache_fresh=ucf,
+                )
+
+            sig.done.connect(_on_named_loaded)
+            QThreadPool.globalInstance().start(worker)
+            return
+
+        self._all_named_people = self.repo.get_named_people_directory_data(min_confidence=min_conf)
+        self._named_cache_ts = now
+        self._finish_refresh_directory(
+            min_conf=min_conf,
+            named_cache_fresh=False,
+            recluster_unnamed=recluster_unnamed,
+            unnamed_cache_fresh=unnamed_cache_fresh,
+        )
+
+    def _finish_refresh_directory(
+        self,
+        *,
+        min_conf: float,
+        named_cache_fresh: bool,
+        recluster_unnamed: bool,
+        unnamed_cache_fresh: bool,
+    ) -> None:
         total_cnt = len(self._all_named_people)
         self.lbl_total_count.setText(f"({total_cnt:,})")
 

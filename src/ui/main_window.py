@@ -1345,6 +1345,9 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._active_semantic_worker: Any = None
         self._semantic_cancel: Any = None
         self._semantic_status_text: str = "Semantic AI: Idle"
+        self._active_sig_backfill_worker: Any = None
+        self._sig_backfill_cancel: Any = None
+        self._sig_backfill_status_text: str = "Visual Signatures: Idle"
         self.nav_show_cameras: bool = False
         self.nav_show_subjects: bool = False
         self.auto_group_bursts: bool = False
@@ -2926,6 +2929,70 @@ class PhotoGalleryMainWindow(QMainWindow):
         )
         QThreadPool.globalInstance().start(worker)
 
+    def _start_signature_backfill_worker(self) -> None:
+        """Start the very-low-priority visual-signature backfill worker.
+
+        Reads only already-cached thumbnails from thumbnails.db (zero disk/OneDrive
+        reads) to pre-populate `media_signatures` so Find Similar Photos is instant.
+        """
+        if getattr(self, "_workers_paused", False):
+            return
+        if getattr(self, "_active_sig_backfill_worker", None) is not None:
+            return
+        if not getattr(self, "engine", None):
+            return
+        import threading
+        from src.workers.signature_backfill_worker import SignatureBackfillWorker
+
+        if getattr(self, "_sig_backfill_cancel", None) is not None:
+            try:
+                self._sig_backfill_cancel.set()
+            except Exception:
+                pass
+
+        flag = threading.Event()
+        self._sig_backfill_cancel = flag
+        worker = SignatureBackfillWorker(
+            engine=self.engine,
+            cancel_flag=flag,
+            is_paused_cb=lambda: bool(getattr(self, "_workers_paused", False)),
+            chunk_size=50,
+            chunk_sleep_sec=0.06,
+        )
+
+        def _on_sig_prog(done: int, total: int) -> None:
+            if getattr(self, "_active_sig_backfill_worker", None) is worker:
+                if total > 0:
+                    self._sig_backfill_status_text = f"Visual Signatures: {done:,}/{total:,}"
+                else:
+                    self._sig_backfill_status_text = "Visual Signatures: Idle"
+                self._update_worker_monitor()
+
+        def _on_sig_finished(_computed: int) -> None:
+            if getattr(self, "_active_sig_backfill_worker", None) is worker:
+                self._active_sig_backfill_worker = None
+                self._sig_backfill_status_text = "Visual Signatures: Idle"
+                self._update_worker_monitor()
+
+        def _on_sig_error(_err: str) -> None:
+            if getattr(self, "_active_sig_backfill_worker", None) is worker:
+                self._active_sig_backfill_worker = None
+                self._sig_backfill_status_text = "Visual Signatures: Idle"
+                self._update_worker_monitor()
+
+        worker.signals.progress.connect(_on_sig_prog)
+        worker.signals.finished_stats.connect(_on_sig_finished)
+        worker.signals.error.connect(_on_sig_error)
+        self._active_sig_backfill_worker = worker
+        self._retain_pool_worker(worker)
+        worker.signals.finished_stats.connect(
+            lambda *_args, w=worker: self._release_pool_worker(w)
+        )
+        worker.signals.error.connect(
+            lambda *_args, w=worker: self._release_pool_worker(w)
+        )
+        QThreadPool.globalInstance().start(worker)
+
     def on_sync_progress(self, count: int, folder_name: str) -> None:
         self._scanner_status_text = f"Scanning: {count:,} files"
         self._update_worker_monitor()
@@ -2971,6 +3038,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         if was_completed and upserted_count > 0:
             self._start_ocr_worker()
             self._start_semantic_worker()
+            self._start_signature_backfill_worker()
 
     def _on_folder_watcher_delta(
         self, folder_path: str, added: int, modified: int, deleted: int, folders_changed: int = 0
@@ -3059,6 +3127,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         if added > 0:
             self._start_ocr_worker()
             self._start_semantic_worker()
+            self._start_signature_backfill_worker()
 
     def _on_startup_reconciliation_completed(
         self, added: int, modified: int, deleted: int, folders_changed: int
@@ -3100,6 +3169,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         QTimer.singleShot(3500, self._start_ocr_worker)
         QTimer.singleShot(4500, self._start_semantic_worker)
         QTimer.singleShot(5000, self._maybe_start_startup_face_scan)
+        QTimer.singleShot(10000, self._start_signature_backfill_worker)
 
     def _on_missing_root_folders_detected(self, missing_roots: list[dict[str, object]]) -> None:
         """Prompts the user when a monitored root folder is missing on disk (moved or disconnected)."""
@@ -11175,6 +11245,13 @@ class PhotoGalleryMainWindow(QMainWindow):
                 pass
         self._active_semantic_worker = None
         self._semantic_status_text = "Semantic AI: Idle"
+        if getattr(self, "_sig_backfill_cancel", None) is not None:
+            try:
+                self._sig_backfill_cancel.set()
+            except Exception:
+                pass
+        self._active_sig_backfill_worker = None
+        self._sig_backfill_status_text = "Visual Signatures: Idle"
         if hasattr(self, "xmp_daemon"):
             try:
                 self.xmp_daemon.set_paused(True)
@@ -11759,6 +11836,13 @@ class PhotoGalleryMainWindow(QMainWindow):
                     pass
             self._active_semantic_worker = None
             self._semantic_status_text = "Semantic AI: Idle"
+            if getattr(self, "_sig_backfill_cancel", None) is not None:
+                try:
+                    self._sig_backfill_cancel.set()
+                except Exception:
+                    pass
+            self._active_sig_backfill_worker = None
+            self._sig_backfill_status_text = "Visual Signatures: Idle"
             self.xmp_daemon.set_paused(True)
             self.btn_pause_workers.setText("▶")
             self.btn_pause_workers.setToolTip("Resume background indexing, face detection, and file write-back")
@@ -11789,6 +11873,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.start_face_detection()
             self._start_ocr_worker()
             self._start_semantic_worker()
+            self._start_signature_backfill_worker()
             self.btn_pause_workers.setText("⏸")
             self.btn_pause_workers.setToolTip("Pause background indexing, face detection, and file write-back")
             self.btn_pause_workers.setStyleSheet(
@@ -11836,11 +11921,13 @@ class PhotoGalleryMainWindow(QMainWindow):
         face_summary = self._face_status_text.removeprefix("Faces: ")
         ocr_summary = getattr(self, "_ocr_status_text", "OCR: Idle").removeprefix("OCR: ")
         sem_summary = getattr(self, "_semantic_status_text", "Semantic AI: Idle").removeprefix("Semantic AI: ")
+        sig_summary = getattr(self, "_sig_backfill_status_text", "Visual Signatures: Idle").removeprefix("Visual Signatures: ")
         detailed_tooltip = (
             f"📁 Indexing: {scan_summary}\n"
             f"👤 Face Detection: {face_summary}\n"
             f"📝 OCR Indexing: {ocr_summary}\n"
             f"🧠 Semantic AI: {sem_summary}\n"
+            f"🔎 Visual Signatures: {sig_summary}\n"
             f"{crop_detail}\n"
             f"{thumb_detail}\n"
             f"{sync_detail}\n\n"
@@ -13404,6 +13491,12 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self._semantic_cancel.set()
             except Exception:
                 pass
+        if getattr(self, "_sig_backfill_cancel", None) is not None:
+            try:
+                self._sig_backfill_cancel.set()
+            except Exception:
+                pass
+        self._active_sig_backfill_worker = None
         if hasattr(self, "folder_watcher"):
             self.folder_watcher.stop()
         if hasattr(self, "xmp_daemon"):

@@ -5288,63 +5288,129 @@ class SingleMediaViewer(QWidget):
         x2 = min(w_full, int(np.max(pts_x)) + pad)
 
         roi_img = self.master_np_rgb[y1:y2, x1:x2].copy()
-        roi_mask = mask_dilated[y1:y2, x1:x2]
+        roi_mask = mask_dilated[y1:y2, x1:x2].copy()
         inpaint_r = max(3, min(25, r_master // 2))
 
-        # 1. Frequency Separation: Decompose local ROI into Low and High frequencies
-        # Low frequency (smooth illumination, chromatic gradient, skin tone)
-        sigma = max(2.0, min(8.0, float(r_master) / 3.0))
-        k = int(2 * round(2 * sigma) + 1)
-        roi_low = cv2.GaussianBlur(roi_img, (k, k), sigma)
-        # High frequency (authentic pores, skin micro-grain, fabric weave)
-        roi_high = roi_img.astype(np.float32) - roi_low.astype(np.float32)
+        def _compute_blemish_roi(
+            r_img: np.ndarray,
+            r_msk: np.ndarray,
+            r_m: int,
+            inp_r: int,
+            box_w: int,
+            box_h: int,
+        ) -> np.ndarray:
+            # 1. Frequency Separation: Decompose local ROI into Low and High frequencies
+            sigma = max(2.0, min(8.0, float(r_m) / 3.0))
+            k = int(2 * round(2 * sigma) + 1)
+            roi_low = cv2.GaussianBlur(r_img, (k, k), sigma)
+            roi_high = r_img.astype(np.float32) - roi_low.astype(np.float32)
 
-        # 2. Inpaint low frequencies across the blemish to seamlessly interpolate color & lighting
-        roi_low_inpainted = cv2.inpaint(
-            roi_low,
-            roi_mask,
-            inpaintRadius=inpaint_r,
-            flags=cv2.INPAINT_TELEA,
-        )
+            # 2. Inpaint low frequencies across the blemish to seamlessly interpolate color & lighting
+            roi_low_inpainted = cv2.inpaint(
+                roi_low,
+                r_msk,
+                inpaintRadius=inp_r,
+                flags=cv2.INPAINT_TELEA,
+            )
 
-        # 3. Donor ring for sampling authentic surrounding skin texture
-        outer_k = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE,
-            (max(7, inpaint_r * 2 + 1), max(7, inpaint_r * 2 + 1)),
-        )
-        donor_ring = cv2.dilate(roi_mask, outer_k, iterations=1) - roi_mask
+            # 3. Donor ring for sampling authentic surrounding skin texture
+            outer_k = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (max(7, inp_r * 2 + 1), max(7, inp_r * 2 + 1)),
+            )
+            donor_ring = cv2.dilate(r_msk, outer_k, iterations=1) - r_msk
 
-        # 4. Best-match directional donor texture transfer from the unblemished perimeter
-        from src.imaging.creative_effects import transfer_best_donor_texture
+            # 4. Best-match directional donor texture transfer from the unblemished perimeter
+            from src.imaging.creative_effects import transfer_best_donor_texture
 
-        transferred_high, _ = transfer_best_donor_texture(
-            roi_img, roi_high, roi_mask, donor_ring, bw, bh
-        )
+            transferred_high, _ = transfer_best_donor_texture(
+                r_img, roi_high, r_msk, donor_ring, box_w, box_h
+            )
 
-        # 5. Frequency Recombination: Base Low + Transferred High
-        restored_roi = np.clip(
-            roi_low_inpainted.astype(np.float32) + transferred_high, 0, 255
-        ).astype(np.uint8)
+            # 5. Frequency Recombination: Base Low + Transferred High
+            restored_roi = np.clip(
+                roi_low_inpainted.astype(np.float32) + transferred_high, 0, 255
+            ).astype(np.uint8)
 
-        # 6. Feathered alpha blending along mask boundary for invisible edges
-        soft_mask = cv2.GaussianBlur(
-            roi_mask.astype(np.float32) / 255.0, (5, 5), 1.2
-        )[:, :, None]
-        blended_roi = np.clip(
-            roi_img.astype(np.float32) * (1.0 - soft_mask) + restored_roi.astype(np.float32) * soft_mask,
-            0,
-            255,
-        ).astype(np.uint8)
+            # 6. Feathered alpha blending along mask boundary for invisible edges
+            soft_mask = cv2.GaussianBlur(
+                r_msk.astype(np.float32) / 255.0, (5, 5), 1.2
+            )[:, :, None]
+            return np.clip(
+                r_img.astype(np.float32) * (1.0 - soft_mask) + restored_roi.astype(np.float32) * soft_mask,
+                0,
+                255,
+            ).astype(np.uint8)
 
-        self.master_np_rgb[y1:y2, x1:x2] = blended_roi
-        self._update_display_proxy()
+        def _commit_blemish_roi(blended_roi: np.ndarray) -> None:
+            self._retouch_in_progress = False
+            self.master_np_rgb[y1:y2, x1:x2] = blended_roi
+            self._update_display_proxy()
+            self._clear_retouch_overlay()
+            cmd = PixelArrayUndoCommand(self, before, self.master_np_rgb.copy(), "Retouch Blemish")
+            self.undo_stack.push(cmd)
+            self._render_current_recipe()
+            if self.current_media_id is not None:
+                self.pixel_edit_saved.emit(self.current_media_id, "")
 
-        self._clear_retouch_overlay()
-        cmd = PixelArrayUndoCommand(self, before, self.master_np_rgb.copy(), "Retouch Blemish")
-        self.undo_stack.push(cmd)
-        self._render_current_recipe()
-        if self.current_media_id is not None:
-            self.pixel_edit_saved.emit(self.current_media_id, "")
+        # Fast-path tiny blemish strokes (<400x400 ROI, ~10ms); offload larger strokes to avoid GUI stalls
+        if (y2 - y1) * (x2 - x1) <= 160_000 or "PYTEST_CURRENT_TEST" in os.environ:
+            _commit_blemish_roi(_compute_blemish_roi(roi_img, roi_mask, r_master, inpaint_r, bw, bh))
+            return
+
+        if getattr(self, "_retouch_in_progress", False):
+            self._clear_retouch_overlay()
+            return
+        self._retouch_in_progress = True
+        self._show_status("Applying Retouch...", 0)
+        req_media_id = self.current_media_id
+        req_gen = self._master_render_gen
+
+        pool = getattr(self, "_retouch_pool", None)
+        if pool is None:
+            from PySide6.QtCore import QThreadPool
+
+            pool = QThreadPool(self)
+            pool.setMaxThreadCount(1)
+            self._retouch_pool = pool
+            self._retouch_workers: set[Any] = set()
+
+        class _RetouchSig(QObject):
+            done = Signal(object, object)
+
+        class _RetouchWorker(QRunnable):
+            def __init__(self, sig_obj: _RetouchSig) -> None:
+                super().__init__()
+                self.setAutoDelete(False)
+                self._sig = sig_obj
+
+            def run(self) -> None:
+                try:
+                    res = _compute_blemish_roi(roi_img, roi_mask, r_master, inpaint_r, bw, bh)
+                    self._sig.done.emit(res, None)
+                except Exception as exc:
+                    self._sig.done.emit(None, exc)
+
+        rsig = _RetouchSig(self)
+        rworker = _RetouchWorker(rsig)
+        self._retouch_workers.add(rworker)
+
+        def _on_retouch_done(res_roi: Any, err: Any, w: Any = rworker, s: Any = rsig) -> None:
+            self._retouch_workers.discard(w)
+            try:
+                s.deleteLater()
+            except RuntimeError:
+                pass
+            if err is not None or res_roi is None or self.current_media_id != req_media_id or self._master_render_gen != req_gen:
+                self._retouch_in_progress = False
+                self._clear_retouch_overlay()
+                self._show_status("", 0)
+                return
+            self._show_status("", 0)
+            _commit_blemish_roi(res_roi)
+
+        rsig.done.connect(_on_retouch_done)
+        pool.start(rworker)
 
     # -------------------------------------------------------------------------
     # Red Eye Removal
