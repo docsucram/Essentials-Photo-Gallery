@@ -2,32 +2,7 @@
 
 This document tracks **genuinely unbuilt future enhancements** for **Essentials Photo Gallery**, maintaining the classic Windows Live Photo Gallery (WLPG) ease-of-use, clean UI, and speed while expanding optional local AI, heritage migration, and enthusiast editing capabilities.
 
-> **Graduated Features:** Completed initiatives—including **v0.18.0 Early Foundations (Scoped / Incremental Nav Refresh, `media_signatures` Reuse + Sharpness Tie-Breaker in Duplicate Finder, Semantic-Blended `Find Similar`, Semantic Subject / Natural-Language Rules in Smart Albums, and Priority 1–3 SQL/Cache Optimizations)**, **v0.17.0 (Thumbnail-Time Visual Signatures `media_signatures` + Undoable Hardened Auto-Stacking, 4-Mode Photo Layout Engine `Grid`/`Tiles`/`Mosaic`/`Masonry`, Optional `Cameras` & `Subjects` Nav Sections, `F1` Keyboard Shortcuts Modal + `Alt+1..9` Quick-Tag Hotkeys, and Optional `MobileCLIP-S1` ONNX `SemanticVectorRepository` + FTS5 RRF Search)**, **v0.16.0 World Map View Speed Overhaul, P2 Grid/RAW/Background Perf, Photographer Culling Toolkit (Zoom Minimap, Batch Rename `F2`, Borderless Fullscreen Spacebar Quick Preview + `Shift+Rating/Flag/Fav` Auto-Advance, Camera AF Area Overlay, Animated Filmstrip with Attached Pull-Tab), Optional Photo Favourites (`is_favourite`) & Tri-State Pick/Reject Flags, Auto-Detecting Google Picasa Importer, Apple Live Photos & Android Motion Photos, Offline Drive/NAS Browsing (`volume_offline`), and Duplicate Preferred Folder Priority**, **Depth & Light 2.0**, **UI Theme Architecture Consolidation**, **Visual Similarity Search (`Find Similar`)**, **Companion Phone GPS Matching & GPX Interpolation**, **Fine Tune Two-Tier `Basic | Advanced` Mode**, **Phase 1 Regional Masking (`Whole | Subject | Bg | Sky`)**, SQLite FTS5 RapidOCR search, Per-Folder Scan & Privacy Controls with PBKDF2 PIN lock, and Unified `LaMa` ONNX Generative Inpainting—have been graduated into [`docs/ARCHITECTURE.md`](ARCHITECTURE.md), [`RELEASES.md`](../RELEASES.md), and [`docs/editing_engine.md`](editing_engine.md).
-
----
-
-## v0.18.0 — Speed, Polish & Everyday Ergonomics
-
-Focus: Keep v0.18.0 fast, crisp, and effortless without adding UI clutter.
-
-* **Tag Shortcuts & Management Polish:**
-  * Allow assigning `Alt+1..9` Quick-Tag shortcuts directly from **Manage Tags**.
-  * Update the tag right-click context menu (Left Nav & Right Tag Pane) to assign/clear shortcuts and open **Manage Tags**.
-* **Image Right-Click Context Menu Review & Updates:**
-  * Audit, streamline, and refresh the thumbnail/viewer right-click menu for clarity, grouping, and consistency.
-* **Flagged Support in Mosaic / Tiles / Masonry Views:**
-  * Ensure Pick/Reject flag badges render cleanly and respect the `Badges ▾` toggle across all four gallery layouts.
-* **Menu Icons, Alignment & Ribbon Polish:**
-  * Add missing menu icons (e.g. **Find by Media Type** and related filter dropdowns).
-  * Fix icon alignment issues across ribbons/menus and text alignment issues under **Information** in the right-hand pane.
-  * Smooth quick fade-outs / transitions for Ribbon dropdown menus.
-* **Geotag & Information Pane Improvements:**
-  * Surface clickable/copyable GPS **coordinates** in the Geotag UI / Info pane.
-  * Show fuller **folder path** details under **Folder** in the Information pane.
-* **Video Frame Capture ("Save Still Frame"):**
-  * Add a **"Save Still Frame as Photo"** action (clean right-click menu item during video playback in Single Media Viewer) exporting the current decoded frame as `.jpg`/`.png` into the same folder with offset `date_taken` + GPS coordinates and immediate catalog indexing.
-* **Unified RAW + JPEG Delete / Move / Rename Handling:**
-  * Keep paired RAW + JPEG/HEIC files together during move, rename, copy, and Duplicate Finder operations, prompting with a clear deletion-scope choice (*Delete Both / RAW Only / JPEG Only*).
+> **Graduated Features:** Completed initiatives—including **v0.18.0 (Scoped / Incremental Nav Refresh, Startup Stall Fixes `~14.2 s → ~3.2 s`, `media_signatures` Reuse + Sharpness Tie-Breaker in Duplicate Finder, Non-Blocking Progressive NumPy-Vectorized Semantic-Blended `Find Similar`, Semantic Subject / Natural-Language Rules in Smart Albums, Priority 1–3 SQL/Cache Optimizations, Mosaic Flag Squircles & 3 Default-Off Monochrome Tag Badges, Always-On Favourites, Unified Image Right-Click Menu & Compare Ribbon AF Focus Points, 2-Column Manage Tags Shortcuts & Delete Tag, Geotag Hover/Copy & Compact Folder Path, Video Frame Capture, Stack-Aware Delete/Move/Rename, Upgraded Key-Aware Auto Exposure & Neutral-Lab Auto Color, Fine Tune Look Profiles + `.cube` 3D LUT Importer, and Map View Coalesced Cluster Thumbnails)**, **v0.17.0 (Thumbnail-Time Visual Signatures `media_signatures` + Undoable Hardened Auto-Stacking, 4-Mode Photo Layout Engine `Grid`/`Tiles`/`Mosaic`/`Masonry`, Optional `Cameras` & `Subjects` Nav Sections, `F1` Keyboard Shortcuts Modal + `Alt+1..9` Quick-Tag Hotkeys, and Optional `MobileCLIP-S1` ONNX `SemanticVectorRepository` + FTS5 RRF Search)**, **v0.16.0 World Map View Speed Overhaul, P2 Grid/RAW/Background Perf, Photographer Culling Toolkit (Zoom Minimap, Batch Rename `F2`, Borderless Fullscreen Spacebar Quick Preview + `Shift+Rating/Flag/Fav` Auto-Advance, Camera AF Area Overlay, Animated Filmstrip with Attached Pull-Tab), Photo Favourites (`is_favourite`) & Tri-State Pick/Reject Flags, Auto-Detecting Google Picasa Importer, Apple Live Photos & Android Motion Photos, Offline Drive/NAS Browsing (`volume_offline`), and Duplicate Preferred Folder Priority**, **Depth & Light 2.0**, **UI Theme Architecture Consolidation**, **Visual Similarity Search (`Find Similar`)**, **Companion Phone GPS Matching & GPX Interpolation**, **Fine Tune Two-Tier `Basic | Advanced` Mode**, **Phase 1 Regional Masking (`Whole | Subject | Bg | Sky`)**, SQLite FTS5 RapidOCR search, Per-Folder Scan & Privacy Controls with PBKDF2 PIN lock, and Unified `LaMa` ONNX Generative Inpainting—have been graduated into [`docs/ARCHITECTURE.md`](ARCHITECTURE.md), [`RELEASES.md`](../RELEASES.md), and [`docs/editing_engine.md`](editing_engine.md).
 
 ---
 
@@ -54,8 +29,6 @@ Focus: Keep v0.18.0 fast, crisp, and effortless without adding UI clutter.
   * Combine temporal gap detection ($\Delta t > 6\text{ hours}$ or multi-day travel away from home centroid) with `location_city` / `location_country` transitions to offer an **`Arrange / Group by: Events / Trips`** option (provided grouping stays fast on large libraries), with optional one-click **"Save Trip as Album"**.
 * **Dominant Color Swatch Filtering (`Find` Tab):**
   * Add a 10-swatch clickable color filter bar to the `Find` ribbon tab matching precomputed Tier 1 `media_signatures` CIE LAB color data.
-* **Updated `Edit → Effects` with Look Profiles & `.cube` 3D LUT Importer:**
-  * Refresh the **Edit → Effects** strip with **Look Profiles** (`As Shot`, `Natural`, `Warm Print`, `Vivid`, `Portrait`, `Monochrome`) and an importable **`.cube` 3D LUT** parser evaluated via fast trilinear `numpy` lookup with continuous `Amount (0–200%)` blending.
 
 ---
 

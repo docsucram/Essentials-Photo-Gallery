@@ -23,11 +23,12 @@ The **Edit & Create Engine** pairs deterministic floating-point / LUT-accelerate
 +-------------------------------------------------------------------------+
 |                         Imaging Pipeline Layer                          |
 |  (src/imaging/opencv_engine.py, src/imaging/creative_effects.py,        |
-|   src/imaging/create_tools.py, src/imaging/image_loader.py)             |
-|  - Non-destructive PhotoAdjustmentRecipe parametric stack               |
+|   src/imaging/create_tools.py, src/imaging/image_loader.py,             |
+|   src/imaging/video_frame_capture.py)                                   |
+|  - Non-destructive PhotoAdjustmentRecipe parametric stack & .cube LUTs  |
 |  - Precomputed sRGB <-> Linear LUTs & unified 256-entry cv2.LUT tonal   |
 |  - Monocular 3D depth maps & portrait alpha matte proxy caching         |
-|  - Next-gen codec decoding & LittleCMS2 Display P3 -> sRGB conversion   |
+|  - Next-gen codec decoding, Display P3 -> sRGB, & video frame capture   |
 +------------------------------------+------------------------------------+
                                      |
                                      v
@@ -47,7 +48,7 @@ The **Edit & Create Engine** pairs deterministic floating-point / LUT-accelerate
 3. **Precomputed Look-Up Tables (`cv2.LUT`):** Levels, Filmic Exposure, and Filmic Contrast combine into a single 256-entry `uint8` LUT executing in **`1.1 ms`**, paired with precomputed sRGB/linear (`_LUT_SRGB_TO_LIN`, `_LUT_LIN_TO_SRGB`, `_VIBRANCE_POW_LUT`) and 4x downsampled base/detail illumination decomposition.
 4. **Non-Destructive File Protocol (`.OriginalFiles/`):** Saving over an original file stashes a byte-identical untouched copy inside `<folder>/.OriginalFiles/<filename>` (never overwriting an existing backup), enabling exact **Revert to original** and preserving EXIF/XMP blocks and spatial face coordinates.
 5. **Embedded JPEG Fast-Path for Camera RAW Files (`decode_raw_embedded_preview`):** Thumbnails and initial Single Image View opens extract the camera's embedded JPEG/bitmap preview (`raw.extract_thumb()` with EXIF orientation) for instant browsing, deferring full `rawpy` demosaicing (`_upgrade_raw_to_full_demosaic_async()`) until active slider editing.
-6. **Two-Tier Fine Tune (`Basic | Advanced`) & Live Masked Histogram:** Defaults to classic WLPG simplicity with a `94px` single-color luminance histogram (`HistogramWidget`), while toggling **Advanced** unlocks a `128px` multi-channel `R/G/B` histogram, **Smart Enhance**, **Whites/Blacks**, content-aware **Structure**, **Tone Curve** (`RGB/R/G/B` + S-Curve), **WB Eyedropper**, **8-Band Color Mixer (HSL)**, **Sharpen Radius/Masking**, **Denoise Detail/Color**, **Orton Glow / Golden Hour**, **Film Grain**, and **Regional Masking (`Whole | Subject | Bg | Sky`)** with mask-restricted live histogram updates (`set_histogram_mask`). `_AeroFineTuneSlider` uses `Qt.StrongFocus` (ignoring wheel events when unfocused unless `Alt` is held, stepping `±1` or `±5` with `Shift`) and propagates disabled states cleanly to paired headers.
+6. **Two-Tier Fine Tune (`Basic | Advanced`), Look Profiles / `.cube` 3D LUTs & Live Masked Histogram:** Defaults to classic WLPG simplicity with a `94px` single-color luminance histogram (`HistogramWidget`), while toggling **Advanced** unlocks a `128px` multi-channel `R/G/B` histogram, **Presets** (`Look` profiles `As Shot` / `Natural` / `Warm Print` / `Vivid` / `Portrait` / `Monochrome`, importable `.cube` 3D LUTs via `LUT...`, and `Profile amount 0–200%`), **Smart Enhance**, **Whites/Blacks**, content-aware **Structure**, **Tone Curve** (`RGB/R/G/B` + S-Curve), **WB Presets & Pipette Eyedropper**, **8-Band Color Mixer (HSL)**, **Sharpen Radius/Masking**, **Denoise Detail/Color**, **Orton Glow / Golden Hour**, **Film Grain**, and **Regional Masking (`Whole | Subject | Bg | Sky`)** with mask-restricted live histogram updates (`set_histogram_mask`) and neutral red-dot mask fill toggle. `_AeroFineTuneSlider` uses `Qt.StrongFocus` (ignoring wheel events when unfocused unless `Alt` is held, stepping `±1` or `±5` with `Shift`) and propagates disabled states cleanly to paired headers.
 
 ---
 
@@ -131,8 +132,11 @@ Resolution-scaled bilateral smoothing separates chrominance (`denoise_chroma`, w
 - **CIE LAB Shadows/Highlights + Ambience & AgX Roll-Off:** Bilateral base/detail separation ($L = L_{\text{base}} + L_{\text{detail}}$) lifts dark regions while keeping micro-contrast punchy; highlights ($L^* > 220$) smoothly desaturate toward paper-white.
 - **Clarity & Orton Glow / Golden Hour:** Midtone bell-curve `Clarity`, screen-blended `Orton Glow`, and warm highlight-weighted `Golden Hour`.
 
-### 3.3 Color Temperature, Tint & Skin-Safe Vibrance in CIE LAB
-- **Temperature ($B^*$) & Tint ($A^*$):** Orthogonal chromatic offsets in perceptual LAB space.
+### 3.3 Color Temperature, Tint, Skin-Safe Vibrance & Upgraded Auto Adjust in CIE LAB
+- **Temperature ($B^*$) & Tint ($A^*$):** Orthogonal chromatic offsets in perceptual LAB space. The Edit Ribbon **Exposure** (Brighter top → Darker bottom × Lower→Higher contrast) and **Color** (High/magenta tint top → Low/green tint bottom × Cooler→Warmer temperature) 3×3 variation menus match WLPG ordering with descriptive hover tooltips and live image previews.
+- **Upgraded Auto Exposure & Auto Color (`analyze_auto_adjust`):**
+  - **Key-Aware & Highlight-Safe Auto Exposure:** Dampens median shifts on intentional low-key (night) and high-key (snow/bright) scenes and scales back positive brightness when `p98 > 232` to prevent blown highlights.
+  - **Near-Neutral CIE Lab White Balance:** Estimates color cast from low-chroma midtone pixels (`chroma < 24`, `28 < L < 228`) so large skies, foliage, or sunsets don't skew white balance, falling back to damped Gray-World only when neutral pixels are scarce, paired with adaptive saturation (`0..+12` only for muted/flat scenes) and a small deadzone.
 - **Skin-Safe Vibrance (Zero HSV Round-Trip):** Measures Euclidean chroma $C = \sqrt{(A^*-128)^2 + (B^*-128)^2}$ and proximity to the warm human skin locus ($A^* \approx 146, B^* \approx 152$):
   $$W_{\text{vibrance}} = \left(1 - \left(\frac{C}{128}\right)^{0.8}\right) \cdot \left(1 - 0.6 \cdot \text{clip}(1 - D_{\text{skin}}, 0, 1)\right)$$
   Boosting muted blues/greens cleanly without turning portraits orange.
@@ -146,7 +150,7 @@ Resolution-scaled bilateral smoothing separates chrominance (`denoise_chroma`, w
 - **Interactive Brush Touch-Up (`apply_region_mask_strokes`):** Supports normalized `Paint` and `Erase` edge-aware bilateral brush strokes per region (`mask_strokes`), reflected live in both the **Show mask** overlay and the region-masked histogram (`HistogramWidget.set_histogram_mask`).
 
 ### 3.6 Analytical Inscribed-Rectangle Auto-Straighten & U-Point Selective Controls
-- **Zero-Border Auto-Straighten:** Rotates by $|\theta| \le 15^\circ$ and analytically crops to the maximum inscribed rectangle matching original aspect ratio $R = W_0 / H_0$:
+- **Zero-Border Auto-Straighten & Async AI Fill:** Rotates by $|\theta| \le 15^\circ$ and analytically crops to the maximum inscribed rectangle matching original aspect ratio $R = W_0 / H_0$ (with optional non-blocking background `LaMa` AI corner/canvas fill via a 1-thread `QThreadPool` with generation cancellation guards):
   $$W_{\text{crop}} = \frac{W_0\cos\alpha - H_0\sin\alpha}{\cos 2\alpha}, \quad H_{\text{crop}} = \frac{H_0\cos\alpha - W_0\sin\alpha}{\cos 2\alpha}$$
 - **U-Point Control Points:** Combines spatial falloff $w_s$ and LAB photometric affinity $w_c = \exp(-(\Delta E / 28)^2)$ using normalized $[0, 1]$ coordinates identical across proxy and master renders.
 
@@ -213,7 +217,7 @@ All presets blend continuously from $0\%$ to $100\%$ intensity.
 - **WLPG Crop / Uncrop:** Entering Crop mode on previously cropped photos displays the full uncropped image with the existing crop rectangle adjustable outward or resettable via `"Full Image (Uncrop)"`.
 - **Metadata & Face Coordinate Healing:** Spatial edits (crop, straighten, 90° rotate) re-project `[0, 1]` face boxes, purge cached thumbnails, preserve orientation consistency, and mark `metadata_dirty = 1` for XMP/EXIF sync.
 - **Authentic Windows `Open with ▸` & Edit Nomenclature:** Inspects Windows Registry (`QFileIconProvider`) for registered apps, opens native `rundll32 shell32.dll,OpenAs_RunDLL`, standardizes **Colour** spelling, and maintains a self-healing thumbnail paint queue (`visible_media_ids(buffer_rows=4)` + decode error flag cleanup).
-- **Single Media Viewer Context Actions:** Includes **Find Similar** (launching `find_similar_to_photo` at the `81%` default threshold) and **Compare** integration alongside non-destructive Fine Tune, Crop, Spot Fix, and Markup modes.
+- **Single Media Viewer Context Actions & Video Frame Capture (`src/imaging/video_frame_capture.py`):** Unified photo right-click menu with **Flag ▸**, **Edit ▸**, **Scan ▸**, **Find Similar Photos...** (non-blocking progressive search), and **Compare** integration alongside non-destructive Fine Tune, Crop, Spot Fix, and Markup modes. Video playback adds **"Save still frame as photo"**, extracting the current full-resolution frame as a collision-safe JPEG in the same folder with offset EXIF capture date + GPS coordinates and immediate catalog indexing.
 
 ---
 

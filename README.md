@@ -37,7 +37,7 @@ Standalone 64-bit Windows installers (`EssentialsPhotoGallery_Setup_x64.exe`) ar
 ## Highlights & Features
 
 - **Classic WLPG Ribbon Look & Feel (with Modern Themes, 4 Layouts & Integrated QAT)**
-  Recreates the authentic ribbon layout (*Home*, *Edit*, *Find*, *Create*, *View*) plus contextual tabs (*Edit* in Single Image View, *Map* in World Map View), integrated title bar with Quick Access Toolbar (QAT), optional left navigation sections (*Albums*, *Folders*, *Date Taken*, *Places*, *Tags*, *People*, *Ratings*, plus optional *Cameras* and AI *Subjects*), and right-hand tag/information pane. Supports three themes (**Classic Aero (Light)**, **Microsoft Fluent (Windows 11)**, and **Dark Studio**), four gallery layout modes (**Grid**, uniform **Tiles**, row-justified **Mosaic**, and portrait-priority **Masonry**), a searchable `F1` Keyboard Shortcuts modal, and custom `Alt+1..9` Quick-Tag hotkeys.
+  Recreates the authentic ribbon layout (*Home*, *Edit*, *Find*, *Create*, *View*) plus contextual tabs (*Edit* in Single Image View, *Map* in World Map View, *Compare*, *Duplicates*), integrated title bar with Quick Access Toolbar (QAT), optional left navigation sections (*Albums*, *Folders*, *Date Taken*, *Places*, *Tags*, *People*, *Ratings*, plus optional *Cameras* and AI *Subjects*), and right-hand tag/information pane. Supports three themes (**Classic Aero (Light)**, **Microsoft Fluent (Windows 11)**, and **Dark Studio**), four gallery layout modes (**Grid**, uniform **Tiles**, row-justified **Mosaic**, and portrait-priority **Masonry**), customizable thumbnail **Badges** (Flags, Favourites, Photo groups, plus optional monochrome Geotagged / Descriptive tagged / People tagged indicators), a searchable `F1` Keyboard Shortcuts modal, and custom `Alt+1..9` Quick-Tag hotkeys assignable directly inside **Manage Tags**.
 
 - **Built for Large Libraries (64-Bit Architecture)**
   WLPG was a 32-bit app that would frequently hit out-of-memory errors on large collections or high-megapixel cameras. Essentials Photo Gallery is native 64-bit with virtualised grid scrolling and separate SQLite catalog and thumbnail databases, designed to stay snappy even with **500,000+ photos and videos**.
@@ -48,8 +48,8 @@ Standalone 64-bit Windows installers (`EssentialsPhotoGallery_Setup_x64.exe`) ar
 - **Folder Manager, Private Mode & Offline Text-in-Photo OCR**
   Control per-folder scanning (*Scan Always*, *Scan Once*, *Exclude*), opt in to offline **Text-in-Photo OCR** (`Tesseract` / `RapidOCR` / `Windows OCR` with SQLite `FTS5` search and copyable OCR text), and protect sensitive folders with **Private Mode** (PIN lock & idle auto-lock).
 
-- **Multi-Photo Compare Mode, Static Albums & 17-Dimension Boolean Smart Albums**
-  Organise photos manually into curated **My Albums** (non-destructive links; removing an item leaves original files untouched), or build live **Smart Albums** using multi-condition **ALL (AND)** / **ANY (OR)** rule builders across People, Tags, Places, Time of Day, Date / On This Day, Camera Make/Model, Rating, Flag, File Type, Orientation, Megapixels, Size, Folder, and Caption/Filename—plus one-click *Save Current Filter as Smart Album...*.
+- **Multi-Photo Compare Mode, Static Albums & 18-Dimension Boolean Smart Albums**
+  Organise photos manually into curated **My Albums** (non-destructive links; removing an item leaves original files untouched), or build live **Smart Albums** using multi-condition **ALL (AND)** / **ANY (OR)** rule builders across People, Tags, Places, Time of Day, Date / On This Day, Camera Make/Model, Rating, Flag, File Type, Orientation, Megapixels, Size, Folder, Caption/Filename, and AI **Subject / Semantic Search**—plus one-click *Save Current Filter as Smart Album...*.
 
 - **WLPG Hierarchical Tagging**
   Full support for nested descriptive tags (`Place/England/London`, `Subject/Occasions/...`), drag-and-drop tag tree management, star ratings, flags, captions, and fast multi-tag filtering—compatible with existing WLPG XMP/EXIF tags.
@@ -65,11 +65,11 @@ Standalone 64-bit Windows installers (`EssentialsPhotoGallery_Setup_x64.exe`) ar
   - **Photo Collage** (grid, masonry, scattered Polaroid, and *Then & Now* layouts)
   - **Photo Fuse** (combine the best smiles/expressions from a burst into one shot)
   - **Panoramic Stitching** (automatic stitcher inspired by Microsoft ICE)
-  - **Portrait Depth Blur, Relighting & Colour Pop** alongside Crop/Uncrop, Straighten, Spot Fix (Retouch & Red Eye), Exposure, Colour, Effects, and Vector Markup & Privacy Redaction
+  - **Portrait Depth Blur, Relighting & Colour Pop** alongside Crop/Uncrop, Straighten, Spot Fix (Retouch & Red Eye), Exposure, Colour, Look Profiles & `.cube` 3D LUTs, Video Frame Capture (*Save still frame as photo*), and Vector Markup & Privacy Redaction
   - **Contact Sheet & Photo Printing**
 
-- **Duplicate & Burst Photo Finder, Find Similar & Optional `MobileCLIP-S1` Semantic Search**
-  Extracts perceptual signatures (`pHash`, `dHash`, `Laplacian` sharpness, and `LAB Haar`) directly during thumbnail generation into `thumbnails.db`, powers undoable Auto-Stacking for RAW+JPEG pairs and burst sequences, and finds exact duplicates or visually similar photos with safe Recycle Bin cleanup. Optionally install the `MobileCLIP-S1` ONNX add-on in **File → Options → Add-ons** for offline natural-language photo search (fused with FTS5) and **Subjects** filtering.
+- **Duplicate & Burst Photo Finder, Progressive Find Similar & Optional `MobileCLIP-S1` Semantic Search**
+  Extracts perceptual signatures (`pHash`, `dHash`, `Laplacian` sharpness, and `LAB Haar`) directly during thumbnail generation into `thumbnails.db`, powers undoable stack-aware Auto-Stacking for RAW+JPEG pairs and burst sequences, and finds exact duplicates or visually similar photos (non-blocking, NumPy-vectorized, and automatically blended with local AI semantics when installed) with safe Recycle Bin cleanup. Optionally install the `MobileCLIP-S1` ONNX add-on in **File → Options → Add-ons** for offline natural-language photo search (fused with FTS5) and **Subjects** filtering.
 
 ---
 
