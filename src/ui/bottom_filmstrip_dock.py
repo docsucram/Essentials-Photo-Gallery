@@ -277,7 +277,7 @@ class _FilmstripItemDelegate(QStyledItemDelegate):
 
             icx = (pr.left() + 8.5) if has_num else pr.center().x()
             icy = pr.center().y()
-            if show_fav:
+            if bool(is_fav):
                 r_h = 4.3
                 hp = QPainterPath()
                 hp.moveTo(icx, icy + 1.0 * r_h)
@@ -541,6 +541,14 @@ class BottomFilmstripDock(QDockWidget):
 
         target_h = max(92, min(148, int(getattr(self, "_saved_filmstrip_height", 96))))
         self._animating_visibility = True
+        self.btn_scroll_left.hide()
+        self.btn_scroll_right.hide()
+        # Freeze QListView relayout & delegate item height while animating so
+        # thumbnails slide smoothly off-screen instead of flickering per frame.
+        self.filmstrip_view.setResizeMode(QListView.ResizeMode.Fixed)
+        self.filmstrip_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        if show:
+            self.filmstrip_delegate.set_item_height(max(70, target_h - 32))
         self.setMinimumHeight(0)
         anim = QPropertyAnimation(self, b"maximumHeight", self)
         anim.setDuration(140)
@@ -557,7 +565,12 @@ class BottomFilmstripDock(QDockWidget):
                 self._animating_visibility = False
                 self.setMinimumHeight(92)
                 self.setMaximumHeight(148)
+                self.filmstrip_view.setResizeMode(QListView.ResizeMode.Adjust)
+                self.filmstrip_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
                 self._apply_saved_filmstrip_height()
+                vp_h = self.filmstrip_view.viewport().height()
+                if vp_h >= 70 and self.filmstrip_delegate.set_item_height(vp_h - 4):
+                    self.filmstrip_view.doItemsLayout()
                 self._position_scroll_buttons()
                 self.height_anim_tick.emit()
 
@@ -565,6 +578,8 @@ class BottomFilmstripDock(QDockWidget):
         else:
             if not self.isVisible():
                 self._animating_visibility = False
+                self.filmstrip_view.setResizeMode(QListView.ResizeMode.Adjust)
+                self.filmstrip_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
                 return
             anim.setStartValue(self.height())
             anim.setEndValue(0)
@@ -574,6 +589,9 @@ class BottomFilmstripDock(QDockWidget):
                 self.hide()
                 self.setMinimumHeight(92)
                 self.setMaximumHeight(148)
+                self.filmstrip_view.setResizeMode(QListView.ResizeMode.Adjust)
+                self.filmstrip_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+                self.height_anim_tick.emit()
 
             anim.finished.connect(_on_hidden)
 
@@ -582,13 +600,17 @@ class BottomFilmstripDock(QDockWidget):
 
     def eventFilter(self, watched: Any, event: QEvent) -> bool:
         if watched is self.page_filmstrip and event.type() == QEvent.Type.Resize:
-            self._position_scroll_buttons()
+            if not getattr(self, "_animating_visibility", False):
+                self._position_scroll_buttons()
         elif watched is self.filmstrip_view.viewport():
             if event.type() == QEvent.Type.Resize:
+                if getattr(self, "_animating_visibility", False):
+                    # Skip doItemsLayout / item-height recomputation during slide animation
+                    # to eliminate per-frame thumbnail flicker.
+                    return super().eventFilter(watched, event)
                 if (
                     self.isVisible()
                     and self.stack.currentIndex() == 0
-                    and not getattr(self, "_animating_visibility", False)
                     and self.height() >= 92
                 ):
                     self._saved_filmstrip_height = max(92, min(148, self.height()))

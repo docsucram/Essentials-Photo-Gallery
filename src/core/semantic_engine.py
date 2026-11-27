@@ -286,7 +286,7 @@ def download_semantic_models(
     cumulative_done = 0
 
     try:
-        from src.version import APP_VERSION
+        from src.utils.downloader import download_file_resumable
 
         for fname, url, _approx_sz in SEMANTIC_MODEL_FILES:
             dest_file = dest_dir / fname
@@ -296,33 +296,18 @@ def download_semantic_models(
                     progress_cb(cumulative_done, max(total_expected, cumulative_done))
                 continue
 
-            tmp_file = dest_dir / f"{fname}.part"
-            existing_bytes = tmp_file.stat().st_size if tmp_file.exists() else 0
-            headers = {"User-Agent": f"EssentialsPhotoGallery/{APP_VERSION}"}
-            if existing_bytes > 0:
-                headers["Range"] = f"bytes={existing_bytes}-"
+            def _file_prog(done: int, _tot: int, base: int = cumulative_done) -> None:
+                if progress_cb is not None:
+                    progress_cb(base + done, max(total_expected, base + done))
 
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                status_code = getattr(resp, "status", 200)
-                append_mode = (status_code == 206 and existing_bytes > 0)
-                file_done = existing_bytes if append_mode else 0
-                open_mode = "ab" if append_mode else "wb"
-                with open(tmp_file, open_mode) as fh:
-                    while True:
-                        if cancel_cb is not None and cancel_cb():
-                            raise InterruptedError("Download cancelled")
-                        chunk = resp.read(256 * 1024)
-                        if not chunk:
-                            break
-                        fh.write(chunk)
-                        file_done += len(chunk)
-                        if progress_cb is not None:
-                            progress_cb(cumulative_done + file_done, max(total_expected, cumulative_done + file_done))
-
-            if tmp_file.stat().st_size < 1024:
-                raise ValueError(f"Downloaded semantic model {fname} is unexpectedly small")
-            os.replace(tmp_file, dest_file)
+            download_file_resumable(
+                url,
+                dest_file,
+                min_bytes=1024,
+                timeout=timeout,
+                progress_cb=_file_prog,
+                cancel_cb=cancel_cb,
+            )
             cumulative_done += dest_file.stat().st_size
         return dest_dir
     except Exception as exc:

@@ -184,32 +184,25 @@ def refine_mask_narrow_band(
 
 
 def _download_u2netp_model(dest_path: Path, timeout: float = 5.0) -> bool:
-    """Downloads lightweight u2netp.onnx (~4.5 MB) from official release with a clean timeout."""
-    import urllib.request
+    """Downloads lightweight u2netp.onnx (~4.5 MB) with streaming Range resume & integrity check."""
+    from src.utils.downloader import download_file_resumable
+
     urls = [
         "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx",
         "https://huggingface.co/schirrmacher/u2netp/resolve/main/u2netp.onnx",
     ]
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = dest_path.with_suffix(".tmp")
     for url in urls:
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                if resp.status == 200:
-                    data = resp.read()
-                    if len(data) > 1_000_000:
-                        tmp_path.write_bytes(data)
-                        tmp_path.replace(dest_path)
-                        logger.info("Successfully downloaded %s (%d bytes)", dest_path.name, len(data))
-                        return True
+            download_file_resumable(
+                url,
+                dest_path,
+                min_bytes=1_000_000,
+                timeout=timeout,
+            )
+            logger.info("Successfully downloaded %s (%d bytes)", dest_path.name, dest_path.stat().st_size)
+            return True
         except Exception as e:
             logger.debug("Download from %s failed: %s", url, e)
-            if tmp_path.exists():
-                try:
-                    tmp_path.unlink()
-                except Exception:
-                    pass
     return False
 
 
@@ -3245,52 +3238,26 @@ def download_lama_model(
     timeout: float = 30.0,
 ) -> Path | None:
     """
-    Download ``lama_fp32.onnx`` (~208 MB) into user AppData ``models/`` atomically.
-    ``progress_cb(bytes_done, total_bytes)`` and ``cancel_cb() -> bool`` are optional.
-    Reloads the shared LaMa engine on success and returns the model path, or None on failure/cancel.
+    Download ``lama_fp32.onnx`` (~208 MB) into user AppData ``models/`` atomically
+    with HTTP Range resume and automatic SHA-256 / X-Linked-Etag verification.
     """
-    import urllib.request
+    from src.utils.downloader import download_file_resumable
 
     target_dir = _get_lama_appdata_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
     dest_path = target_dir / LAMA_MODEL_FILENAME
-    tmp_path = target_dir / f"{LAMA_MODEL_FILENAME}.part"
 
     try:
-        req = urllib.request.Request(
+        download_file_resumable(
             LAMA_MODEL_URL,
-            headers={"User-Agent": "EssentialsPhotoGallery/1.0"},
+            dest_path,
+            min_bytes=150_000_000,
+            timeout=timeout,
+            progress_cb=progress_cb,
+            cancel_cb=cancel_cb,
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            total = int(resp.headers.get("Content-Length") or 0)
-            done = 0
-            chunk_size = 262144  # 256 KB
-            with open(tmp_path, "wb") as f:
-                while True:
-                    if cancel_cb is not None and cancel_cb():
-                        raise InterruptedError("Download cancelled")
-                    chunk = resp.read(chunk_size)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    done += len(chunk)
-                    if progress_cb is not None:
-                        progress_cb(done, total)
-
-        if total > 0 and done != total:
-            raise ValueError(f"Incomplete LaMa download ({done} of {total} bytes)")
-        if tmp_path.stat().st_size < 150_000_000:
-            raise ValueError("Downloaded LaMa model file is unexpectedly small")
-        with open(tmp_path, "rb") as chk:
-            head = chk.read(32).lstrip()
-            if head.startswith(b"<") or b"<html" in head.lower():
-                raise ValueError("Downloaded LaMa file appears to be HTML rather than an ONNX model")
-
-        tmp_path.replace(dest_path)
         engine = get_lama_inpaint_engine()
         engine.reset_session()
-        if progress_cb is not None and total > 0:
-            progress_cb(total, total)
         return dest_path
     except Exception as e:
         logger.warning("LaMa model download failed or cancelled: %s", e)

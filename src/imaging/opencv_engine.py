@@ -292,7 +292,11 @@ class PhotoAdjustmentRecipe:
     dehaze: float = 0.0           # -100.0 .. +100.0 (Atmospheric haze reduction)
     vignette: float = 0.0         # -100.0 .. +100.0 (Dark <-> Light corners)
     straighten_deg: float = 0.0   # -15.0 .. +15.0 degrees
-    straighten_ai_fill: bool = False  # Fill rotated corner wedges instead of cropping inward
+    straighten_ai_fill: bool = False  # Fill rotated/warped corner wedges instead of cropping inward
+    perspective_v: float = 0.0    # -100.0 .. +100.0 (Vertical keystone correction)
+    perspective_h: float = 0.0    # -100.0 .. +100.0 (Horizontal keystone correction)
+    flip_h: bool = False          # Mirror horizontally
+    flip_v: bool = False          # Mirror vertically
     sharpen: float = 0.0          # 0.0 .. 100.0 (Halo-free unsharp mask amount)
     sharpen_radius: float = 25.0  # 0.0 .. 100.0 (25 = 1.0px nominal radius)
     sharpen_masking: float = 0.0  # 0.0 .. 100.0 (Edge-only sharpening threshold)
@@ -354,6 +358,10 @@ class PhotoAdjustmentRecipe:
             and abs(self.orton_glow) < 0.1
             and abs(self.golden_hour) < 0.1
             and abs(self.straighten_deg) < 0.01
+            and abs(self.perspective_v) < 0.1
+            and abs(self.perspective_h) < 0.1
+            and not self.flip_h
+            and not self.flip_v
             and abs(self.sharpen) < 0.1
             and abs(self.sharpen_radius - 25.0) < 0.1
             and abs(self.sharpen_masking) < 0.1
@@ -412,6 +420,10 @@ class PhotoAdjustmentRecipe:
             golden_hour=self.golden_hour,
             straighten_deg=self.straighten_deg,
             straighten_ai_fill=self.straighten_ai_fill,
+            perspective_v=self.perspective_v,
+            perspective_h=self.perspective_h,
+            flip_h=self.flip_h,
+            flip_v=self.flip_v,
             sharpen=self.sharpen,
             sharpen_radius=self.sharpen_radius,
             sharpen_masking=self.sharpen_masking,
@@ -1511,23 +1523,49 @@ def render_adjusted_image(
     if recipe.grain_amount >= 0.5:
         img = _apply_film_grain(img, recipe.grain_amount, recipe.grain_size)
 
-    # 7. Straighten & Crop
-    if abs(recipe.straighten_deg) >= 0.05:
-        if getattr(recipe, "straighten_ai_fill", False):
-            img = straighten_with_ai_fill(img, recipe.straighten_deg)
+    # 7. Flip, Straighten, Perspective & Crop
+    has_geo = (
+        abs(recipe.straighten_deg) >= 0.05
+        or abs(getattr(recipe, "perspective_v", 0.0)) >= 0.1
+        or abs(getattr(recipe, "perspective_h", 0.0)) >= 0.1
+        or bool(getattr(recipe, "flip_h", False))
+        or bool(getattr(recipe, "flip_v", False))
+    )
+    if has_geo:
+        has_persp = (
+            abs(getattr(recipe, "perspective_v", 0.0)) >= 0.1
+            or abs(getattr(recipe, "perspective_h", 0.0)) >= 0.1
+            or bool(getattr(recipe, "flip_h", False))
+            or bool(getattr(recipe, "flip_v", False))
+        )
+        if not has_persp and abs(recipe.straighten_deg) >= 0.05:
+            if getattr(recipe, "straighten_ai_fill", False):
+                img = straighten_with_ai_fill(img, recipe.straighten_deg)
+            else:
+                h, w = img.shape[:2]
+                center = (w / 2.0, h / 2.0)
+                rot_matrix = cv2.getRotationMatrix2D(center, -float(recipe.straighten_deg), 1.0)
+                img = cv2.warpAffine(
+                    img,
+                    rot_matrix,
+                    (w, h),
+                    flags=cv2.INTER_CUBIC,
+                    borderMode=cv2.BORDER_REFLECT_101,
+                )
+                if recipe.crop_rect is None:
+                    img = _crop_largest_inscribed_rect(img, recipe.straighten_deg, w, h)
         else:
-            h, w = img.shape[:2]
-            center = (w / 2.0, h / 2.0)
-            rot_matrix = cv2.getRotationMatrix2D(center, -float(recipe.straighten_deg), 1.0)
-            img = cv2.warpAffine(
+            img, _ = apply_geometry_transform(
                 img,
-                rot_matrix,
-                (w, h),
-                flags=cv2.INTER_CUBIC,
-                borderMode=cv2.BORDER_REFLECT_101,
+                straighten_deg=float(recipe.straighten_deg),
+                perspective_v=float(getattr(recipe, "perspective_v", 0.0)),
+                perspective_h=float(getattr(recipe, "perspective_h", 0.0)),
+                flip_h=bool(getattr(recipe, "flip_h", False)),
+                flip_v=bool(getattr(recipe, "flip_v", False)),
+                auto_crop=(recipe.crop_rect is None and not getattr(recipe, "straighten_ai_fill", False)),
+                ai_fill=bool(getattr(recipe, "straighten_ai_fill", False)),
+                fast_preview=False,
             )
-            if recipe.crop_rect is None:
-                img = _crop_largest_inscribed_rect(img, recipe.straighten_deg, w, h)
 
     if recipe.crop_rect is not None:
         h, w = img.shape[:2]
@@ -1550,6 +1588,357 @@ def render_adjusted_image(
             img = img[t:b, l:r]
 
     return np.ascontiguousarray(img)
+
+
+def build_perspective_homography(
+    w: int,
+    h: int,
+    straighten_deg: float = 0.0,
+    perspective_v: float = 0.0,
+    perspective_h: float = 0.0,
+) -> np.ndarray:
+    """
+    Build a combined 3x3 float64 projective homography mapping source (0..w, 0..h)
+    coordinates through straighten rotation and vertical/horizontal keystone correction.
+    """
+    wf, hf = float(max(1, w)), float(max(1, h))
+    H_total = np.eye(3, dtype=np.float64)
+
+    if abs(straighten_deg) >= 0.01:
+        rot_2x3 = cv2.getRotationMatrix2D((wf / 2.0, hf / 2.0), -float(straighten_deg), 1.0)
+        H_rot = np.eye(3, dtype=np.float64)
+        H_rot[:2, :] = rot_2x3
+        H_total = H_rot @ H_total
+
+    pv = max(-100.0, min(100.0, float(perspective_v))) / 100.0
+    ph = max(-100.0, min(100.0, float(perspective_h))) / 100.0
+    if abs(pv) >= 1e-4 or abs(ph) >= 1e-4:
+        src = np.array(
+            [[0.0, 0.0], [wf, 0.0], [wf, hf], [0.0, hf]],
+            dtype=np.float32,
+        )
+        dx = abs(pv) * 0.24 * wf
+        dy = abs(ph) * 0.24 * hf
+        tl = [0.0, 0.0]
+        tr = [wf, 0.0]
+        br = [wf, hf]
+        bl = [0.0, hf]
+        if pv > 0.0:
+            # Widen top relative to bottom -> inset bottom corners
+            bl[0] += dx
+            br[0] -= dx
+        elif pv < 0.0:
+            # Widen bottom relative to top -> inset top corners
+            tl[0] += dx
+            tr[0] -= dx
+        if ph > 0.0:
+            # Widen left relative to right -> inset right corners
+            tr[1] += dy
+            br[1] -= dy
+        elif ph < 0.0:
+            # Widen right relative to left -> inset left corners
+            tl[1] += dy
+            bl[1] -= dy
+
+        dst = np.array([tl, tr, br, bl], dtype=np.float32)
+        H_persp = cv2.getPerspectiveTransform(src, dst)
+
+        # Gentle aspect compensation so strong vertical keystone does not look squished
+        if abs(pv) > 0.05:
+            sy = 1.0 + 0.14 * abs(pv)
+            cy = hf / 2.0
+            H_comp = np.array(
+                [[1.0, 0.0, 0.0], [0.0, sy, cy * (1.0 - sy)], [0.0, 0.0, 1.0]],
+                dtype=np.float64,
+            )
+            H_persp = H_comp @ H_persp
+
+        H_total = H_persp @ H_total
+
+    return H_total
+
+
+def _largest_true_rect_in_mask(mask_bool: np.ndarray) -> tuple[int, int, int, int]:
+    """O(H*W) monotonic-stack largest axis-aligned inscribed rectangle in a 2D boolean mask."""
+    mh, mw = mask_bool.shape[:2]
+    heights = np.zeros(mw, dtype=np.int32)
+    best_area = 0
+    best_rect = (0, 0, mw, mh)
+    for y in range(mh):
+        row = mask_bool[y]
+        heights = np.where(row, heights + 1, 0)
+        stack: list[tuple[int, int]] = []  # (start_x, height)
+        for x in range(mw + 1):
+            cur_h = int(heights[x]) if x < mw else 0
+            start = x
+            while stack and stack[-1][1] > cur_h:
+                sx, sh = stack.pop()
+                area = sh * (x - sx)
+                if area > best_area:
+                    best_area = area
+                    best_rect = (sx, y - sh + 1, x, y + 1)
+                start = sx
+            if cur_h > 0 and (not stack or stack[-1][1] < cur_h):
+                stack.append((start, cur_h))
+    return best_rect
+
+
+def compute_inscribed_rect_for_homography(
+    w: int, h: int, H: np.ndarray
+) -> tuple[int, int, int, int]:
+    """Compute the largest valid (non-black) axis-aligned rectangle inside a homography-warped image."""
+    if w <= 4 or h <= 4:
+        return (0, 0, max(1, w), max(1, h))
+    max_dim = 220
+    scale = min(1.0, max_dim / float(max(w, h)))
+    sw = max(8, int(round(w * scale)))
+    sh = max(8, int(round(h * scale)))
+    S = np.diag([sw / float(w), sh / float(h), 1.0])
+    S_inv = np.diag([float(w) / sw, float(h) / sh, 1.0])
+    H_small = S @ H @ S_inv
+    ones = np.full((sh, sw), 255, dtype=np.uint8)
+    warped_mask = cv2.warpPerspective(
+        ones, H_small, (sw, sh), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0
+    )
+    l_s, t_s, r_s, b_s = _largest_true_rect_in_mask(warped_mask > 0)
+    inv_x = float(w) / sw
+    inv_y = float(h) / sh
+    pad = max(1, int(math.ceil(max(inv_x, inv_y))))
+    l = max(0, min(w - 2, int(round(l_s * inv_x)) + pad))
+    t = max(0, min(h - 2, int(round(t_s * inv_y)) + pad))
+    r = max(l + 2, min(w, int(round(r_s * inv_x)) - pad))
+    b = max(t + 2, min(h, int(round(b_s * inv_y)) - pad))
+    return (l, t, r, b)
+
+
+def apply_geometry_transform(
+    img: np.ndarray,
+    *,
+    straighten_deg: float = 0.0,
+    perspective_v: float = 0.0,
+    perspective_h: float = 0.0,
+    flip_h: bool = False,
+    flip_v: bool = False,
+    auto_crop: bool = True,
+    ai_fill: bool = False,
+    fast_preview: bool = False,
+) -> tuple[np.ndarray, tuple[int, int, int, int] | None]:
+    """
+    Apply Flip H/V, Straighten, and Vertical/Horizontal Perspective in a single homography warp.
+    Returns ``(transformed_rgb, valid_inscribed_rect)`` where ``valid_inscribed_rect`` is
+    ``(left, top, right, bottom)`` in the warped frame (or ``None`` if no warp was applied).
+    """
+    if img is None or img.size == 0:
+        return img, None
+    out = img
+    if flip_h and flip_v:
+        out = cv2.flip(out, -1)
+    elif flip_h:
+        out = cv2.flip(out, 1)
+    elif flip_v:
+        out = cv2.flip(out, 0)
+
+    has_warp = (
+        abs(straighten_deg) >= 0.05
+        or abs(perspective_v) >= 0.1
+        or abs(perspective_h) >= 0.1
+    )
+    if not has_warp:
+        return np.ascontiguousarray(out), None
+
+    h, w = out.shape[:2]
+    H = build_perspective_homography(
+        w, h,
+        straighten_deg=straighten_deg,
+        perspective_v=perspective_v,
+        perspective_h=perspective_h,
+    )
+    interp = cv2.INTER_LINEAR if fast_preview else cv2.INTER_LANCZOS4
+    valid_rect = compute_inscribed_rect_for_homography(w, h, H)
+
+    if ai_fill and not fast_preview:
+        warped = cv2.warpPerspective(
+            out, H, (w, h), flags=interp, borderMode=cv2.BORDER_REPLICATE
+        )
+        ones = np.full((h, w), 255, dtype=np.uint8)
+        wmask = cv2.warpPerspective(
+            ones, H, (w, h), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0
+        )
+        gap_mask = np.where(wmask == 0, np.uint8(255), np.uint8(0))
+        if np.any(gap_mask > 0):
+            from src.imaging.creative_effects import inpaint_object_lama
+
+            seam_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            inpaint_mask = cv2.dilate(gap_mask, seam_k, iterations=1)
+            filled = inpaint_object_lama(warped, inpaint_mask)
+            erode_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            keep_bin = cv2.erode((gap_mask == 0).astype(np.uint8) * 255, erode_k, iterations=1)
+            alpha_keep = cv2.GaussianBlur(keep_bin.astype(np.float32) / 255.0, (7, 7), 1.8)
+            alpha_keep = np.where(gap_mask > 0, 0.0, alpha_keep)[:, :, None]
+            blended = (
+                warped.astype(np.float32) * alpha_keep
+                + filled.astype(np.float32) * (1.0 - alpha_keep)
+            )
+            return np.ascontiguousarray(np.clip(blended, 0, 255).astype(np.uint8)), valid_rect
+        return np.ascontiguousarray(warped), valid_rect
+
+    border_mode = cv2.BORDER_CONSTANT
+    warped = cv2.warpPerspective(
+        out, H, (w, h), flags=interp, borderMode=border_mode, borderValue=(18, 18, 22)
+    )
+    if auto_crop:
+        l, t, r, b = valid_rect
+        if r > l + 2 and b > t + 2:
+            warped = warped[t:b, l:r]
+    return np.ascontiguousarray(warped), valid_rect
+
+
+def estimate_auto_perspective(
+    master_rgb: np.ndarray, mode: str = "vertical"
+) -> tuple[float, float, float]:
+    """
+    Estimate ``(straighten_deg, perspective_v, perspective_h)`` from structural line segments.
+    Modes: ``"straighten"``, ``"vertical"`` (horizon + converging verticals), or ``"full"``.
+    Conservative confidence gating returns 0.0 on organic/nature scenes without clear lines.
+    """
+    if master_rgb is None or master_rgb.size == 0:
+        return (0.0, 0.0, 0.0)
+
+    h, w = master_rgb.shape[:2]
+    max_dim = 800
+    if max(h, w) > max_dim:
+        sc = max_dim / float(max(h, w))
+        small = cv2.resize(master_rgb, (max(16, int(w * sc)), max(16, int(h * sc))), interpolation=cv2.INTER_AREA)
+    else:
+        small = master_rgb
+    sh, sw = small.shape[:2]
+    gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
+
+    # Extract line segments via LSD (fallback to HoughLinesP if unavailable)
+    segs: list[tuple[float, float, float, float]] = []
+    min_len = max(18.0, min(sw, sh) * 0.065)
+    try:
+        lsd = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD)
+        raw_lines = lsd.detect(gray)[0]
+        if raw_lines is not None:
+            for x1, y1, x2, y2 in np.asarray(raw_lines).reshape(-1, 4):
+                if math.hypot(x2 - x1, y2 - y1) >= min_len:
+                    segs.append((float(x1), float(y1), float(x2), float(y2)))
+    except Exception:
+        edges = cv2.Canny(cv2.GaussianBlur(gray, (3, 3), 0), 50, 150)
+        raw_lines = cv2.HoughLinesP(edges, 1, np.pi / 360, 50, minLineLength=int(min_len), maxLineGap=10)
+        if raw_lines is not None:
+            for x1, y1, x2, y2 in np.asarray(raw_lines).reshape(-1, 4):
+                segs.append((float(x1), float(y1), float(x2), float(y2)))
+
+    if not segs:
+        return (0.0, 0.0, 0.0)
+
+    vert_x: list[float] = []
+    vert_lean: list[float] = []  # deg: positive = top leans right relative to bottom
+    vert_w: list[float] = []
+
+    horiz_y: list[float] = []
+    horiz_tilt: list[float] = []  # deg: positive = right end lower than left end
+    horiz_w: list[float] = []
+
+    for x1, y1, x2, y2 in segs:
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.hypot(dx, dy)
+        ang = math.degrees(math.atan2(dy, dx))
+        mx_n = ((x1 + x2) * 0.5 / float(sw)) * 2.0 - 1.0  # [-1, 1]
+        my_n = ((y1 + y2) * 0.5 / float(sh)) * 2.0 - 1.0  # [-1, 1]
+
+        # Near-horizontal (-15..+15 deg)
+        if abs(ang) <= 15.0:
+            horiz_y.append(my_n)
+            horiz_tilt.append(ang)
+            horiz_w.append(length * length)
+        elif abs(ang - 180.0) <= 15.0:
+            horiz_y.append(my_n)
+            horiz_tilt.append(ang - 180.0)
+            horiz_w.append(length * length)
+        elif abs(ang + 180.0) <= 15.0:
+            horiz_y.append(my_n)
+            horiz_tilt.append(ang + 180.0)
+            horiz_w.append(length * length)
+        else:
+            # Near-vertical: orient segment from bottom (larger y) to top (smaller y)
+            if y1 < y2:
+                bx, by, tx, ty = x2, y2, x1, y1
+            else:
+                bx, by, tx, ty = x1, y1, x2, y2
+            lean = math.degrees(math.atan2(tx - bx, by - ty))  # 0 = pure vertical, + = top leans right
+            if abs(lean) <= 22.0:
+                vert_x.append(mx_n)
+                vert_lean.append(lean)
+                vert_w.append(length * length)
+
+    # 1. Straighten angle
+    straighten_deg = 0.0
+    if horiz_tilt:
+        order = np.argsort(horiz_tilt)
+        wt_sorted = np.asarray(horiz_w, dtype=np.float64)[order]
+        ang_sorted = np.asarray(horiz_tilt, dtype=np.float64)[order]
+        cum = np.cumsum(wt_sorted)
+        med_idx = int(np.searchsorted(cum, cum[-1] * 0.5))
+        straighten_deg = float(ang_sorted[min(med_idx, len(ang_sorted) - 1)])
+        straighten_deg = max(-15.0, min(15.0, round(straighten_deg, 1)))
+    elif len(vert_lean) >= 3:
+        # Fallback roll from mean vertical lean
+        vw = np.asarray(vert_w, dtype=np.float64)
+        vl = np.asarray(vert_lean, dtype=np.float64)
+        mean_lean = float(np.sum(vw * vl) / max(1e-6, np.sum(vw)))
+        straighten_deg = max(-15.0, min(15.0, round(mean_lean, 1)))
+
+    if mode == "straighten":
+        return (straighten_deg, 0.0, 0.0)
+
+    # 2. Vertical perspective (converging verticals: left leans right [+], right leans left [-])
+    persp_v = 0.0
+    if len(vert_x) >= 4:
+        vx = np.asarray(vert_x, dtype=np.float64)
+        vl = np.asarray(vert_lean, dtype=np.float64)
+        vw = np.asarray(vert_w, dtype=np.float64)
+        if float(np.max(vx) - np.min(vx)) >= 0.35:
+            w_sum = float(np.sum(vw))
+            mx = float(np.sum(vw * vx) / w_sum)
+            my = float(np.sum(vw * vl) / w_sum)
+            cov = float(np.sum(vw * (vx - mx) * (vl - my)))
+            var_x = float(np.sum(vw * (vx - mx) ** 2))
+            if var_x > 1e-4:
+                slope = cov / var_x
+                pred = my + slope * (vx - mx)
+                ss_res = float(np.sum(vw * (vl - pred) ** 2))
+                ss_tot = float(np.sum(vw * (vl - my) ** 2))
+                r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 1e-4 else 0.0
+                if r2 >= 0.25 and abs(slope) >= 0.6:
+                    # Negative slope (left +, right -) -> building converges upward -> positive perspective_v
+                    persp_v = max(-65.0, min(65.0, round(-slope * 4.2, 1)))
+
+    # 3. Horizontal perspective (only in "full" mode, conservative clamp)
+    persp_h = 0.0
+    if mode == "full" and len(horiz_y) >= 4:
+        hy = np.asarray(horiz_y, dtype=np.float64)
+        ht = np.asarray(horiz_tilt, dtype=np.float64)
+        hw = np.asarray(horiz_w, dtype=np.float64)
+        if float(np.max(hy) - np.min(hy)) >= 0.35:
+            w_sum = float(np.sum(hw))
+            my = float(np.sum(hw * hy) / w_sum)
+            mt = float(np.sum(hw * ht) / w_sum)
+            cov = float(np.sum(hw * (hy - my) * (ht - mt)))
+            var_y = float(np.sum(hw * (hy - my) ** 2))
+            if var_y > 1e-4:
+                slope = cov / var_y
+                pred = mt + slope * (hy - my)
+                ss_res = float(np.sum(hw * (ht - pred) ** 2))
+                ss_tot = float(np.sum(hw * (ht - mt) ** 2))
+                r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 1e-4 else 0.0
+                if r2 >= 0.30 and abs(slope) >= 0.8:
+                    persp_h = max(-40.0, min(40.0, round(-slope * 3.8, 1)))
+
+    return (straighten_deg, persp_v, persp_h)
 
 
 def straighten_with_ai_fill(img: np.ndarray, angle_deg: float) -> np.ndarray:
@@ -1707,13 +2096,42 @@ def analyze_noise_profile(master_rgb: np.ndarray) -> float:
     return float(np.clip(round(rec_val, 1), 0.0, 100.0))
 
 
-def analyze_auto_adjust(master_rgb: np.ndarray) -> PhotoAdjustmentRecipe:
+DEFAULT_AUTO_ADJUST_OPTIONS: dict[str, bool] = {
+    "exposure_contrast": True,
+    "colour_wb": True,
+    "detail_clarity": True,
+    "denoise": False,
+    "dehaze": False,
+    "straighten": False,
+    "perspective": False,
+}
+
+
+def analyze_auto_adjust(
+    master_rgb: np.ndarray,
+    options: dict[str, bool] | None = None,
+) -> PhotoAdjustmentRecipe:
     """
-    Analyzes scene dynamic range, histogram distribution, and color cast
-    to compute balanced, professional Auto Adjust parameters.
+    Analyzes scene dynamic range, histogram distribution, noise floor, haze, color cast,
+    and optional structural geometry to compute balanced, safe Auto Adjust parameters.
+
+    ``options`` toggles individual passes (defaults to ``DEFAULT_AUTO_ADJUST_OPTIONS``):
+      - ``exposure_contrast`` (default True): Key-aware brightness, highlight/shadow recovery, contrast, gentle black-point anchor
+      - ``colour_wb`` (default True): Near-neutral CIE LAB white balance & adaptive skin-safe vibrance
+      - ``detail_clarity`` (default True): Noise-aware luminance sharpening & subtle midtone clarity
+      - ``denoise`` (default False): MAD noise-gated luminance + chroma denoise (0 on clean daylight shots)
+      - ``dehaze`` (default False): Conservative dark-channel haze lift for misty/washed-out scenes
+      - ``straighten`` (default False): Horizon roll leveling (-15..+15 deg, deadzone < 0.4 deg)
+      - ``perspective`` (default False): Confidence-gated converging-vertical correction
     """
     if master_rgb is None or master_rgb.size == 0:
         return PhotoAdjustmentRecipe()
+
+    opts = dict(DEFAULT_AUTO_ADJUST_OPTIONS)
+    if options:
+        for k, v in options.items():
+            if k in opts:
+                opts[k] = bool(v)
 
     # Downsample for fast, consistent analysis
     h, w = master_rgb.shape[:2]
@@ -1724,96 +2142,143 @@ def analyze_auto_adjust(master_rgb: np.ndarray) -> PhotoAdjustmentRecipe:
     else:
         small = master_rgb
 
-    # 1. Luminance & Percentiles
+    # 1. Luminance & Percentiles (Exposure, Contrast, Shadows, Highlights, Blacks)
     gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
     p2 = float(np.percentile(gray, 2))
     p50 = float(np.percentile(gray, 50))
     p98 = float(np.percentile(gray, 98))
-
-    # Key-aware & highlight-safe Auto Exposure
-    target_median = 122.0
-    brightness_shift = 0.0
-    if p50 > 4.0 and abs(p50 - target_median) > 7.0:
-        raw_b = (target_median - p50) / 128.0 * 48.0
-        # Dampen shifts on intentional low-key (night) or high-key (snow/bright) scenes
-        if p50 < 55.0 and p98 < 220.0:
-            raw_b *= 0.65
-        elif p50 > 180.0:
-            raw_b *= 0.65
-        # Protect near-clipping highlights from positive brightness push
-        if raw_b > 0.0 and p98 > 232.0:
-            headroom = max(0.15, (255.0 - p98) / 23.0)
-            raw_b *= headroom
-        brightness_shift = float(np.clip(raw_b, -40.0, 40.0))
-        if abs(brightness_shift) < 2.5:
-            brightness_shift = 0.0
-
-    # Dynamic Range & Contrast
     dyn_range = p98 - p2
-    contrast_shift = 0.0
-    if dyn_range < 195.0:
-        contrast_shift = float(np.clip((195.0 - dyn_range) / 195.0 * 32.0, 4.0, 32.0))
 
-    # Shadow & Highlight recovery
+    brightness_shift = 0.0
+    contrast_shift = 0.0
     shadows_shift = 0.0
     highlights_shift = 0.0
-    if p2 < 20.0 and p50 < 105.0:
-        shadows_shift = float(np.clip((20.0 - p2) * 1.6, 0.0, 32.0))
-    if p98 > 240.0 and p50 > 125.0:
-        highlights_shift = float(np.clip(-(p98 - 238.0) * 1.8, -35.0, 0.0))
+    blacks_shift = 0.0
+    if opts["exposure_contrast"]:
+        target_median = 122.0
+        if p50 > 4.0 and abs(p50 - target_median) > 7.0:
+            raw_b = (target_median - p50) / 128.0 * 48.0
+            # Dampen shifts on intentional low-key (night) or high-key (snow/bright) scenes
+            if p50 < 55.0 and p98 < 220.0:
+                raw_b *= 0.65
+            elif p50 > 180.0:
+                raw_b *= 0.65
+            # Protect near-clipping highlights from positive brightness push
+            if raw_b > 0.0 and p98 > 232.0:
+                headroom = max(0.15, (255.0 - p98) / 23.0)
+                raw_b *= headroom
+            brightness_shift = float(np.clip(raw_b, -40.0, 40.0))
+            if abs(brightness_shift) < 2.5:
+                brightness_shift = 0.0
 
-    # 2. White Balance / Color Cast Analysis
-    # Prefer near-neutral midtones in CIE Lab so large saturated areas (sky, grass, sunsets)
-    # do not skew white balance; fall back to damped Gray-World if neutral area is scarce.
-    lab = cv2.cvtColor(small, cv2.COLOR_RGB2LAB).astype(np.float32)
-    L_ch = lab[:, :, 0]
-    a_off = lab[:, :, 1] - 128.0
-    b_off = lab[:, :, 2] - 128.0
-    chroma = np.hypot(a_off, b_off)
+        if dyn_range < 195.0:
+            contrast_shift = float(np.clip((195.0 - dyn_range) / 195.0 * 30.0, 4.0, 28.0))
 
-    midtone_mask = (L_ch > 28.0) & (L_ch < 228.0)
-    neutral_mask = midtone_mask & (chroma < 24.0)
-    total_mid = int(np.count_nonzero(midtone_mask))
-    neutral_cnt = int(np.count_nonzero(neutral_mask))
+        # Shadow & Highlight recovery
+        if p2 < 20.0 and p50 < 105.0:
+            shadows_shift = float(np.clip((20.0 - p2) * 1.6, 0.0, 32.0))
+        if p98 > 238.0 and p50 > 125.0:
+            highlights_shift = float(np.clip(-(p98 - 236.0) * 1.8, -35.0, 0.0))
 
+        # Gently anchor lifted/washed-out black points without ever crushing real shadows
+        if p2 > 22.0 and dyn_range < 185.0:
+            blacks_shift = float(np.clip(-(p2 - 18.0) * 0.45, -16.0, 0.0))
+
+    # 2. White Balance & Adaptive Skin-Safe Vibrance
     temp_shift = 0.0
     tint_shift = 0.0
-    if neutral_cnt >= max(80, int(total_mid * 0.05)):
-        # Neutral pixels directly reveal ambient illuminant cast in Lab (a = green..magenta, b = blue..yellow)
-        mean_a = float(np.mean(a_off[neutral_mask]))
-        mean_b = float(np.mean(b_off[neutral_mask]))
-        temp_shift = float(np.clip(-mean_b * 2.2, -25.0, 25.0))
-        tint_shift = float(np.clip(-mean_a * 2.0, -20.0, 20.0))
-    elif total_mid > 100:
-        # Damped Gray-World fallback for scenes dominated by saturated colors
-        mean_a = float(np.mean(a_off[midtone_mask]))
-        mean_b = float(np.mean(b_off[midtone_mask]))
-        temp_shift = float(np.clip(-mean_b * 1.1, -18.0, 18.0))
-        tint_shift = float(np.clip(-mean_a * 1.0, -14.0, 14.0))
+    sat_shift = 0.0
+    if opts["colour_wb"]:
+        lab = cv2.cvtColor(small, cv2.COLOR_RGB2LAB).astype(np.float32)
+        L_ch = lab[:, :, 0]
+        a_off = lab[:, :, 1] - 128.0
+        b_off = lab[:, :, 2] - 128.0
+        chroma = np.hypot(a_off, b_off)
 
-    if abs(temp_shift) < 2.5:
-        temp_shift = 0.0
-    if abs(tint_shift) < 2.0:
-        tint_shift = 0.0
+        midtone_mask = (L_ch > 28.0) & (L_ch < 228.0)
+        neutral_mask = midtone_mask & (chroma < 24.0)
+        total_mid = int(np.count_nonzero(midtone_mask))
+        neutral_cnt = int(np.count_nonzero(neutral_mask))
 
-    # Adaptive saturation: gently lift flat/muted photos without oversaturating already vivid scenes
-    hsv_s = cv2.cvtColor(small, cv2.COLOR_RGB2HSV)[:, :, 1]
-    mean_sat = float(np.mean(hsv_s[midtone_mask])) if total_mid > 100 else float(np.mean(hsv_s))
-    if mean_sat < 105.0:
-        sat_shift = float(np.clip((105.0 - mean_sat) / 105.0 * 14.0, 2.0, 12.0))
-    else:
-        sat_shift = 0.0
+        if neutral_cnt >= max(80, int(total_mid * 0.05)):
+            mean_a = float(np.mean(a_off[neutral_mask]))
+            mean_b = float(np.mean(b_off[neutral_mask]))
+            temp_shift = float(np.clip(-mean_b * 2.2, -25.0, 25.0))
+            tint_shift = float(np.clip(-mean_a * 2.0, -20.0, 20.0))
+        elif total_mid > 100:
+            mean_a = float(np.mean(a_off[midtone_mask]))
+            mean_b = float(np.mean(b_off[midtone_mask]))
+            temp_shift = float(np.clip(-mean_b * 1.1, -18.0, 18.0))
+            tint_shift = float(np.clip(-mean_a * 1.0, -14.0, 14.0))
+
+        if abs(temp_shift) < 2.5:
+            temp_shift = 0.0
+        if abs(tint_shift) < 2.0:
+            tint_shift = 0.0
+
+        hsv_s = cv2.cvtColor(small, cv2.COLOR_RGB2HSV)[:, :, 1]
+        mean_sat = float(np.mean(hsv_s[midtone_mask])) if total_mid > 100 else float(np.mean(hsv_s))
+        if mean_sat < 105.0:
+            sat_shift = float(np.clip((105.0 - mean_sat) / 105.0 * 14.0, 2.0, 12.0))
+
+    # 3. Noise profile (shared by noise-aware detail & optional low-light denoise)
+    noise_est = 0.0
+    if opts["detail_clarity"] or opts["denoise"]:
+        noise_est = analyze_noise_profile(small)
+
+    # 4. Noise-aware Detail & Crispness (avoid amplifying high-ISO grain on night shots)
+    clarity_val = 0.0
+    sharpen_val = 0.0
+    if opts["detail_clarity"]:
+        noise_atten = float(np.clip(1.0 - max(0.0, noise_est - 18.0) / 55.0, 0.25, 1.0))
+        sharpen_val = round(15.0 * noise_atten, 1)
+        base_clarity = 10.0 if dyn_range < 185.0 else 6.0
+        clarity_val = round(base_clarity * (noise_atten if noise_est < 45.0 else 0.0), 1)
+
+    # 5. Optional Low-Light Denoise (MAD-gated so clean daylight photos stay 0)
+    denoise_val = 0.0
+    denoise_chroma_val = 0.0
+    if opts["denoise"] and noise_est >= 14.0:
+        denoise_val = round(float(np.clip((noise_est - 12.0) * 0.65, 6.0, 42.0)), 1)
+        denoise_chroma_val = round(float(np.clip(noise_est * 0.85, 10.0, 55.0)), 1)
+
+    # 6. Optional Conservative Dehaze (only when dark-channel minimum is visibly lifted/misty)
+    dehaze_val = 0.0
+    if opts["dehaze"]:
+        dark_ch = np.min(small, axis=2)
+        dark_p10 = float(np.percentile(dark_ch, 10))
+        if dark_p10 > 38.0 and dyn_range < 175.0:
+            dehaze_val = round(float(np.clip((dark_p10 - 34.0) * 0.45, 6.0, 22.0)), 1)
+
+    # 7. Optional Horizon Straighten & Vertical Perspective
+    straighten_val = 0.0
+    persp_v_val = 0.0
+    if opts["perspective"]:
+        det_deg, det_pv, _ = estimate_auto_perspective(master_rgb, mode="vertical")
+        persp_v_val = float(det_pv)
+        if opts["straighten"] and abs(det_deg) >= 0.4:
+            straighten_val = float(det_deg)
+    elif opts["straighten"]:
+        det_deg = float(detect_auto_straighten_angle(master_rgb))
+        if abs(det_deg) >= 0.4:
+            straighten_val = max(-15.0, min(15.0, round(det_deg, 1)))
 
     return PhotoAdjustmentRecipe(
         brightness=round(brightness_shift, 1),
         contrast=round(contrast_shift, 1),
         shadows=round(shadows_shift, 1),
         highlights=round(highlights_shift, 1),
-        clarity=10.0,     # Subtle modern clarity
+        blacks=round(blacks_shift, 1),
+        clarity=clarity_val,
         temperature=round(temp_shift, 1),
         tint=round(tint_shift, 1),
         saturation=round(sat_shift, 1),
-        sharpen=15.0,     # Clean natural sharpness
+        dehaze=dehaze_val,
+        sharpen=sharpen_val,
+        denoise=denoise_val,
+        denoise_chroma=denoise_chroma_val,
+        straighten_deg=straighten_val,
+        perspective_v=persp_v_val,
     )
 
 

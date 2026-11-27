@@ -1053,7 +1053,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             pass
         self.pixmap_cache = LruCache(2500)
 
-        self.retention_days: int = 30
+        self.retention_days: int = 180
         self.find_people_enabled: bool = True
         self.current_theme: Literal["wlpg_aero", "modern", "dark"] = "wlpg_aero"
         self._arrange_by: ArrangeMode = "date"
@@ -1240,6 +1240,12 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.media_viewer.main_window = self
         self.media_viewer.catalog_repo = self.catalog_repo
         self.media_viewer.repo = self.catalog_repo
+        self.media_viewer._use_ribbon_markup_controls = True
+        if hasattr(self.media_viewer, "markup_toolbar"):
+            self.media_viewer.markup_toolbar.obscure_mode = "brush"
+        self.media_viewer.markup_mode_changed.connect(self._on_viewer_markup_mode_changed)
+        self.media_viewer.markup_saved.connect(self.ribbon.flash_markup_saved)
+        self.media_viewer.undo_stack.canUndoChanged.connect(self._on_viewer_can_undo_changed)
         self.central_stack.addWidget(self.media_viewer)
 
         self._map_view: WorldMapView | None = None
@@ -1352,7 +1358,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.nav_show_cameras: bool = False
         self.nav_show_subjects: bool = False
         self.auto_group_bursts: bool = False
-        self.auto_group_raw_jpeg: bool = False
+        self.auto_group_raw_jpeg: bool = True
         self._badge_show_flags: bool = True
         self._badge_show_favourites: bool = True
         self._badge_show_groups: bool = True
@@ -1414,6 +1420,8 @@ class PhotoGalleryMainWindow(QMainWindow):
         QTimer.singleShot(400, self._check_stale_scan_crash_trace)
         QTimer.singleShot(1000, self._start_async_avatar_backfill)
         QTimer.singleShot(1200, self.folder_watcher.start_startup_reconciliation)
+        QTimer.singleShot(5200, self._schedule_startup_integrity_check)
+        QTimer.singleShot(5400, self._schedule_startup_update_check)
 
         from src.utils.scan_logger import mark_startup_stage
         mark_startup_stage("main-window-ready")
@@ -1549,6 +1557,20 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.lbl_sync_status = QLabel("", sb)
         self.lbl_sync_status.setStyleSheet("color: #0066CC; padding-left: 4px;")
         sb.addWidget(self.lbl_sync_status, 1)
+
+        # Quiet non-modal update pill shown only when a newer GitHub Release is detected
+        self._pending_update_info: dict[str, Any] | None = None
+        self.btn_update_pill = QPushButton("", sb)
+        self.btn_update_pill.setCursor(Qt.PointingHandCursor)
+        self.btn_update_pill.setToolTip("Click to view release notes and install update")
+        self.btn_update_pill.setStyleSheet(
+            "QPushButton { background: #E0F2FE; color: #0369A1; border: 1px solid #7DD3FC; "
+            "border-radius: 9px; padding: 1px 10px; font-size: 8.5pt; font-weight: 600; }"
+            "QPushButton:hover { background: #BAE6FD; border-color: #0284C7; }"
+        )
+        self.btn_update_pill.setVisible(False)
+        self.btn_update_pill.clicked.connect(self._on_update_pill_clicked)
+        sb.addWidget(self.btn_update_pill)
 
         # Override statusBar().showMessage and clearMessage so temporary notifications
         # display in lbl_sync_status without ever hiding item counts or worker monitor controls
@@ -1791,6 +1813,108 @@ class PhotoGalleryMainWindow(QMainWindow):
         )
         self.ribbon.find_duplicates_requested.connect(self.open_duplicate_finder)
 
+        # Contextual Markup Ribbon <-> SingleMediaViewer 2-Way Connections
+        self._syncing_markup_ribbon: bool = False
+        mk_tb = self.media_viewer.markup_toolbar
+        self.ribbon.markup_tool_changed.connect(lambda tid: self._run_markup_ribbon_action(lambda: mk_tb.set_tool(tid)))
+        self.ribbon.markup_shape_changed.connect(
+            lambda sid: self._run_markup_ribbon_action(lambda: (mk_tb.set_tool(sid)))
+        )
+        self.ribbon.markup_stroke_width_changed.connect(lambda w: self._run_markup_ribbon_action(lambda: mk_tb.set_stroke_width(w)))
+        self.ribbon.markup_primary_color_changed.connect(lambda c: self._run_markup_ribbon_action(lambda: mk_tb.set_primary_color(c)))
+        self.ribbon.markup_secondary_color_changed.connect(lambda c: self._run_markup_ribbon_action(lambda: mk_tb.set_secondary_color(c)))
+        self.ribbon.markup_colors_swapped.connect(lambda _p, _s: self._run_markup_ribbon_action(mk_tb.swap_colors))
+        self.ribbon.markup_font_family_changed.connect(lambda f: self._run_markup_ribbon_action(lambda: mk_tb.set_font_family(f)))
+        self.ribbon.markup_text_format_changed.connect(
+            lambda b, it: self._run_markup_ribbon_action(lambda: (mk_tb.set_text_bold(b), mk_tb.set_text_italic(it)))
+        )
+        self.ribbon.markup_text_style_changed.connect(lambda s: self._run_markup_ribbon_action(lambda: mk_tb.set_text_style(s)))
+        self.ribbon.markup_text_align_changed.connect(lambda a: self._run_markup_ribbon_action(lambda: mk_tb.set_text_align(a)))
+        self.ribbon.markup_opacity_changed.connect(lambda o: self._run_markup_ribbon_action(lambda: mk_tb.set_opacity(o)))
+        self.ribbon.markup_bg_opacity_changed.connect(lambda bo: self._run_markup_ribbon_action(lambda: mk_tb.set_bg_opacity(bo)))
+        self.ribbon.markup_shape_filled_changed.connect(lambda fl: self._run_markup_ribbon_action(lambda: mk_tb.set_shape_filled(fl)))
+        self.ribbon.markup_line_style_changed.connect(lambda ls: self._run_markup_ribbon_action(lambda: mk_tb.set_line_style(ls)))
+        self.ribbon.markup_dash_style_changed.connect(lambda ds: self._run_markup_ribbon_action(lambda: mk_tb.set_dash_style(ds)))
+        self.ribbon.markup_sticker_requested.connect(
+            lambda sid: self._run_markup_ribbon_action(lambda: (mk_tb.set_active_sticker(sid), mk_tb.set_tool("sticker")))
+        )
+        self.ribbon.markup_obscure_mode_changed.connect(lambda om: self._run_markup_ribbon_action(lambda: mk_tb.set_obscure_mode(om)))
+        self.ribbon.markup_obscure_strength_changed.connect(lambda os_: self._run_markup_ribbon_action(lambda: mk_tb.set_obscure_strength(os_)))
+        self.ribbon.markup_rotation_reset_requested.connect(lambda: self.media_viewer.set_active_markup_rotation(0.0))
+        self.ribbon.markup_rotation_preview_changed.connect(self.media_viewer.preview_active_markup_rotation)
+        self.ribbon.markup_rotation_changed.connect(self.media_viewer.set_active_markup_rotation)
+        self.media_viewer.markup_rotation_changed.connect(
+            lambda deg: self.ribbon.sync_markup_state(rotation_deg=deg)
+        )
+        self.ribbon.markup_pill_bg_toggled.connect(lambda en: self._run_markup_ribbon_action(lambda: mk_tb.set_pill_bg_enabled(en)))
+        self.ribbon.markup_magnifier_zoom_changed.connect(lambda z: self._run_markup_ribbon_action(lambda: mk_tb.set_magnifier_zoom(z)))
+        self.ribbon.markup_stamp_requested.connect(self.media_viewer.insert_markup_stamp)
+        self.ribbon.markup_stamp_kind_selected.connect(
+            lambda kind: self.ribbon.set_markup_stamp_preview_text(
+                self.media_viewer.resolve_markup_stamp_text(kind)
+            )
+        )
+        self.ribbon.markup_delete_selected_requested.connect(self.media_viewer.delete_active_markup_element)
+        self.ribbon.markup_duplicate_selected_requested.connect(self.media_viewer.duplicate_active_markup_element)
+        self.ribbon.markup_copy_selected_requested.connect(self.media_viewer.copy_active_markup_element)
+        self.ribbon.markup_paste_requested.connect(self.media_viewer.paste_markup_element)
+        self.ribbon.markup_edit_text_requested.connect(self.media_viewer.edit_active_markup_text)
+        self.media_viewer.markup_selection_changed.connect(self.ribbon.set_markup_selection_state)
+        self.ribbon.markup_undo_requested.connect(self.media_viewer._undo_markup)
+        self.ribbon.markup_clear_requested.connect(self.media_viewer._clear_markup_overlays)
+        self.ribbon.markup_save_requested.connect(self.media_viewer._on_markup_save_requested)
+        self.ribbon.markup_save_copy_requested.connect(lambda: self.dispatch_ribbon_action("save_as_copy"))
+        self.ribbon.markup_close_requested.connect(self.media_viewer._commit_markup)
+
+        # Contextual Crop & Perspective Ribbon bindings
+        self.media_viewer._use_ribbon_crop_controls = True
+        self.ribbon.crop_ratio_text_changed.connect(self.media_viewer.set_crop_ratio_text)
+        self.ribbon.crop_delete_ratio_requested.connect(self.media_viewer._on_crop_delete_ratio_clicked)
+        self.ribbon.crop_custom_ratio_changed.connect(self.media_viewer.set_crop_custom_ratio)
+        self.ribbon.crop_swap_ratio_requested.connect(self.media_viewer._on_crop_swap_clicked)
+        self.ribbon.crop_flip_h_toggled.connect(self.media_viewer.set_crop_flip_h)
+        self.ribbon.crop_flip_v_toggled.connect(self.media_viewer.set_crop_flip_v)
+        self.ribbon.crop_grid_mode_changed.connect(self.media_viewer.set_crop_grid_mode)
+        self.ribbon.crop_straighten_changed.connect(self.media_viewer.set_crop_straighten_deg)
+        self.ribbon.crop_straighten_drag_started.connect(lambda: self.media_viewer.set_crop_perspective_dragging(True))
+        self.ribbon.crop_straighten_drag_ended.connect(lambda: self.media_viewer.set_crop_perspective_dragging(False))
+        self.ribbon.crop_straighten_line_toggled.connect(self.media_viewer._on_crop_straighten_line_toggled)
+        self.ribbon.crop_perspective_v_changed.connect(self.media_viewer.set_crop_perspective_v)
+        self.ribbon.crop_perspective_h_changed.connect(self.media_viewer.set_crop_perspective_h)
+        self.ribbon.crop_perspective_drag_started.connect(lambda: self.media_viewer.set_crop_perspective_dragging(True))
+        self.ribbon.crop_perspective_drag_ended.connect(lambda: self.media_viewer.set_crop_perspective_dragging(False))
+        self.ribbon.crop_auto_perspective_requested.connect(self.media_viewer.run_crop_auto_perspective)
+        self.ribbon.crop_reset_geometry_requested.connect(self.media_viewer.reset_crop_geometry)
+        self.ribbon.crop_ai_expand_toggled.connect(self._on_ribbon_crop_ai_expand_toggled)
+        self.ribbon.crop_apply_requested.connect(self.media_viewer.apply_crop)
+        self.ribbon.crop_cancel_requested.connect(lambda: self.media_viewer.set_crop_mode(False))
+        self.media_viewer.crop_mode_changed.connect(self._on_viewer_crop_mode_changed)
+        self.media_viewer.crop_ui_state_changed.connect(self._sync_ribbon_crop_from_viewer)
+        if hasattr(self.ribbon, "get_auto_adjust_options"):
+            self.media_viewer.set_auto_adjust_options(self.ribbon.get_auto_adjust_options())
+            self.ribbon.auto_adjust_options_changed.connect(self.media_viewer.set_auto_adjust_options)
+
+        for sig in (
+            mk_tb.tool_changed,
+            mk_tb.stroke_width_changed,
+            mk_tb.color_changed,
+            mk_tb.secondary_color_changed,
+            mk_tb.colors_swapped,
+            mk_tb.font_family_changed,
+            mk_tb.text_format_changed,
+            mk_tb.text_style_changed,
+            mk_tb.text_align_changed,
+            mk_tb.opacity_changed,
+            mk_tb.bg_opacity_changed,
+            mk_tb.shape_filled_changed,
+            mk_tb.line_style_changed,
+            mk_tb.sticker_changed,
+            mk_tb.obscure_mode_changed,
+            mk_tb.obscure_strength_changed,
+            mk_tb.magnifier_zoom_changed,
+        ):
+            sig.connect(lambda *_args: self._sync_ribbon_markup_from_viewer())
+
         # Central Search Scope Bar Signals
         self.scope_bar.search_text_changed.connect(self._on_search_text_changed)
         self.scope_bar.search_all_requested.connect(self._on_search_all_requested)
@@ -1967,6 +2091,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             lambda m: (
                 self.media_viewer.set_suppress_face_overlays(m in ("fine_tune", "depth_light")),
                 self.media_viewer.set_depth_light_active(m == "depth_light"),
+                self.ribbon.set_edit_pane_mode(m),
             )
         )
         self.right_tag_dock.pane_interacted.connect(self._on_right_pane_interacted)
@@ -4224,8 +4349,31 @@ class PhotoGalleryMainWindow(QMainWindow):
             members = self.catalog_repo.get_stack_member_ids(int(ids[0]))
             if len(members) > 1:
                 ids = members
+
+        photo_ids: list[int] = []
+        video_ids: list[int] = []
+        for mid in ids:
+            try:
+                det = self.catalog_repo.get_media_detail(int(mid))
+                if det and bool(det.get("is_video")):
+                    video_ids.append(int(mid))
+                else:
+                    photo_ids.append(int(mid))
+            except Exception:
+                photo_ids.append(int(mid))
+
+        if not photo_ids:
+            QMessageBox.information(
+                self,
+                "Compare Mode",
+                "Compare Mode is only available for photos and cannot compare video files.\n\nPlease select one or more photos.",
+            )
+            return
+
         all_grid_ids = [
-            int(r.id) for r in getattr(self.catalog_model, "_records", []) if getattr(r, "id", None) is not None
+            int(r.id)
+            for r in getattr(self.catalog_model, "_records", [])
+            if getattr(r, "id", None) is not None and not bool(getattr(r, "is_video", 0))
         ]
         self.left_nav_dock.setVisible(False)
         self.right_tag_dock.setVisible(False)
@@ -4234,9 +4382,14 @@ class PhotoGalleryMainWindow(QMainWindow):
         is_dark_theme = (getattr(self, "current_theme", "wlpg_aero") == "dark")
         self.compare_view.bind_repositories(self.catalog_repo, self.thumb_repo)
         self.compare_view.set_dark_mode(is_dark_theme)
-        self.compare_view.open_media_ids(ids, all_grid_ids=all_grid_ids, repo=self.catalog_repo, thumb_repo=self.thumb_repo)
+        self.compare_view.open_media_ids(photo_ids, all_grid_ids=all_grid_ids, repo=self.catalog_repo, thumb_repo=self.thumb_repo)
         self.central_stack.setCurrentWidget(self.compare_view)
         self.ribbon.set_active_mode("compare")
+        if video_ids:
+            self.show_status_message(
+                f"Skipped {len(video_ids)} video file(s) — Compare Mode compares photos only.",
+                4500,
+            )
         if hasattr(self.ribbon, "btn_cmp_lock_sync"):
             self.ribbon.btn_cmp_lock_sync.setChecked(self.compare_view.lock_sync)
         if hasattr(self.ribbon, "btn_cmp_peaking"):
@@ -5506,7 +5659,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         settings.setValue("smart_show_favourites", getattr(self.left_nav_dock, "_show_smart_favourites", True))
         settings.setValue("smart_show_picked", getattr(self.left_nav_dock, "_show_smart_picked", True))
         settings.setValue("smart_show_rejected", getattr(self.left_nav_dock, "_show_smart_rejected", True))
-        settings.setValue("smart_show_unflagged", getattr(self.left_nav_dock, "_show_smart_unflagged", True))
+        settings.setValue("smart_show_unflagged", getattr(self.left_nav_dock, "_show_smart_unflagged", False))
 
     def select_all_rejected(self) -> list[int]:
         rejected = self.catalog_repo.get_rejected_media_ids()
@@ -5663,6 +5816,20 @@ class PhotoGalleryMainWindow(QMainWindow):
         flag = -1 if int(detail.get("is_rejected") or 0) else int(detail.get("flag") or 0)
         is_fav = bool(detail.get("is_favourite") or 0)
 
+        is_vid = bool(detail.get("is_video") or 0)
+        raw_dur = detail.get("duration")
+        if raw_dur is None:
+            raw_dur = detail.get("duration_sec")
+        if raw_dur is None and detail.get("duration_ms"):
+            raw_dur = float(detail["duration_ms"]) / 1000.0
+        duration_sec = float(raw_dur) if raw_dur is not None and float(raw_dur) > 0 else None
+        fallback_pixmap = self.pixmap_cache.get(int(media_id)) if hasattr(self, "pixmap_cache") else None
+        if (fallback_pixmap is None or fallback_pixmap.isNull()) and hasattr(self, "thumb_repo") and self.thumb_repo is not None:
+            try:
+                fallback_pixmap = self.thumb_repo.load_thumbnail_pixmap(int(media_id))
+            except Exception:
+                fallback_pixmap = None
+
         dlg = getattr(self, "_quick_preview_dialog", None)
         if dlg is None:
             from src.ui.quick_preview_dialog import QuickPreviewDialog
@@ -5681,7 +5848,10 @@ class PhotoGalleryMainWindow(QMainWindow):
             filename,
             rating=rating,
             flag=flag,
+            fallback_pixmap=fallback_pixmap,
             is_favourite=is_fav,
+            is_video=is_vid,
+            duration_sec=float(duration_sec) if duration_sec is not None else None,
         )
         if not dlg.isVisible():
             dlg.show()
@@ -5778,10 +5948,16 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.auto_group_bursts = bool(enabled)
         settings = QSettings("PhotoGallery64", "PhotoGallery64")
         settings.setValue("auto_group_bursts", self.auto_group_bursts)
+        settings.setValue("photo_stacks_last_bursts", self.auto_group_bursts)
+        settings.setValue("photo_stacks_last_raw_jpeg", bool(self.auto_group_raw_jpeg))
+        if not self.auto_group_bursts and not self.auto_group_raw_jpeg and getattr(self, "_stacks_only", False):
+            self._stacks_only = False
+            self._update_scope_bar_visibility()
         if hasattr(self, "ribbon") and hasattr(self.ribbon, "set_photo_grouping_state"):
             self.ribbon.set_photo_grouping_state(
                 auto_bursts=self.auto_group_bursts,
                 auto_raw_jpeg=self.auto_group_raw_jpeg,
+                stacks_only=getattr(self, "_stacks_only", False),
             )
         if self.auto_group_bursts:
             count = self.catalog_repo.auto_stack_bursts(
@@ -5802,10 +5978,16 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.auto_group_raw_jpeg = bool(enabled)
         settings = QSettings("PhotoGallery64", "PhotoGallery64")
         settings.setValue("auto_group_raw_jpeg", self.auto_group_raw_jpeg)
+        settings.setValue("photo_stacks_last_bursts", bool(self.auto_group_bursts))
+        settings.setValue("photo_stacks_last_raw_jpeg", self.auto_group_raw_jpeg)
+        if not self.auto_group_bursts and not self.auto_group_raw_jpeg and getattr(self, "_stacks_only", False):
+            self._stacks_only = False
+            self._update_scope_bar_visibility()
         if hasattr(self, "ribbon") and hasattr(self.ribbon, "set_photo_grouping_state"):
             self.ribbon.set_photo_grouping_state(
                 auto_bursts=self.auto_group_bursts,
                 auto_raw_jpeg=self.auto_group_raw_jpeg,
+                stacks_only=getattr(self, "_stacks_only", False),
             )
         if self.auto_group_raw_jpeg:
             count = self.catalog_repo.auto_stack_raw_jpeg_pairs(folder_ids=None)
@@ -5817,6 +5999,83 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._expanded_stack_ids.clear()
             self.rebuild_and_run_query()
             self.show_status_message(f"✓ Auto-group RAW + JPEG disabled ({removed} photo(s) ungrouped)", 3500)
+
+    def toggle_photo_stacks_master(self) -> None:
+        """
+        Master toggle for the Home -> Photo stacks button:
+        - When currently ON (bursts or RAW+JPEG enabled): remembers which options were on,
+          turns both off, clears View-stacks-only filter if active, and ungroups auto-stacks.
+        - When currently OFF: restores whichever options were last enabled (or turns both ON
+          if both were previously turned off), collapses all stacks, and refreshes once.
+        """
+        settings = QSettings("PhotoGallery64", "PhotoGallery64")
+        currently_on = bool(self.auto_group_bursts or self.auto_group_raw_jpeg)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            if currently_on:
+                settings.setValue("photo_stacks_last_bursts", bool(self.auto_group_bursts))
+                settings.setValue("photo_stacks_last_raw_jpeg", bool(self.auto_group_raw_jpeg))
+                self.auto_group_bursts = False
+                self.auto_group_raw_jpeg = False
+                settings.setValue("auto_group_bursts", False)
+                settings.setValue("auto_group_raw_jpeg", False)
+
+                removed = int(self.catalog_repo.unstack_by_source("burst") or 0)
+                removed += int(self.catalog_repo.unstack_by_source("raw_jpeg") or 0)
+                self._expanded_stack_ids.clear()
+                if getattr(self, "_stacks_only", False):
+                    self._stacks_only = False
+                    self._update_scope_bar_visibility()
+
+                if hasattr(self, "ribbon") and hasattr(self.ribbon, "set_photo_grouping_state"):
+                    self.ribbon.set_photo_grouping_state(
+                        auto_bursts=False,
+                        auto_raw_jpeg=False,
+                        stacks_only=getattr(self, "_stacks_only", False),
+                    )
+                self.rebuild_and_run_query()
+                msg = (
+                    f"✓ Photo stacks disabled ({removed} photo(s) ungrouped)"
+                    if removed > 0
+                    else "✓ Photo stacks disabled"
+                )
+                self.show_status_message(msg, 3200)
+            else:
+                want_bursts = settings.value("photo_stacks_last_bursts", True, type=bool)
+                want_raw = settings.value("photo_stacks_last_raw_jpeg", True, type=bool)
+                if not want_bursts and not want_raw:
+                    want_bursts = True
+                    want_raw = True
+
+                self.auto_group_bursts = bool(want_bursts)
+                self.auto_group_raw_jpeg = bool(want_raw)
+                settings.setValue("auto_group_bursts", self.auto_group_bursts)
+                settings.setValue("auto_group_raw_jpeg", self.auto_group_raw_jpeg)
+
+                total_stacks = 0
+                if self.auto_group_raw_jpeg:
+                    total_stacks += int(self.catalog_repo.auto_stack_raw_jpeg_pairs(folder_ids=None) or 0)
+                if self.auto_group_bursts:
+                    total_stacks += int(
+                        self.catalog_repo.auto_stack_bursts(
+                            folder_ids=None,
+                            max_gap_sec=2.0,
+                            thumb_repo=self.thumb_repo,
+                        )
+                        or 0
+                    )
+
+                self._expanded_stack_ids.clear()
+                if hasattr(self, "ribbon") and hasattr(self.ribbon, "set_photo_grouping_state"):
+                    self.ribbon.set_photo_grouping_state(
+                        auto_bursts=self.auto_group_bursts,
+                        auto_raw_jpeg=self.auto_group_raw_jpeg,
+                        stacks_only=getattr(self, "_stacks_only", False),
+                    )
+                self.rebuild_and_run_query()
+                self.show_status_message(f"✓ Photo stacks enabled ({total_stacks} stack(s))", 3200)
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def set_stacks_only_filter(self, enabled: bool) -> None:
         """Filter the current gallery view to show only stacked photos (bursts & RAW+JPEG stacks)."""
@@ -7477,11 +7736,14 @@ class PhotoGalleryMainWindow(QMainWindow):
             if not bool(detail["is_video"]):
                 self.media_viewer.set_zoom_mode("fit")
             self.media_viewer.set_dark_mode(getattr(self, "current_theme", "") == "dark")
+            is_vid_item = bool(detail["is_video"])
             self.ribbon.set_active_mode("viewer")
+            self.ribbon.set_video_viewer_mode(is_vid_item)
             self.ribbon.tab_widget.setCurrentWidget(self.ribbon.tab_edit)
             self.right_tag_dock.show()
             self.right_tag_dock.setVisible(True)
             self.right_tag_dock.set_view_mode("viewer")
+            self.right_tag_dock.set_video_mode(is_vid_item)
             self._update_undo_redo_enabled()
             if hasattr(self, "scope_bar"):
                 self.scope_bar.hide()
@@ -7631,6 +7893,10 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.media_viewer.set_retouch_mode(False)
         self.media_viewer.set_red_eye_mode(False)
         self.media_viewer.set_crop_mode(False)
+        if hasattr(self.ribbon, "set_video_viewer_mode"):
+            self.ribbon.set_video_viewer_mode(False)
+        if hasattr(self, "right_tag_dock") and hasattr(self.right_tag_dock, "set_video_mode"):
+            self.right_tag_dock.set_video_mode(False)
         if hasattr(self, "bottom_dock") and self.bottom_dock is not None and getattr(self, "_active_create_workspace", None) is None:
             self.bottom_dock.hide()
         if hasattr(self, "right_tag_dock") and hasattr(self.right_tag_dock, "clear_mask_editing_session"):
@@ -8340,8 +8606,10 @@ class PhotoGalleryMainWindow(QMainWindow):
     def _batch_auto_adjust(self, media_ids: list[int]) -> None:
         from src.imaging.opencv_engine import analyze_auto_adjust, render_adjusted_image
 
+        opts = self.ribbon.get_auto_adjust_options() if hasattr(self, "ribbon") and hasattr(self.ribbon, "get_auto_adjust_options") else None
+
         def _adjust(rgb: np.ndarray) -> np.ndarray:
-            rec = analyze_auto_adjust(rgb)
+            rec = analyze_auto_adjust(rgb, options=opts)
             return render_adjusted_image(rgb, rec)
 
         self._batch_apply_image_adjustment(media_ids, "Auto Adjust", _adjust)
@@ -8654,11 +8922,14 @@ class PhotoGalleryMainWindow(QMainWindow):
         self._copy_or_cut_selection(is_cut=True)
 
     def copy_selection_to_clipboard(self) -> None:
-        """Copies selected text if a text widget has focus, otherwise copies selected media files."""
+        """Copies selected text if a text widget has focus, selected markup item in Markup mode, or media files."""
         focus_w = QApplication.focusWidget()
         if isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit)):
             focus_w.copy()
             return
+        if getattr(self.media_viewer, "is_markup_mode", False):
+            if self.media_viewer.copy_active_markup_element():
+                return
         self._copy_or_cut_selection(is_cut=False)
 
     def _copy_or_cut_selection(self, is_cut: bool = False) -> None:
@@ -8711,7 +8982,14 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.show_status_message(f"✓ {action_name} {len(urls)} {item_w} to clipboard", 3500)
 
     def paste_from_clipboard(self) -> None:
-        """Pastes files from clipboard into the currently active or selected folder."""
+        """Pastes markup item in Markup mode, or files from clipboard into the currently active folder."""
+        focus_w = QApplication.focusWidget()
+        if isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            focus_w.paste()
+            return
+        if getattr(self.media_viewer, "is_markup_mode", False):
+            if self.media_viewer.paste_markup_element() is not None:
+                return
         clipboard = QApplication.clipboard()
         mime = clipboard.mimeData()
         if not mime or not mime.hasUrls():
@@ -9404,19 +9682,20 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.resizeDocks([self.right_tag_dock], [target_w], Qt.Horizontal)
             except Exception:
                 pass
-            if mode == "fine_tune":
-                self.right_tag_dock.histogram_widget.set_histogram_data(
-                    self.media_viewer.current_pil_image
-                )
-            elif mode == "depth_light":
-                proxy = getattr(self.media_viewer, "display_proxy_rgb", None)
-                mid = getattr(self.media_viewer, "current_media_id", None)
-                if proxy is not None and mid is not None:
-                    from src.imaging.creative_effects import get_depth_and_matte_engine
-                    QTimer.singleShot(
-                        0,
-                        lambda: get_depth_and_matte_engine().get_depth_and_matte(proxy, media_id=mid),
+            if not getattr(self.right_tag_dock, "_is_video_mode", False):
+                if mode == "fine_tune":
+                    self.right_tag_dock.histogram_widget.set_histogram_data(
+                        self.media_viewer.current_pil_image
                     )
+                elif mode == "depth_light":
+                    proxy = getattr(self.media_viewer, "display_proxy_rgb", None)
+                    mid = getattr(self.media_viewer, "current_media_id", None)
+                    if proxy is not None and mid is not None:
+                        from src.imaging.creative_effects import get_depth_and_matte_engine
+                        QTimer.singleShot(
+                            0,
+                            lambda: get_depth_and_matte_engine().get_depth_and_matte(proxy, media_id=mid),
+                        )
         is_open = not self.right_tag_dock.isHidden()
         self._sync_tag_pane_buttons(is_open)
         if hasattr(self.ribbon, "btn_edit_tag_caption"):
@@ -9429,6 +9708,9 @@ class PhotoGalleryMainWindow(QMainWindow):
     def toggle_immersive_viewer_mode(self) -> None:
         """Toggles Immersive Viewer Mode (F4): hides/restores all side panes, status bar, QAT and collapses ribbon."""
         if not getattr(self, "_is_immersive_mode", False):
+            # Immersive mode (F4) has no markup controls; exit Markup Mode first if active
+            if hasattr(self, "media_viewer") and getattr(self.media_viewer, "is_markup_mode", False):
+                self.media_viewer.set_markup_mode(False)
             # Enter immersive mode: save current visibility states
             self._immersive_saved_state = {
                 "left_nav": self.left_nav_dock.isVisible() if hasattr(self, "left_nav_dock") else False,
@@ -9456,14 +9738,15 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.media_viewer.fix_pane.hide()
             if self.statusBar():
                 self.statusBar().hide()
-            if hasattr(self.ribbon, "qat_container"):
-                self.ribbon.qat_container.hide()
-            if hasattr(self, "scope_bar"):
-                self.scope_bar.hide()
-            if hasattr(self.ribbon, "set_ribbon_collapsed"):
-                self.ribbon.set_ribbon_collapsed(True)
-            if hasattr(self.ribbon, "btn_exit_immersive"):
-                self.ribbon.btn_exit_immersive.show()
+            if hasattr(self.ribbon, "set_immersive_mode"):
+                self.ribbon.set_immersive_mode(True)
+            else:
+                if hasattr(self.ribbon, "qat_container"):
+                    self.ribbon.qat_container.hide()
+                if hasattr(self.ribbon, "set_ribbon_collapsed"):
+                    self.ribbon.set_ribbon_collapsed(True)
+                if hasattr(self.ribbon, "btn_exit_immersive"):
+                    self.ribbon.btn_exit_immersive.show()
             self._is_immersive_mode = True
         else:
             # Restore previous visibility states
@@ -9482,14 +9765,21 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.media_viewer.fix_pane.show()
             if saved.get("status_bar", True) and self.statusBar():
                 self.statusBar().show()
-            if saved.get("qat", True) and hasattr(self.ribbon, "qat_container"):
-                self.ribbon.qat_container.show()
+            if hasattr(self.ribbon, "set_immersive_mode"):
+                self.ribbon.set_immersive_mode(False)
+                if not saved.get("qat", True) and hasattr(self.ribbon, "qat_container"):
+                    self.ribbon.qat_container.hide()
+                if hasattr(self.ribbon, "set_ribbon_collapsed"):
+                    self.ribbon.set_ribbon_collapsed(bool(saved.get("ribbon_collapsed", False)))
+            else:
+                if saved.get("qat", True) and hasattr(self.ribbon, "qat_container"):
+                    self.ribbon.qat_container.show()
+                if not saved.get("ribbon_collapsed", False) and hasattr(self.ribbon, "set_ribbon_collapsed"):
+                    self.ribbon.set_ribbon_collapsed(False)
+                if hasattr(self.ribbon, "btn_exit_immersive"):
+                    self.ribbon.btn_exit_immersive.hide()
             if saved.get("scope_bar") and hasattr(self, "scope_bar"):
                 self.scope_bar.show()
-            if not saved.get("ribbon_collapsed", False) and hasattr(self.ribbon, "set_ribbon_collapsed"):
-                self.ribbon.set_ribbon_collapsed(False)
-            if hasattr(self.ribbon, "btn_exit_immersive"):
-                self.ribbon.btn_exit_immersive.hide()
             self._is_immersive_mode = False
 
     def toggle_filmstrip_dock(self) -> None:
@@ -9497,6 +9787,33 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.dispatch_ribbon_action("toggle_filmstrip_pane")
 
     def dispatch_ribbon_action(self, action_id: str) -> None:
+        if (
+            self.central_stack.currentWidget() == self.media_viewer
+            and getattr(self.media_viewer, "current_is_video", False)
+            and (
+                action_id in (
+                    "auto_adjust",
+                    "crop_photo",
+                    "straighten",
+                    "noise_reduction",
+                    "retouch",
+                    "red_eye",
+                    "fine_tune",
+                    "depth_light_pane",
+                    "markup",
+                    "save_photo",
+                    "revert_original",
+                    "tag_face",
+                    "rotate_left",
+                    "rotate_right",
+                )
+                or (
+                    action_id != "color_pop"
+                    and action_id.startswith(("color_", "exposure_", "effect_"))
+                )
+            )
+        ):
+            return
         if action_id in ("toggle_immersive", "exit_immersive"):
             self.toggle_immersive_viewer_mode()
         elif action_id == "add_folder":
@@ -9526,18 +9843,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.right_tag_dock.txt_caption.setFocus()
             self.right_tag_dock.txt_caption.selectAll()
         elif action_id == "photo_grouping_primary":
-            if self._expanded_stack_ids:
-                self.collapse_all_stacks()
-            else:
-                records = getattr(self.catalog_model, "_records", []) or []
-                has_groups = any(int(getattr(r, "stack_count", 1) or 1) > 1 for r in records)
-                if has_groups:
-                    self.expand_all_stacks()
-                else:
-                    self.show_status_message(
-                        "Click 'Photo stacks ▾' to enable Auto-stack bursts or RAW + JPEG.",
-                        3200,
-                    )
+            self.toggle_photo_stacks_master()
         elif action_id in ("toggle_auto_group_bursts:1", "toggle_auto_group_bursts:0"):
             self.set_auto_group_bursts(action_id.endswith(":1"))
         elif action_id in ("toggle_auto_group_raw_jpeg:1", "toggle_auto_group_raw_jpeg:0"):
@@ -10381,7 +10687,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._start_semantic_worker(force=True)
             self._refresh_subjects_nav_counts()
             self.show_status_message(
-                "✓ MobileCLIP-S1 installed — indexing photos for AI Subjects...",
+                "✓ MobileCLIP-S1 installed — indexing photos for Subjects...",
                 4500,
             )
             return True
@@ -10422,7 +10728,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             self._update_scope_bar_visibility()
             self.rebuild_and_run_query()
             self.show_status_message(
-                f"Indexing photos for AI Subjects '{joined_label}' in the background...",
+                f"Indexing photos for Subjects '{joined_label}' in the background...",
                 4500,
             )
             return
@@ -10994,8 +11300,113 @@ class PhotoGalleryMainWindow(QMainWindow):
         ws = PhotoFuseWorkspace(paths, self)
         self.open_create_workspace(ws)
 
+    def _on_viewer_can_undo_changed(self, can: bool) -> None:
+        try:
+            import shiboken6
+            if hasattr(self, "ribbon") and shiboken6.isValid(self.ribbon) and hasattr(self.ribbon, "btn_mk_undo"):
+                btn = self.ribbon.btn_mk_undo
+                if shiboken6.isValid(btn):
+                    btn.setEnabled(bool(can))
+        except Exception:
+            pass
+
+    def _run_markup_ribbon_action(self, fn: Any) -> None:
+        if getattr(self, "_syncing_markup_ribbon", False):
+            return
+        self._syncing_markup_ribbon = True
+        try:
+            fn()
+        finally:
+            self._syncing_markup_ribbon = False
+
+    def _sync_ribbon_markup_from_viewer(self) -> None:
+        if getattr(self, "_syncing_markup_ribbon", False):
+            return
+        if not hasattr(self, "media_viewer") or not hasattr(self, "ribbon"):
+            return
+        mk_tb = getattr(self.media_viewer, "markup_toolbar", None)
+        if mk_tb is None or not hasattr(self.ribbon, "sync_markup_state"):
+            return
+        self._syncing_markup_ribbon = True
+        try:
+            self.ribbon.sync_markup_state(
+                active_tool=getattr(mk_tb, "active_tool", "pen"),
+                active_shape=getattr(mk_tb, "active_shape", "rect"),
+                active_sticker=getattr(mk_tb, "active_sticker", "smiley"),
+                stroke_width=getattr(mk_tb, "stroke_width", 16),
+                primary_color=getattr(mk_tb, "current_color", None),
+                secondary_color=getattr(mk_tb, "secondary_color", None),
+                font_family=getattr(mk_tb, "font_family", "Segoe UI"),
+                is_bold=getattr(mk_tb, "is_text_bold", True),
+                is_italic=getattr(mk_tb, "is_text_italic", False),
+                text_style=getattr(mk_tb, "text_style", "pill"),
+                text_align=getattr(mk_tb, "text_align", "left"),
+                opacity=getattr(mk_tb, "opacity", 1.0),
+                bg_opacity=getattr(mk_tb, "bg_opacity", 0.85),
+                shape_filled=getattr(mk_tb, "shape_filled", False),
+                line_style=getattr(mk_tb, "line_style", "arrow"),
+                obscure_mode=getattr(mk_tb, "obscure_mode", "brush"),
+                obscure_strength=getattr(mk_tb, "obscure_strength", 55),
+                magnifier_zoom=getattr(mk_tb, "magnifier_zoom", 2.5),
+                can_undo=self.media_viewer.undo_stack.canUndo() if hasattr(self.media_viewer, "undo_stack") else False,
+            )
+        finally:
+            self._syncing_markup_ribbon = False
+
+    def _on_ribbon_crop_ai_expand_toggled(self, checked: bool) -> None:
+        if hasattr(self.media_viewer, "btn_crop_ai_expand"):
+            self.media_viewer.btn_crop_ai_expand.blockSignals(True)
+            self.media_viewer.btn_crop_ai_expand.setChecked(bool(checked))
+            self.media_viewer.btn_crop_ai_expand.blockSignals(False)
+        self.media_viewer._on_crop_ai_expand_toggled(bool(checked))
+        self._sync_ribbon_crop_from_viewer()
+
+    def _sync_ribbon_crop_from_viewer(self) -> None:
+        if not hasattr(self, "media_viewer") or not hasattr(self, "ribbon"):
+            return
+        if not hasattr(self.ribbon, "sync_crop_state"):
+            return
+        state = self.media_viewer.get_crop_ribbon_state()
+        self.ribbon.sync_crop_state(**state)
+
+    def _on_viewer_crop_mode_changed(self, enabled: bool) -> None:
+        if enabled:
+            if getattr(self, "_is_immersive_mode", False):
+                self.media_viewer.set_crop_mode(False)
+                return
+            self._sync_ribbon_crop_from_viewer()
+            self.ribbon.set_active_mode("crop")
+        else:
+            tab_crop = getattr(self.ribbon, "tab_crop", None) if hasattr(self, "ribbon") else None
+            idx_c = self.ribbon.tab_widget.indexOf(tab_crop) if tab_crop is not None else -1
+            if idx_c >= 0 and self.ribbon.tab_widget.tabBar().isTabVisible(idx_c):
+                if self.central_stack.currentWidget() is self.media_viewer:
+                    self.ribbon.set_active_mode("viewer")
+
+    def _on_viewer_markup_mode_changed(self, enabled: bool) -> None:
+        if enabled:
+            if getattr(self, "_is_immersive_mode", False):
+                self.media_viewer.set_markup_mode(False)
+                return
+            self._sync_ribbon_markup_from_viewer()
+            self.ribbon.set_active_mode("markup")
+        else:
+            tab_markup = getattr(self.ribbon, "tab_markup", None) if hasattr(self, "ribbon") else None
+            idx_mk = self.ribbon.tab_widget.indexOf(tab_markup) if tab_markup is not None else -1
+            if (
+                hasattr(self, "central_stack")
+                and self.central_stack.currentWidget() == self.media_viewer
+                and idx_mk >= 0
+                and self.ribbon.tab_widget.tabBar().isTabVisible(idx_mk)
+            ):
+                self.ribbon.set_active_mode("viewer")
+
     def toggle_markup_mode(self) -> None:
         """Toggles the Quick Markup, Callouts & Privacy Redaction tool in the viewer."""
+        if getattr(self, "_is_immersive_mode", False):
+            return
+        if self.central_stack.currentWidget() == self.media_viewer and getattr(self.media_viewer, "current_is_video", False):
+            return
         if self.central_stack.currentWidget() != self.media_viewer:
             sel = self.grid_view.selected_media_ids() or list(self._selected_ids)
             if sel:
@@ -11028,7 +11439,29 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         p, bgr = self._get_single_selected_photo_and_bgr()
         if bgr is None:
-            QMessageBox.information(self, "Colour Pop", "Please select a photo to apply Colour Pop.")
+            has_video = False
+            if self.central_stack.currentWidget() == self.media_viewer and getattr(self.media_viewer, "current_is_video", False):
+                has_video = True
+            else:
+                sel_ids = list(self.grid_view.selected_media_ids() or self._selected_ids or [])
+                if not sel_ids and getattr(self.grid_view, "_last_selected_id", None):
+                    sel_ids = [int(self.grid_view._last_selected_id)]
+                for mid in sel_ids:
+                    try:
+                        det = self.catalog_repo.get_media_detail(int(mid))
+                        if det and bool(det.get("is_video")):
+                            has_video = True
+                            break
+                    except Exception:
+                        pass
+            if has_video:
+                QMessageBox.information(
+                    self,
+                    "Colour Pop",
+                    "Colour Pop is only available for photos and cannot be applied to video files.\n\nPlease select a photo.",
+                )
+            else:
+                QMessageBox.information(self, "Colour Pop", "Please select a photo to apply Colour Pop.")
             return
 
         ws = ColourPopWorkspace(bgr, p, self)
@@ -11103,11 +11536,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             show_subjects=getattr(self.left_nav_dock, "_show_subjects", False),
             find_people_enabled=getattr(self, "find_people_enabled", True),
             tooltip_previews=getattr(self, "tooltip_previews", True),
-            jpeg_quality=getattr(self, "jpeg_quality", 83),
-            auto_straighten=getattr(self, "auto_straighten", True),
-            auto_noise=getattr(self, "auto_noise", False),
-            auto_color=getattr(self, "auto_color", True),
-            auto_exposure=getattr(self, "auto_exposure", True),
+            jpeg_quality=getattr(self, "jpeg_quality", 90),
             originals_dir=str(Path.home() / "Pictures" / ".OriginalFiles"),
             pause_write_back=self.write_back_paused,
             icon_theme=getattr(self, "current_icon_theme", icon_provider.get_icon_theme()),
@@ -11182,10 +11611,6 @@ class PhotoGalleryMainWindow(QMainWindow):
 
             self.tooltip_previews = dlg.tooltip_previews_enabled()
             self.jpeg_quality = dlg.jpeg_quality()
-            self.auto_straighten = dlg.auto_straighten()
-            self.auto_noise = dlg.auto_noise()
-            self.auto_color = dlg.auto_color()
-            self.auto_exposure = dlg.auto_exposure()
 
             # Save to QSettings
             settings = QSettings("PhotoGallery64", "PhotoGallery64")
@@ -11203,15 +11628,14 @@ class PhotoGalleryMainWindow(QMainWindow):
             settings.setValue("tooltip_previews", self.tooltip_previews)
             settings.setValue("jpeg_quality", self.jpeg_quality)
             settings.setValue("retention_days", self.retention_days)
-            settings.setValue("auto_straighten", self.auto_straighten)
-            settings.setValue("auto_noise", self.auto_noise)
-            settings.setValue("auto_color", self.auto_color)
-            settings.setValue("auto_exposure", self.auto_exposure)
             settings.setValue("save_copy_location", dlg.save_copy_location())
             settings.setValue("save_copy_custom_folder", dlg.save_copy_custom_folder())
             settings.setValue("save_copy_naming_pattern", dlg.save_copy_naming_pattern())
             settings.setValue("save_copy_switch_view", dlg.save_copy_switch_view())
             settings.setValue("unsaved_edits_action", dlg.unsaved_edits_action())
+            from src.version import AUTO_UPDATE_CHECK_KEY, AUTO_UPDATE_FREQ_KEY
+            settings.setValue(AUTO_UPDATE_CHECK_KEY, dlg.auto_check_updates())
+            settings.setValue(AUTO_UPDATE_FREQ_KEY, dlg.update_check_frequency())
 
         dlg.settings_applied.connect(_apply_dlg_settings)
         dlg.picasa_import_requested.connect(self.open_picasa_import_dialog)
@@ -12148,6 +12572,11 @@ class PhotoGalleryMainWindow(QMainWindow):
         if not hasattr(self, "ribbon"):
             return
         if self.central_stack.currentWidget() == self.media_viewer:
+            if getattr(self.media_viewer, "current_is_video", False):
+                self.ribbon.set_revert_enabled(False)
+                self.ribbon.set_save_enabled(False)
+                self.ribbon.set_save_copy_enabled(False)
+                return
             can_revert = False
             if self.media_viewer.current_file_path is not None:
                 bpath = (
@@ -12574,6 +13003,153 @@ class PhotoGalleryMainWindow(QMainWindow):
     # -------------------------------------------------------------------------
     # Theme Application, Keyboard Shortcuts & Clean Shutdown
     # -------------------------------------------------------------------------
+    def _on_update_pill_clicked(self) -> None:
+        info = getattr(self, "_pending_update_info", None)
+        if not info:
+            return
+        from src.ui.dialogs import UpdateAvailableDialog
+
+        dlg = UpdateAvailableDialog(info, parent=self)
+        dlg.exec()
+        if dlg.skipped_this_version and hasattr(self, "btn_update_pill"):
+            self.btn_update_pill.setVisible(False)
+            self._pending_update_info = None
+
+    def _schedule_startup_update_check(self) -> None:
+        """Quietly checks GitHub Releases 5s after startup (once per 24h) and surfaces a non-modal pill if newer."""
+        import time
+        from src.version import (
+            APP_VERSION,
+            AUTO_UPDATE_LAST_CHECK_KEY,
+            fetch_latest_release,
+            get_skipped_update_version,
+            is_newer_version,
+            should_run_auto_update_check,
+        )
+
+        if getattr(self, "_is_shutting_down", False) or not should_run_auto_update_check():
+            return
+
+        class _UpdSig(QObject):
+            done = Signal(bool, object)
+
+        class _UpdRunnable(QRunnable):
+            def __init__(self, sig: _UpdSig) -> None:
+                super().__init__()
+                self.setAutoDelete(False)
+                self._sig = sig
+
+            def run(self) -> None:
+                try:
+                    info = fetch_latest_release(timeout=6.0)
+                    self._sig.done.emit(True, info)
+                except Exception:
+                    self._sig.done.emit(False, None)
+
+        sig = _UpdSig(self)
+        worker = _UpdRunnable(sig)
+        if not hasattr(self, "_inflight_workers"):
+            self._inflight_workers = set()
+        self._inflight_workers.add(worker)
+
+        def _on_done(ok: bool, info: object, w=worker, s=sig) -> None:
+            self._inflight_workers.discard(w)
+            s.deleteLater()
+            if getattr(self, "_is_shutting_down", False):
+                return
+            if not ok or not isinstance(info, dict):
+                return
+            QSettings("PhotoGallery64", "PhotoGallery64").setValue(AUTO_UPDATE_LAST_CHECK_KEY, int(time.time()))
+            latest_ver = str(info.get("version") or "").strip().lstrip("vV")
+            if not latest_ver or not is_newer_version(latest_ver, APP_VERSION):
+                return
+            if latest_ver == get_skipped_update_version():
+                return
+            self._pending_update_info = info
+            if hasattr(self, "btn_update_pill"):
+                self.btn_update_pill.setText(f"✨ Update v{latest_ver} available")
+                self.btn_update_pill.setVisible(True)
+
+        sig.done.connect(_on_done)
+        QThreadPool.globalInstance().start(worker)
+
+    def prepare_for_db_relocation(self) -> None:
+        """Stops all worker pools and checkpoints/closes SQLite handles cleanly before moving DB files."""
+        self.shutdown()
+        if hasattr(self, "engine") and self.engine is not None and hasattr(self.engine, "checkpoint_and_close_all"):
+            self.engine.checkpoint_and_close_all()
+
+    def _schedule_startup_integrity_check(self) -> None:
+        """Asynchronously runs PRAGMA quick_check(1) on catalog.db (and weekly on thumbnails.db)."""
+        import datetime
+        import os
+
+        if "PYTEST_CURRENT_TEST" in os.environ or getattr(self, "_is_shutting_down", False):
+            return
+        if not hasattr(self, "engine") or self.engine is None:
+            return
+        if str(getattr(self.engine, "catalog_path", ":memory:")) == ":memory:":
+            return
+
+        settings = QSettings("PhotoGallery64", "PhotoGallery64")
+        now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+        last_thumb_ts = int(settings.value("db/last_thumb_quick_check_ts", 0) or 0)
+        check_thumbs = (now_ts - last_thumb_ts) >= (7 * 86400)
+
+        class _IntegritySig(QObject):
+            done = Signal(bool, str, bool, str, bool)
+
+        class _IntegrityRunnable(QRunnable):
+            def __init__(self, eng: Any, do_thumbs: bool, sig: _IntegritySig) -> None:
+                super().__init__()
+                self.setAutoDelete(False)
+                self._eng = eng
+                self._do_thumbs = do_thumbs
+                self._sig = sig
+
+            def run(self) -> None:
+                c_ok, c_msg = self._eng.quick_check_catalog()
+                t_ok, t_msg = (True, "skipped")
+                if self._do_thumbs:
+                    t_ok, t_msg = self._eng.quick_check_thumbnails()
+                self._sig.done.emit(c_ok, c_msg, t_ok, t_msg, self._do_thumbs)
+
+        sig = _IntegritySig(self)
+        worker = _IntegrityRunnable(self.engine, check_thumbs, sig)
+        if not hasattr(self, "_inflight_workers"):
+            self._inflight_workers = set()
+        self._inflight_workers.add(worker)
+
+        def _on_done(c_ok: bool, c_msg: str, t_ok: bool, t_msg: str, checked_t: bool, w=worker, s=sig) -> None:
+            self._inflight_workers.discard(w)
+            s.deleteLater()
+            if getattr(self, "_is_shutting_down", False):
+                return
+            if checked_t and t_ok:
+                QSettings("PhotoGallery64", "PhotoGallery64").setValue("db/last_thumb_quick_check_ts", now_ts)
+            if not c_ok:
+                self.show_status_message(f"⚠ Catalog integrity warning: {c_msg}", 9000)
+                QMessageBox.warning(
+                    self,
+                    "Catalog Integrity Warning",
+                    f"catalog.db reported an integrity check issue:\n{c_msg}\n\n"
+                    "Open File → Options → Database to back up or restore your catalog.",
+                )
+            elif checked_t and not t_ok:
+                ans = QMessageBox.warning(
+                    self,
+                    "Thumbnail Cache Issue",
+                    f"thumbnails.db reported an integrity check issue:\n{t_msg}\n\n"
+                    "Rebuild the thumbnail cache now? (Your photos are completely safe.)",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if ans == QMessageBox.Yes:
+                    self.rebuild_thumbnail_cache()
+
+        sig.done.connect(_on_done)
+        QThreadPool.globalInstance().start(worker)
+
     def rebuild_thumbnail_cache(self) -> None:
         """Clear cached thumbnail blobs and regenerate visible thumbnails at HiDPI/panorama quality."""
         try:
@@ -12731,6 +13307,12 @@ class PhotoGalleryMainWindow(QMainWindow):
                         )
                     if hasattr(self, "lbl_sync_status"):
                         self.lbl_sync_status.setStyleSheet("color: #60A5FA; padding-left: 4px; background: transparent;")
+                    if hasattr(self, "btn_update_pill"):
+                        self.btn_update_pill.setStyleSheet(
+                            "QPushButton { background: #1E3A5F; color: #93C5FD; border: 1px solid #3B82F6; "
+                            "border-radius: 9px; padding: 1px 10px; font-size: 8.5pt; font-weight: 600; }"
+                            "QPushButton:hover { background: #1D4ED8; color: #FFFFFF; }"
+                        )
                     if hasattr(self, "sep_status_msg"):
                         self.sep_status_msg.setStyleSheet("color: #333A45; margin: 3px 6px;")
                 elif theme_name == "modern":
@@ -12814,6 +13396,12 @@ class PhotoGalleryMainWindow(QMainWindow):
                         )
                     if hasattr(self, "lbl_sync_status"):
                         self.lbl_sync_status.setStyleSheet("color: #0F6CBD; padding-left: 4px; background: transparent;")
+                    if hasattr(self, "btn_update_pill"):
+                        self.btn_update_pill.setStyleSheet(
+                            "QPushButton { background: #E0F2FE; color: #0369A1; border: 1px solid #7DD3FC; "
+                            "border-radius: 9px; padding: 1px 10px; font-size: 8.5pt; font-weight: 600; }"
+                            "QPushButton:hover { background: #BAE6FD; border-color: #0284C7; }"
+                        )
                     if hasattr(self, "sep_status_msg"):
                         self.sep_status_msg.setStyleSheet("color: #E5E7EB; margin: 3px 6px;")
                 else:
@@ -12904,11 +13492,29 @@ class PhotoGalleryMainWindow(QMainWindow):
                         )
                     if hasattr(self, "lbl_sync_status"):
                         self.lbl_sync_status.setStyleSheet("color: #0066CC; padding-left: 4px; background: transparent;")
+                    if hasattr(self, "btn_update_pill"):
+                        self.btn_update_pill.setStyleSheet(
+                            "QPushButton { background: #E0F2FE; color: #0369A1; border: 1px solid #7DD3FC; "
+                            "border-radius: 9px; padding: 1px 10px; font-size: 8.5pt; font-weight: 600; }"
+                            "QPushButton:hover { background: #BAE6FD; border-color: #0284C7; }"
+                        )
                     if hasattr(self, "sep_status_msg"):
                         self.sep_status_msg.setStyleSheet("color: #AFC3D8; margin: 3px 6px;")
         finally:
             self.setUpdatesEnabled(True)
             self.update()
+
+    def keyReleaseEvent(self, event: QKeyEvent) -> None:
+        if (
+            event.key() in (Qt.Key_B, Qt.Key_Backslash)
+            and not event.isAutoRepeat()
+            and hasattr(self, "media_viewer")
+            and getattr(self.media_viewer, "_is_comparing", False)
+        ):
+            self.media_viewer.set_compare_mode(False)
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         qp = getattr(self, "_quick_preview_dialog", None)
@@ -12938,6 +13544,19 @@ class PhotoGalleryMainWindow(QMainWindow):
 
         if (
             not is_text_entry
+            and event.key() in (Qt.Key_B, Qt.Key_Backslash)
+            and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier))
+            and hasattr(self, "media_viewer")
+            and self.central_stack.currentWidget() is self.media_viewer
+            and not getattr(self.media_viewer, "current_is_video", False)
+        ):
+            if not event.isAutoRepeat():
+                self.media_viewer.set_compare_mode(True)
+            event.accept()
+            return
+
+        if (
+            not is_text_entry
             and hasattr(self, "compare_view")
             and self.central_stack.currentWidget() is self.compare_view
             and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier))
@@ -12946,7 +13565,7 @@ class PhotoGalleryMainWindow(QMainWindow):
             if event.isAccepted():
                 return
 
-        # Star ratings: 0..5 (or Shift+0..5 to auto-advance) and Flag: P / Shift+P (when not focused on a text entry)
+        # Star ratings: 0..5 (or Shift+0..5 to auto-advance) and Flag: Z / Shift+Z (when not focused on a text entry)
         if not is_text_entry and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
             shift_held = bool(event.modifiers() & Qt.ShiftModifier)
             _SHIFT_DIGIT_KEYS = {
@@ -12970,7 +13589,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 self.apply_rating_to_selection(rating_val, advance=shift_held)
                 event.accept()
                 return
-            if event.key() == Qt.Key_P:
+            if event.key() == Qt.Key_Z:
                 target_ids = self.get_active_target_ids()
                 if target_ids:
                     has_non_picked = any(
@@ -13242,16 +13861,12 @@ class PhotoGalleryMainWindow(QMainWindow):
             settings.setValue("smart_show_favourites", getattr(self.left_nav_dock, "_show_smart_favourites", True))
             settings.setValue("smart_show_picked", getattr(self.left_nav_dock, "_show_smart_picked", True))
             settings.setValue("smart_show_rejected", getattr(self.left_nav_dock, "_show_smart_rejected", True))
-            settings.setValue("smart_show_unflagged", getattr(self.left_nav_dock, "_show_smart_unflagged", True))
+            settings.setValue("smart_show_unflagged", getattr(self.left_nav_dock, "_show_smart_unflagged", False))
             settings.setValue("nav_section_order", json.dumps(self.left_nav_dock.get_section_order()))
             settings.setValue("find_people_enabled", getattr(self, "find_people_enabled", True))
             settings.setValue("tooltip_previews", getattr(self, "tooltip_previews", True))
-            settings.setValue("jpeg_quality", getattr(self, "jpeg_quality", 83))
+            settings.setValue("jpeg_quality", getattr(self, "jpeg_quality", 90))
             settings.setValue("retention_days", getattr(self, "retention_days", 180))
-            settings.setValue("auto_straighten", getattr(self, "auto_straighten", True))
-            settings.setValue("auto_noise", getattr(self, "auto_noise", False))
-            settings.setValue("auto_color", getattr(self, "auto_color", True))
-            settings.setValue("auto_exposure", getattr(self, "auto_exposure", True))
             settings.setValue("write_back_paused", getattr(self, "write_back_paused", True))
             settings.setValue("theme", self.current_theme)
             settings.setValue("icon_theme", getattr(self, "current_icon_theme", "wlpg_aero"))
@@ -13274,12 +13889,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                     "nav_show_subjects": getattr(self.left_nav_dock, "_show_subjects", False),
                     "find_people_enabled": getattr(self, "find_people_enabled", True),
                     "tooltip_previews": getattr(self, "tooltip_previews", True),
-                    "jpeg_quality": getattr(self, "jpeg_quality", 83),
+                    "jpeg_quality": getattr(self, "jpeg_quality", 90),
                     "retention_days": getattr(self, "retention_days", 180),
-                    "auto_straighten": getattr(self, "auto_straighten", True),
-                    "auto_noise": getattr(self, "auto_noise", False),
-                    "auto_color": getattr(self, "auto_color", True),
-                    "auto_exposure": getattr(self, "auto_exposure", True),
                     "zoom_val": self.slider_status_zoom.value(),
                     "recent_descriptive_tags": list(getattr(self, "_mru_descriptive_tags", [])),
                 }
@@ -13411,7 +14022,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                     pass
             self.find_people_enabled = _to_bool(_get_val("find_people_enabled", True), True)
             self.auto_group_bursts = _to_bool(_get_val("auto_group_bursts", False), False)
-            self.auto_group_raw_jpeg = _to_bool(_get_val("auto_group_raw_jpeg", False), False)
+            self.auto_group_raw_jpeg = _to_bool(_get_val("auto_group_raw_jpeg", True), True)
             if hasattr(self, "ribbon") and hasattr(self.ribbon, "set_photo_grouping_state"):
                 self.ribbon.set_photo_grouping_state(
                     auto_bursts=self.auto_group_bursts,
@@ -13428,12 +14039,8 @@ class PhotoGalleryMainWindow(QMainWindow):
                 save=False,
             )
             self.tooltip_previews = _to_bool(_get_val("tooltip_previews", True), True)
-            self.jpeg_quality = int(_get_val("jpeg_quality", 83))
+            self.jpeg_quality = int(_get_val("jpeg_quality", 90))
             self.retention_days = int(_get_val("retention_days", 180))
-            self.auto_straighten = _to_bool(_get_val("auto_straighten", True), True)
-            self.auto_noise = _to_bool(_get_val("auto_noise", False), False)
-            self.auto_color = _to_bool(_get_val("auto_color", True), True)
-            self.auto_exposure = _to_bool(_get_val("auto_exposure", True), True)
             self.write_back_paused = _to_bool(_get_val("write_back_paused", True), True)
             self.xmp_daemon.set_paused(self.write_back_paused)
             self.ribbon.set_write_back_paused(self.write_back_paused)
@@ -13461,7 +14068,7 @@ class PhotoGalleryMainWindow(QMainWindow):
                 favourites=_to_bool(_get_val("smart_show_favourites", True), True),
                 picked=_to_bool(_get_val("smart_show_picked", True), True),
                 rejected=_to_bool(_get_val("smart_show_rejected", True), True),
-                unflagged=_to_bool(_get_val("smart_show_unflagged", True), True),
+                unflagged=_to_bool(_get_val("smart_show_unflagged", False), False),
                 emit_signal=False,
             )
 
@@ -14136,6 +14743,21 @@ class PhotoGalleryMainWindow(QMainWindow):
             if not self.close_create_workspace():
                 event.ignore()
                 return
+        if (
+            hasattr(self, "central_stack")
+            and hasattr(self, "media_viewer")
+            and self.central_stack.currentWidget() == self.media_viewer
+        ):
+            if getattr(self.media_viewer, "_inline_text_input", None) is not None:
+                self.media_viewer._commit_inline_text()
+            if getattr(self.media_viewer, "_active_movable_element", None) is not None and hasattr(
+                self.media_viewer, "_finalize_movable_markup"
+            ):
+                self.media_viewer._finalize_movable_markup()
+            if self.media_viewer.has_unsaved_adjustments():
+                if not self.media_viewer.prompt_save_changes_if_needed("close"):
+                    event.ignore()
+                    return
         self._save_app_state()
         self.hide()
         self.shutdown()

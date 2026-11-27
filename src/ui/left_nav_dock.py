@@ -566,7 +566,7 @@ class LeftNavigationDock(QDockWidget):
         self._show_smart_favourites: bool = True
         self._show_smart_picked: bool = True
         self._show_smart_rejected: bool = True
-        self._show_smart_unflagged: bool = True
+        self._show_smart_unflagged: bool = False
         self._default_section_order: tuple[str, ...] = (
             "all_media",
             "section_albums",
@@ -976,7 +976,7 @@ class LeftNavigationDock(QDockWidget):
                 self.root_dates.setIcon(0, make_wlpg_icon("calendar", 16))
                 self.root_dates.setFont(0, sec_font)
                 self.root_dates.setForeground(0, section_color)
-                self.root_dates.setExpanded(True)
+                self.root_dates.setExpanded(False)
 
             def _build_people() -> None:
                 self.root_people = QTreeWidgetItem(self.tree, ["People"])

@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QToolButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -89,19 +90,27 @@ from src.ui.create_studio.shared_widgets import (
     prompt_save_new_file,
 )
 from src.ui.create_studio_dialogs import recommended_grid_layouts
-from src.ui.ribbon_toolbar import make_wlpg_icon
+from src.ui.ribbon_toolbar import make_rainbow_color_wheel_icon, make_wlpg_icon
 from src.ui.theme_tokens import get_theme_tokens
 
-# Curated collage background colour swatches: (label, hex)
+# Curated collage background colour swatches (2 sensible rows: Neutrals & Tones, then Soft Pastels & Accents)
 _BG_SWATCHES: list[tuple[str, str]] = [
+    # Row 1: Classic Neutrals & Warm/Cool Photo Mount Tones
     ("White", "#FFFFFF"),
     ("Warm Cream", "#F8F5F0"),
+    ("Sand", "#EAE3D5"),
     ("Soft Grey", "#E5E7EB"),
+    ("Slate", "#64748B"),
     ("Charcoal", "#1F2937"),
     ("Black", "#0F1115"),
+    # Row 2: Soft Pastels & Rich Editorial Backdrops
     ("Sky Tint", "#DBEAFE"),
     ("Sage Tint", "#DCFCE7"),
+    ("Buttercream", "#FEF3C7"),
     ("Blush Tint", "#FCE7F3"),
+    ("Lavender", "#EDE9FE"),
+    ("Navy", "#1E3A5F"),
+    ("Forest", "#14532D"),
 ]
 
 # Combined visual aspect ratio / print presets:
@@ -1363,25 +1372,40 @@ class CollageWorkspace(CreateWorkspaceBase):
         self.grp_grid.add_widget(self.sld_corner)
 
         self.grp_grid.add_widget(QLabel("Background Colour:", self.grp_grid))
-        swatch_row = QHBoxLayout()
-        swatch_row.setContentsMargins(0, 2, 0, 2)
-        swatch_row.setSpacing(5)
+        swatch_outer = QHBoxLayout()
+        swatch_outer.setContentsMargins(0, 2, 0, 2)
+        swatch_outer.setSpacing(8)
+        swatch_grid = QGridLayout()
+        swatch_grid.setContentsMargins(0, 0, 0, 0)
+        swatch_grid.setSpacing(5)
         self._bg_swatch_btns = []
-        for s_name, s_hex in _BG_SWATCHES:
+        cols_per_row = 7
+        for idx, (s_name, s_hex) in enumerate(_BG_SWATCHES):
             sw = QPushButton("", self.grp_grid)
             sw.setFixedSize(22, 22)
             sw.setCursor(Qt.CursorShape.PointingHandCursor)
             sw.setToolTip(f"{s_name} ({s_hex})")
             sw.clicked.connect(lambda _c=False, hx=s_hex: self._set_bg_color(QColor(hx)))
             self._bg_swatch_btns.append((s_hex, sw))
-            swatch_row.addWidget(sw)
-        swatch_row.addStretch(1)
-        self.grp_grid.add_layout(swatch_row)
+            swatch_grid.addWidget(sw, idx // cols_per_row, idx % cols_per_row)
+        swatch_outer.addLayout(swatch_grid)
 
-        self.btn_bg_color = QPushButton("Custom Colour...", self.grp_grid)
-        self.btn_bg_color.setIcon(make_wlpg_icon("eyedropper", 16))
+        self.btn_bg_color = QToolButton(self.grp_grid)
+        self.btn_bg_color.setFixedSize(36, 36)
+        self.btn_bg_color.setIcon(
+            make_rainbow_color_wheel_icon(getattr(self, "_theme_mode", "wlpg_aero") == "dark", 32)
+        )
+        self.btn_bg_color.setIconSize(QSize(32, 32))
+        self.btn_bg_color.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_bg_color.setToolTip("Custom Background Colour...")
+        self.btn_bg_color.setStyleSheet(
+            "QToolButton { background: transparent; border: 1px solid transparent; border-radius: 18px; padding: 0px; }"
+            "QToolButton:hover { background: rgba(59, 130, 246, 0.16); border-color: #60A5FA; }"
+        )
         self.btn_bg_color.clicked.connect(self._pick_bg_color)
-        self.grp_grid.add_widget(self.btn_bg_color)
+        swatch_outer.addWidget(self.btn_bg_color, 0, Qt.AlignmentFlag.AlignVCenter)
+        swatch_outer.addStretch(1)
+        self.grp_grid.add_layout(swatch_outer)
         vbox.addWidget(self.grp_grid)
 
         # 6. Polaroid card
@@ -1643,6 +1667,10 @@ class CollageWorkspace(CreateWorkspaceBase):
             btn.setIcon(_make_grid_layout_icon(lbl, count, fg))
 
     def _refresh_bg_swatch_styles(self) -> None:
+        if hasattr(self, "btn_bg_color"):
+            self.btn_bg_color.setIcon(
+                make_rainbow_color_wheel_icon(getattr(self, "_theme_mode", "wlpg_aero") == "dark", 32)
+            )
         tok = get_theme_tokens(self._theme_name)
         cur_hex = self.bg_color.name().lower()
         for s_hex, btn in self._bg_swatch_btns:

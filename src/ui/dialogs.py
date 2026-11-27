@@ -452,11 +452,7 @@ class AppSettingsDialog(QDialog):
         show_subjects: bool = False,
         find_people_enabled: bool = False,
         tooltip_previews: bool = True,
-        jpeg_quality: int = 83,
-        auto_straighten: bool = True,
-        auto_noise: bool = False,
-        auto_color: bool = True,
-        auto_exposure: bool = True,
+        jpeg_quality: int = 90,
         save_copy_location: str | None = None,
         save_copy_custom_folder: str | None = None,
         save_copy_naming: str | None = None,
@@ -505,111 +501,123 @@ class AppSettingsDialog(QDialog):
         self._apply_dialog_theme(self._is_dark)
 
         # -------------------------------------------------------------
-        # Tab 1: General (docs: screenshot 2)
+        # Tab 1: General
         # -------------------------------------------------------------
         tab_general = QWidget()
         v_gen = QVBoxLayout(tab_general)
-        v_gen.setContentsMargins(14, 14, 14, 14)
-        v_gen.setSpacing(12)
+        v_gen.setContentsMargins(12, 12, 12, 12)
+        v_gen.setSpacing(8)
 
-        # Face detection and recognition
-        lbl_face = QLabel("Face detection and recognition", tab_general)
-        lbl_face.setFont(QFont("Segoe UI", 9, QFont.Bold))
-        v_gen.addWidget(lbl_face)
-
-        self.chk_find_people = QCheckBox("Find people in your photos.", tab_general)
-        self.chk_find_people.setChecked(find_people_enabled)
-        v_gen.addWidget(self.chk_find_people)
-
-        self.btn_configure_face = QPushButton("⚙ Configure Face Recognition & Tuning Options...", tab_general)
-        self.btn_configure_face.setFixedWidth(290)
-        self.btn_configure_face.clicked.connect(lambda: self.tab_widget.setCurrentWidget(self.face_tab))
-        v_gen.addWidget(self.btn_configure_face)
-
-        sep2 = QFrame(tab_general)
-        sep2.setFrameShape(QFrame.HLine)
-        sep2.setFrameShadow(QFrame.Sunken)
-        v_gen.addWidget(sep2)
-
-        # Navigation pane
-        lbl_nav = QLabel("Navigation pane", tab_general)
-        lbl_nav.setFont(QFont("Segoe UI", 9, QFont.Bold))
-        v_gen.addWidget(lbl_nav)
+        # Card 1: Navigation Pane
+        grp_nav = QGroupBox("Navigation Pane", tab_general)
+        v_nav_card = QVBoxLayout(grp_nav)
+        v_nav_card.setContentsMargins(12, 8, 12, 8)
+        v_nav_card.setSpacing(6)
 
         nav_grid = QGridLayout()
         nav_grid.setHorizontalSpacing(24)
-        nav_grid.setVerticalSpacing(8)
+        nav_grid.setVerticalSpacing(6)
 
-        self.chk_show_dates = QCheckBox("Show Date taken", tab_general)
+        self.chk_show_dates = QCheckBox("Show Date taken", grp_nav)
         self.chk_show_dates.setChecked(show_dates)
+        self.chk_show_dates.setToolTip(
+            "Shows or hides the Date taken tree in the left sidebar so you can browse photos by year and month."
+        )
         nav_grid.addWidget(self.chk_show_dates, 0, 0)
 
-        self.chk_show_tags = QCheckBox("Show Descriptive tags", tab_general)
+        self.chk_show_tags = QCheckBox("Show Descriptive tags", grp_nav)
         self.chk_show_tags.setChecked(show_tags)
+        self.chk_show_tags.setToolTip(
+            "Shows or hides Descriptive tags in the left sidebar so you can filter photos by keyword."
+        )
         nav_grid.addWidget(self.chk_show_tags, 0, 1)
 
-        self.chk_show_people = QCheckBox("Show People", tab_general)
+        self.chk_show_people = QCheckBox("Show People", grp_nav)
         self.chk_show_people.setChecked(show_people)
+        self.chk_show_people.setToolTip(
+            "Shows or hides the People list in the left sidebar so you can view photos of each tagged person."
+        )
         nav_grid.addWidget(self.chk_show_people, 1, 0)
 
-        self.chk_show_ratings = QCheckBox("Show Ratings", tab_general)
+        self.chk_show_ratings = QCheckBox("Show Ratings", grp_nav)
         self.chk_show_ratings.setChecked(show_ratings)
+        self.chk_show_ratings.setToolTip(
+            "Shows or hides star Ratings in the left sidebar so you can quickly find your favorite photos."
+        )
         nav_grid.addWidget(self.chk_show_ratings, 1, 1)
 
-        self.chk_show_places = QCheckBox("Show Places", tab_general)
+        self.chk_show_places = QCheckBox("Show Places", grp_nav)
         self.chk_show_places.setChecked(show_places)
+        self.chk_show_places.setToolTip(
+            "Shows or hides Places in the left sidebar so you can browse photos grouped by GPS location."
+        )
         nav_grid.addWidget(self.chk_show_places, 2, 0)
 
-        self.chk_show_albums = QCheckBox("Show Albums", tab_general)
+        self.chk_show_albums = QCheckBox("Show Albums", grp_nav)
         self.chk_show_albums.setChecked(show_albums)
+        self.chk_show_albums.setToolTip(
+            "Shows or hides virtual Albums in the left sidebar for quick access to custom photo collections."
+        )
         nav_grid.addWidget(self.chk_show_albums, 2, 1)
 
-        self.chk_show_cameras = QCheckBox("Show Cameras", tab_general)
+        self.chk_show_cameras = QCheckBox("Show Cameras", grp_nav)
         self.chk_show_cameras.setChecked(show_cameras)
+        self.chk_show_cameras.setToolTip(
+            "Shows or hides Cameras in the left sidebar so you can filter photos by camera or phone model (uses EXIF metadata)."
+        )
         nav_grid.addWidget(self.chk_show_cameras, 3, 0)
 
-        self.chk_show_subjects = QCheckBox("Show Subjects (AI)", tab_general)
+        self.chk_show_subjects = QCheckBox("Show Subjects", grp_nav)
         self.chk_show_subjects.setChecked(show_subjects)
+        self.chk_show_subjects.setToolTip(
+            "Adds a Subjects section to the sidebar to browse photos by scene or topic, like pets, food, or landscapes (requires the optional MobileCLIP-S1 add-on)."
+        )
         self._semantic_prompted_in_dialog: bool = False
         self.chk_show_subjects.clicked.connect(self._on_show_subjects_clicked)
         nav_grid.addWidget(self.chk_show_subjects, 3, 1)
 
-        v_gen.addLayout(nav_grid)
+        v_nav_card.addLayout(nav_grid)
+        v_gen.addWidget(grp_nav)
 
-        sep3 = QFrame(tab_general)
-        sep3.setFrameShape(QFrame.HLine)
-        sep3.setFrameShadow(QFrame.Sunken)
-        v_gen.addWidget(sep3)
+        # Card 2: Appearance
+        grp_appear = QGroupBox("Appearance", tab_general)
+        v_appear = QVBoxLayout(grp_appear)
+        v_appear.setContentsMargins(12, 8, 12, 8)
+        v_appear.setSpacing(6)
 
-        # Visual Theme selector
         h_theme = QHBoxLayout()
-        lbl_theme = QLabel("Visual theme:", tab_general)
+        lbl_theme = QLabel("Visual theme:", grp_appear)
         lbl_theme.setFixedWidth(85)
-        self.cmb_theme = QComboBox(tab_general)
+        self.cmb_theme = QComboBox(grp_appear)
         self.cmb_theme.addItem("Classic Aero", "wlpg_aero")
         self.cmb_theme.addItem("Modern Fluent", "modern")
         self.cmb_theme.addItem("Dark Studio", "dark")
+        self.cmb_theme.setToolTip(
+            "Changes the overall look and color scheme of Photo Gallery, including Dark Studio mode."
+        )
         t_idx = self.cmb_theme.findData(current_theme)
         if t_idx >= 0:
             self.cmb_theme.setCurrentIndex(t_idx)
         h_theme.addWidget(lbl_theme)
         h_theme.addWidget(self.cmb_theme, 1)
-        v_gen.addLayout(h_theme)
+        v_appear.addLayout(h_theme)
 
-        # Icon Theme selector
         h_icon_theme = QHBoxLayout()
-        lbl_icon_theme = QLabel("Icon style:", tab_general)
+        lbl_icon_theme = QLabel("Icon style:", grp_appear)
         lbl_icon_theme.setFixedWidth(85)
-        self.cmb_icon_theme = QComboBox(tab_general)
+        self.cmb_icon_theme = QComboBox(grp_appear)
         self.cmb_icon_theme.addItem("Classic Aero (Colourful)", "wlpg_aero")
         self.cmb_icon_theme.addItem("Microsoft Fluent UI (Windows 11)", "fluent")
         self.cmb_icon_theme.addItem("Modern Minimalist", "minimal")
+        self.cmb_icon_theme.setToolTip(
+            "Changes the ribbon and toolbar icon set to match Classic Aero, Windows 11 Fluent, or Minimalist styles."
+        )
         i_idx = self.cmb_icon_theme.findData(icon_theme)
         if i_idx >= 0:
             self.cmb_icon_theme.setCurrentIndex(i_idx)
         h_icon_theme.addWidget(lbl_icon_theme)
         h_icon_theme.addWidget(self.cmb_icon_theme, 1)
-        v_gen.addLayout(h_icon_theme)
+        v_appear.addLayout(h_icon_theme)
 
         def _on_theme_selection_changed(idx: int) -> None:
             theme_val = str(self.cmb_theme.itemData(idx) or "")
@@ -620,37 +628,99 @@ class AppSettingsDialog(QDialog):
                     self.cmb_icon_theme.setCurrentIndex(match_idx)
 
         self.cmb_theme.currentIndexChanged.connect(_on_theme_selection_changed)
+        v_gen.addWidget(grp_appear)
 
-        sep4 = QFrame(tab_general)
-        sep4.setFrameShape(QFrame.HLine)
-        sep4.setFrameShadow(QFrame.Sunken)
-        v_gen.addWidget(sep4)
+        # Card 3: People & File Metadata
+        grp_meta = QGroupBox("People && File Metadata", tab_general)
+        v_meta = QVBoxLayout(grp_meta)
+        v_meta.setContentsMargins(12, 8, 12, 8)
+        v_meta.setSpacing(6)
 
-        # File Metadata Writing
-        lbl_safe = QLabel("File Metadata", tab_general)
-        lbl_safe.setFont(QFont("Segoe UI", 9, QFont.Bold))
-        v_gen.addWidget(lbl_safe)
+        h_face_row = QHBoxLayout()
+        h_face_row.setSpacing(8)
+        self.chk_find_people = QCheckBox("Find people in your photos", grp_meta)
+        self.chk_find_people.setChecked(find_people_enabled)
+        self.chk_find_people.setToolTip(
+            "Automatically detects faces in your photos in the background so you can tag and browse by person."
+        )
+        h_face_row.addWidget(self.chk_find_people)
+        h_face_row.addStretch(1)
+
+        self.btn_configure_face = QPushButton("Face Recognition Settings...", grp_meta)
+        self.btn_configure_face.setToolTip(
+            "Opens the Face Recognition tab to adjust detection accuracy, download AI models, or rescan photos."
+        )
+        self.btn_configure_face.clicked.connect(lambda: self.tab_widget.setCurrentWidget(self.face_tab))
+        h_face_row.addWidget(self.btn_configure_face)
+        v_meta.addLayout(h_face_row)
 
         self.chk_write_to_files = QCheckBox(
-            "Write metadata changes to original files", tab_general
+            "Write metadata changes to original files", grp_meta
         )
         self.chk_write_to_files.setChecked(not pause_write_back)
         self.chk_write_to_files.setToolTip(
-            "When checked, tags, ratings, captions, and face coordinates are written back to\n"
-            "the original image files (EXIF/XMP). When unchecked, changes are saved only to the\n"
-            "PhotoGallery64 catalog database without modifying original files on disk."
+            "Saves your tags, ratings, captions, and people directly into the photo files so other apps can read them; leave unchecked to keep original files untouched (writes EXIF/XMP metadata)."
         )
-        v_gen.addWidget(self.chk_write_to_files)
+        v_meta.addWidget(self.chk_write_to_files)
         self.chk_pause_write_back = self.chk_write_to_files
 
-        lbl_safe_hint = QLabel(
+        self.lbl_safe_hint = QLabel(
             "When unchecked (default), tags, ratings, captions, and people are safely saved to the "
             "gallery database without modifying your original image files on disk.",
-            tab_general,
+            grp_meta,
         )
-        lbl_safe_hint.setWordWrap(True)
-        lbl_safe_hint.setStyleSheet("font-size: 8.5pt; padding-left: 20px;")
-        v_gen.addWidget(lbl_safe_hint)
+        self.lbl_safe_hint.setWordWrap(True)
+        self.lbl_safe_hint.setStyleSheet(
+            f"font-size: 8.5pt; padding-left: 20px; color: {'#94A3B8' if self._is_dark else '#55687D'};"
+        )
+        v_meta.addWidget(self.lbl_safe_hint)
+        v_gen.addWidget(grp_meta)
+
+        # Card 4: Updates
+        from src.version import (
+            AUTO_UPDATE_CHECK_KEY,
+            get_update_check_frequency,
+        )
+
+        grp_updates = QGroupBox("Updates", tab_general)
+        v_upd = QVBoxLayout(grp_updates)
+        v_upd.setContentsMargins(12, 8, 12, 8)
+        v_upd.setSpacing(6)
+
+        h_upd = QHBoxLayout()
+        h_upd.setSpacing(10)
+
+        self.chk_auto_check_updates = QCheckBox(
+            "Automatically check for updates on startup", grp_updates
+        )
+        self.chk_auto_check_updates.setChecked(
+            QSettings("PhotoGallery64", "PhotoGallery64").value(AUTO_UPDATE_CHECK_KEY, True, type=bool)
+        )
+        self.chk_auto_check_updates.setToolTip(
+            "Checks for newer releases after launch on the chosen schedule and shows a quiet link in the status bar—no usage data is ever sent (queries GitHub Releases API)."
+        )
+        h_upd.addWidget(self.chk_auto_check_updates)
+        h_upd.addStretch(1)
+
+        lbl_upd_freq = QLabel("Frequency:", grp_updates)
+        h_upd.addWidget(lbl_upd_freq)
+
+        self.cmb_update_frequency = QComboBox(grp_updates)
+        self.cmb_update_frequency.addItem("Once per day", "daily")
+        self.cmb_update_frequency.addItem("Once per week", "weekly")
+        self.cmb_update_frequency.addItem("Once per month", "monthly")
+        cur_freq = get_update_check_frequency()
+        freq_idx = self.cmb_update_frequency.findData(cur_freq)
+        self.cmb_update_frequency.setCurrentIndex(freq_idx if freq_idx >= 0 else 1)
+        self.cmb_update_frequency.setEnabled(self.chk_auto_check_updates.isChecked())
+        self.cmb_update_frequency.setToolTip(
+            "Choose how often Photo Gallery checks for updates when starting up (default: once per week)."
+        )
+        self.chk_auto_check_updates.toggled.connect(self.cmb_update_frequency.setEnabled)
+        h_upd.addWidget(self.cmb_update_frequency)
+
+        v_upd.addLayout(h_upd)
+        v_gen.addWidget(grp_updates)
 
         v_gen.addStretch(1)
 
@@ -695,12 +765,17 @@ class AppSettingsDialog(QDialog):
 
         # Import to row
         h_to = QHBoxLayout()
-        lbl_to = QLabel("Import to:   ", imp_frame)
+        lbl_to = QLabel("Import to:", imp_frame)
+        lbl_to.setFixedWidth(85)
         self.cmb_import_dest = QComboBox(imp_frame)
         self.cmb_import_dest.addItem("Pictures", str(Path.home() / "Pictures"))
         self.cmb_import_dest.addItem("Documents", str(Path.home() / "Documents"))
+        self.cmb_import_dest.setToolTip(
+            "Chooses the base folder where photos imported from cameras or removable drives are saved."
+        )
         self.btn_browse_dest = QPushButton("Browse...", imp_frame)
-        self.btn_browse_dest.setFixedWidth(75)
+        self.btn_browse_dest.setFixedWidth(80)
+        self.btn_browse_dest.setToolTip("Browse for a custom folder to save imported photos into.")
         self.btn_browse_dest.clicked.connect(self._on_browse_import_dest)
         h_to.addWidget(lbl_to)
         h_to.addWidget(self.cmb_import_dest, 1)
@@ -710,8 +785,12 @@ class AppSettingsDialog(QDialog):
         # Folder name row
         h_fn = QHBoxLayout()
         lbl_fn = QLabel("Folder name:", imp_frame)
+        lbl_fn.setFixedWidth(85)
         self.cmb_folder_naming = QComboBox(imp_frame)
         self.cmb_folder_naming.addItems(["Name", "Date + Name", "Name + Date", "Date"])
+        self.cmb_folder_naming.setToolTip(
+            "Sets how new import subfolders are named so your imported shoots stay organized."
+        )
         self.cmb_folder_naming.currentIndexChanged.connect(self._update_import_example)
         h_fn.addWidget(lbl_fn)
         h_fn.addWidget(self.cmb_folder_naming, 1)
@@ -719,9 +798,13 @@ class AppSettingsDialog(QDialog):
 
         # File name row
         h_fin = QHBoxLayout()
-        lbl_fin = QLabel("File name:    ", imp_frame)
+        lbl_fin = QLabel("File name:", imp_frame)
+        lbl_fin.setFixedWidth(85)
         self.cmb_file_naming = QComboBox(imp_frame)
         self.cmb_file_naming.addItems(["Original File Name", "Name + Number", "Date + Name"])
+        self.cmb_file_naming.setToolTip(
+            "Sets whether imported photos keep their camera filename or get renamed automatically."
+        )
         self.cmb_file_naming.currentIndexChanged.connect(self._update_import_example)
         h_fin.addWidget(lbl_fin)
         h_fin.addWidget(self.cmb_file_naming, 1)
@@ -729,7 +812,8 @@ class AppSettingsDialog(QDialog):
 
         # Example label
         h_ex = QHBoxLayout()
-        lbl_ex_title = QLabel("Example:     ", imp_frame)
+        lbl_ex_title = QLabel("Example:", imp_frame)
+        lbl_ex_title.setFixedWidth(85)
         self.lbl_import_example = QLabel("Himalayas\\DSC_1234.jpg", imp_frame)
         h_ex.addWidget(lbl_ex_title)
         h_ex.addWidget(self.lbl_import_example, 1)
@@ -741,10 +825,19 @@ class AppSettingsDialog(QDialog):
 
         self.chk_open_after_import = QCheckBox("Open Photo Gallery after importing files", imp_frame)
         self.chk_open_after_import.setChecked(True)
+        self.chk_open_after_import.setToolTip(
+            "Automatically opens the newly imported folder in Photo Gallery when an import finishes."
+        )
         self.chk_delete_after_import = QCheckBox("Delete files from device after importing", imp_frame)
         self.chk_delete_after_import.setChecked(False)
+        self.chk_delete_after_import.setToolTip(
+            "Removes photos from your camera or memory card after they are safely copied to your PC."
+        )
         self.chk_rotate_during_import = QCheckBox("Rotate photos during import", imp_frame)
         self.chk_rotate_during_import.setChecked(False)
+        self.chk_rotate_during_import.setToolTip(
+            "Automatically rotates portrait photos upright during import using your camera's orientation sensor (EXIF orientation)."
+        )
 
         imp_frame_layout.addWidget(self.chk_open_after_import)
         imp_frame_layout.addWidget(self.chk_delete_after_import)
@@ -752,17 +845,23 @@ class AppSettingsDialog(QDialog):
 
         v_imp.addWidget(imp_frame)
 
+        h_imp_footer = QHBoxLayout()
         lbl_autoplay = QLabel("<a href='autoplay' style='color:#0066CC;'>Change default autoplay options</a>", tab_import)
         lbl_autoplay.setOpenExternalLinks(False)
         self.lbl_autoplay = lbl_autoplay
-        v_imp.addWidget(lbl_autoplay)
+        h_imp_footer.addWidget(lbl_autoplay)
+        h_imp_footer.addStretch(1)
 
         self.btn_restore_import_defaults = QPushButton("Restore defaults", tab_import)
         self.btn_restore_import_defaults.setIcon(make_wlpg_icon("restore", 14))
         self.btn_restore_import_defaults.setIconSize(QSize(14, 14))
-        self.btn_restore_import_defaults.setFixedWidth(110)
+        self.btn_restore_import_defaults.setMinimumWidth(134)
+        self.btn_restore_import_defaults.setToolTip(
+            "Resets all device import folder, naming, and checkbox options back to their defaults."
+        )
         self.btn_restore_import_defaults.clicked.connect(self._restore_import_defaults)
-        v_imp.addWidget(self.btn_restore_import_defaults)
+        h_imp_footer.addWidget(self.btn_restore_import_defaults)
+        v_imp.addLayout(h_imp_footer)
 
         # Legacy Photo Manager Metadata Import (Google Picasa)
         picasa_group = QGroupBox("Import from Other Photo Managers", tab_import)
@@ -777,13 +876,16 @@ class AppSettingsDialog(QDialog):
         picasa_btn_row = QHBoxLayout()
         picasa_btn_row.setSpacing(8)
         self.btn_import_picasa = QPushButton("Import Picasa Metadata...", picasa_group)
-        self.btn_import_picasa.setFixedWidth(190)
+        self.btn_import_picasa.setMinimumWidth(175)
+        self.btn_import_picasa.setToolTip(
+            "Brings in stars, captions, tags, people, and albums from Google Picasa folders so you don't lose past organization (reads .picasa.ini files)."
+        )
         self.btn_import_picasa.clicked.connect(self.picasa_import_requested.emit)
         picasa_btn_row.addWidget(self.btn_import_picasa)
         self.btn_view_picasa_folders = QPushButton("View Picasa Folders...", picasa_group)
-        self.btn_view_picasa_folders.setFixedWidth(170)
+        self.btn_view_picasa_folders.setMinimumWidth(160)
         self.btn_view_picasa_folders.setToolTip(
-            "See all library folders with Picasa metadata, check import status, import with one click, or open the folder"
+            "Lists all library folders that contain Picasa metadata so you can check import status or import individual folders."
         )
         self.btn_view_picasa_folders.clicked.connect(self.picasa_folders_requested.emit)
         picasa_btn_row.addWidget(self.btn_view_picasa_folders)
@@ -819,24 +921,33 @@ class AppSettingsDialog(QDialog):
         lbl_orig_desc.setWordWrap(True)
         orig_layout.addWidget(lbl_orig_desc)
 
-        lbl_go_orig = QLabel(
-            "<a href='open_originals' style='color: #0066CC; text-decoration: underline;'>Go to original photos folder</a>",
+        self.lbl_go_orig = QLabel(
+            f"<a href='open_originals' style='color: {'#60A5FA' if self._is_dark else '#0066CC'}; text-decoration: underline;'>Go to original photos folder</a>",
             orig_group,
         )
-        lbl_go_orig.setOpenExternalLinks(False)
-        lbl_go_orig.linkActivated.connect(self._on_open_originals_link)
-        orig_layout.addWidget(lbl_go_orig)
+        self.lbl_go_orig.setOpenExternalLinks(False)
+        self.lbl_go_orig.setToolTip(
+            "Opens the hidden backup folder where untouched pre-edit copies of your photos are kept (.OriginalFiles)."
+        )
+        self.lbl_go_orig.linkActivated.connect(self._on_open_originals_link)
+        orig_layout.addWidget(self.lbl_go_orig)
 
+        h_ret_row = QHBoxLayout()
+        h_ret_row.setSpacing(10)
         lbl_recycle_after = QLabel("Move originals to Recycle Bin after:", orig_group)
-        orig_layout.addWidget(lbl_recycle_after)
+        h_ret_row.addWidget(lbl_recycle_after)
 
         self.cmb_retention = QComboBox(orig_group)
+        self.cmb_retention.setMinimumWidth(160)
         self.cmb_retention.addItem("Never", 99999)
         self.cmb_retention.addItem("One day", 1)
         self.cmb_retention.addItem("One week", 7)
         self.cmb_retention.addItem("One month", 30)
         self.cmb_retention.addItem("Six months", 180)
         self.cmb_retention.addItem("One year", 365)
+        self.cmb_retention.setToolTip(
+            "Automatically cleans up old pre-edit backups after this time to save drive space; choose 'Never' if you always want to be able to revert edits (moves files from .OriginalFiles to Recycle Bin)."
+        )
 
         # Select matching or closest preset
         best_idx = 4  # default: Six months
@@ -846,7 +957,9 @@ class AppSettingsDialog(QDialog):
                 break
         self.cmb_retention.setCurrentIndex(best_idx)
         self.cmb_retention.currentIndexChanged.connect(self._on_retention_cmb_changed)
-        orig_layout.addWidget(self.cmb_retention)
+        h_ret_row.addWidget(self.cmb_retention)
+        h_ret_row.addStretch(1)
+        orig_layout.addLayout(h_ret_row)
 
         v_orig.addWidget(orig_group)
 
@@ -870,36 +983,6 @@ class AppSettingsDialog(QDialog):
         v_edit.setContentsMargins(14, 14, 14, 14)
         v_edit.setSpacing(12)
 
-        # Auto adjust settings
-        grp_auto = QGroupBox("Auto adjust settings", tab_edit)
-        v_auto = QVBoxLayout(grp_auto)
-        v_auto.setContentsMargins(12, 10, 12, 10)
-        v_auto.setSpacing(6)
-
-        lbl_auto_desc = QLabel(
-            "Select which adjustments you would like auto adjust to perform:",
-            grp_auto,
-        )
-        v_auto.addWidget(lbl_auto_desc)
-
-        self.chk_auto_straighten = QCheckBox("Straighten", grp_auto)
-        self.chk_auto_straighten.setChecked(auto_straighten)
-        v_auto.addWidget(self.chk_auto_straighten)
-
-        self.chk_auto_noise = QCheckBox("Noise reduction", grp_auto)
-        self.chk_auto_noise.setChecked(auto_noise)
-        v_auto.addWidget(self.chk_auto_noise)
-
-        self.chk_auto_color = QCheckBox("Color", grp_auto)
-        self.chk_auto_color.setChecked(auto_color)
-        v_auto.addWidget(self.chk_auto_color)
-
-        self.chk_auto_exposure = QCheckBox("Exposure", grp_auto)
-        self.chk_auto_exposure.setChecked(auto_exposure)
-        v_auto.addWidget(self.chk_auto_exposure)
-
-        v_edit.addWidget(grp_auto)
-
         # JPEG quality group
         self.grp_jpeg = QGroupBox(f"JPEG quality: {jpeg_quality}%", tab_edit)
         v_jpeg = QVBoxLayout(self.grp_jpeg)
@@ -921,6 +1004,9 @@ class AppSettingsDialog(QDialog):
         self.slider_jpeg_quality.setValue(max(50, min(100, int(jpeg_quality))))
         self.slider_jpeg_quality.setTickPosition(QSlider.TicksBelow)
         self.slider_jpeg_quality.setTickInterval(10)
+        self.slider_jpeg_quality.setToolTip(
+            "Controls the balance between image sharpness and file size when saving edited JPEGs—around 90% is recommended for most photos."
+        )
         self.slider_jpeg_quality.valueChanged.connect(self._on_jpeg_slider_changed)
         v_jpeg.addWidget(self.slider_jpeg_quality)
 
@@ -948,6 +1034,9 @@ class AppSettingsDialog(QDialog):
         self.cmb_save_naming.addItem("Original name + (edited) (e.g. photo (edited).jpg)", "{stem} (edited)")
         self.cmb_save_naming.addItem("Original name + _copy (e.g. photo_copy.jpg)", "{stem}_copy")
         self.cmb_save_naming.addItem("Original name + -edit (e.g. photo-edit.jpg)", "{stem}-edit")
+        self.cmb_save_naming.setToolTip(
+            "Sets the suffix added to the filename when you choose 'Save as copy' so the original file stays untouched."
+        )
         v_copy.addWidget(self.cmb_save_naming)
 
         naming_idx = self.cmb_save_naming.findData(self._init_save_copy_naming)
@@ -959,9 +1048,13 @@ class AppSettingsDialog(QDialog):
         v_copy.addWidget(lbl_dest)
 
         self.rad_save_orig = QRadioButton("Save to original photo's folder", self.grp_save_copy)
+        self.rad_save_orig.setToolTip("Saves edited copies right next to the original photo in the same folder.")
         self.rad_save_custom = QRadioButton("Save to a specific folder:", self.grp_save_copy)
+        self.rad_save_custom.setToolTip("Saves all edited copies into one dedicated folder of your choice.")
         self.rad_save_ask = QRadioButton("Ask each time", self.grp_save_copy)
-        self.rad_save_ask.setToolTip("Prompt with a File Explorer save dialog each time Save as copy is clicked")
+        self.rad_save_ask.setToolTip(
+            "Opens a Save dialog so you can pick the folder and filename every time you click 'Save as copy'."
+        )
 
         if self._init_save_copy_location == "custom":
             self.rad_save_custom.setChecked(True)
@@ -977,8 +1070,12 @@ class AppSettingsDialog(QDialog):
         self.txt_save_custom_folder = QLineEdit(self.grp_save_copy)
         self.txt_save_custom_folder.setText(self._init_save_copy_custom_folder)
         self.txt_save_custom_folder.setEnabled(self.rad_save_custom.isChecked())
+        self.txt_save_custom_folder.setToolTip(
+            "Folder path where edited copies are saved when 'Save to a specific folder' is selected."
+        )
         self.btn_browse_custom_folder = QPushButton("Browse...", self.grp_save_copy)
         self.btn_browse_custom_folder.setEnabled(self.rad_save_custom.isChecked())
+        self.btn_browse_custom_folder.setToolTip("Choose the folder where edited copies will be saved.")
         self.btn_browse_custom_folder.clicked.connect(self._on_browse_save_copy_folder)
         self.rad_save_custom.toggled.connect(self.txt_save_custom_folder.setEnabled)
         self.rad_save_custom.toggled.connect(self.btn_browse_custom_folder.setEnabled)
@@ -991,6 +1088,9 @@ class AppSettingsDialog(QDialog):
         v_copy.addSpacing(2)
         self.chk_save_switch_view = QCheckBox("Switch to viewing the new copy after saving", self.grp_save_copy)
         self.chk_save_switch_view.setChecked(self._init_save_copy_switch_view)
+        self.chk_save_switch_view.setToolTip(
+            "Automatically jumps to the newly saved copy in the viewer so any further edits apply to the copy instead of the original."
+        )
         v_copy.addWidget(self.chk_save_switch_view)
 
         v_edit.addWidget(self.grp_save_copy)
@@ -1001,17 +1101,23 @@ class AppSettingsDialog(QDialog):
         v_unsaved.setContentsMargins(10, 10, 10, 10)
         v_unsaved.setSpacing(6)
 
-        lbl_unsaved_desc = QLabel("When closing or navigating away from a photo with unsaved adjustments:")
-        lbl_unsaved_desc.setStyleSheet(
+        self.lbl_unsaved_desc = QLabel(
+            "When closing or navigating away from a photo with unsaved adjustments:",
+            self.grp_unsaved,
+        )
+        self.lbl_unsaved_desc.setStyleSheet(
             f"color: {'#94A3B8' if self._is_dark else '#1E395B'}; font-size: 9pt;"
         )
-        v_unsaved.addWidget(lbl_unsaved_desc)
+        v_unsaved.addWidget(self.lbl_unsaved_desc)
 
         self.cmb_unsaved_action = QComboBox(self.grp_unsaved)
         self.cmb_unsaved_action.addItem("Prompt what to do each time", "prompt")
         self.cmb_unsaved_action.addItem("Automatically Save (Overwrite original)", "overwrite")
         self.cmb_unsaved_action.addItem("Automatically Save as copy", "copy")
         self.cmb_unsaved_action.addItem("Discard changes without asking", "discard")
+        self.cmb_unsaved_action.setToolTip(
+            "Chooses what happens if you close or switch away from a photo that still has unsaved edits."
+        )
 
         cur_idx = self.cmb_unsaved_action.findData(self._init_unsaved_edits_action)
         if cur_idx >= 0:
@@ -1031,43 +1137,56 @@ class AppSettingsDialog(QDialog):
         # -------------------------------------------------------------
         tab_ai = QWidget()
         v_ai = QVBoxLayout(tab_ai)
-        v_ai.setContentsMargins(14, 14, 14, 14)
-        v_ai.setSpacing(12)
+        v_ai.setContentsMargins(14, 12, 14, 12)
+        v_ai.setSpacing(9)
 
-        ai_intro = QLabel(
-            "Manage optional AI models and external OCR engines. Models are stored in your local AppData folder "
-            "and can be uninstalled at any time."
+        self.lbl_ai_intro = QLabel(
+            "Download or remove optional AI models and text-recognition (OCR) engines. Everything runs offline on your PC and can be uninstalled anytime.",
+            tab_ai,
         )
-        ai_intro.setWordWrap(True)
-        ai_intro.setStyleSheet("color: #666; font-size: 11px;")
-        v_ai.addWidget(ai_intro)
+        self.lbl_ai_intro.setWordWrap(True)
+        self.lbl_ai_intro.setStyleSheet(
+            f"color: {'#94A3B8' if self._is_dark else '#55687D'}; font-size: 8.5pt;"
+        )
+        v_ai.addWidget(self.lbl_ai_intro)
 
         # 1. AI Neural Inpainting (LaMa)
         grp_lama = QGroupBox("AI Neural Inpainting (LaMa)", tab_ai)
         v_lama = QVBoxLayout(grp_lama)
+        v_lama.setContentsMargins(12, 8, 12, 8)
         v_lama.setSpacing(6)
-        lama_desc = QLabel(
-            "Optional deep-learning fill model (~208 MB) that upgrades Object Eraser, Crop AI Expand, "
-            "Panorama corner fill, and 3D Cinematic background fill. Built-in basic inpainting is used when not installed.",
+        self.lbl_lama_desc = QLabel(
+            "Upgrades Object Eraser, Crop AI Expand, Panorama edge fill, and 3D Cinematic background fill for cleaner results; uses the built-in filler if not installed (optional offline LaMa model, ~208 MB).",
             grp_lama,
         )
-        lama_desc.setWordWrap(True)
-        lama_desc.setStyleSheet("color: #666; font-size: 10.5px;")
-        v_lama.addWidget(lama_desc)
+        self.lbl_lama_desc.setWordWrap(True)
+        self.lbl_lama_desc.setStyleSheet(
+            f"color: {'#94A3B8' if self._is_dark else '#55687D'}; font-size: 8.5pt;"
+        )
+        v_lama.addWidget(self.lbl_lama_desc)
 
         self.lbl_opt_lama_status = QLabel("Checking status...", grp_lama)
         self.lbl_opt_lama_status.setWordWrap(True)
         v_lama.addWidget(self.lbl_opt_lama_status)
 
         self.chk_opt_lama_enabled = QCheckBox(
-            "Enable AI Object Eraser (LaMa) when model is installed", grp_lama
+            "Use AI Object Eraser (LaMa) when installed", grp_lama
+        )
+        self.chk_opt_lama_enabled.setToolTip(
+            "Uses the high-quality AI model to fill erased areas seamlessly; uncheck to switch back to the faster built-in filler without uninstalling."
         )
         self.chk_opt_lama_enabled.toggled.connect(self._on_opt_lama_enabled_toggled)
         v_lama.addWidget(self.chk_opt_lama_enabled)
 
         lama_btn_row = QHBoxLayout()
         self.btn_opt_lama_download = QPushButton("Download AI Object Eraser", grp_lama)
+        self.btn_opt_lama_download.setToolTip(
+            "Downloads the offline AI fill model for cleaner object removal, Crop AI Expand, and panorama edge fill (LaMa ONNX, ~208 MB)."
+        )
         self.btn_opt_lama_uninstall = QPushButton("Uninstall Model", grp_lama)
+        self.btn_opt_lama_uninstall.setToolTip(
+            "Removes the downloaded AI fill model to free ~208 MB; editing tools will fall back to the built-in filler."
+        )
         self.btn_opt_lama_download.clicked.connect(self._on_opt_lama_download)
         self.btn_opt_lama_uninstall.clicked.connect(self._on_opt_lama_uninstall)
         lama_btn_row.addWidget(self.btn_opt_lama_download)
@@ -1079,16 +1198,19 @@ class AppSettingsDialog(QDialog):
         # 2. Offline Text Recognition (OCR)
         grp_ocr = QGroupBox("Offline Text Recognition (OCR)", tab_ai)
         v_ocr = QVBoxLayout(grp_ocr)
-        v_ocr.setSpacing(7)
-        ocr_desc = QLabel(
-            "• Windows Native OCR: Built-in Windows 10/11 OCR — zero download, best for photos (used first by Auto).\n"
-            "• RapidOCR (~15 MB): Self-contained offline AI text recognition downloaded to AppData.\n"
-            "• Tesseract OCR: Uses an external tesseract.exe installation if already on your PC.",
+        v_ocr.setContentsMargins(12, 8, 12, 8)
+        v_ocr.setSpacing(6)
+        self.lbl_ocr_desc = QLabel(
+            "• Windows Native OCR: Built into Windows 10/11 — zero download and best for photos (used first by Auto).\n"
+            "• RapidOCR: Self-contained offline AI text reader downloaded to your PC (~15 MB).\n"
+            "• Tesseract OCR: Uses an existing external installation on your PC if present (tesseract.exe).",
             grp_ocr,
         )
-        ocr_desc.setWordWrap(True)
-        ocr_desc.setStyleSheet("color: #666; font-size: 10.5px;")
-        v_ocr.addWidget(ocr_desc)
+        self.lbl_ocr_desc.setWordWrap(True)
+        self.lbl_ocr_desc.setStyleSheet(
+            f"color: {'#94A3B8' if self._is_dark else '#55687D'}; font-size: 8.5pt;"
+        )
+        v_ocr.addWidget(self.lbl_ocr_desc)
 
         self.lbl_opt_ocr_status = QLabel("Detecting OCR engine...", grp_ocr)
         self.lbl_opt_ocr_status.setWordWrap(True)
@@ -1102,11 +1224,14 @@ class AppSettingsDialog(QDialog):
         self.cmb_opt_ocr_backend.addItem("Windows Native OCR (WinRT)", "windows_media_ocr")
         self.cmb_opt_ocr_backend.addItem("RapidOCR (ONNX)", "rapidocr")
         self.cmb_opt_ocr_backend.addItem("Tesseract OCR", "pytesseract")
+        self.cmb_opt_ocr_backend.setToolTip(
+            "Chooses which offline engine reads text inside photos for searching and copying text; 'Auto' uses Windows Native OCR first with no download needed."
+        )
         self.cmb_opt_ocr_backend.currentIndexChanged.connect(self._on_opt_ocr_backend_changed)
         ocr_engine_row.addWidget(self.cmb_opt_ocr_backend, 1)
         self.btn_opt_rescan_ocr = QPushButton("Re-scan All OCR...", grp_ocr)
         self.btn_opt_rescan_ocr.setToolTip(
-            "Re-run OCR indexing across all OCR-enabled folders using the selected engine."
+            "Re-reads text across all OCR-enabled folders using the currently selected engine—useful after switching engines or installing RapidOCR."
         )
         self.btn_opt_rescan_ocr.clicked.connect(self._on_opt_rescan_ocr)
         ocr_engine_row.addWidget(self.btn_opt_rescan_ocr)
@@ -1118,7 +1243,13 @@ class AppSettingsDialog(QDialog):
 
         rapid_dl_row = QHBoxLayout()
         self.btn_opt_rapid_download = QPushButton("Download RapidOCR (~15 MB)", grp_ocr)
+        self.btn_opt_rapid_download.setToolTip(
+            "Downloads a lightweight offline text-recognition model as an alternative to Windows Native OCR (RapidOCR ONNX, ~15 MB)."
+        )
         self.btn_opt_rapid_uninstall = QPushButton("Uninstall RapidOCR", grp_ocr)
+        self.btn_opt_rapid_uninstall.setToolTip(
+            "Removes the RapidOCR model files from your PC; Photo Gallery will fall back to Windows Native OCR."
+        )
         self.btn_opt_rapid_download.clicked.connect(self._on_opt_rapid_download)
         self.btn_opt_rapid_uninstall.clicked.connect(self._on_opt_rapid_uninstall)
         rapid_dl_row.addWidget(self.btn_opt_rapid_download)
@@ -1132,10 +1263,16 @@ class AppSettingsDialog(QDialog):
         rapid_row.addWidget(rapid_lbl)
         self.txt_opt_rapid_dir = QLabel("Default (AppData)", grp_ocr)
         self.txt_opt_rapid_dir.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.txt_opt_rapid_dir.setStyleSheet("color: #444; font-size: 11px;")
+        self.txt_opt_rapid_dir.setStyleSheet(
+            f"color: {'#CBD5E1' if self._is_dark else '#475569'}; font-size: 8.5pt;"
+        )
         self.txt_opt_rapid_dir.setWordWrap(True)
         self.btn_opt_browse_rapid = QPushButton("Browse...", grp_ocr)
+        self.btn_opt_browse_rapid.setToolTip(
+            "Lets you point Photo Gallery to an existing folder of RapidOCR model files instead of downloading them again (requires *det*.onnx and *rec*.onnx)."
+        )
         self.btn_opt_reset_rapid = QPushButton("Reset", grp_ocr)
+        self.btn_opt_reset_rapid.setToolTip("Switches back to the default RapidOCR folder inside AppData.")
         self.btn_opt_browse_rapid.clicked.connect(self._on_opt_browse_rapidocr)
         self.btn_opt_reset_rapid.clicked.connect(self._on_opt_reset_rapidocr)
         rapid_row.addWidget(self.txt_opt_rapid_dir, 1)
@@ -1149,10 +1286,14 @@ class AppSettingsDialog(QDialog):
         tess_row.addWidget(tess_lbl)
         self.txt_opt_tesseract_path = QLabel("Not detected", grp_ocr)
         self.txt_opt_tesseract_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.txt_opt_tesseract_path.setStyleSheet("color: #444; font-size: 11px;")
+        self.txt_opt_tesseract_path.setStyleSheet(
+            f"color: {'#CBD5E1' if self._is_dark else '#475569'}; font-size: 8.5pt;"
+        )
         self.txt_opt_tesseract_path.setWordWrap(True)
         self.btn_opt_browse_tess = QPushButton("Browse...", grp_ocr)
+        self.btn_opt_browse_tess.setToolTip("Manually locate tesseract.exe on your PC if it is installed in a custom folder.")
         self.btn_opt_detect_tess = QPushButton("Auto-Detect", grp_ocr)
+        self.btn_opt_detect_tess.setToolTip("Scans your PATH and Program Files folders to find tesseract.exe automatically.")
         self.btn_opt_browse_tess.clicked.connect(self._on_opt_browse_tesseract)
         self.btn_opt_detect_tess.clicked.connect(self._on_opt_detect_tesseract)
         tess_row.addWidget(self.txt_opt_tesseract_path, 1)
@@ -1165,15 +1306,17 @@ class AppSettingsDialog(QDialog):
         # Group 3: Optional Semantic Search & Subjects (MobileCLIP-S1 ONNX ~82 MB)
         grp_sem = QGroupBox("Semantic Search && Subjects (MobileCLIP-S1 ONNX)", tab_ai)
         v_sem = QVBoxLayout(grp_sem)
-        v_sem.setSpacing(8)
-        lbl_sem_desc = QLabel(
-            "Enables optional natural-language photo search ('dog on beach') and the calibrated "
-            "Subjects navigation section (~82 MB offline ONNX Runtime download; runs only on cached thumbnails).",
+        v_sem.setContentsMargins(12, 8, 12, 8)
+        v_sem.setSpacing(6)
+        self.lbl_sem_desc = QLabel(
+            "Lets you search photos in plain English (like 'dog on beach') and enables the Subjects sidebar; runs completely offline on cached thumbnails (MobileCLIP-S1 ONNX, ~82 MB).",
             grp_sem,
         )
-        lbl_sem_desc.setWordWrap(True)
-        lbl_sem_desc.setStyleSheet("font-size: 11px;")
-        v_sem.addWidget(lbl_sem_desc)
+        self.lbl_sem_desc.setWordWrap(True)
+        self.lbl_sem_desc.setStyleSheet(
+            f"color: {'#94A3B8' if self._is_dark else '#55687D'}; font-size: 8.5pt;"
+        )
+        v_sem.addWidget(self.lbl_sem_desc)
 
         self.lbl_opt_semantic_status = QLabel("Checking MobileCLIP-S1 add-on...", grp_sem)
         self.lbl_opt_semantic_status.setWordWrap(True)
@@ -1182,7 +1325,13 @@ class AppSettingsDialog(QDialog):
 
         sem_btn_row = QHBoxLayout()
         self.btn_opt_semantic_download = QPushButton("Download MobileCLIP-S1 (~82 MB)", grp_sem)
+        self.btn_opt_semantic_download.setToolTip(
+            "Downloads the offline AI model that lets you search photos in plain English—like 'dog on beach'—and powers the Subjects sidebar (MobileCLIP-S1 ONNX, ~82 MB)."
+        )
         self.btn_opt_semantic_uninstall = QPushButton("Uninstall", grp_sem)
+        self.btn_opt_semantic_uninstall.setToolTip(
+            "Removes the MobileCLIP-S1 AI search model from your PC to free ~82 MB."
+        )
         self.btn_opt_semantic_download.clicked.connect(self._on_opt_semantic_download)
         self.btn_opt_semantic_uninstall.clicked.connect(self._on_opt_semantic_uninstall)
         sem_btn_row.addWidget(self.btn_opt_semantic_download)
@@ -1207,89 +1356,176 @@ class AppSettingsDialog(QDialog):
         tab_database = QWidget()
         v_db = QVBoxLayout(tab_database)
         v_db.setContentsMargins(14, 14, 14, 14)
-        v_db.setSpacing(12)
+        v_db.setSpacing(10)
 
-        # Catalog & Cache Statistics Group
-        stats_group = QGroupBox("Catalog & Cache Statistics", tab_database)
+        # Card 0: Catalog & Cache Statistics (counts + storage sizes)
+        stats_group = QGroupBox("Catalog && Cache Statistics", tab_database)
         stats_layout = QVBoxLayout(stats_group)
         stats_layout.setContentsMargins(12, 10, 12, 10)
-        stats_layout.setSpacing(6)
+        stats_layout.setSpacing(4)
 
         self.lbl_db_stats = QLabel(stats_group)
         self.lbl_db_stats.setWordWrap(True)
         stats_layout.addWidget(self.lbl_db_stats)
-
-        self.lbl_open_db_dir = QLabel(
-            "<a href='open_db_dir' style='color: #3B82F6; text-decoration: underline;'>Open database folder in Explorer</a>",
-            stats_group,
-        )
-        self.lbl_open_db_dir.setOpenExternalLinks(False)
-        self.lbl_open_db_dir.linkActivated.connect(self._on_open_db_dir_link)
-        stats_layout.addWidget(self.lbl_open_db_dir)
-
         v_db.addWidget(stats_group)
-        self._refresh_db_stats()
 
-        maint_frame = QGroupBox("Database & Backup Maintenance", tab_database)
+        # Card 1: Maintenance & Backups (2x2 compact grid + Check Integrity utility row)
+        maint_frame = QGroupBox("Maintenance && Backups", tab_database)
         maint_layout = QVBoxLayout(maint_frame)
-        maint_layout.setContentsMargins(12, 10, 12, 12)
+        maint_layout.setContentsMargins(12, 10, 12, 10)
         maint_layout.setSpacing(8)
 
         lbl_maint_desc = QLabel(
-            "Maintain optimal performance for large photo catalogs by compacting SQLite\n"
-            "databases and removing expired backup copies of edited photos.",
+            "Keep your gallery fast, refresh blurry thumbnails, back up your catalog, or check for database issues.",
             maint_frame,
         )
         lbl_maint_desc.setWordWrap(True)
         maint_layout.addWidget(lbl_maint_desc)
 
-        self.btn_compact_db = QPushButton(
-            "Compact && Optimize Databases (catalog.db + thumbnails.db)", maint_frame
+        maint_grid = QGridLayout()
+        maint_grid.setContentsMargins(0, 0, 0, 0)
+        maint_grid.setHorizontalSpacing(8)
+        maint_grid.setVerticalSpacing(6)
+        maint_grid.setColumnStretch(0, 1)
+        maint_grid.setColumnStretch(1, 1)
+
+        self.btn_compact_db = QPushButton("Optimize Databases", maint_frame)
+        self.btn_compact_db.setToolTip(
+            "Shrinks database files and speeds up browsing and searches after big imports or deletions (runs SQLite VACUUM and ANALYZE on catalog.db and thumbnails.db)."
         )
         self.btn_compact_db.clicked.connect(self._on_compact_clicked)
-        maint_layout.addWidget(self.btn_compact_db)
+        maint_grid.addWidget(self.btn_compact_db, 0, 0)
 
-        self.btn_rebuild_thumbs = QPushButton(
-            "Rebuild Thumbnail Cache (HiDPI && Panoramas)", maint_frame
+        self.btn_rebuild_thumbs = QPushButton("Rebuild Thumbnails", maint_frame)
+        self.btn_rebuild_thumbs.setToolTip(
+            "Regenerates all preview images so blurry, outdated, or cropped thumbnails look sharp again (rebuilds thumbnails.db at HiDPI and panorama resolution)."
         )
         self.btn_rebuild_thumbs.clicked.connect(self._on_rebuild_thumbs_clicked)
-        maint_layout.addWidget(self.btn_rebuild_thumbs)
+        maint_grid.addWidget(self.btn_rebuild_thumbs, 0, 1)
 
-        self.btn_prune_backups = QPushButton(
-            "Clean Up Expired Original Backups Now", maint_frame
-        )
-        self.btn_prune_backups.clicked.connect(self._on_prune_clicked)
-        maint_layout.addWidget(self.btn_prune_backups)
-
-        self.btn_backup_catalog = QPushButton(
-            "Backup Catalog Database Now...", maint_frame
+        self.btn_backup_catalog = QPushButton("Backup Catalog...", maint_frame)
+        self.btn_backup_catalog.setToolTip(
+            "Saves a safe copy of your tags, ratings, albums, and face tags in case of drive failure (creates an online SQLite snapshot of catalog.db)."
         )
         self.btn_backup_catalog.clicked.connect(self._on_backup_clicked)
-        maint_layout.addWidget(self.btn_backup_catalog)
+        maint_grid.addWidget(self.btn_backup_catalog, 1, 0)
 
-        self.btn_fresh_start = QPushButton(
-            "Fresh Start (Reset Catalog && Thumbnails)...", maint_frame
+        self.btn_prune_backups = QPushButton("Clean Up Backups", maint_frame)
+        self.btn_prune_backups.setToolTip(
+            "Frees up disk space by removing old pre-edit backups that are past your Originals retention period (prunes expired copies in .OriginalFiles)."
         )
-        self.btn_fresh_start.setStyleSheet(
-            "QPushButton { color: #B91C1C; border: 1px solid #FCA5A5; background: #FEF2F2; "
-            "border-radius: 3px; padding: 5px 10px; font-weight: 600; }"
-            "QPushButton:hover { background: #FEE2E2; border-color: #EF4444; }"
-            if not self._is_dark
-            else "QPushButton { color: #FCA5A5; border: 1px solid #7F1D1D; background: #2D181B; "
-            "border-radius: 3px; padding: 5px 10px; font-weight: 600; }"
-            "QPushButton:hover { background: #451A20; border-color: #EF4444; }"
+        self.btn_prune_backups.clicked.connect(self._on_prune_clicked)
+        maint_grid.addWidget(self.btn_prune_backups, 1, 1)
+
+        maint_layout.addLayout(maint_grid)
+
+        integrity_row = QHBoxLayout()
+        integrity_row.setContentsMargins(0, 2, 0, 0)
+        integrity_row.setSpacing(8)
+        self.btn_check_integrity = QPushButton("Check Integrity", maint_frame)
+        self.btn_check_integrity.setToolTip(
+            "Checks that your photo catalog and thumbnail cache are healthy and free of file corruption, useful after a crash or power cut (runs SQLite PRAGMA quick_check(1) on catalog.db and thumbnails.db)."
         )
-        self.btn_fresh_start.setToolTip(
-            "Deletes catalog.db and thumbnails.db to start with a clean empty gallery (your photo files on disk are NOT deleted)"
+        self.btn_check_integrity.clicked.connect(self._on_check_integrity_clicked)
+        integrity_row.addWidget(self.btn_check_integrity)
+
+        last_chk_ts = int(QSettings("PhotoGallery64", "PhotoGallery64").value("db/last_thumb_quick_check_ts", 0) or 0)
+        if last_chk_ts > 0:
+            chk_dt = datetime.datetime.fromtimestamp(last_chk_ts).strftime("%Y-%m-%d %H:%M")
+            init_chk_txt = f"Last checked: {chk_dt}"
+        else:
+            init_chk_txt = "Not checked yet"
+        self.lbl_integrity_badge = QLabel(init_chk_txt, maint_frame)
+        self.lbl_integrity_badge.setStyleSheet(
+            f"font-size: 8.5pt; color: {'#94A3B8' if self._is_dark else '#55687D'};"
         )
-        self.btn_fresh_start.clicked.connect(self._on_fresh_start_clicked)
-        maint_layout.addWidget(self.btn_fresh_start)
+        integrity_row.addWidget(self.lbl_integrity_badge, 1)
+        maint_layout.addLayout(integrity_row)
 
         self.lbl_maint_status = QLabel("", maint_frame)
+        self.lbl_maint_status.setWordWrap(True)
         self.lbl_maint_status.setStyleSheet("color: #3B82F6; font-weight: 600;")
+        self.lbl_maint_status.setVisible(False)
         maint_layout.addWidget(self.lbl_maint_status)
 
         v_db.addWidget(maint_frame)
+
+        # Card 2: Storage Location & Reset
+        storage_frame = QGroupBox("Storage Location && Reset", tab_database)
+        storage_v = QVBoxLayout(storage_frame)
+        storage_v.setContentsMargins(12, 10, 12, 10)
+        storage_v.setSpacing(8)
+
+        loc_row = QHBoxLayout()
+        loc_row.setSpacing(6)
+        self.txt_db_location = QLineEdit(storage_frame)
+        self.txt_db_location.setReadOnly(True)
+        self.txt_db_location.setToolTip(
+            "Shows where Essentials Photo Gallery stores its catalog and thumbnail cache (catalog.db, thumbnails.db, and optional AI vectors)."
+        )
+        loc_row.addWidget(self.txt_db_location, 1)
+
+        self.btn_open_db_dir = QPushButton("Open", storage_frame)
+        self.btn_open_db_dir.setToolTip(
+            "Opens the database folder in File Explorer so you can inspect or manually back up the files."
+        )
+        self.btn_open_db_dir.clicked.connect(lambda: self._on_open_db_dir_link(""))
+        loc_row.addWidget(self.btn_open_db_dir)
+
+        self.btn_move_db_dir = QPushButton("Move Location...", storage_frame)
+        self.btn_move_db_dir.setToolTip(
+            "Moves your catalog and thumbnail cache to another drive or folder—useful if your C: drive is running low on space (restarts the app after copying)."
+        )
+        self.btn_move_db_dir.clicked.connect(lambda: self._on_relocate_db_clicked(use_default=False))
+        loc_row.addWidget(self.btn_move_db_dir)
+
+        from src.utils.paths import get_custom_db_dir
+
+        self.btn_reset_db_dir = QPushButton("Default", storage_frame)
+        self.btn_reset_db_dir.setToolTip(
+            "Moves your catalog and thumbnail cache back to the default folder on this PC (restarts the app after copying)."
+        )
+        self.btn_reset_db_dir.setVisible(get_custom_db_dir() is not None)
+        self.btn_reset_db_dir.clicked.connect(lambda: self._on_relocate_db_clicked(use_default=True))
+        loc_row.addWidget(self.btn_reset_db_dir)
+        storage_v.addLayout(loc_row)
+
+        sep_danger = QFrame(storage_frame)
+        sep_danger.setFrameShape(QFrame.HLine)
+        sep_danger.setFrameShadow(QFrame.Sunken)
+        storage_v.addWidget(sep_danger)
+
+        danger_row = QHBoxLayout()
+        danger_row.setSpacing(10)
+        self.lbl_reset_hint = QLabel(
+            "Clears catalog & cached thumbnails only — your photo files on disk are never deleted.",
+            storage_frame,
+        )
+        self.lbl_reset_hint.setWordWrap(True)
+        self.lbl_reset_hint.setStyleSheet(
+            f"font-size: 8.5pt; color: {'#94A3B8' if self._is_dark else '#64748B'};"
+        )
+        danger_row.addWidget(self.lbl_reset_hint, 1)
+
+        self.btn_fresh_start = QPushButton("Fresh Start...", storage_frame)
+        self.btn_fresh_start.setStyleSheet(
+            "QPushButton { color: #B91C1C; border: 1px solid #FCA5A5; background: #FEF2F2; "
+            "border-radius: 3px; padding: 5px 12px; font-weight: 600; }"
+            "QPushButton:hover { background: #FEE2E2; border-color: #EF4444; }"
+            if not self._is_dark
+            else "QPushButton { color: #FCA5A5; border: 1px solid #7F1D1D; background: #2D181B; "
+            "border-radius: 3px; padding: 5px 12px; font-weight: 600; }"
+            "QPushButton:hover { background: #451A20; border-color: #EF4444; }"
+        )
+        self.btn_fresh_start.setToolTip(
+            "Resets the gallery to an empty catalog so you can re-index from scratch; your actual photo files on disk are never deleted (deletes catalog.db and thumbnails.db)."
+        )
+        self.btn_fresh_start.clicked.connect(self._on_fresh_start_clicked)
+        danger_row.addWidget(self.btn_fresh_start)
+        storage_v.addLayout(danger_row)
+
+        v_db.addWidget(storage_frame)
+        self._refresh_db_stats()
         v_db.addStretch(1)
 
         self.tab_widget.addTab(tab_database, "Database")
@@ -1441,6 +1677,51 @@ class AppSettingsDialog(QDialog):
 
         apply_windows_dark_titlebar(self, self._is_dark)
 
+        muted = "#94A3B8" if self._is_dark else "#55687D"
+        link_col = "#60A5FA" if self._is_dark else "#0066CC"
+        if hasattr(self, "lbl_safe_hint"):
+            self.lbl_safe_hint.setStyleSheet(
+                f"font-size: 8.5pt; padding-left: 20px; color: {muted};"
+            )
+        if hasattr(self, "lbl_go_orig"):
+            self.lbl_go_orig.setText(
+                f"<a href='open_originals' style='color: {link_col}; text-decoration: underline;'>Go to original photos folder</a>"
+            )
+        if hasattr(self, "lbl_unsaved_desc"):
+            self.lbl_unsaved_desc.setStyleSheet(
+                f"color: {'#94A3B8' if self._is_dark else '#1E395B'}; font-size: 9pt;"
+            )
+        for attr_name in ("lbl_ai_intro", "lbl_lama_desc", "lbl_ocr_desc", "lbl_sem_desc"):
+            lbl = getattr(self, attr_name, None)
+            if lbl is not None:
+                lbl.setStyleSheet(f"color: {muted}; font-size: 8.5pt;")
+        for attr_name in ("txt_opt_rapid_dir", "txt_opt_tesseract_path"):
+            lbl = getattr(self, attr_name, None)
+            if lbl is not None:
+                lbl.setStyleSheet(
+                    f"color: {'#CBD5E1' if self._is_dark else '#475569'}; font-size: 8.5pt;"
+                )
+        if hasattr(self, "lbl_integrity_badge") and not self.lbl_integrity_badge.text().startswith(("✓", "⚠")):
+            self.lbl_integrity_badge.setStyleSheet(f"font-size: 8.5pt; color: {muted};")
+        if hasattr(self, "lbl_reset_hint"):
+            self.lbl_reset_hint.setStyleSheet(
+                f"font-size: 8.5pt; color: {'#94A3B8' if self._is_dark else '#64748B'};"
+            )
+        if hasattr(self, "btn_fresh_start"):
+            self.btn_fresh_start.setStyleSheet(
+                "QPushButton { color: #FCA5A5; border: 1px solid #7F1D1D; background: #2D181B; "
+                "border-radius: 3px; padding: 5px 12px; font-weight: 600; }"
+                "QPushButton:hover { background: #451A20; border-color: #EF4444; }"
+                if self._is_dark
+                else "QPushButton { color: #B91C1C; border: 1px solid #FCA5A5; background: #FEF2F2; "
+                "border-radius: 3px; padding: 5px 12px; font-weight: 600; }"
+                "QPushButton:hover { background: #FEE2E2; border-color: #EF4444; }"
+            )
+        if hasattr(self, "btn_opt_semantic_download"):
+            self._refresh_ai_downloads_tab()
+        if hasattr(self, "face_tab") and hasattr(self.face_tab, "apply_theme"):
+            self.face_tab.apply_theme(self._is_dark)
+
     def _refresh_ai_downloads_tab(self) -> None:
         try:
             from src.imaging.creative_effects import get_lama_model_status, is_lama_enabled
@@ -1482,7 +1763,7 @@ class AppSettingsDialog(QDialog):
             labels = {
                 "rapidocr": "RapidOCR (ONNX)",
                 "winocr": "Windows Native OCR (WinRT)",
-                "windows_media_ocr": "Windows.Media.Ocr",
+                "windows_media_ocr": "Windows Native OCR",
                 "pytesseract": "Tesseract OCR",
                 "stub": "Not configured (MSER stub)",
             }
@@ -1505,15 +1786,17 @@ class AppSettingsDialog(QDialog):
             else:
                 self.txt_opt_rapid_dir.setText("Default (AppData)")
 
+            green_col = "#4ADE80" if self._is_dark else "#1B6E2D"
+            muted_col = "#94A3B8" if self._is_dark else "#55687D"
             if rapid_installed:
                 self.lbl_opt_rapid_status.setText(f"RapidOCR Add-on: Installed ({rapid_mb} MB)")
-                self.lbl_opt_rapid_status.setStyleSheet("color: #1B6E2D; font-size: 11px;")
+                self.lbl_opt_rapid_status.setStyleSheet(f"color: {green_col}; font-size: 8.5pt; font-weight: 600;")
                 self.btn_opt_rapid_download.setText("Reinstall / Repair")
                 self.btn_opt_rapid_uninstall.setVisible(True)
                 self.btn_opt_rapid_uninstall.setEnabled(True)
             else:
                 self.lbl_opt_rapid_status.setText(f"RapidOCR Add-on: Not installed (~{rapid_mb} MB download)")
-                self.lbl_opt_rapid_status.setStyleSheet("color: #666; font-size: 11px;")
+                self.lbl_opt_rapid_status.setStyleSheet(f"color: {muted_col}; font-size: 8.5pt;")
                 self.btn_opt_rapid_download.setText(f"Download RapidOCR (~{rapid_mb} MB)")
                 self.btn_opt_rapid_uninstall.setVisible(False)
                 self.btn_opt_rapid_uninstall.setEnabled(False)
@@ -1526,9 +1809,11 @@ class AppSettingsDialog(QDialog):
             sem_st = get_semantic_addon_status()
             sem_installed = bool(sem_st.get("installed"))
             sem_mb = sem_st.get("size_mb", 82)
+            green_col = "#4ADE80" if self._is_dark else "#1B6E2D"
+            muted_col = "#94A3B8" if self._is_dark else "#55687D"
             if sem_installed:
                 self.lbl_opt_semantic_status.setText(f"MobileCLIP-S1 Add-on: Installed ({sem_mb} MB)")
-                self.lbl_opt_semantic_status.setStyleSheet("color: #1B6E2D; font-size: 11px;")
+                self.lbl_opt_semantic_status.setStyleSheet(f"color: {green_col}; font-size: 8.5pt; font-weight: 600;")
                 self.btn_opt_semantic_download.setText("Reinstall / Repair")
                 self.btn_opt_semantic_uninstall.setVisible(True)
                 self.btn_opt_semantic_uninstall.setEnabled(True)
@@ -1536,7 +1821,7 @@ class AppSettingsDialog(QDialog):
                 self.lbl_opt_semantic_status.setText(
                     f"MobileCLIP-S1 Add-on: Not installed (~{sem_mb} MB optional download)"
                 )
-                self.lbl_opt_semantic_status.setStyleSheet("color: #666; font-size: 11px;")
+                self.lbl_opt_semantic_status.setStyleSheet(f"color: {muted_col}; font-size: 8.5pt;")
                 self.btn_opt_semantic_download.setText(f"Download MobileCLIP-S1 (~{sem_mb} MB)")
                 self.btn_opt_semantic_uninstall.setVisible(False)
                 self.btn_opt_semantic_uninstall.setEnabled(False)
@@ -1791,12 +2076,25 @@ class AppSettingsDialog(QDialog):
             return
         if self.engine is None:
             self.lbl_db_stats.setText("Database statistics unavailable.")
+            if hasattr(self, "txt_db_location"):
+                from src.utils.paths import get_default_db_dir
+                self.txt_db_location.setText(str(get_default_db_dir()))
+                QTimer.singleShot(0, lambda: self.txt_db_location.setCursorPosition(0))
             return
         try:
             cat_path = Path(self.engine.catalog_path)
             thumb_path = Path(self.engine.thumbnails_path)
+            sem_path = cat_path.parent / "semantic_vectors.db"
             cat_mb = cat_path.stat().st_size / (1024 * 1024) if cat_path.exists() else 0.0
             thumb_mb = thumb_path.stat().st_size / (1024 * 1024) if thumb_path.exists() else 0.0
+            sem_txt = (
+                f"  •  semantic_vectors.db ({sem_path.stat().st_size / (1024 * 1024):.1f} MB)"
+                if sem_path.is_file()
+                else ""
+            )
+            if hasattr(self, "txt_db_location"):
+                self.txt_db_location.setText(str(cat_path.parent))
+                QTimer.singleShot(0, lambda: self.txt_db_location.setCursorPosition(0))
             conn = self.engine.catalog_conn()
             media_cnt = int(conn.execute("SELECT COUNT(*) FROM media;").fetchone()[0])
             folder_cnt = int(conn.execute("SELECT COUNT(*) FROM folders;").fetchone()[0])
@@ -1805,8 +2103,7 @@ class AppSettingsDialog(QDialog):
             self.lbl_db_stats.setText(
                 f"Indexed Media: {media_cnt:,} items across {folder_cnt:,} folders  |  "
                 f"People: {people_cnt:,}  |  Pending file writes: {dirty_cnt:,}\n"
-                f"Storage: catalog.db ({cat_mb:.1f} MB)  •  thumbnails.db ({thumb_mb:.1f} MB)\n"
-                f"Location: {cat_path.parent}"
+                f"Storage: catalog.db ({cat_mb:.1f} MB)  •  thumbnails.db ({thumb_mb:.1f} MB){sem_txt}"
             )
         except Exception:
             self.lbl_db_stats.setText("Database statistics ready.")
@@ -1854,12 +2151,18 @@ class AppSettingsDialog(QDialog):
         super().accept()
 
     def _save_copy_preferences(self) -> None:
+        from src.version import AUTO_UPDATE_CHECK_KEY, AUTO_UPDATE_FREQ_KEY
+
         settings = QSettings("PhotoGallery64", "PhotoGallery64")
         settings.setValue("save_copy_location", self.save_copy_location())
         settings.setValue("save_copy_custom_folder", self.save_copy_custom_folder())
         settings.setValue("save_copy_naming_pattern", self.save_copy_naming_pattern())
         settings.setValue("save_copy_switch_view", self.save_copy_switch_view())
         settings.setValue("unsaved_edits_action", self.unsaved_edits_action())
+        if hasattr(self, "chk_auto_check_updates"):
+            settings.setValue(AUTO_UPDATE_CHECK_KEY, self.chk_auto_check_updates.isChecked())
+        if hasattr(self, "cmb_update_frequency"):
+            settings.setValue(AUTO_UPDATE_FREQ_KEY, self.update_check_frequency())
 
     def _on_browse_save_copy_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Select Save as Copy Destination Folder")
@@ -1930,19 +2233,177 @@ class AppSettingsDialog(QDialog):
 
     def _on_compact_clicked(self) -> None:
         self.compact_requested = True
+        self.lbl_maint_status.setVisible(True)
         self.lbl_maint_status.setText("✓ Database optimization queued on close.")
 
     def _on_rebuild_thumbs_clicked(self) -> None:
         self.rebuild_thumbs_requested = True
+        self.lbl_maint_status.setVisible(True)
         self.lbl_maint_status.setText("✓ Thumbnail cache rebuild queued on close (regenerates visible thumbnails at HiDPI quality).")
 
     def _on_prune_clicked(self) -> None:
         self.prune_backups_requested = True
+        self.lbl_maint_status.setVisible(True)
         self.lbl_maint_status.setText("✓ Expired backup cleanup queued on close.")
 
     def _on_backup_clicked(self) -> None:
         self.backup_requested = True
+        self.lbl_maint_status.setVisible(True)
         self.lbl_maint_status.setText("✓ Catalog backup queued on close.")
+
+    def _on_check_integrity_clicked(self) -> None:
+        if self.engine is None:
+            self.lbl_integrity_badge.setText("Database engine unavailable")
+            return
+        self.btn_check_integrity.setEnabled(False)
+        self.lbl_integrity_badge.setText("Checking catalog.db and thumbnails.db...")
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.processEvents()
+        try:
+            cat_ok, cat_msg = self.engine.quick_check_catalog()
+            th_ok, th_msg = self.engine.quick_check_thumbnails()
+            QSettings("PhotoGallery64", "PhotoGallery64").setValue(
+                "db/last_thumb_quick_check_ts",
+                int(datetime.datetime.now(datetime.timezone.utc).timestamp()),
+            )
+            ok_col = "#34D399" if self._is_dark else "#15803D"
+            warn_col = "#FCA5A5" if self._is_dark else "#B91C1C"
+            if cat_ok and th_ok:
+                self.lbl_integrity_badge.setStyleSheet(f"font-size: 8.5pt; font-weight: 600; color: {ok_col};")
+                self.lbl_integrity_badge.setText("✓ OK — catalog.db & thumbnails.db healthy")
+            elif cat_ok and not th_ok:
+                self.lbl_integrity_badge.setStyleSheet(f"font-size: 8.5pt; font-weight: 600; color: {warn_col};")
+                self.lbl_integrity_badge.setText(f"⚠ thumbnails.db error: {th_msg}")
+                ans = QMessageBox.warning(
+                    self,
+                    "Thumbnail Cache Issue",
+                    f"thumbnails.db reported an integrity issue:\n{th_msg}\n\n"
+                    "Because thumbnails are purely cached previews, you can safely rebuild the thumbnail cache now.",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if ans == QMessageBox.Yes:
+                    self._on_rebuild_thumbs_clicked()
+            else:
+                self.lbl_integrity_badge.setStyleSheet(f"font-size: 8.5pt; font-weight: 600; color: {warn_col};")
+                self.lbl_integrity_badge.setText(f"⚠ catalog.db error: {cat_msg}")
+                QMessageBox.critical(
+                    self,
+                    "Catalog Integrity Warning",
+                    f"catalog.db reported an integrity issue:\n{cat_msg}\n\n"
+                    "Use 'Backup Catalog...' or restore a recent backup before continuing.",
+                )
+        finally:
+            self.btn_check_integrity.setEnabled(True)
+
+    def _on_relocate_db_clicked(self, *, use_default: bool = False) -> None:
+        import sys
+        from PySide6.QtCore import QProcess
+        from PySide6.QtWidgets import QApplication
+        from src.db.connection import migrate_database_directory
+        from src.utils.paths import (
+            get_default_db_dir,
+            is_cloud_or_network_path,
+            set_custom_db_dir,
+        )
+
+        if self.engine is None or not hasattr(self.engine, "catalog_path"):
+            QMessageBox.warning(self, "Move Database", "Database engine is unavailable.")
+            return
+
+        src_dir = Path(self.engine.catalog_path).parent.resolve()
+        if use_default:
+            dest_dir = get_default_db_dir(ignore_custom=True).resolve()
+        else:
+            picked = QFileDialog.getExistingDirectory(
+                self, "Select Destination Folder for Database & Cache", str(src_dir)
+            )
+            if not picked:
+                return
+            dest_dir = Path(picked).resolve()
+
+        if dest_dir == src_dir:
+            self.lbl_maint_status.setText("Databases are already in that folder.")
+            return
+
+        if is_cloud_or_network_path(dest_dir):
+            ans_cloud = QMessageBox.warning(
+                self,
+                "Cloud / Network Folder Warning",
+                f"'{dest_dir}' appears to be a cloud-synced (OneDrive/Dropbox) or network path.\n\n"
+                "SQLite databases in synced or network folders can suffer file locks or corruption. "
+                "A local SSD/HDD folder is strongly recommended.\n\nProceed anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if ans_cloud != QMessageBox.Yes:
+                return
+
+        confirm = QMessageBox.question(
+            self,
+            "Move Database & Cache",
+            f"Move catalog.db, thumbnails.db, and optional AI vectors:\n\n"
+            f"From: {src_dir}\nTo:   {dest_dir}\n\n"
+            "Background tasks will pause, databases will be copied and verified, "
+            "and Essentials Photo Gallery will automatically restart.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        prog = QProgressDialog("Preparing databases for move...", "Cancel", 0, 100, self)
+        prog.setWindowTitle("Moving Database & Cache")
+        prog.setWindowModality(Qt.WindowModal)
+        prog.setMinimumDuration(0)
+        prog.setValue(0)
+        QApplication.processEvents()
+
+        try:
+            mw = self.parent()
+            if mw is not None and hasattr(mw, "prepare_for_db_relocation"):
+                mw.prepare_for_db_relocation()
+            else:
+                self.engine.checkpoint_and_close_all()
+
+            def _on_prog(done: int, total: int, fname: str) -> None:
+                pct = int((done / max(1, total)) * 100)
+                prog.setLabelText(f"Moving {fname} ({done / (1024 * 1024):.1f} / {total / (1024 * 1024):.1f} MB)...")
+                prog.setValue(min(99, pct))
+                QApplication.processEvents()
+
+            migrate_database_directory(
+                src_dir,
+                dest_dir,
+                progress_cb=_on_prog,
+                cancel_cb=prog.wasCanceled,
+            )
+            prog.setValue(100)
+            set_custom_db_dir(None if use_default else dest_dir)
+
+            QMessageBox.information(
+                self,
+                "Move Complete",
+                f"Databases were verified and moved to:\n{dest_dir}\n\n"
+                "Essentials Photo Gallery will now restart.",
+            )
+            prog.close()
+
+            # Relaunch cleanly so all pools, watchers, and map scheme handlers bind to the new directory
+            if getattr(sys, "frozen", False):
+                QProcess.startDetached(sys.executable, [])
+            else:
+                QProcess.startDetached(sys.executable, list(sys.argv))
+            app_inst = QApplication.instance()
+            if app_inst is not None:
+                app_inst.quit()
+        except InterruptedError:
+            prog.close()
+            self.lbl_maint_status.setText("Database move cancelled (original files untouched).")
+        except Exception as exc:
+            prog.close()
+            QMessageBox.critical(self, "Move Failed", f"Could not move databases:\n{exc}")
 
     def _on_fresh_start_clicked(self) -> None:
         box = QMessageBox(self)
@@ -2018,18 +2479,6 @@ class AppSettingsDialog(QDialog):
     def jpeg_quality(self) -> int:
         return int(self.slider_jpeg_quality.value())
 
-    def auto_straighten(self) -> bool:
-        return self.chk_auto_straighten.isChecked()
-
-    def auto_noise(self) -> bool:
-        return self.chk_auto_noise.isChecked()
-
-    def auto_color(self) -> bool:
-        return self.chk_auto_color.isChecked()
-
-    def auto_exposure(self) -> bool:
-        return self.chk_auto_exposure.isChecked()
-
     def save_copy_location(self) -> str:
         if getattr(self, "rad_save_ask", None) and self.rad_save_ask.isChecked():
             return "ask"
@@ -2048,6 +2497,18 @@ class AppSettingsDialog(QDialog):
 
     def unsaved_edits_action(self) -> str:
         return str(self.cmb_unsaved_action.currentData()) if hasattr(self, "cmb_unsaved_action") else "prompt"
+
+    def auto_check_updates(self) -> bool:
+        return self.chk_auto_check_updates.isChecked() if hasattr(self, "chk_auto_check_updates") else True
+
+    def update_check_frequency(self) -> str:
+        from src.version import DEFAULT_UPDATE_FREQUENCY
+
+        return (
+            str(self.cmb_update_frequency.currentData() or DEFAULT_UPDATE_FREQUENCY)
+            if hasattr(self, "cmb_update_frequency")
+            else DEFAULT_UPDATE_FREQUENCY
+        )
 
 
 def compute_resize_target(
@@ -3261,17 +3722,228 @@ class ResizePhotoDialog(QDialog):
         return generated
 
 
+class UpdateAvailableDialog(QDialog):
+    """Themed update prompt displaying formatted inline Markdown release notes and 1-click installer launch."""
+
+    def __init__(self, release_info: dict[str, Any], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("UpdateAvailableDialog")
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        self._info = dict(release_info or {})
+        self._dl_thread: QThread | None = None
+        self.skipped_this_version: bool = False
+
+        from PySide6.QtWidgets import QTextBrowser
+        from src.ui.theme_tokens import get_theme_tokens
+        from src.version import APP_VERSION, sanitize_release_notes_markdown, set_skipped_update_version
+
+        theme_name = getattr(parent, "current_theme", None)
+        is_dark = bool(
+            (str(theme_name or "").strip().lower() == "dark")
+            or (self.palette().window().color().lightness() < 128)
+        )
+        tok = get_theme_tokens(theme_name, is_dark=is_dark)
+        self._tok = tok
+
+        latest_ver = str(self._info.get("version") or "").strip().lstrip("vV")
+        installer_url = str(self._info.get("installer_url") or "")
+        html_url = str(self._info.get("html_url") or "")
+        raw_body = str(self._info.get("body") or "").strip()
+
+        self.setWindowTitle(f"Update Available — v{latest_ver}")
+        self.resize(620, 460)
+        self.setMinimumSize(520, 340)
+
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(20, 18, 20, 16)
+        vbox.setSpacing(10)
+
+        # Header
+        hdr = QHBoxLayout()
+        hdr.setSpacing(12)
+        lbl_ico = QLabel(self)
+        try:
+            from src.ui.icon_provider import make_wlpg_icon
+            lbl_ico.setPixmap(make_wlpg_icon("app_logo", 40).pixmap(40, 40))
+        except Exception:
+            lbl_ico.setText("✨")
+        hdr.addWidget(lbl_ico, 0, Qt.AlignTop)
+
+        hdr_col = QVBoxLayout()
+        hdr_col.setSpacing(2)
+        lbl_head = QLabel(f"Essentials Photo Gallery v{latest_ver} is available", self)
+        lbl_head.setStyleSheet(
+            f"font-family: 'Segoe UI', sans-serif; font-size: 12pt; font-weight: bold; "
+            f"color: {tok.text_primary if tok.is_dark else '#1E395B'}; background: transparent;"
+        )
+        hdr_col.addWidget(lbl_head)
+        sub_txt = f"You are currently running version {APP_VERSION}."
+        if installer_url:
+            sub_txt += " Click Download & Install to update (the app will close automatically to launch Setup)."
+        lbl_sub = QLabel(sub_txt, self)
+        lbl_sub.setWordWrap(True)
+        lbl_sub.setStyleSheet(
+            f"font-family: 'Segoe UI', sans-serif; font-size: 9pt; color: {tok.text_secondary}; background: transparent;"
+        )
+        hdr_col.addWidget(lbl_sub)
+        hdr.addLayout(hdr_col, 1)
+        vbox.addLayout(hdr)
+
+        # Formatted Release Notes viewer
+        notes_clean, has_tech = sanitize_release_notes_markdown(raw_body, include_technical=False)
+        self.txt_notes = QTextBrowser(self)
+        self.txt_notes.setOpenExternalLinks(True)
+        self.txt_notes.setReadOnly(True)
+        self.txt_notes.setMarkdown(notes_clean or f"Version {latest_ver} is ready to download from GitHub Releases.")
+        card_bg = tok.bg_card if tok.is_dark else "#F8FAFC"
+        self.txt_notes.setStyleSheet(
+            f"QTextBrowser {{ background-color: {card_bg}; color: {tok.text_primary}; "
+            f"border: 1px solid {tok.border_subtle}; border-radius: 5px; padding: 8px; "
+            f"font-family: 'Segoe UI', sans-serif; font-size: 9.5pt; }}"
+        )
+        vbox.addWidget(self.txt_notes, 1)
+
+        self.chk_show_tech = QCheckBox("Show full technical changelog", self)
+        self.chk_show_tech.setVisible(has_tech)
+        if has_tech:
+            def _toggle_tech(checked: bool) -> None:
+                md_text, _ = sanitize_release_notes_markdown(raw_body, include_technical=checked)
+                self.txt_notes.setMarkdown(md_text)
+            self.chk_show_tech.toggled.connect(_toggle_tech)
+        vbox.addWidget(self.chk_show_tech)
+
+        # Action bar
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        self.btn_skip = QPushButton("Skip This Version", self)
+        self.btn_skip.clicked.connect(
+            lambda: (set_skipped_update_version(latest_ver), setattr(self, "skipped_this_version", True), self.reject())
+        )
+        btn_row.addWidget(self.btn_skip)
+
+        if html_url:
+            self.btn_web = QPushButton("Open Release Page", self)
+            self.btn_web.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(html_url)))
+            btn_row.addWidget(self.btn_web)
+
+        btn_row.addStretch(1)
+
+        if installer_url:
+            self.btn_dl = QPushButton("Download && Install", self)
+            self.btn_dl.setDefault(True)
+            self.btn_dl.clicked.connect(self._on_download_and_install)
+            btn_row.addWidget(self.btn_dl)
+
+        self.btn_later = QPushButton("Later", self)
+        self.btn_later.clicked.connect(self.reject)
+        btn_row.addWidget(self.btn_later)
+        vbox.addLayout(btn_row)
+
+        bg_dlg = tok.bg_surface if tok.is_dark else "#FFFFFF"
+        self.setStyleSheet(
+            f"QDialog#UpdateAvailableDialog {{ background-color: {bg_dlg}; color: {tok.text_primary}; }} "
+            f"QDialog#UpdateAvailableDialog QCheckBox {{ color: {tok.text_primary}; background: transparent; }}"
+        )
+
+    def _on_download_and_install(self) -> None:
+        import os
+        from PySide6.QtWidgets import QApplication
+        from src.version import download_installer_exe
+
+        if self._dl_thread is not None and self._dl_thread.isRunning():
+            return
+        tok = self._tok
+        latest_ver = str(self._info.get("version") or "").strip().lstrip("vV")
+        installer_url = str(self._info.get("installer_url") or "")
+        installer_name = str(self._info.get("installer_name") or "EssentialsPhotoGallery_Setup_x64.exe")
+
+        prog = QProgressDialog(f"Downloading v{latest_ver} installer...", "Cancel", 0, 100, self)
+        prog.setWindowTitle("Updating Essentials Photo Gallery")
+        prog.setWindowModality(Qt.WindowModal)
+        style_progress_dialog(prog, self, is_dark=tok.is_dark, min_width=380)
+        prog.show()
+        cancelled = {"v": False}
+        prog.canceled.connect(lambda: cancelled.__setitem__("v", True))
+
+        class _InstallerDlWorker(QThread):
+            progress = Signal(int, int)
+            done = Signal(object)
+
+            def run(self) -> None:
+                p = download_installer_exe(
+                    installer_url,
+                    installer_name,
+                    progress_cb=lambda d, t: self.progress.emit(int(d), int(t)),
+                    cancel_cb=lambda: cancelled["v"],
+                )
+                self.done.emit(p)
+
+        dl_w = _InstallerDlWorker(self)
+
+        def _on_dl_progress(done_b: int, total_b: int) -> None:
+            if total_b > 0:
+                pct = int((done_b * 100) // total_b)
+                prog.setValue(pct)
+                prog.setLabelText(
+                    f"Downloading v{latest_ver} installer... "
+                    f"{done_b / (1024 * 1024):.1f} / {total_b / (1024 * 1024):.1f} MB ({pct}%)"
+                )
+            else:
+                prog.setLabelText(
+                    f"Downloading v{latest_ver} installer... {done_b / (1024 * 1024):.1f} MB"
+                )
+
+        dl_w.progress.connect(_on_dl_progress)
+
+        def _on_dl_done(path_obj: object) -> None:
+            self._dl_thread = None
+            prog.close()
+            if path_obj:
+                launched = False
+                try:
+                    if hasattr(os, "startfile"):
+                        os.startfile(str(path_obj))
+                        launched = True
+                except Exception:
+                    launched = False
+                if not launched:
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(path_obj)))
+                self.accept()
+                top_win = self.window() or self.parentWidget()
+                for w in list(QApplication.topLevelWidgets()):
+                    if w is not self and w.isVisible():
+                        QTimer.singleShot(120, w.close)
+                app = QApplication.instance()
+                if app is not None:
+                    QTimer.singleShot(350, app.quit)
+            elif not cancelled["v"]:
+                QMessageBox.warning(
+                    self,
+                    "Download Failed",
+                    "Could not download the installer.\n\n"
+                    "You can download the update manually from the GitHub Releases page.",
+                )
+
+        dl_w.done.connect(_on_dl_done)
+        self._dl_thread = dl_w
+        dl_w.start()
+
+
 class AboutDialog(QDialog):
-    """About dialog for Essentials Photo Gallery."""
+    """About dialog for Essentials Photo Gallery with inline offline Release Notes viewer."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("About Essentials Photo Gallery")
         self.setObjectName("AboutDialog")
-        self.setFixedSize(480, 310)
+        self.resize(520, 340)
+        self.setMinimumSize(480, 310)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
+        from PySide6.QtWidgets import QTextBrowser
         from src.ui.theme_tokens import get_theme_tokens
+        from src.version import APP_VERSION, load_local_release_notes, sanitize_release_notes_markdown
 
         theme_name = getattr(parent, "current_theme", None)
         self._is_dark = bool(
@@ -3283,7 +3955,7 @@ class AboutDialog(QDialog):
 
         vbox = QVBoxLayout(self)
         vbox.setContentsMargins(24, 20, 24, 18)
-        vbox.setSpacing(12)
+        vbox.setSpacing(10)
 
         # Header with Logo & Title
         header_hbox = QHBoxLayout()
@@ -3312,8 +3984,6 @@ class AboutDialog(QDialog):
             f"font-family: 'Segoe UI', sans-serif; font-size: 13pt; font-weight: bold; color: {title_color}; background: transparent;"
         )
         info_vbox.addWidget(lbl_title)
-
-        from src.version import APP_VERSION
 
         lbl_ver = QLabel(f"Version {APP_VERSION} (64-bit)", self)
         ver_color = tok.text_secondary if tok.is_dark else "#55687D"
@@ -3357,9 +4027,37 @@ class AboutDialog(QDialog):
         )
         vbox.addWidget(lbl_tech)
 
-        vbox.addStretch(1)
+        # Expandable Offline Release Notes (from bundled RELEASES.md)
+        local_notes_raw = load_local_release_notes(APP_VERSION)
+        clean_notes, has_tech = sanitize_release_notes_markdown(local_notes_raw, include_technical=False)
+        self._about_notes_wrap = QWidget(self)
+        an_v = QVBoxLayout(self._about_notes_wrap)
+        an_v.setContentsMargins(0, 2, 0, 2)
+        an_v.setSpacing(6)
+        self.txt_release_notes = QTextBrowser(self._about_notes_wrap)
+        self.txt_release_notes.setOpenExternalLinks(True)
+        self.txt_release_notes.setMinimumHeight(170)
+        self.txt_release_notes.setMarkdown(clean_notes)
+        card_bg = tok.bg_card if tok.is_dark else "#F8FAFC"
+        self.txt_release_notes.setStyleSheet(
+            f"QTextBrowser {{ background-color: {card_bg}; color: {tok.text_primary}; "
+            f"border: 1px solid {tok.border_subtle}; border-radius: 5px; padding: 6px; "
+            f"font-family: 'Segoe UI', sans-serif; font-size: 9pt; }}"
+        )
+        an_v.addWidget(self.txt_release_notes, 1)
+        self.chk_about_tech = QCheckBox("Show full technical changelog", self._about_notes_wrap)
+        self.chk_about_tech.setVisible(has_tech)
+        if has_tech:
+            self.chk_about_tech.toggled.connect(
+                lambda c: self.txt_release_notes.setMarkdown(
+                    sanitize_release_notes_markdown(local_notes_raw, include_technical=c)[0]
+                )
+            )
+        an_v.addWidget(self.chk_about_tech)
+        self._about_notes_wrap.setVisible(False)
+        vbox.addWidget(self._about_notes_wrap, 1)
 
-        # Update status label + Check for Updates & OK buttons
+        # Update status label + Release Notes, Check for Updates & OK buttons
         self.lbl_update_status = QLabel("", self)
         status_color = "#60A5FA" if tok.is_dark else "#3A6EA5"
         self.lbl_update_status.setStyleSheet(
@@ -3373,6 +4071,18 @@ class AboutDialog(QDialog):
         self.btn_check_updates.setFixedHeight(26)
         self.btn_check_updates.clicked.connect(self._on_check_updates)
         btn_box.addWidget(self.btn_check_updates)
+
+        self.btn_toggle_notes = QPushButton("Release Notes ▾", self)
+        self.btn_toggle_notes.setFixedHeight(26)
+        self.btn_toggle_notes.setCheckable(True)
+        self.btn_toggle_notes.setVisible(bool(clean_notes))
+        def _toggle_about_notes(checked: bool) -> None:
+            self._about_notes_wrap.setVisible(checked)
+            self.btn_toggle_notes.setText("Hide Notes ▴" if checked else "Release Notes ▾")
+            self.resize(560 if checked else 520, 540 if checked else 340)
+        self.btn_toggle_notes.toggled.connect(_toggle_about_notes)
+        btn_box.addWidget(self.btn_toggle_notes)
+
         btn_box.addStretch(1)
         self._update_thread = None
         btn_ok = QPushButton("OK", self)
@@ -3419,8 +4129,6 @@ class AboutDialog(QDialog):
         btn_box.addWidget(btn_ok)
         vbox.addLayout(btn_box)
 
-        # Scope strictly to #AboutDialog so child QMessageBox / QProgressDialog
-        # never inherit a forced white QDialog background on top of Dark Theme text.
         bg_dlg = tok.bg_surface if tok.is_dark else "#FFFFFF"
         self.setStyleSheet(
             f"""
@@ -3456,134 +4164,18 @@ class AboutDialog(QDialog):
             if not ok or not isinstance(info, dict):
                 self.lbl_update_status.setText("Could not check for updates (offline or GitHub unreachable).")
                 return
-            from PySide6.QtCore import QUrl
-            from PySide6.QtGui import QDesktopServices
-            from src.version import APP_VERSION, is_newer_version, download_installer_exe
+            from src.version import APP_VERSION, AUTO_UPDATE_LAST_CHECK_KEY, is_newer_version
+            import time
 
+            QSettings("PhotoGallery64", "PhotoGallery64").setValue(AUTO_UPDATE_LAST_CHECK_KEY, int(time.time()))
             latest_ver = str(info.get("version") or "")
             if not is_newer_version(latest_ver, APP_VERSION):
                 self.lbl_update_status.setText(f"✓ You are running the latest version ({APP_VERSION}).")
                 return
 
             self.lbl_update_status.setText(f"Update available: v{latest_ver} (current: {APP_VERSION}).")
-            installer_url = str(info.get("installer_url") or "")
-            html_url = str(info.get("html_url") or "")
-            release_body = str(info.get("body") or "").strip()
-            tok = self._theme_tokens
-            msg = QMessageBox(self)
-            msg.setWindowTitle("Update Available")
-            msg.setIcon(QMessageBox.Information)
-            msg.setText(f"A new version of Essentials Photo Gallery (v{latest_ver}) is available.")
-            info_text = f"You are currently running version {APP_VERSION}."
-            if installer_url:
-                info_text += "\n\nThe app will close automatically once the installer is downloaded and ready to run."
-            msg.setInformativeText(info_text)
-            if release_body:
-                msg.setDetailedText(release_body[:3000])
-            msg.setStyleSheet(
-                f"QMessageBox {{ background-color: {tok.bg_surface}; color: {tok.text_primary}; }} "
-                f"QMessageBox QLabel {{ color: {tok.text_primary}; background: transparent; }} "
-                f"QMessageBox QTextEdit {{ background-color: {tok.bg_card}; color: {tok.text_primary}; "
-                f"border: 1px solid {tok.border_subtle}; border-radius: 4px; }} "
-                f"QMessageBox QPushButton {{ background-color: {tok.bg_elevated}; color: {tok.text_primary}; "
-                f"border: 1px solid {tok.border_subtle}; border-radius: 4px; padding: 5px 12px; }} "
-                f"QMessageBox QPushButton:hover {{ background-color: {tok.bg_hover}; border-color: {tok.accent}; }}"
-            )
-            btn_dl = msg.addButton("Download && Install", QMessageBox.AcceptRole) if installer_url else None
-            btn_web = msg.addButton("Open Release Page", QMessageBox.ActionRole)
-            msg.addButton(QMessageBox.Close)
-            for b in msg.buttons():
-                b.setMinimumWidth(b.sizeHint().width() + 8)
-            lay = msg.layout()
-            if lay is not None and hasattr(lay, "addItem"):
-                from PySide6.QtWidgets import QSpacerItem
-                lay.addItem(
-                    QSpacerItem(560, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding),
-                    lay.rowCount(),
-                    0,
-                    1,
-                    lay.columnCount(),
-                )
-            msg.exec()
-            clicked = msg.clickedButton()
-            if btn_dl is not None and clicked == btn_dl:
-                from PySide6.QtCore import QTimer
-                from PySide6.QtWidgets import QApplication, QProgressDialog
-
-                prog = QProgressDialog(f"Downloading v{latest_ver} installer...", "Cancel", 0, 100, self)
-                prog.setWindowTitle("Updating Essentials Photo Gallery")
-                prog.setWindowModality(Qt.WindowModal)
-                style_progress_dialog(prog, self, is_dark=tok.is_dark, min_width=380)
-                prog.show()
-                cancelled = {"v": False}
-                prog.canceled.connect(lambda: cancelled.__setitem__("v", True))
-
-                class _InstallerDlWorker(QThread):
-                    progress = QtSignal(int, int)
-                    done = QtSignal(object)
-
-                    def run(self) -> None:
-                        p = download_installer_exe(
-                            installer_url,
-                            str(info.get("installer_name") or "EssentialsPhotoGallery_Setup_x64.exe"),
-                            progress_cb=lambda d, t: self.progress.emit(int(d), int(t)),
-                            cancel_cb=lambda: cancelled["v"],
-                        )
-                        self.done.emit(p)
-
-                dl_w = _InstallerDlWorker(self)
-
-                def _on_dl_progress(done_b: int, total_b: int) -> None:
-                    if total_b > 0:
-                        pct = int((done_b * 100) // total_b)
-                        prog.setValue(pct)
-                        prog.setLabelText(
-                            f"Downloading v{latest_ver} installer... "
-                            f"{done_b / (1024 * 1024):.1f} / {total_b / (1024 * 1024):.1f} MB ({pct}%)"
-                        )
-                    else:
-                        prog.setLabelText(
-                            f"Downloading v{latest_ver} installer... {done_b / (1024 * 1024):.1f} MB"
-                        )
-
-                dl_w.progress.connect(_on_dl_progress)
-
-                def _on_dl_done(path_obj: object) -> None:
-                    self._update_thread = None
-                    prog.close()
-                    if path_obj:
-                        self.lbl_update_status.setText("Launching installer and closing app...")
-                        launched = False
-                        try:
-                            if hasattr(os, "startfile"):
-                                os.startfile(str(path_obj))
-                                launched = True
-                        except Exception:
-                            launched = False
-                        if not launched:
-                            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path_obj)))
-                        # Cleanly close AboutDialog & MainWindow so Inno Setup never hits file/mutex locks
-                        parent_win = self.parentWidget()
-                        self.accept()
-                        if parent_win is not None:
-                            QTimer.singleShot(120, parent_win.close)
-                        app = QApplication.instance()
-                        if app is not None:
-                            QTimer.singleShot(350, app.quit)
-                    elif not cancelled["v"]:
-                        warn = QMessageBox(self)
-                        warn.setWindowTitle("Download Failed")
-                        warn.setIcon(QMessageBox.Warning)
-                        warn.setText("Could not download the installer.")
-                        warn.setInformativeText("You can download the update manually from the GitHub Releases page.")
-                        warn.setStyleSheet(msg.styleSheet())
-                        warn.exec()
-
-                dl_w.done.connect(_on_dl_done)
-                self._update_thread = dl_w
-                dl_w.start()
-            elif clicked == btn_web and html_url:
-                QDesktopServices.openUrl(QUrl(html_url))
+            dlg = UpdateAvailableDialog(info, parent=self)
+            dlg.exec()
 
         worker.result_ready.connect(_on_result)
         self._update_thread = worker
@@ -3769,7 +4361,7 @@ def prompt_and_download_semantic_addon(
     on_more_options: Any = None,
 ) -> bool:
     """
-    When Subjects (AI) is enabled or selected and the optional MobileCLIP-S1 ONNX add-on
+    When Subjects is enabled or selected and the optional MobileCLIP-S1 ONNX add-on
     is not yet installed, prompt to download it (~85 MB), open Add-ons settings, or Cancel.
     Returns True if MobileCLIP-S1 is ready (or was downloaded), False if cancelled.
     """
@@ -3785,10 +4377,10 @@ def prompt_and_download_semantic_addon(
         return True
 
     box = QMessageBox(parent)
-    box.setWindowTitle("Enable AI Subjects & Semantic Search")
+    box.setWindowTitle("Enable Subjects & Semantic Search")
     box.setIcon(QMessageBox.Question)
     box.setText(
-        f"Download MobileCLIP-S1 (~{SEMANTIC_ADDON_SIZE_MB} MB) for offline AI Subjects and semantic search?"
+        f"Download MobileCLIP-S1 (~{SEMANTIC_ADDON_SIZE_MB} MB) for offline Subjects and semantic search?"
     )
     box.setInformativeText(
         "The optional MobileCLIP-S1 ONNX add-on is not installed yet.\n\n"
@@ -3815,7 +4407,7 @@ def prompt_and_download_semantic_addon(
     prog = QProgressDialog(
         f"Downloading MobileCLIP-S1 (~{SEMANTIC_ADDON_SIZE_MB} MB)...", "Cancel", 0, 100, parent
     )
-    prog.setWindowTitle("Downloading AI Subjects Add-on")
+    prog.setWindowTitle("Downloading Subjects Add-on")
     prog.setWindowModality(Qt.WindowModal)
     prog.setAutoClose(False)
     prog.setAutoReset(False)

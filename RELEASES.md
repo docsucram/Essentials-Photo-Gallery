@@ -4,6 +4,52 @@ Release history matching the published GitHub Releases (`EssentialsPhotoGallery_
 
 ---
 
+## Essentials Photo Gallery v0.19.0
+
+**Essentials Photo Gallery 0.19.0** introduces a redesigned contextual **Markup Studio**, a dedicated contextual **Crop & Perspective** Ribbon tab, configurable **Auto Adjust**, **`Shift+Drag` Line Healing** in Spot Fix, **relocatable databases & cache** with integrity verification, **resumable SHA-256 add-on downloads**, and **automatic startup update checks with inline release notes**.
+
+### Highlights
+
+- **Contextual Crop Ribbon, Live Keystone Perspective & Configurable Auto Adjust:**
+  - Selecting **Crop** in Single Image View opens a dedicated 5-group contextual **Crop** tab (`Aspect Ratio` with **Swap Aspect**, `Orientation` with **Flip horizontal / Flip vertical** and **3×3 / 4×4 / Fine 9×9 Grid**, `Straighten & Perspective` sliders + **Line / Auto ▾ / Reset**, **AI Expand** fill, and crisp green-tick **Apply crop** / **Cancel crop**), automatically returning to `Edit` on apply or cancel.
+  - **Vertical & Horizontal Perspective Sliders (`-100..+100`):** Correct tilting buildings and keystoned horizons with live GPU proxy previews, analytical inscribed zero-black-wedge auto-crop, and confidence-gated **Auto → Perspective**.
+  - **Configurable `Edit → Auto adjust ▾` Split Menu:** Toggle any of 7 independent adjustment passes (**Exposure & contrast**, **Colour & white balance**, **Detail & crispness**, **Reduce noise (low light)**, **Remove haze**, **Straighten**, **Perspective**) with smart defaults and noise-aware sharpening.
+- **Dedicated Contextual Markup Studio Ribbon (`Edit | Create | View | Markup`) & Text UX:**
+  - Selecting **Markup** opens a dedicated contextual **Markup** tab with 9 WLPG category buttons (**Select**, **Pen**, **Text**, **Shapes ▾**, **Line ▾**, **Obscure ▾**, **Stickers ▾**, **Magnify**, **Stamp ▾**), visual MS Paint-style **Shapes** & **Stickers** galleries, a compact Canva/Fluent-style `[ − | pt | + ]` **Text Size** stepper (`12–440 pt`), a wider unclipped **Text Style** selector (`Pill`, `Outline`, `Shadow`, `Plain`), resolution-aware stroke sizing, **Select (`V`)** session reselection, 120 FPS live rotation, expanded 16-colour + rainbow wheel palette, and EXIF/GPS/Watermark stamps.
+  - **Drag-Border Before Commit & Live Text Effects:** Drag the dashed blue border of an active inline Text box to reposition it before committing and click back inside to keep typing until pressing `Enter` or clicking away; **Outline** and **Shadow** effects render live from the very first keystroke.
+- **Spot Fix Line Healing, Edit Ribbon States & Unified Keyboard Workflow:**
+  - **Straight Line Mode (`Shift+Drag`):** Heal telephone wires, film scratches, and power lines in Spot Fix with a live brush-width + dashed center-guide preview in one undoable stroke.
+  - **Active Side-Pane Highlighting & Mask Cleanup:** **Fine tune** and **Depth & Light** remain highlighted on the **Edit** ribbon while open and automatically clear any active mask overlays or eyedropper modes when dismissed; closing the app with uncommitted edits or active markup prompts with **Save / Save as copy / Discard / Cancel**.
+  - **Unified Hold-to-Compare (`B`) & Lightroom Culling (`Z` / `X`):** Press and hold **`B`** (*Before*, works identically on ANSI and UK ISO keyboards) in **Spot Fix**, **Fine Tune**, or **Depth & Light** to compare against the original photo; press **`Z` / `Shift+Z`** (Pick) and **`X` / `Shift+X`** (Reject) to cull and auto-advance.
+- **Relocatable Database & Cache, Integrity Checks & Resilient Downloads:**
+  - **Move Database & Thumbnail Cache (`Options → Database`):** Relocate `catalog.db`, `thumbnails.db`, and optional AI vectors to another drive or folder with background worker draining, byte-verified migration, offline-drive startup recovery prompts, and a redesigned 3-card **Database** tab with one-click **Check Integrity** (`PRAGMA quick_check(1)`).
+  - **Resumable Add-on Downloads & Content-Sniffed Image Fallback:** Optional AI add-ons resume interrupted HTTP transfers from `.part` files and verify `X-Linked-Etag` SHA-256 digests, while misnamed PNG/WebP images (e.g. from messaging apps) decode cleanly by inspecting magic bytes.
+- **Auto-Update Checks, Inline Release Notes, Cleaner Defaults & Options Polish:**
+  - Quietly checks GitHub Releases on startup (**Daily**, **Weekly [default]**, or **Monthly** in **Options → General**), renders clean inline release notes in **Update Available** and **Help → About**, turns **Home → Photo stacks** into a master toggle remembering **Bursts** / **RAW + JPEG** preferences, refines first-install defaults (**Auto-stack RAW + JPEG** on, **JPEG Quality 90%**, clean default **Navigation Pane** sections, simplified **Subjects** label), and rewrites **Options** tooltips to lead with plain English plus full Dark Studio contrast.
+- **Video Handling, Immersive `F4` & Filmstrip Smoothness:**
+  - Suppresses Markup tools in **Immersive (`F4`)**, places themed **Exit Immersive (`F4`)** in the title bar, adds Play badges and video frame capture in Spacebar **Quick Preview**, adds clear video-unavailable cards in Fine Tune / Depth & Light / Colour Pop / Compare, and eliminates filmstrip minimize flicker.
+
+<details>
+<summary>Full Technical Changelog</summary>
+
+- **Contextual Crop & Perspective Pipeline (`src/imaging/opencv_engine.py`, `src/ui/crop_tool.py`, `src/ui/ribbon_toolbar.py`, `src/ui/media_viewer.py`, `src/ui/main_window.py`):**
+  - Added `perspective_v`, `perspective_h`, `flip_h`, and `flip_v` to `PhotoAdjustmentRecipe` alongside `build_perspective_homography()`, `compute_inscribed_rect_for_homography()`, `apply_geometry_transform()`, and `estimate_auto_perspective()`.
+  - Built 5-group contextual `tab_crop` with Dark Studio theme support, `Fine Grid (9×9)`, live proxy perspective preview anchored at `(0, 0)`, and single-step undo across Crop + Flip + Straighten + Perspective.
+  - Added `DEFAULT_AUTO_ADJUST_OPTIONS` and `_make_split_auto_adjust_button()` persisting 7 toggleable `Auto adjust` passes to `QSettings` for both Single Viewer and Batch Auto Adjust.
+- **Contextual Markup Ribbon, WYSIWYG Text, Spot Fix & Workflow Polish (`src/ui/ribbon_toolbar.py`, `src/ui/markup_overlay.py`, `src/ui/media_viewer.py`, `src/ui/right_tag_dock.py`, `src/ui/shortcuts_dialog.py`, `src/ui/grid_view.py`, `src/ui/compare_view.py`, `src/ui/quick_preview_dialog.py`):**
+  - Added `_AdaptiveStackedWidget`, `_make_mk_split_tool_button()`, compact 3-digit `Size` stepper + wider `Text Style` dropdown, border hit-testing & repositioning (`_hit_test_inline_text_border`, `_move_inline_text_box_to`) before commit, direct `QPainterPath`/shadow rendering inside `_InlineTextEdit.paintEvent()`, resolution-aware stroke defaults (`16px` / `short_edge / 120`), `flatten_markup_element_roi()`, `PixelArrayUndoCommand.from_roi_patch()`, `_start_retouch(..., straight_line=True)` for `Shift+Drag` line healing, `set_edit_pane_mode` / `clear_depth_light_session()` active-pane sync & mask cleanup, global `Key_B` Hold-to-Compare, Lightroom-aligned `Key_Z` (`Pick`) / `Key_X` (`Reject`) shortcuts, and `MainWindow.closeEvent()` unsaved-edits guard.
+- **Storage Reliability, Resumable Downloads & Format Sniffing (`src/utils/downloader.py`, `src/db/connection.py`, `src/utils/paths.py`, `src/imaging/image_loader.py`, `src/workers/scanner_thumb_worker.py`, `main.py`):**
+  - Extracted `download_file_resumable()` (`Range` resume, `Content-Length` check, `X-Linked-Etag` SHA-256 verification, HTML guard) for LaMa, u2netp, MobileCLIP-S1, and RapidOCR add-ons.
+  - Added `quick_check_db()`, `checkpoint_and_close_all()`, `migrate_database_directory()`, custom DB path helpers + offline-volume recovery dialog on startup, and `sniff_image_format()` + `QImageReader.setDecideFormatFromContent(True)`.
+- **Auto-Updates, Offline Release Notes, Defaults & Options Redesign (`src/version.py`, `src/ui/dialogs.py`, `src/ui/options_dialog.py`, `src/ui/left_nav_dock.py`, `photogallery.spec`):**
+  - Added `sanitize_release_notes_markdown()`, `load_local_release_notes()`, configurable daily/weekly/monthly `should_run_auto_update_check()`, `UpdateAvailableDialog` + expandable `AboutDialog` release notes, bundled `RELEASES.md` in `photogallery.spec`, updated first-install defaults (`jpeg_quality=90`, `auto_group_raw_jpeg=True`, `retention_days=180`, clean `LeftNavDock` initial expand/visibility state, `"Show Subjects"` label), redesigned **Options → Database** & **General** cards, added 2×2 maintenance grid + Dark Mode styling to `FaceRecognitionOptionsTab`, and rewrote Options tooltips to lead with plain English.
+- **Video Polish & Non-Flickering Filmstrip (`src/ui/right_tag_dock.py`, `src/ui/quick_preview_dialog.py`, `src/ui/compare_view.py`, `src/ui/bottom_filmstrip_dock.py`):**
+  - Added `VideoUnavailablePage` (`set_video_mode`), video thumbnails + Play badges in `QuickPreviewDialog`, video guards in Compare / Colour Pop, and froze `QListView` relayout during `BottomFilmstripDock.animate_visible()`.
+
+</details>
+
+---
+
 ## Essentials Photo Gallery v0.18.0
 
 **Essentials Photo Gallery 0.18.0** delivers major **large-library performance & responsiveness upgrades**—cutting cold startup from **~14.2 s → ~3.2 s**, making navigation pane refreshes up to **6×–22× faster** at 500,000 photos, **Batch People Tagging** up to **10× faster**, and making **Find Similar**, **People Directory**, **AI Straighten / Expand**, **Retouch**, and **Visual Signature Backfill** completely non-blocking—alongside **new monochrome tag badges**, **Photo stacks** filtering & tooltips, **Semantic Smart Albums**, and **Auto Exposure / Auto Color / Fine Tune** polish.

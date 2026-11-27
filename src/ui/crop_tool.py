@@ -138,7 +138,7 @@ class CropOverlayItem(QGraphicsRectItem):
     Dynamically scales handles and badges according to the view's current zoom level.
     """
 
-    GRID_MODES: tuple[str, ...] = ("thirds", "golden", "diagonals", "crosshair", "none")
+    GRID_MODES: tuple[str, ...] = ("thirds", "fine", "golden", "diagonals", "crosshair", "none")
 
     def __init__(self, parent: QGraphicsItem | None = None) -> None:
         super().__init__(parent)
@@ -402,6 +402,14 @@ class CropOverlayItem(QGraphicsRectItem):
                 y2 = r.top() + 2.0 * h / 3.0
                 painter.drawLine(QPointF(r.left(), y1), QPointF(r.right(), y1))
                 painter.drawLine(QPointF(r.left(), y2), QPointF(r.right(), y2))
+            elif self._grid_mode == "fine":
+                fine_pen = QPen(QColor(255, 255, 255, 145), max(0.8, 0.9 * inv_scale), Qt.SolidLine)
+                painter.setPen(fine_pen)
+                for i in range(1, 9):
+                    x = r.left() + (w * i) / 9.0
+                    y = r.top() + (h * i) / 9.0
+                    painter.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
+                    painter.drawLine(QPointF(r.left(), y), QPointF(r.right(), y))
             elif self._grid_mode == "golden":
                 # Phi (1:1.618) -> 0.381966 and 0.618034
                 g1, g2 = 0.381966, 0.618034
@@ -639,7 +647,7 @@ class CropScene(QGraphicsScene):
         rot = max(-45.0, min(float(deg), 45.0))
         self.crop_rotation_deg = rot
         self.crop_rect_item.set_rotation_deg(rot)
-        if self.pixmap_item is not None and self.sceneRect().isValid():
+        if self.pixmap_item is not None and self.sceneRect().isValid() and not getattr(self, "perspective_preview_active", False):
             self.pixmap_item.setTransformOriginPoint(self.sceneRect().center())
             self.pixmap_item.setRotation(rot)
         if not self.allow_ai_expand and self.crop_rect_item.isVisible():

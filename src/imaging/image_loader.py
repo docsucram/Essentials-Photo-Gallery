@@ -112,6 +112,43 @@ ALPHA_SAVE_DOT_EXT_SET: frozenset[str] = frozenset(
 _SRGB_CMS_PROFILE: Any = None
 
 
+def sniff_image_format(path: Path | str) -> str | None:
+    """
+    Inspects the first 16 magic bytes of ``path`` to detect the true container format
+    (handling misnamed files such as PNG/WebP/HEIC saved with a `.jpg` extension).
+    Returns uppercase format token (``"JPEG"``, ``"PNG"``, ``"WEBP"``, ``"GIF"``,
+    ``"BMP"``, ``"TIFF"``, ``"JXL"``, ``"HEIF"``, ``"AVIF"``) or ``None``.
+    """
+    try:
+        with open(path, "rb") as fh:
+            hdr = fh.read(16)
+    except OSError:
+        return None
+    if len(hdr) < 4:
+        return None
+    if hdr[:3] == b"\xff\xd8\xff":
+        return "JPEG"
+    if hdr[:8] == b"\x89PNG\r\n\x1a\n":
+        return "PNG"
+    if hdr[:4] == b"RIFF" and len(hdr) >= 12 and hdr[8:12] == b"WEBP":
+        return "WEBP"
+    if hdr[:6] in (b"GIF87a", b"GIF89a"):
+        return "GIF"
+    if hdr[:2] == b"BM":
+        return "BMP"
+    if hdr[:4] in (b"II*\x00", b"MM\x00*"):
+        return "TIFF"
+    if hdr[:2] == b"\xff\x0a" or hdr[:12] == b"\x00\x00\x00\x0cJXL \r\n\x87\n":
+        return "JXL"
+    if len(hdr) >= 12 and hdr[4:8] == b"ftyp":
+        brand = hdr[8:12].lower()
+        if brand in (b"avif", b"avis"):
+            return "AVIF"
+        if brand in (b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"):
+            return "HEIF"
+    return None
+
+
 def _get_srgb_cms_profile() -> Any:
     global _SRGB_CMS_PROFILE
     if _SRGB_CMS_PROFILE is None and ImageCms is not None:

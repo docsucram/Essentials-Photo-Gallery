@@ -16,6 +16,8 @@ datas = [
     (str(project_root / "resources"), "resources"),
     (str(project_root / "db" / "schema.sql"), "db"),
 ]
+if (project_root / "RELEASES.md").is_file():
+    datas.append((str(project_root / "RELEASES.md"), "."))
 _models_dir = project_root / "models"
 if _models_dir.exists():
     # Bundle lightweight core models (e.g. u2netp.onnx); keep optional 208 MB LaMa ONNX

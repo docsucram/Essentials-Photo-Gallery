@@ -28,7 +28,13 @@ from PySide6.QtWidgets import QApplication, QToolTip, QWidget
 from src.db.connection import DualDatabaseEngine
 from src.imaging.image_loader import register_nextgen_codecs
 from src.ui.main_window import PhotoGalleryMainWindow
-from src.utils.paths import get_default_db_dir, get_resource_path
+from src.utils.paths import (
+    get_custom_db_dir,
+    get_default_db_dir,
+    get_resource_path,
+    is_volume_offline,
+    set_custom_db_dir,
+)
 from src.utils.scan_logger import (
     install_global_crash_logger,
     install_universal_tooltip_filter,
@@ -127,7 +133,43 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     app = create_app(argv)
-    db_dir = args.db_dir if args.db_dir is not None else get_default_db_dir()
+    if args.db_dir is not None:
+        db_dir = args.db_dir
+    else:
+        custom_dir = get_custom_db_dir()
+        while custom_dir is not None and (is_volume_offline(custom_dir) or not custom_dir.exists()):
+            from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+            box = QMessageBox()
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("Database Drive Unavailable")
+            box.setText(f"Your custom database location is currently unavailable:\n{custom_dir}")
+            box.setInformativeText(
+                "Please reconnect the drive containing your catalog & thumbnail cache, choose another folder, "
+                "or temporarily switch back to the default AppData location.\n\n"
+                "(Essentials Photo Gallery will not overwrite or create an empty database on a missing drive.)"
+            )
+            btn_retry = box.addButton("Retry", QMessageBox.AcceptRole)
+            btn_choose = box.addButton("Choose Folder...", QMessageBox.ActionRole)
+            btn_default = box.addButton("Use Default Location", QMessageBox.ResetRole)
+            btn_exit = box.addButton("Exit", QMessageBox.RejectRole)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is btn_retry:
+                continue
+            elif clicked is btn_choose:
+                picked = QFileDialog.getExistingDirectory(None, "Select Database & Cache Folder")
+                if picked:
+                    set_custom_db_dir(Path(picked))
+                    custom_dir = Path(picked)
+                    continue
+            elif clicked is btn_default:
+                set_custom_db_dir(None)
+                custom_dir = None
+                break
+            elif clicked is btn_exit:
+                return 0
+        db_dir = get_default_db_dir()
     db_dir.mkdir(parents=True, exist_ok=True)
 
     engine = DualDatabaseEngine(

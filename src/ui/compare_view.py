@@ -1075,7 +1075,7 @@ class _ComparePane(QFrame):
         self.btn_flag.setCheckable(True)
         self.btn_flag.setFixedSize(26, 22)
         self.btn_flag.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_flag.setToolTip("Flag / Pick photo (P / Insert)")
+        self.btn_flag.setToolTip("Flag / Pick photo (Z / Insert)")
         self.btn_flag.clicked.connect(self._on_flag_clicked)
         f_lay.addWidget(self.btn_flag)
 
@@ -1444,7 +1444,7 @@ class CompareMediaView(QWidget):
                 if row and row["date_taken"]:
                     dt = int(row["date_taken"])
                     nbr = conn.execute(
-                        "SELECT id FROM media WHERE id != ? AND COALESCE(is_missing, 0) = 0 "
+                        "SELECT id FROM media WHERE id != ? AND COALESCE(is_missing, 0) = 0 AND COALESCE(is_video, 0) = 0 "
                         "AND ABS(date_taken - ?) <= 3 ORDER BY ABS(date_taken - ?) ASC LIMIT 1;",
                         (media_id, dt, dt),
                     ).fetchone()
@@ -2096,7 +2096,11 @@ class CompareMediaView(QWidget):
             self.delete_slot(self._focused_slot)
             event.accept()
             return
-        if key in (Qt.Key.Key_P, Qt.Key.Key_Insert) and 0 <= self._focused_slot < len(self._panes):
+        if (
+            key in (Qt.Key.Key_Z, Qt.Key.Key_Insert)
+            and not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier))
+            and 0 <= self._focused_slot < len(self._panes)
+        ):
             p = self._panes[self._focused_slot]
             if p.media_id is not None:
                 p._on_flag_clicked(not bool(p._flag))

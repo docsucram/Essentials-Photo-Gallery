@@ -264,7 +264,10 @@ class QuickPreviewDialog(QDialog):
         self._rating: int = 0
         self._flag: int = 0
         self._is_favourite: bool = False
+        self._is_video: bool = False
+        self._duration_sec: float | None = None
         self._image_rect: QRect = QRect()
+        self._play_badge_rect: QRect = QRect()
         self._app_filter_installed: bool = False
 
         # Borderless image canvas
@@ -396,8 +399,9 @@ class QuickPreviewDialog(QDialog):
         else:
             self.lbl_fav_icon.hide()
 
+        open_hint = "Enter / Click Play: Open Video" if self._is_video else "Enter: Full View"
         self.lbl_hint.setText(
-            "Space / Esc: Close   •   ← / →: Prev / Next   •   0–5: Rate   •   P: Pick   •   X: Reject   •   F: Fav   •   Enter: Full View"
+            f"Space / Esc: Close   •   ← / →: Prev / Next   •   0–5: Rate   •   P: Pick   •   X: Reject   •   F: Fav   •   {open_hint}"
         )
         self._position_floating_overlays()
 
@@ -423,12 +427,18 @@ class QuickPreviewDialog(QDialog):
         flag: int = 0,
         fallback_pixmap: QPixmap | None = None,
         is_favourite: bool = False,
+        is_video: bool = False,
+        duration_sec: float | None = None,
     ) -> None:
         self._current_media_id = int(media_id)
         self._filename = filename
         self._rating = int(rating or 0)
         self._flag = int(flag or 0)
         self._is_favourite = bool(is_favourite)
+        path_obj = Path(file_path)
+        video_exts = {"mp4", "mov", "m4v", "avi", "mkv", "wmv", "webm", "mts", "m2ts", "3gp", "mpg", "mpeg"}
+        self._is_video = bool(is_video) or (path_obj.suffix.lstrip(".").lower() in video_exts)
+        self._duration_sec = float(duration_sec) if duration_sec is not None else None
 
         # Span the full screen containing the parent window
         screen = None
@@ -441,7 +451,7 @@ class QuickPreviewDialog(QDialog):
             self.setGeometry(screen.geometry())
 
         self._update_header()
-        pix = self._load_preview_pixmap(Path(file_path), fallback_pixmap)
+        pix = self._load_preview_pixmap(path_obj, fallback_pixmap, is_video=self._is_video)
         self._current_pixmap = pix
         self._position_floating_overlays()
         self._update_scaled_pixmap()
@@ -451,9 +461,75 @@ class QuickPreviewDialog(QDialog):
         self.activateWindow()
         self.setFocus()
 
+    def _extract_video_preview_pixmap(self, path: Path) -> QPixmap:
+        """Extract a representative preview frame from a local video file."""
+        try:
+            import cv2
+            from PySide6.QtGui import QImage
+        except Exception:
+            return QPixmap()
+
+        cap = None
+        try:
+            cap = cv2.VideoCapture(str(path))
+            if not cap or not cap.isOpened():
+                return QPixmap()
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            target_idx = min(30, max(0, frame_count // 10)) if frame_count > 10 else 0
+            if target_idx > 0:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, float(target_idx))
+            ok, frame = cap.read()
+            if (not ok or frame is None) and target_idx > 0:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0.0)
+                ok, frame = cap.read()
+            if not ok or frame is None:
+                return QPixmap()
+            if self._duration_sec is None:
+                fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+                if fps > 0.1 and frame_count > 0:
+                    self._duration_sec = frame_count / fps
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, _ch = rgb.shape
+            qimg = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
+            pm = QPixmap.fromImage(qimg)
+            if not pm.isNull() and max(pm.width(), pm.height()) > 1920:
+                pm = pm.scaled(1920, 1920, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            return pm
+        except Exception:
+            return QPixmap()
+        finally:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _make_video_placeholder_pixmap() -> QPixmap:
+        pm = QPixmap(640, 360)
+        pm.fill(QColor("#111827"))
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(QPen(QColor(148, 163, 184, 70), 2.0))
+        p.drawRoundedRect(QRectF(2.0, 2.0, 636.0, 356.0), 14.0, 14.0)
+        p.setPen(QColor("#94A3B8"))
+        p.setFont(QFont("Segoe UI", 12, QFont.Weight.DemiBold))
+        p.drawText(QRect(0, 220, 640, 40), Qt.AlignmentFlag.AlignCenter, "Video Preview")
+        p.end()
+        return pm
+
     def _load_preview_pixmap(
-        self, path: Path, fallback_pixmap: QPixmap | None
+        self, path: Path, fallback_pixmap: QPixmap | None, is_video: bool = False
     ) -> QPixmap:
+        if is_video:
+            if path.is_file() and not is_cloud_only_file(path):
+                vpm = self._extract_video_preview_pixmap(path)
+                if not vpm.isNull():
+                    return vpm
+            if fallback_pixmap is not None and not fallback_pixmap.isNull():
+                return fallback_pixmap
+            return self._make_video_placeholder_pixmap()
+
         if not path.is_file() or is_cloud_only_file(path):
             return fallback_pixmap if fallback_pixmap is not None else QPixmap()
 
@@ -494,6 +570,7 @@ class QuickPreviewDialog(QDialog):
         if self._current_pixmap.isNull():
             self.lbl_image.setText("Preview unavailable")
             self._image_rect = QRect()
+            self._play_badge_rect = QRect()
             return
         avail = self.lbl_image.size()
         if avail.width() <= 0 or avail.height() <= 0:
@@ -503,10 +580,60 @@ class QuickPreviewDialog(QDialog):
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        self.lbl_image.setPixmap(scaled)
         gx = self.lbl_image.x() + (avail.width() - scaled.width()) // 2
         gy = self.lbl_image.y() + (avail.height() - scaled.height()) // 2
         self._image_rect = QRect(gx, gy, scaled.width(), scaled.height())
+        self._play_badge_rect = QRect()
+
+        if self._is_video:
+            composed = QPixmap(scaled)
+            p = QPainter(composed)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            cx = composed.width() / 2.0
+            cy = composed.height() / 2.0
+            rad = max(28.0, min(42.0, min(composed.width(), composed.height()) * 0.11))
+            circle_rect = QRectF(cx - rad, cy - rad, rad * 2.0, rad * 2.0)
+            p.setPen(QPen(QColor(255, 255, 255, 220), 2.2))
+            p.setBrush(QColor(15, 23, 42, 180))
+            p.drawEllipse(circle_rect)
+            tri_r = rad * 0.44
+            tri = QPolygonF([
+                QPointF(cx - tri_r * 0.65, cy - tri_r * 0.95),
+                QPointF(cx + tri_r * 1.15, cy),
+                QPointF(cx - tri_r * 0.65, cy + tri_r * 0.95),
+            ])
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#F8FAFC"))
+            p.drawPolygon(tri)
+
+            if self._duration_sec is not None and self._duration_sec > 0:
+                total_s = int(round(self._duration_sec))
+                hrs, rem = divmod(total_s, 3600)
+                mins, secs = divmod(rem, 60)
+                dur_txt = f"{hrs}:{mins:02d}:{secs:02d}" if hrs > 0 else f"{mins}:{secs:02d}"
+                fnt = QFont("Segoe UI", 10, QFont.Weight.DemiBold)
+                p.setFont(fnt)
+                fm = QFontMetrics(fnt)
+                tw = fm.horizontalAdvance(dur_txt) + 16
+                th = fm.height() + 8
+                badge_r = QRectF(composed.width() - tw - 12, composed.height() - th - 12, tw, th)
+                p.setPen(QPen(QColor(148, 163, 184, 120), 1.0))
+                p.setBrush(QColor(15, 23, 42, 200))
+                p.drawRoundedRect(badge_r, 8.0, 8.0)
+                p.setPen(QColor("#F8FAFC"))
+                p.drawText(badge_r, Qt.AlignmentFlag.AlignCenter, dur_txt)
+
+            p.end()
+            self._play_badge_rect = QRect(
+                int(gx + cx - rad),
+                int(gy + cy - rad),
+                int(rad * 2.0),
+                int(rad * 2.0),
+            )
+            self.lbl_image.setPixmap(composed)
+            return
+
+        self.lbl_image.setPixmap(scaled)
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)
@@ -516,6 +643,17 @@ class QuickPreviewDialog(QDialog):
     def mousePressEvent(self, event) -> None:
         pt = event.position().toPoint()
         if (
+            self._is_video
+            and self._current_media_id is not None
+            and not self._play_badge_rect.isNull()
+            and self._play_badge_rect.contains(pt)
+        ):
+            mid = self._current_media_id
+            self.hide()
+            self.open_full_requested.emit(mid)
+            event.accept()
+            return
+        if (
             not self._image_rect.contains(pt)
             and not self._top_pill.geometry().contains(pt)
             and not self._hint_pill.geometry().contains(pt)
@@ -524,6 +662,16 @@ class QuickPreviewDialog(QDialog):
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        pt = event.position().toPoint()
+        if self._current_media_id is not None and self._image_rect.contains(pt):
+            mid = self._current_media_id
+            self.hide()
+            self.open_full_requested.emit(mid)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -607,7 +755,11 @@ class QuickPreviewDialog(QDialog):
                 self.navigate_requested.emit(1)
             event.accept()
             return
-        if key == Qt.Key.Key_P and self._current_media_id is not None:
+        if (
+            key == Qt.Key.Key_Z
+            and not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier))
+            and self._current_media_id is not None
+        ):
             self._flag = 0 if self._flag == 1 else 1
             self._update_header()
             self.flag_set_requested.emit(self._current_media_id, self._flag)

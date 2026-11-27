@@ -3382,7 +3382,7 @@ class ThumbnailGridView(QListView):
                     main_win.toggle_favourite_selection(advance=shift_held)
                     event.accept()
                     return
-            if event.key() == Qt.Key_P:
+            if event.key() == Qt.Key_Z:
                 main_win = getattr(self, "main_window", None) or self.window()
                 if hasattr(main_win, "apply_flag_to_selection"):
                     sel_ids = self.selected_media_ids()

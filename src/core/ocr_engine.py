@@ -106,27 +106,28 @@ def download_rapidocr_models(
     cumulative_done = 0
 
     try:
+        from src.utils.downloader import download_file_resumable
+
         for fname, url, approx_sz in RAPIDOCR_FILES:
             dest_file = dest_dir / fname
-            tmp_file = dest_dir / f"{fname}.part"
-            from src.version import APP_VERSION
-            req = urllib.request.Request(url, headers={"User-Agent": f"EssentialsPhotoGallery/{APP_VERSION}"})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                file_done = 0
-                with open(tmp_file, "wb") as fh:
-                    while True:
-                        if cancel_cb is not None and cancel_cb():
-                            raise InterruptedError("Download cancelled")
-                        chunk = resp.read(128 * 1024)
-                        if not chunk:
-                            break
-                        fh.write(chunk)
-                        file_done += len(chunk)
-                        if progress_cb is not None:
-                            progress_cb(cumulative_done + file_done, total_expected)
-            if tmp_file.stat().st_size < 1024:
-                raise ValueError(f"Downloaded file {fname} is unexpectedly small")
-            os.replace(tmp_file, dest_file)
+            if dest_file.is_file() and dest_file.stat().st_size > 1024:
+                cumulative_done += dest_file.stat().st_size
+                if progress_cb is not None:
+                    progress_cb(cumulative_done, max(total_expected, cumulative_done))
+                continue
+
+            def _file_prog(done: int, _tot: int, base: int = cumulative_done) -> None:
+                if progress_cb is not None:
+                    progress_cb(base + done, max(total_expected, base + done))
+
+            download_file_resumable(
+                url,
+                dest_file,
+                min_bytes=1024,
+                timeout=timeout,
+                progress_cb=_file_prog,
+                cancel_cb=cancel_cb,
+            )
             cumulative_done += dest_file.stat().st_size
         return dest_dir
     except Exception as exc:

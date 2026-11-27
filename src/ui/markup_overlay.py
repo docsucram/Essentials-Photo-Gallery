@@ -24,6 +24,7 @@ from PySide6.QtGui import (
     QPainter,
     QPainterPath,
     QFont,
+    QFontDatabase,
     QFontMetrics,
     QPolygonF,
     QCursor,
@@ -32,6 +33,7 @@ from PySide6.QtGui import (
     QIcon,
     QMouseEvent,
     QAction,
+    QTransform,
 )
 from PySide6.QtWidgets import (
     QWidget,
@@ -52,20 +54,200 @@ from src.imaging.creative_effects import apply_pixelate, apply_blur_redact
 from src.ui.ribbon_toolbar import make_wlpg_icon, make_symbol_icon, ARROW_DROPDOWN_PATH
 
 
+_ROUND_ROTATION_CURSOR: QCursor | None = None
+_SELECT_TOOL_CURSOR: QCursor | None = None
+
+
+def make_select_tool_cursor() -> QCursor:
+    """Returns a cached HiDPI precision dark-filled selection pointer cursor distinct from the OS arrow."""
+    global _SELECT_TOOL_CURSOR
+    if _SELECT_TOOL_CURSOR is not None:
+        return _SELECT_TOOL_CURSOR
+
+    pm = QPixmap(56, 56)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.scale(2.0, 2.0)
+
+    arrow = QPolygonF([
+        QPointF(2.5, 2.0),
+        QPointF(2.5, 20.5),
+        QPointF(7.2, 16.0),
+        QPointF(11.0, 23.2),
+        QPointF(13.8, 21.8),
+        QPointF(10.0, 14.6),
+        QPointF(16.4, 14.2),
+    ])
+    # Bold white outer halo for visibility over dark photos
+    p.setPen(QPen(QColor(255, 255, 255, 245), 2.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    p.setBrush(QColor(255, 255, 255, 245))
+    p.drawPolygon(arrow)
+
+    # Crisp dark-slate / royal-blue Photoshop-style Move/Select pointer
+    p.setPen(QPen(QColor("#0F172A"), 1.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    p.setBrush(QColor("#1E3A8A"))
+    p.drawPolygon(arrow)
+
+    # Subtle 4-way move indicator badge at bottom-right
+    mx, my = 20.5, 20.5
+    p.setPen(QPen(QColor(255, 255, 255, 230), 2.6, Qt.SolidLine, Qt.RoundCap))
+    p.drawLine(QPointF(mx - 3.6, my), QPointF(mx + 3.6, my))
+    p.drawLine(QPointF(mx, my - 3.6), QPointF(mx, my + 3.6))
+    p.setPen(QPen(QColor("#1D4ED8"), 1.35, Qt.SolidLine, Qt.RoundCap))
+    p.drawLine(QPointF(mx - 3.6, my), QPointF(mx + 3.6, my))
+    p.drawLine(QPointF(mx, my - 3.6), QPointF(mx, my + 3.6))
+
+    p.end()
+    pm.setDevicePixelRatio(2.0)
+    _SELECT_TOOL_CURSOR = QCursor(pm, 2, 2)
+    return _SELECT_TOOL_CURSOR
+
+
+def make_round_rotation_cursor() -> QCursor:
+    """Renders a crisp round circular clockwise arrow cursor for markup rotation handles."""
+    global _ROUND_ROTATION_CURSOR
+    if _ROUND_ROTATION_CURSOR is not None:
+        return _ROUND_ROTATION_CURSOR
+
+    pm = QPixmap(56, 56)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+
+    cx, cy = 28.0, 28.0
+    r = 14.5
+    arc_rect = QRectF(cx - r, cy - r, r * 2.0, r * 2.0)
+
+    # Arc from ~40 deg sweeping -285 deg clockwise (in Qt 1/16 deg units)
+    start_qt = int(45 * 16)
+    span_qt = int(-280 * 16)
+    end_rad = math.radians(45 - 280)  # Qt counter-clockwise from +X -> y inverted below
+    # Convert Qt angle a_qt to screen coordinates: (cx + r*cos(a), cy - r*sin(a))
+    end_angle = math.radians(45.0 - 280.0)
+    tip_anchor = QPointF(cx + r * math.cos(end_angle), cy - r * math.sin(end_angle))
+    # Clockwise tangent at end_angle: (sin(a), cos(a)) -> check direction toward arrowhead
+    tx = math.sin(end_angle)
+    ty = math.cos(end_angle)
+    nx = math.cos(end_angle)
+    ny = -math.sin(end_angle)
+
+    tip = QPointF(tip_anchor.x() + tx * 6.5, tip_anchor.y() + ty * 6.5)
+    wing_out = QPointF(tip_anchor.x() - tx * 3.0 + nx * 6.2, tip_anchor.y() - ty * 3.0 + ny * 6.2)
+    wing_in = QPointF(tip_anchor.x() - tx * 3.0 - nx * 5.8, tip_anchor.y() - ty * 3.0 - ny * 5.8)
+    head_poly = QPolygonF([tip, wing_out, wing_in])
+
+    # White outer halo for high contrast on both dark & bright photos
+    halo_pen = QPen(QColor(255, 255, 255, 245), 6.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+    p.setPen(halo_pen)
+    p.setBrush(QColor(255, 255, 255, 245))
+    p.drawArc(arc_rect, start_qt, span_qt)
+    p.drawPolygon(head_poly)
+
+    # Crisp dark slate core + subtle center pivot dot
+    core_pen = QPen(QColor(15, 23, 42), 3.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+    p.setPen(core_pen)
+    p.setBrush(QColor(15, 23, 42))
+    p.drawArc(arc_rect, start_qt, span_qt)
+    p.setPen(QPen(QColor(15, 23, 42), 1.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    p.drawPolygon(head_poly)
+
+    p.setPen(QPen(QColor(255, 255, 255, 220), 1.4))
+    p.setBrush(QColor(59, 130, 246))
+    p.drawEllipse(QPointF(cx, cy), 3.2, 3.2)
+
+    p.end()
+    pm.setDevicePixelRatio(2.0)
+    _ROUND_ROTATION_CURSOR = QCursor(pm, 14, 14)
+    return _ROUND_ROTATION_CURSOR
+
+
+CURATED_MARKUP_FONTS: tuple[str, ...] = (
+    "Segoe UI",
+    "Arial",
+    "Calibri",
+    "Verdana",
+    "Trebuchet MS",
+    "Georgia",
+    "Times New Roman",
+    "Consolas",
+    "Comic Sans MS",
+    "Impact",
+)
+
+
+def get_markup_font_families() -> list[str]:
+    """
+    Returns curated photographic/callout font families first (when available),
+    followed by remaining installed system font families (excluding '@' vertical CJK aliases).
+    """
+    try:
+        installed = [f for f in QFontDatabase.families() if f and not f.startswith("@")]
+    except Exception:
+        return list(CURATED_MARKUP_FONTS)
+
+    if not installed:
+        return list(CURATED_MARKUP_FONTS)
+
+    installed_lower = {f.lower(): f for f in installed}
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    for fam in CURATED_MARKUP_FONTS:
+        matched = installed_lower.get(fam.lower())
+        if matched and matched.lower() not in seen:
+            ordered.append(matched)
+            seen.add(matched.lower())
+
+    for fam in installed:
+        low = fam.lower()
+        if low not in seen:
+            ordered.append(fam)
+            seen.add(low)
+
+    return ordered or list(CURATED_MARKUP_FONTS)
+
+
+ALL_SHAPE_KINDS: tuple[str, ...] = (
+    "rect",
+    "ellipse",
+    "triangle",
+    "pentagon",
+    "hexagon",
+    "star",
+    "heart_shape",
+    "speech_bubble",
+)
+ALL_LINE_KINDS: tuple[str, ...] = ("line", "arrow", "double_arrow")
+ALL_STICKER_IDS: tuple[str, ...] = ("heart", "smiley", "star", "fire", "check")
+
+
 @dataclass
 class MarkupElement:
-    kind: str  # 'pen', 'highlighter', 'arrow', 'rect', 'ellipse', 'star', 'pixelate', 'blur', 'magnifier', 'text'
+    kind: str  # 'pen', 'highlighter', 'line', 'arrow', 'double_arrow', shape kinds, 'pixelate', 'blur', 'sticker', 'magnifier', 'text'
     rect: QRectF | None = None
     start_pt: QPointF | None = None
     end_pt: QPointF | None = None
     points: list[QPointF] = field(default_factory=list)
     color: QColor = field(default_factory=lambda: QColor(230, 40, 40))
     bg_color: QColor | None = None
-    stroke_width: int = 4
+    stroke_width: int = 16
     text: str = ""
     zoom_factor: float = 2.5
+    font_family: str = "Segoe UI"
     font_bold: bool = True
     font_italic: bool = False
+    rotation_deg: float = 0.0
+    text_style: str = "pill"   # 'pill', 'outline', 'shadow', 'plain'
+    text_align: str = "left"   # 'left', 'center', 'right'
+    opacity: float = 1.0       # 0.15 .. 1.0
+    bg_opacity: float = 0.85   # 0.0 .. 1.0
+    shape_filled: bool = False
+    line_style: str = "arrow"  # 'line', 'arrow', 'double_arrow'
+    dash_style: str = "solid"  # 'solid', 'dashed', 'dotted'
+    sticker_id: str = ""       # 'heart', 'smiley', 'star', 'fire', 'check'
+    obscure_mode: str = "brush"  # 'brush', 'box'
+    obscure_strength: int = 55   # 15 .. 100
 
 
 def build_arrow_geometry(p1: QPointF, p2: QPointF, stroke_width: int = 4) -> tuple[QPointF, QPolygonF]:
@@ -109,6 +291,220 @@ def build_star_polygon_in_rect(rect: QRectF) -> QPolygonF:
             QPointF(cx + r * math.cos(rad), cy + r * math.sin(rad))
         )
     return QPolygonF(points)
+
+
+def build_regular_polygon_in_rect(rect: QRectF, sides: int, start_deg: float = -90.0) -> QPolygonF:
+    """Constructs a regular N-gon (triangle, pentagon, hexagon) inscribed in *rect*."""
+    rx = max(2.0, rect.width() / 2.0)
+    ry = max(2.0, rect.height() / 2.0)
+    cx, cy = rect.center().x(), rect.center().y()
+    n = max(3, int(sides))
+    pts: list[QPointF] = []
+    for i in range(n):
+        rad = math.radians(start_deg + (360.0 * i) / n)
+        pts.append(QPointF(cx + rx * math.cos(rad), cy + ry * math.sin(rad)))
+    return QPolygonF(pts)
+
+
+def build_heart_path_in_rect(rect: QRectF) -> QPainterPath:
+    """Constructs a balanced symmetric vector heart path inscribed in *rect*."""
+    x, y, w, h = rect.x(), rect.y(), max(4.0, rect.width()), max(4.0, rect.height())
+    path = QPainterPath()
+    path.moveTo(x + w * 0.50, y + h * 0.90)
+    path.cubicTo(x + w * 0.08, y + h * 0.62, x + w * 0.02, y + h * 0.28, x + w * 0.26, y + h * 0.14)
+    path.cubicTo(x + w * 0.40, y + h * 0.06, x + w * 0.50, y + h * 0.22, x + w * 0.50, y + h * 0.28)
+    path.cubicTo(x + w * 0.50, y + h * 0.22, x + w * 0.60, y + h * 0.06, x + w * 0.74, y + h * 0.14)
+    path.cubicTo(x + w * 0.98, y + h * 0.28, x + w * 0.92, y + h * 0.62, x + w * 0.50, y + h * 0.90)
+    path.closeSubpath()
+    return path
+
+
+def build_speech_bubble_path_in_rect(rect: QRectF) -> QPainterPath:
+    """Constructs a clean rounded speech-bubble callout path with a bottom-left pointer tail."""
+    x, y, w, h = rect.x(), rect.y(), max(4.0, rect.width()), max(4.0, rect.height())
+    body_h = h * 0.76
+    rad = min(14.0, w * 0.18, body_h * 0.28)
+    tail_x1 = x + w * 0.22
+    tail_x2 = x + w * 0.36
+    tail_tip = QPointF(x + w * 0.14, y + h)
+
+    path = QPainterPath()
+    path.moveTo(x + rad, y)
+    path.lineTo(x + w - rad, y)
+    path.quadTo(x + w, y, x + w, y + rad)
+    path.lineTo(x + w, y + body_h - rad)
+    path.quadTo(x + w, y + body_h, x + w - rad, y + body_h)
+    path.lineTo(tail_x2, y + body_h)
+    path.lineTo(tail_tip)
+    path.lineTo(tail_x1, y + body_h)
+    path.lineTo(x + rad, y + body_h)
+    path.quadTo(x, y + body_h, x, y + body_h - rad)
+    path.lineTo(x, y + rad)
+    path.quadTo(x, y, x + rad, y)
+    path.closeSubpath()
+    return path
+
+
+def draw_vector_sticker(
+    painter: QPainter,
+    rect: QRectF,
+    sticker_id: str,
+    *,
+    rotation_deg: float = 0.0,
+    opacity: float = 1.0,
+) -> None:
+    """Renders crisp resolution-independent social vector stickers with glossy shading inside *rect*."""
+    if rect.isEmpty():
+        return
+    from PySide6.QtGui import QLinearGradient, QRadialGradient
+
+    sid = (sticker_id or "heart").strip().lower()
+    painter.save()
+    painter.setOpacity(max(0.15, min(1.0, float(opacity))))
+    if abs(float(rotation_deg)) >= 0.05:
+        c = rect.center()
+        painter.translate(c.x(), c.y())
+        painter.rotate(float(rotation_deg))
+        painter.translate(-c.x(), -c.y())
+
+    x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+    edge_w = max(1.4, min(w, h) * 0.032)
+    shadow_off = max(1.0, min(w, h) * 0.04)
+
+    if sid == "heart":
+        hp_shadow = build_heart_path_in_rect(rect.translated(0.0, shadow_off))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 48))
+        painter.drawPath(hp_shadow)
+
+        hp = build_heart_path_in_rect(rect)
+        hgrad = QRadialGradient(QPointF(x + w * 0.34, y + h * 0.28), max(w, h) * 0.78)
+        hgrad.setColorAt(0.0, QColor("#FDA4AF"))
+        hgrad.setColorAt(0.28, QColor("#F43F5E"))
+        hgrad.setColorAt(0.78, QColor("#E11D48"))
+        hgrad.setColorAt(1.0, QColor("#9F1239"))
+        painter.setPen(QPen(QColor("#881337"), edge_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(hgrad)
+        painter.drawPath(hp)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 135))
+        painter.drawEllipse(QRectF(x + w * 0.19, y + h * 0.20, w * 0.17, h * 0.10))
+
+    elif sid == "smiley":
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 46))
+        painter.drawEllipse(rect.translated(0.0, shadow_off))
+
+        sgrad = QRadialGradient(QPointF(x + w * 0.35, y + h * 0.28), max(w, h) * 0.72)
+        sgrad.setColorAt(0.0, QColor("#FEF08A"))
+        sgrad.setColorAt(0.45, QColor("#FACC15"))
+        sgrad.setColorAt(1.0, QColor("#D97706"))
+        painter.setPen(QPen(QColor("#B45309"), edge_w))
+        painter.setBrush(sgrad)
+        painter.drawEllipse(rect)
+
+        # Top gloss arc & rosy cheeks
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 95))
+        painter.drawEllipse(QRectF(x + w * 0.24, y + h * 0.10, w * 0.44, h * 0.16))
+        painter.setBrush(QColor(244, 63, 94, 72))
+        painter.drawEllipse(QRectF(x + w * 0.14, y + h * 0.48, w * 0.18, h * 0.13))
+        painter.drawEllipse(QRectF(x + w * 0.68, y + h * 0.48, w * 0.18, h * 0.13))
+
+        # Expressive eyes with tiny catchlights
+        painter.setBrush(QColor("#1E293B"))
+        ew, eh = w * 0.115, h * 0.155
+        painter.drawEllipse(QRectF(x + w * 0.28, y + h * 0.30, ew, eh))
+        painter.drawEllipse(QRectF(x + w * 0.605, y + h * 0.30, ew, eh))
+        painter.setBrush(QColor(255, 255, 255, 210))
+        painter.drawEllipse(QRectF(x + w * 0.30, y + h * 0.32, ew * 0.38, eh * 0.34))
+        painter.drawEllipse(QRectF(x + w * 0.625, y + h * 0.32, ew * 0.38, eh * 0.34))
+
+        painter.setPen(QPen(QColor("#1E293B"), max(2.2, min(w, h) * 0.068), Qt.SolidLine, Qt.RoundCap))
+        painter.setBrush(Qt.NoBrush)
+        smile_rect = QRectF(x + w * 0.25, y + h * 0.34, w * 0.50, h * 0.40)
+        painter.drawArc(smile_rect, 205 * 16, 130 * 16)
+
+    elif sid == "star":
+        sp_shadow = build_star_polygon_in_rect(rect.translated(0.0, shadow_off))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 46))
+        painter.drawPolygon(sp_shadow)
+
+        sp = build_star_polygon_in_rect(rect)
+        stgrad = QLinearGradient(QPointF(x, y), QPointF(x + w * 0.3, y + h))
+        stgrad.setColorAt(0.0, QColor("#FEF08A"))
+        stgrad.setColorAt(0.45, QColor("#FBBF24"))
+        stgrad.setColorAt(1.0, QColor("#D97706"))
+        painter.setPen(QPen(QColor("#92400E"), edge_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(stgrad)
+        painter.drawPolygon(sp)
+
+        # Subtle inner facet highlight
+        painter.setPen(QPen(QColor(255, 255, 255, 130), max(1.0, edge_w * 0.65), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawLine(QPointF(x + w * 0.50, y + h * 0.14), QPointF(x + w * 0.42, y + h * 0.42))
+
+    elif sid == "fire":
+        flame_s = QPainterPath()
+        flame_s.moveTo(x + w * 0.50, y + h * 0.05 + shadow_off)
+        flame_s.cubicTo(x + w * 0.85, y + h * 0.32 + shadow_off, x + w * 0.94, y + h * 0.64 + shadow_off, x + w * 0.78, y + h * 0.86 + shadow_off)
+        flame_s.cubicTo(x + w * 0.66, y + h * 0.98 + shadow_off, x + w * 0.34, y + h * 0.98 + shadow_off, x + w * 0.22, y + h * 0.86 + shadow_off)
+        flame_s.cubicTo(x + w * 0.06, y + h * 0.64 + shadow_off, x + w * 0.16, y + h * 0.36 + shadow_off, x + w * 0.36, y + h * 0.22 + shadow_off)
+        flame_s.cubicTo(x + w * 0.36, y + h * 0.38 + shadow_off, x + w * 0.48, y + h * 0.36 + shadow_off, x + w * 0.50, y + h * 0.05 + shadow_off)
+        flame_s.closeSubpath()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 44))
+        painter.drawPath(flame_s)
+
+        flame = QPainterPath()
+        flame.moveTo(x + w * 0.50, y + h * 0.05)
+        flame.cubicTo(x + w * 0.85, y + h * 0.32, x + w * 0.94, y + h * 0.64, x + w * 0.78, y + h * 0.86)
+        flame.cubicTo(x + w * 0.66, y + h * 0.98, x + w * 0.34, y + h * 0.98, x + w * 0.22, y + h * 0.86)
+        flame.cubicTo(x + w * 0.06, y + h * 0.64, x + w * 0.16, y + h * 0.36, x + w * 0.36, y + h * 0.22)
+        flame.cubicTo(x + w * 0.36, y + h * 0.38, x + w * 0.48, y + h * 0.36, x + w * 0.50, y + h * 0.05)
+        flame.closeSubpath()
+        fgrad = QLinearGradient(QPointF(x + w * 0.5, y), QPointF(x + w * 0.5, y + h))
+        fgrad.setColorAt(0.0, QColor("#FB7185"))
+        fgrad.setColorAt(0.35, QColor("#F97316"))
+        fgrad.setColorAt(1.0, QColor("#DC2626"))
+        painter.setPen(QPen(QColor("#9A3412"), edge_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(fgrad)
+        painter.drawPath(flame)
+
+        inner = QPainterPath()
+        inner.moveTo(x + w * 0.52, y + h * 0.36)
+        inner.cubicTo(x + w * 0.74, y + h * 0.54, x + w * 0.72, y + h * 0.86, x + w * 0.50, y + h * 0.90)
+        inner.cubicTo(x + w * 0.28, y + h * 0.86, x + w * 0.28, y + h * 0.54, x + w * 0.52, y + h * 0.36)
+        igrad = QLinearGradient(QPointF(x + w * 0.5, y + h * 0.36), QPointF(x + w * 0.5, y + h * 0.9))
+        igrad.setColorAt(0.0, QColor("#FEF9C3"))
+        igrad.setColorAt(1.0, QColor("#FACC15"))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(igrad)
+        painter.drawPath(inner)
+
+    else:  # check
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 44))
+        painter.drawEllipse(rect.translated(0.0, shadow_off))
+
+        cgrad = QRadialGradient(QPointF(x + w * 0.35, y + h * 0.28), max(w, h) * 0.78)
+        cgrad.setColorAt(0.0, QColor("#86EFAC"))
+        cgrad.setColorAt(0.35, QColor("#22C55E"))
+        cgrad.setColorAt(1.0, QColor("#15803D"))
+        painter.setPen(QPen(QColor("#14532D"), edge_w))
+        painter.setBrush(cgrad)
+        painter.drawEllipse(rect)
+
+        painter.setPen(QPen(QColor("#FFFFFF"), max(2.6, min(w, h) * 0.125), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(Qt.NoBrush)
+        chk = QPainterPath()
+        chk.moveTo(x + w * 0.27, y + h * 0.52)
+        chk.lineTo(x + w * 0.44, y + h * 0.69)
+        chk.lineTo(x + w * 0.74, y + h * 0.33)
+        painter.drawPath(chk)
+
+    painter.restore()
 
 
 def compute_circle_tangent_lines(
@@ -183,13 +579,16 @@ def create_magnifier_pixmap(
     painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
     center = canvas_size / 2.0
 
-    # Clip circle for zoomed content
-    painter.save()
-    clip_path = QPainterPath()
-    clip_path.addEllipse(QPointF(center, center), radius, radius)
-    painter.setClipPath(clip_path)
-    painter.drawImage(QRectF(center - radius, center - radius, radius * 2.0, radius * 2.0), scaled_patch)
-    painter.restore()
+    # Antialiased circular fill via textured QBrush (avoids Qt's jagged integer setClipPath)
+    brush = QBrush(scaled_patch)
+    b_tr = QTransform()
+    b_tr.translate(center - radius, center - radius)
+    if scaled_patch.width() > 0 and scaled_patch.height() > 0:
+        b_tr.scale((radius * 2.0) / float(scaled_patch.width()), (radius * 2.0) / float(scaled_patch.height()))
+    brush.setTransform(b_tr)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(brush)
+    painter.drawEllipse(QPointF(center, center), radius, radius)
 
     accent_col = ring_color if (ring_color is not None and ring_color.isValid()) else QColor(50, 130, 230)
 
@@ -206,25 +605,472 @@ def create_magnifier_pixmap(
     return pm
 
 
+def _measure_text_pill_size(el: MarkupElement) -> tuple[float, float, list[str], QFont, QFontMetrics]:
+    """Computes consistent text box width/height, lines, QFont, and QFontMetrics."""
+    fam = getattr(el, "font_family", "Segoe UI") or "Segoe UI"
+    font = QFont(fam, max(10, int(round(el.stroke_width * 2.2))))
+    font.setBold(getattr(el, "font_bold", True))
+    font.setItalic(getattr(el, "font_italic", False))
+    fm = QFontMetrics(font)
+    lines = (el.text or "").split("\n")
+    max_line_w = max((fm.horizontalAdvance(line) for line in lines), default=40)
+    line_h = fm.lineSpacing()
+    total_text_h = line_h * max(1, len(lines))
+    pad_x, pad_y = 12.0, 8.0
+    natural_w = float(max_line_w + 2.0 * pad_x)
+    rect_w = float(el.rect.normalized().width()) if el.rect is not None else 0.0
+    box_w = max(natural_w, rect_w)
+    return box_w, float(total_text_h + 2.0 * pad_y), lines, font, fm
+
+
+def _rotated_rect_bounding_box(rect: QRectF, angle_deg: float) -> QRectF:
+    """Returns the axis-aligned bounding rect of *rect* rotated around its center by *angle_deg*."""
+    if abs(float(angle_deg)) < 1e-4:
+        return rect
+    c = rect.center()
+    tr = QTransform()
+    tr.translate(c.x(), c.y())
+    tr.rotate(float(angle_deg))
+    tr.translate(-c.x(), -c.y())
+    return tr.mapRect(rect)
+
+
+def _pen_style_from_dash(dash_style: str | None) -> Qt.PenStyle:
+    norm = str(dash_style or "solid").strip().lower()
+    if norm == "dashed":
+        return Qt.DashLine
+    if norm == "dotted":
+        return Qt.DotLine
+    return Qt.SolidLine
+
+
+def get_markup_element_unrotated_rect(el: MarkupElement | None) -> QRectF:
+    """Returns the element's unrotated scene geometry rectangle (pill rect for text, normalized rect for shapes/stickers/lines)."""
+    if el is None:
+        return QRectF()
+    if el.kind == "text" and el.rect is not None:
+        if el.text:
+            pill_w, pill_h, _, _, _ = _measure_text_pill_size(el)
+            return QRectF(el.rect.x(), el.rect.y(), pill_w, pill_h)
+        return el.rect.normalized()
+    if el.kind in ALL_LINE_KINDS and el.start_pt is not None and el.end_pt is not None:
+        x1 = min(el.start_pt.x(), el.end_pt.x())
+        y1 = min(el.start_pt.y(), el.end_pt.y())
+        x2 = max(el.start_pt.x(), el.end_pt.x())
+        y2 = max(el.start_pt.y(), el.end_pt.y())
+        w = x2 - x1
+        h = y2 - y1
+        if w < 16.0:
+            cx = (x1 + x2) * 0.5
+            x1, x2 = cx - 8.0, cx + 8.0
+        if h < 16.0:
+            cy = (y1 + y2) * 0.5
+            y1, y2 = cy - 8.0, cy + 8.0
+        return QRectF(x1, y1, x2 - x1, y2 - y1)
+    if el.rect is not None:
+        return el.rect.normalized()
+    return QRectF()
+
+
+def scale_markup_element(el: MarkupElement | None, new_rect: QRectF) -> None:
+    """Resizes a shape/sticker/line/redaction rect or scales a text element's font size proportionally to *new_rect*."""
+    if el is None or new_rect is None:
+        return
+    nr = new_rect.normalized()
+    if nr.width() < 8.0 or nr.height() < 8.0:
+        return
+    if el.kind == "text":
+        old_r = get_markup_element_unrotated_rect(el)
+        if old_r.height() > 1.0:
+            ratio = max(0.25, nr.height() / old_r.height())
+            new_sw = max(2, min(48, int(round(el.stroke_width * ratio))))
+            el.stroke_width = new_sw
+        el.rect = QRectF(nr.x(), nr.y(), nr.width(), nr.height())
+        # Enforce minimum text pill width while letting users stretch the box horizontally for left/center/right align
+        adj = get_markup_element_unrotated_rect(el)
+        el.rect = QRectF(nr.x(), nr.y(), adj.width(), adj.height())
+    elif el.kind in ALL_LINE_KINDS and el.start_pt is not None and el.end_pt is not None:
+        old_r = get_markup_element_unrotated_rect(el)
+        ow = max(1.0, old_r.width())
+        oh = max(1.0, old_r.height())
+        sx1 = (el.start_pt.x() - old_r.left()) / ow
+        sy1 = (el.start_pt.y() - old_r.top()) / oh
+        sx2 = (el.end_pt.x() - old_r.left()) / ow
+        sy2 = (el.end_pt.y() - old_r.top()) / oh
+        el.start_pt = QPointF(nr.left() + sx1 * nr.width(), nr.top() + sy1 * nr.height())
+        el.end_pt = QPointF(nr.left() + sx2 * nr.width(), nr.top() + sy2 * nr.height())
+    elif el.kind in ALL_SHAPE_KINDS or el.kind in ("pixelate", "blur", "sticker"):
+        el.rect = nr
+
+
+def _draw_text_element(painter: QPainter, el: MarkupElement) -> None:
+    """Shared WYSIWYG renderer for text elements across live preview and final master bake."""
+    if el.rect is None or not el.text:
+        return
+    pill_w, pill_h, lines, font, metrics = _measure_text_pill_size(el)
+    rx, ry = el.rect.x(), el.rect.y()
+    pad_x, pad_y = 12.0, 8.0
+    max_line_w = max(1.0, pill_w - 2.0 * pad_x)
+    line_h = metrics.lineSpacing()
+    pill_rect = QRectF(rx, ry, pill_w, pill_h)
+    style = str(getattr(el, "text_style", "pill") or "pill").lower()
+    align = str(getattr(el, "text_align", "left") or "left").lower()
+    sec_col = getattr(el, "bg_color", None)
+    bg_op = max(0.0, min(1.0, float(getattr(el, "bg_opacity", 0.85) if getattr(el, "bg_opacity", None) is not None else 0.85)))
+
+    painter.save()
+    rot = float(getattr(el, "rotation_deg", 0.0) or 0.0)
+    if abs(rot) >= 0.05:
+        c = pill_rect.center()
+        painter.translate(c.x(), c.y())
+        painter.rotate(rot)
+        painter.translate(-c.x(), -c.y())
+
+    painter.setFont(font)
+
+    if style == "pill":
+        if (sec_col is not None and sec_col.alpha() == 0) or bg_op <= 0.01:
+            pass
+        else:
+            corner_rad = min(12.0, pill_h / 2.0)
+            painter.setPen(QPen(QColor(255, 255, 255, int(round(180 * bg_op))), 1.2))
+            if sec_col is None or not sec_col.isValid():
+                sec_brush = QColor(15, 20, 28, int(round(255 * bg_op)))
+            else:
+                sec_brush = QColor(sec_col.red(), sec_col.green(), sec_col.blue(), int(round(255 * bg_op)))
+            painter.setBrush(sec_brush)
+            painter.drawRoundedRect(pill_rect, corner_rad, corner_rad)
+
+    text_color = el.color if el.color not in (QColor(0, 0, 0), QColor("#000000")) else QColor(255, 255, 255)
+    outline_col = (
+        QColor(sec_col.red(), sec_col.green(), sec_col.blue(), max(25, int(round(255 * max(0.25, bg_op)))))
+        if (sec_col is not None and sec_col.isValid() and sec_col.alpha() > 0)
+        else QColor(17, 24, 39, max(25, int(round(255 * max(0.25, bg_op)))))
+    )
+
+    font_pt_val = max(10, float(font.pointSize()) if font.pointSize() > 0 else float(max(10, int(round(el.stroke_width * 2.2)))))
+    cur_y = ry + pad_y + metrics.ascent()
+    for line in lines:
+        lw = float(metrics.horizontalAdvance(line))
+        if align == "center":
+            tx = rx + pad_x + (max_line_w - lw) * 0.5
+        elif align == "right":
+            tx = rx + pad_x + (max_line_w - lw)
+        else:
+            tx = rx + pad_x
+
+        if style == "outline" and line:
+            t_path = QPainterPath()
+            t_path.addText(QPointF(tx, cur_y), font, line)
+            stroke_w = max(3.0, font_pt_val * 0.22)
+            painter.setPen(QPen(outline_col, stroke_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(t_path)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(text_color))
+            painter.drawPath(t_path)
+        elif style == "shadow" and line:
+            shadow_off = max(2.0, font_pt_val * 0.09)
+            painter.setPen(QPen(QColor(0, 0, 0, 155)))
+            painter.drawText(QPointF(tx + shadow_off, cur_y + shadow_off), line)
+            painter.setPen(QPen(QColor(0, 0, 0, 75)))
+            painter.drawText(QPointF(tx + shadow_off * 1.6, cur_y + shadow_off * 1.6), line)
+            painter.setPen(QPen(text_color))
+            painter.drawText(QPointF(tx, cur_y), line)
+        else:
+            painter.setPen(QPen(text_color))
+            painter.drawText(QPointF(tx, cur_y), line)
+        cur_y += line_h
+
+    painter.restore()
+
+
+def _draw_vector_shape(painter: QPainter, el: MarkupElement) -> None:
+    """Draws all geometric & callout shapes with optional rotation, fill, and opacity."""
+    if el.rect is None:
+        return
+    r = el.rect.normalized()
+    el_opacity = max(0.15, min(1.0, float(getattr(el, "opacity", 1.0) if getattr(el, "opacity", None) is not None else 1.0)))
+    rot = float(getattr(el, "rotation_deg", 0.0) or 0.0)
+    filled = bool(getattr(el, "shape_filled", False))
+
+    painter.save()
+    painter.setOpacity(el_opacity)
+    if abs(rot) >= 0.05:
+        c = r.center()
+        painter.translate(c.x(), c.y())
+        painter.rotate(rot)
+        painter.translate(-c.x(), -c.y())
+
+    if el.stroke_width > 0:
+        dash = str(getattr(el, "dash_style", "solid") or "solid").strip().lower()
+        if dash == "outlined":
+            bg = getattr(el, "bg_color", None)
+            if bg is not None and bg.isValid() and bg.alpha() > 0:
+                out_col = QColor(bg.red(), bg.green(), bg.blue(), bg.alpha())
+            else:
+                out_col = QColor("#FFFFFF") if el.color.lightness() < 150 else QColor("#111111")
+            out_w = el.stroke_width + max(4, int(round(el.stroke_width * 0.5)))
+            painter.setPen(QPen(out_col, out_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setBrush(Qt.NoBrush)
+            if el.kind == "rect":
+                painter.drawRoundedRect(r, 4.0, 4.0)
+            elif el.kind == "ellipse":
+                painter.drawEllipse(r)
+            elif el.kind == "triangle":
+                painter.drawPolygon(build_regular_polygon_in_rect(r, 3, -90.0))
+            elif el.kind == "pentagon":
+                painter.drawPolygon(build_regular_polygon_in_rect(r, 5, -90.0))
+            elif el.kind == "hexagon":
+                painter.drawPolygon(build_regular_polygon_in_rect(r, 6, -90.0))
+            elif el.kind == "star":
+                painter.drawPolygon(build_star_polygon_in_rect(r))
+            elif el.kind == "heart_shape":
+                painter.drawPath(build_heart_path_in_rect(r))
+            elif el.kind == "speech_bubble":
+                painter.drawPath(build_speech_bubble_path_in_rect(r))
+            pen = QPen(el.color, max(1, el.stroke_width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        else:
+            pen = QPen(el.color, max(1, el.stroke_width), _pen_style_from_dash(dash), Qt.RoundCap, Qt.RoundJoin)
+        painter.setPen(pen)
+    else:
+        painter.setPen(Qt.NoPen)
+    if filled:
+        bg = getattr(el, "bg_color", None)
+        if bg is not None and bg.isValid():
+            if bg.alpha() > 0:
+                painter.setBrush(QBrush(QColor(bg.red(), bg.green(), bg.blue(), bg.alpha())))
+            else:
+                painter.setBrush(Qt.NoBrush)
+        else:
+            painter.setBrush(QBrush(QColor(el.color.red(), el.color.green(), el.color.blue(), 220)))
+    else:
+        painter.setBrush(Qt.NoBrush)
+
+    if el.kind == "rect":
+        painter.drawRoundedRect(r, 4.0, 4.0)
+    elif el.kind == "ellipse":
+        painter.drawEllipse(r)
+    elif el.kind == "triangle":
+        painter.drawPolygon(build_regular_polygon_in_rect(r, 3, -90.0))
+    elif el.kind == "pentagon":
+        painter.drawPolygon(build_regular_polygon_in_rect(r, 5, -90.0))
+    elif el.kind == "hexagon":
+        painter.drawPolygon(build_regular_polygon_in_rect(r, 6, -90.0))
+    elif el.kind == "star":
+        painter.drawPolygon(build_star_polygon_in_rect(r))
+    elif el.kind == "heart_shape":
+        painter.drawPath(build_heart_path_in_rect(r))
+    elif el.kind == "speech_bubble":
+        painter.drawPath(build_speech_bubble_path_in_rect(r))
+    painter.restore()
+
+
+def _draw_line_element(painter: QPainter, el: MarkupElement) -> None:
+    """Draws plain lines, single arrows, and double-ended arrows with optional rotation and dash style."""
+    if not el.start_pt or not el.end_pt:
+        return
+    p1, p2 = el.start_pt, el.end_pt
+    if math.hypot(p2.x() - p1.x(), p2.y() - p1.y()) < 4.0:
+        return
+    el_opacity = max(0.15, min(1.0, float(getattr(el, "opacity", 1.0) if getattr(el, "opacity", None) is not None else 1.0)))
+    style = el.kind if el.kind in ("line", "double_arrow") else str(getattr(el, "line_style", "arrow") or "arrow")
+    rot = float(getattr(el, "rotation_deg", 0.0) or 0.0)
+
+    painter.save()
+    painter.setOpacity(el_opacity)
+    if abs(rot) >= 0.05:
+        c = get_markup_element_unrotated_rect(el).center()
+        painter.translate(c.x(), c.y())
+        painter.rotate(rot)
+        painter.translate(-c.x(), -c.y())
+    dash = str(getattr(el, "dash_style", "solid") or "solid").strip().lower()
+    pen = QPen(el.color, max(1, el.stroke_width), _pen_style_from_dash(dash), Qt.RoundCap, Qt.RoundJoin)
+
+    if dash == "outlined":
+        bg = getattr(el, "bg_color", None)
+        if bg is not None and bg.isValid() and bg.alpha() > 0:
+            out_col = QColor(bg.red(), bg.green(), bg.blue(), bg.alpha())
+        else:
+            out_col = QColor("#FFFFFF") if el.color.lightness() < 150 else QColor("#111111")
+        out_pad = max(4, int(round(el.stroke_width * 0.55)))
+        out_pen = QPen(out_col, max(1, el.stroke_width) + out_pad, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        if style == "line":
+            painter.setPen(out_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawLine(p1, p2)
+        elif style == "double_arrow":
+            p_end_base, head_end = build_arrow_geometry(p1, p2, el.stroke_width)
+            p_start_base, head_start = build_arrow_geometry(p2, p1, el.stroke_width)
+            painter.setPen(out_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawLine(p_start_base, p_end_base)
+            painter.setPen(QPen(out_col, max(3.0, out_pad * 0.9), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setBrush(QBrush(out_col))
+            painter.drawPolygon(head_end)
+            painter.drawPolygon(head_start)
+        else:
+            p_base, arrowhead = build_arrow_geometry(p1, p2, el.stroke_width)
+            painter.setPen(out_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawLine(p1, p_base)
+            painter.setPen(QPen(out_col, max(3.0, out_pad * 0.9), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setBrush(QBrush(out_col))
+            painter.drawPolygon(arrowhead)
+        pen = QPen(el.color, max(1, el.stroke_width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+
+    if style == "line":
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawLine(p1, p2)
+    elif style == "double_arrow":
+        p_end_base, head_end = build_arrow_geometry(p1, p2, el.stroke_width)
+        p_start_base, head_start = build_arrow_geometry(p2, p1, el.stroke_width)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawLine(p_start_base, p_end_base)
+        painter.setPen(QPen(el.color, 1.0))
+        painter.setBrush(QBrush(el.color))
+        painter.drawPolygon(head_end)
+        painter.drawPolygon(head_start)
+    else:
+        p_base, arrowhead = build_arrow_geometry(p1, p2, el.stroke_width)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawLine(p1, p_base)
+        painter.setPen(QPen(el.color, 1.0))
+        painter.setBrush(QBrush(el.color))
+        painter.drawPolygon(arrowhead)
+    painter.restore()
+
+
+def _draw_pen_stroke(painter: QPainter, el: MarkupElement, canvas_w: int, canvas_h: int) -> None:
+    """Draws freehand pen/highlighter strokes with non-stacking opacity via an isolated mask."""
+    if len(el.points) < 2:
+        return
+    el_opacity = max(0.15, min(1.0, float(getattr(el, "opacity", 1.0) if getattr(el, "opacity", None) is not None else 1.0)))
+    is_hl = el.kind == "highlighter"
+    eff_opacity = (0.42 * el_opacity) if is_hl else el_opacity
+    stroke_w = max(8, int(el.stroke_width * 2.6)) if is_hl else max(1, el.stroke_width)
+
+    path = QPainterPath()
+    path.moveTo(el.points[0])
+    for pt in el.points[1:]:
+        path.lineTo(pt)
+
+    if eff_opacity >= 0.99:
+        painter.save()
+        painter.setPen(QPen(el.color, stroke_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(path)
+        painter.restore()
+        return
+
+    # Isolated transparent mask prevents self-intersecting strokes from darkening
+    stroke_mask = QImage(max(1, canvas_w), max(1, canvas_h), QImage.Format.Format_ARGB32_Premultiplied)
+    stroke_mask.fill(Qt.transparent)
+    mp = QPainter(stroke_mask)
+    mp.setRenderHint(QPainter.Antialiasing, True)
+    solid_col = QColor(el.color.red(), el.color.green(), el.color.blue(), 255)
+    mp.setPen(QPen(solid_col, stroke_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    mp.setBrush(Qt.NoBrush)
+    mp.drawPath(path)
+    mp.end()
+
+    painter.save()
+    painter.setOpacity(eff_opacity)
+    painter.drawImage(0, 0, stroke_mask)
+    painter.restore()
+
+
+def _apply_obscure_element_to_rgb(base_rgb: np.ndarray, el: MarkupElement) -> np.ndarray:
+    """Applies box or circular brush blur/pixelate redaction onto an RGB numpy image."""
+    if base_rgb is None or el.kind not in ("blur", "pixelate"):
+        return base_rgb
+    h, w = base_rgb.shape[:2]
+    strength = max(15, min(100, int(getattr(el, "obscure_strength", 55) or 55)))
+
+    if getattr(el, "points", None) and len(el.points) >= 1 and getattr(el, "obscure_mode", "box") == "brush":
+        rad = max(10, int(round(el.stroke_width * 2.2)))
+        xs = [p.x() for p in el.points]
+        ys = [p.y() for p in el.points]
+        pad = rad + 6
+        x1 = max(0, int(math.floor(min(xs) - pad)))
+        y1 = max(0, int(math.floor(min(ys) - pad)))
+        x2 = min(w, int(math.ceil(max(xs) + pad)))
+        y2 = min(h, int(math.ceil(max(ys) + pad)))
+        rw, rh = x2 - x1, y2 - y1
+        if rw <= 4 or rh <= 4:
+            return base_rgb
+        patch = base_rgb[y1:y2, x1:x2].copy()
+        if el.kind == "pixelate":
+            bs = max(6, int(round(6 + (strength / 100.0) * 26)))
+            redacted = apply_pixelate(patch, (0, 0, rw, rh), block_size=bs)
+        else:
+            blur_rad = max(9, int(round(9 + (strength / 100.0) * 34))) | 1
+            redacted = apply_blur_redact(patch, (0, 0, rw, rh), radius=blur_rad)
+
+        mask = np.zeros((rh, rw), dtype=np.uint8)
+        pts_int = [(int(round(p.x() - x1)), int(round(p.y() - y1))) for p in el.points]
+        if len(pts_int) == 1:
+            cv2.circle(mask, pts_int[0], rad, 255, -1)
+        else:
+            for a, b in zip(pts_int[:-1], pts_int[1:]):
+                cv2.line(mask, a, b, 255, rad * 2, lineType=cv2.LINE_AA)
+            cv2.circle(mask, pts_int[0], rad, 255, -1)
+            cv2.circle(mask, pts_int[-1], rad, 255, -1)
+
+        if el.kind == "blur":
+            mask_f = (cv2.GaussianBlur(mask, (9, 9), 2.5).astype(np.float32) / 255.0)[:, :, None]
+        else:
+            mask_f = (mask.astype(np.float32) / 255.0)[:, :, None]
+
+        out = base_rgb.copy()
+        blended = np.clip(redacted.astype(np.float32) * mask_f + patch.astype(np.float32) * (1.0 - mask_f) + 0.5, 0, 255).astype(np.uint8)
+        out[y1:y2, x1:x2] = blended
+        return out
+
+    if el.rect is not None:
+        rx = max(0, int(round(el.rect.x())))
+        ry = max(0, int(round(el.rect.y())))
+        rw = max(1, min(w - rx, int(round(el.rect.width()))))
+        rh = max(1, min(h - ry, int(round(el.rect.height()))))
+        if rw > 4 and rh > 4:
+            if el.kind == "pixelate":
+                bs = max(6, int(round(min(rw, rh) * (0.04 + 0.14 * (strength / 100.0)))))
+                return apply_pixelate(base_rgb, (rx, ry, rw, rh), block_size=bs)
+            rad = max(9, int(round(min(rw, rh) * (0.10 + 0.25 * (strength / 100.0))))) | 1
+            return apply_blur_redact(base_rgb, (rx, ry, rw, rh), radius=rad)
+    return base_rgb
+
+
 def get_markup_element_bounds(el: MarkupElement | None) -> QRectF:
-    """Returns the scene bounding rectangle for an element, including stroke and arrowhead margin."""
+    """Returns the scene bounding rectangle for an element, including rotation, stroke and arrowhead margin."""
     if el is None:
         return QRectF()
     margin = max(8.0, float(el.stroke_width) * 1.5)
+    rot = float(getattr(el, "rotation_deg", 0.0) or 0.0)
 
-    if el.kind in ("rect", "ellipse", "star", "pixelate", "blur"):
+    if el.kind in ALL_SHAPE_KINDS or el.kind in ("pixelate", "blur", "sticker"):
+        if el.kind in ("pixelate", "blur") and getattr(el, "points", None) and getattr(el, "obscure_mode", "box") == "brush":
+            rad = max(10.0, float(el.stroke_width) * 2.2) + 6.0
+            xs = [p.x() for p in el.points]
+            ys = [p.y() for p in el.points]
+            return QRectF(min(xs), min(ys), max(1.0, max(xs) - min(xs)), max(1.0, max(ys) - min(ys))).adjusted(-rad, -rad, rad, rad)
         if el.rect is not None:
-            return el.rect.normalized().adjusted(-margin, -margin, margin, margin)
+            base_r = el.rect.normalized()
+            if abs(rot) >= 0.05 and (el.kind in ALL_SHAPE_KINDS or el.kind == "sticker"):
+                base_r = _rotated_rect_bounding_box(base_r, rot)
+            return base_r.adjusted(-margin, -margin, margin, margin)
         return QRectF()
 
-    elif el.kind == "arrow":
+    elif el.kind in ALL_LINE_KINDS:
         if el.start_pt is not None and el.end_pt is not None:
-            x1 = min(el.start_pt.x(), el.end_pt.x())
-            y1 = min(el.start_pt.y(), el.end_pt.y())
-            x2 = max(el.start_pt.x(), el.end_pt.x())
-            y2 = max(el.start_pt.y(), el.end_pt.y())
-            arrow_m = max(margin, float(el.stroke_width) * 3.6)
-            return QRectF(x1, y1, max(1.0, x2 - x1), max(1.0, y2 - y1)).adjusted(-arrow_m, -arrow_m, arrow_m, arrow_m)
+            base_r = get_markup_element_unrotated_rect(el)
+            if abs(rot) >= 0.05:
+                base_r = _rotated_rect_bounding_box(base_r, rot)
+            arrow_m = max(margin, float(el.stroke_width) * 4.0)
+            return base_r.adjusted(-arrow_m, -arrow_m, arrow_m, arrow_m)
         return QRectF()
 
     elif el.kind in ("pen", "highlighter"):
@@ -251,18 +1097,12 @@ def get_markup_element_bounds(el: MarkupElement | None) -> QRectF:
 
     elif el.kind == "text":
         if el.rect is not None and el.text:
-            font = QFont("Segoe UI", max(10, int(el.stroke_width * 2.2)))
-            font.setBold(getattr(el, "font_bold", True))
-            font.setItalic(getattr(el, "font_italic", False))
-            fm = QFontMetrics(font)
-            lines = el.text.split("\n")
-            max_line_w = max((fm.horizontalAdvance(line) for line in lines), default=40)
-            line_h = fm.lineSpacing()
-            total_text_h = line_h * max(1, len(lines))
-            pad_x, pad_y = 12.0, 8.0
-            pill_w = max_line_w + 2 * pad_x
-            pill_h = total_text_h + 2 * pad_y
-            return QRectF(el.rect.x(), el.rect.y(), pill_w, pill_h).adjusted(-4, -4, 4, 4)
+            pill_w, pill_h, _, _, _ = _measure_text_pill_size(el)
+            base_r = QRectF(el.rect.x(), el.rect.y(), pill_w, pill_h)
+            if abs(rot) >= 0.05:
+                base_r = _rotated_rect_bounding_box(base_r, rot)
+            extra = 8.0 if getattr(el, "text_style", "pill") in ("outline", "shadow") else 4.0
+            return base_r.adjusted(-extra, -extra, extra, extra)
         elif el.rect is not None:
             return el.rect.normalized().adjusted(-margin, -margin, margin, margin)
         return QRectF()
@@ -306,36 +1146,65 @@ def render_markup_element_pixmap(
     top_left = QPointF(float(x1), float(y1))
 
     # For pixelate or blur:
-    if el.kind in ("pixelate", "blur") and base_rgb is not None and el.rect is not None:
+    if el.kind in ("pixelate", "blur") and base_rgb is not None:
         base_h, base_w = base_rgb.shape[:2]
         cl, ct = (crop_rect[0], crop_rect[1]) if crop_rect is not None else (0, 0)
-
-        rx = max(0, int(round(el.rect.x() + cl)))
-        ry = max(0, int(round(el.rect.y() + ct)))
-        rw = max(1, min(base_w - rx, int(round(el.rect.width()))))
-        rh = max(1, min(base_h - ry, int(round(el.rect.height()))))
-
         pm = QPixmap(w, h)
         pm.fill(Qt.transparent)
-        if rw > 4 and rh > 4:
-            patch = base_rgb[ry:ry+rh, rx:rx+rw].copy()
-            if el.kind == "pixelate":
-                bs = max(8, int(min(rw, rh) / 8))
-                patch = apply_pixelate(patch, (0, 0, rw, rh), block_size=bs)
-            else:
-                rad = max(15, int(min(rw, rh) / 4)) | 1
-                patch = apply_blur_redact(patch, (0, 0, rw, rh), radius=rad)
-            qimg_patch = QImage(patch.data, rw, rh, 3 * rw, QImage.Format.Format_RGB888).copy()
+        if getattr(el, "points", None) and getattr(el, "obscure_mode", "box") == "brush":
+            shifted_pts = [QPointF(pt.x() + cl, pt.y() + ct) for pt in el.points]
+            tmp_el = MarkupElement(
+                kind=el.kind,
+                points=shifted_pts,
+                stroke_width=el.stroke_width,
+                obscure_mode="brush",
+                obscure_strength=getattr(el, "obscure_strength", 55),
+            )
+            sx1 = max(0, x1 + int(cl))
+            sy1 = max(0, y1 + int(ct))
+            sx2 = min(base_w, x2 + int(cl))
+            sy2 = min(base_h, y2 + int(ct))
+            if sx2 > sx1 + 2 and sy2 > sy1 + 2:
+                local_el = MarkupElement(
+                    kind=el.kind,
+                    points=[QPointF(pt.x() - sx1, pt.y() - sy1) for pt in tmp_el.points],
+                    stroke_width=el.stroke_width,
+                    obscure_mode="brush",
+                    obscure_strength=getattr(el, "obscure_strength", 55),
+                )
+                sub = _apply_obscure_element_to_rgb(base_rgb[sy1:sy2, sx1:sx2], local_el)
+                sw, sh = sx2 - sx1, sy2 - sy1
+                qimg_sub = QImage(sub.data, sw, sh, 3 * sw, QImage.Format.Format_RGB888).copy()
+                p = QPainter(pm)
+                p.drawImage(QPointF(float(sx1 - cl - x1), float(sy1 - ct - y1)), qimg_sub)
+                p.end()
+            return pm, top_left
 
-            p = QPainter(pm)
-            p.setRenderHint(QPainter.Antialiasing, True)
-            rel_x = el.rect.x() - float(x1)
-            rel_y = el.rect.y() - float(y1)
-            p.drawImage(QRectF(rel_x, rel_y, el.rect.width(), el.rect.height()), qimg_patch)
-            p.setPen(QPen(el.color, 1.5, Qt.DashLine))
-            p.setBrush(Qt.NoBrush)
-            p.drawRect(QRectF(rel_x, rel_y, el.rect.width(), el.rect.height()))
-            p.end()
+        if el.rect is not None:
+            rx = max(0, int(round(el.rect.x() + cl)))
+            ry = max(0, int(round(el.rect.y() + ct)))
+            rw = max(1, min(base_w - rx, int(round(el.rect.width()))))
+            rh = max(1, min(base_h - ry, int(round(el.rect.height()))))
+            if rw > 4 and rh > 4:
+                strength = max(15, min(100, int(getattr(el, "obscure_strength", 55) or 55)))
+                patch = base_rgb[ry:ry+rh, rx:rx+rw].copy()
+                if el.kind == "pixelate":
+                    bs = max(6, int(round(min(rw, rh) * (0.04 + 0.14 * (strength / 100.0)))))
+                    patch = apply_pixelate(patch, (0, 0, rw, rh), block_size=bs)
+                else:
+                    rad = max(9, int(round(min(rw, rh) * (0.10 + 0.25 * (strength / 100.0))))) | 1
+                    patch = apply_blur_redact(patch, (0, 0, rw, rh), radius=rad)
+                qimg_patch = QImage(patch.data, rw, rh, 3 * rw, QImage.Format.Format_RGB888).copy()
+
+                p = QPainter(pm)
+                p.setRenderHint(QPainter.Antialiasing, True)
+                rel_x = el.rect.x() - float(x1)
+                rel_y = el.rect.y() - float(y1)
+                p.drawImage(QRectF(rel_x, rel_y, el.rect.width(), el.rect.height()), qimg_patch)
+                p.setPen(QPen(el.color, 1.5, Qt.DashLine))
+                p.setBrush(Qt.NoBrush)
+                p.drawRect(QRectF(rel_x, rel_y, el.rect.width(), el.rect.height()))
+                p.end()
         return pm, top_left
 
     # For magnifier:
@@ -401,8 +1270,19 @@ def render_markup_element_pixmap(
         stroke_width=el.stroke_width,
         text=el.text,
         zoom_factor=el.zoom_factor,
+        font_family=getattr(el, "font_family", "Segoe UI") or "Segoe UI",
         font_bold=getattr(el, "font_bold", True),
         font_italic=getattr(el, "font_italic", False),
+        rotation_deg=float(getattr(el, "rotation_deg", 0.0) or 0.0),
+        text_style=str(getattr(el, "text_style", "pill") or "pill"),
+        text_align=str(getattr(el, "text_align", "left") or "left"),
+        opacity=float(getattr(el, "opacity", 1.0) if getattr(el, "opacity", None) is not None else 1.0),
+        shape_filled=bool(getattr(el, "shape_filled", False)),
+        line_style=str(getattr(el, "line_style", "arrow") or "arrow"),
+        dash_style=str(getattr(el, "dash_style", "solid") or "solid"),
+        sticker_id=str(getattr(el, "sticker_id", "") or ""),
+        obscure_mode=str(getattr(el, "obscure_mode", "brush") or "brush"),
+        obscure_strength=int(getattr(el, "obscure_strength", 55) or 55),
     )
 
     pm = QPixmap(w, h)
@@ -412,105 +1292,100 @@ def render_markup_element_pixmap(
     painter.setRenderHint(QPainter.TextAntialiasing, True)
     painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
-    if shifted.kind == "pen" and len(shifted.points) >= 2:
-        pen = QPen(shifted.color, max(1, shifted.stroke_width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-        path = QPainterPath()
-        path.moveTo(shifted.points[0])
-        for pt in shifted.points[1:]:
-            path.lineTo(pt)
-        painter.drawPath(path)
+    el_opacity = max(0.15, min(1.0, float(getattr(shifted, "opacity", 1.0) if getattr(shifted, "opacity", None) is not None else 1.0)))
+    rot = float(getattr(shifted, "rotation_deg", 0.0) or 0.0)
 
-    elif shifted.kind == "highlighter" and len(shifted.points) >= 2:
-        hl_w = max(8, int(shifted.stroke_width * 2.6))
-        path = QPainterPath()
-        path.moveTo(shifted.points[0])
-        for pt in shifted.points[1:]:
-            path.lineTo(pt)
-        stroke_mask = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
-        stroke_mask.fill(Qt.transparent)
-        mp = QPainter(stroke_mask)
-        mp.setRenderHint(QPainter.Antialiasing, True)
-        solid_col = QColor(shifted.color.red(), shifted.color.green(), shifted.color.blue(), 255)
-        mp.setPen(QPen(solid_col, hl_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        mp.setBrush(Qt.NoBrush)
-        mp.drawPath(path)
-        mp.end()
-        painter.save()
-        painter.setOpacity(0.42)
-        painter.drawImage(0, 0, stroke_mask)
-        painter.restore()
+    if shifted.kind in ("pen", "highlighter") and len(shifted.points) >= 2:
+        _draw_pen_stroke(painter, shifted, w, h)
 
-    elif shifted.kind == "arrow" and shifted.start_pt and shifted.end_pt:
-        p1 = shifted.start_pt
-        p2 = shifted.end_pt
-        if math.hypot(p2.x() - p1.x(), p2.y() - p1.y()) >= 4.0:
-            p_base, arrowhead = build_arrow_geometry(p1, p2, shifted.stroke_width)
-            pen = QPen(shifted.color, max(1, shifted.stroke_width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawLine(p1, p_base)
-            painter.setPen(QPen(shifted.color, 1.0))
-            painter.setBrush(QBrush(shifted.color))
-            painter.drawPolygon(arrowhead)
+    elif shifted.kind in ALL_LINE_KINDS and shifted.start_pt and shifted.end_pt:
+        _draw_line_element(painter, shifted)
 
-    elif shifted.kind == "rect" and shifted.rect is not None:
-        pen = QPen(shifted.color, max(1, shifted.stroke_width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-        painter.drawRoundedRect(shifted.rect, 4.0, 4.0)
+    elif shifted.kind in ALL_SHAPE_KINDS and shifted.rect is not None:
+        _draw_vector_shape(painter, shifted)
 
-    elif shifted.kind == "ellipse" and shifted.rect is not None:
-        pen = QPen(shifted.color, max(1, shifted.stroke_width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-        painter.drawEllipse(shifted.rect)
-
-    elif shifted.kind == "star" and shifted.rect is not None:
-        pen = QPen(shifted.color, max(1, shifted.stroke_width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-        painter.drawPolygon(build_star_polygon_in_rect(shifted.rect))
+    elif shifted.kind == "sticker" and shifted.rect is not None:
+        draw_vector_sticker(
+            painter,
+            shifted.rect.normalized(),
+            getattr(shifted, "sticker_id", "heart"),
+            rotation_deg=rot,
+            opacity=el_opacity,
+        )
 
     elif shifted.kind == "text" and shifted.rect is not None and shifted.text:
-        font = QFont("Segoe UI", max(10, int(shifted.stroke_width * 2.2)))
-        font.setBold(getattr(shifted, "font_bold", True))
-        font.setItalic(getattr(shifted, "font_italic", False))
-        painter.setFont(font)
-        metrics = painter.fontMetrics()
-        lines = shifted.text.split("\n")
-        max_line_w = max((metrics.horizontalAdvance(l) for l in lines), default=40)
-        line_h = metrics.lineSpacing()
-        total_text_h = line_h * max(1, len(lines))
-        pad_x, pad_y = 12.0, 8.0
-        rx, ry = shifted.rect.x(), shifted.rect.y()
-        pill_w = max_line_w + 2 * pad_x
-        pill_h = total_text_h + 2 * pad_y
-        pill_rect = QRectF(rx, ry, pill_w, pill_h)
-
-        sec_col = getattr(shifted, "bg_color", None)
-        if sec_col is not None and sec_col.alpha() == 0:
-            pass
-        else:
-            corner_rad = min(12.0, pill_h / 2.0)
-            painter.setPen(QPen(QColor(255, 255, 255, 180), 1.2))
-            if sec_col is None or not sec_col.isValid():
-                sec_brush = QColor(15, 20, 28, 220)
-            else:
-                sec_brush = QColor(sec_col.red(), sec_col.green(), sec_col.blue(), 220)
-            painter.setBrush(sec_brush)
-            painter.drawRoundedRect(pill_rect, corner_rad, corner_rad)
-
-        text_color = shifted.color if shifted.color not in (QColor(0, 0, 0), QColor("#000000")) else QColor(255, 255, 255)
-        painter.setPen(QPen(text_color))
-        cur_y = ry + pad_y + metrics.ascent()
-        for line in lines:
-            painter.drawText(QPointF(rx + pad_x, cur_y), line)
-            cur_y += line_h
+        painter.save()
+        painter.setOpacity(el_opacity)
+        _draw_text_element(painter, shifted)
+        painter.restore()
 
     painter.end()
     return pm, top_left
+
+
+def flatten_markup_element_roi(
+    base_rgb: np.ndarray,
+    el: MarkupElement,
+) -> tuple[tuple[int, int, int, int], np.ndarray, np.ndarray] | None:
+    """
+    Fast ROI-only bake for a single non-magnifier MarkupElement directly into base_rgb in-place.
+    Avoids copying or wrapping the full 24MP+ master array into a QImage.
+    Returns ((y0, y1, x0, x1), before_roi, after_roi), or None to fall back to full-frame flatten.
+    """
+    if base_rgb is None or el is None or el.kind in ("magnifier", "magnify"):
+        return None
+    h, w = base_rgb.shape[:2]
+    if h <= 0 or w <= 0:
+        return None
+
+    bounds = get_markup_element_bounds(el)
+    if bounds.isNull() or bounds.width() <= 0 or bounds.height() <= 0:
+        return None
+
+    sw = max(2, int(getattr(el, "stroke_width", 4) or 4))
+    pad = max(64, int(sw * 4.5) + 48)
+    x0 = max(0, int(math.floor(bounds.left())) - pad)
+    y0 = max(0, int(math.floor(bounds.top())) - pad)
+    x1 = min(w, int(math.ceil(bounds.right())) + pad)
+    y1 = min(h, int(math.ceil(bounds.bottom())) + pad)
+    if x1 <= x0 or y1 <= y0:
+        return None
+
+    # If the ROI already spans > 85% of the image, full-frame flatten is equivalent
+    if (x1 - x0) * (y1 - y0) > 0.85 * w * h:
+        return None
+
+    local_el = MarkupElement(
+        kind=el.kind,
+        rect=QRectF(el.rect.x() - x0, el.rect.y() - y0, el.rect.width(), el.rect.height()) if el.rect else None,
+        start_pt=QPointF(el.start_pt.x() - x0, el.start_pt.y() - y0) if el.start_pt else None,
+        end_pt=QPointF(el.end_pt.x() - x0, el.end_pt.y() - y0) if el.end_pt else None,
+        points=[QPointF(pt.x() - x0, pt.y() - y0) for pt in el.points],
+        color=el.color,
+        bg_color=el.bg_color,
+        stroke_width=el.stroke_width,
+        text=el.text,
+        zoom_factor=el.zoom_factor,
+        font_family=getattr(el, "font_family", "Segoe UI") or "Segoe UI",
+        font_bold=getattr(el, "font_bold", True),
+        font_italic=getattr(el, "font_italic", False),
+        rotation_deg=float(getattr(el, "rotation_deg", 0.0) or 0.0),
+        text_style=str(getattr(el, "text_style", "pill") or "pill"),
+        text_align=str(getattr(el, "text_align", "left") or "left"),
+        opacity=float(getattr(el, "opacity", 1.0) if getattr(el, "opacity", None) is not None else 1.0),
+        bg_opacity=float(getattr(el, "bg_opacity", 0.85) if getattr(el, "bg_opacity", None) is not None else 0.85),
+        shape_filled=bool(getattr(el, "shape_filled", False)),
+        line_style=str(getattr(el, "line_style", "arrow") or "arrow"),
+        dash_style=str(getattr(el, "dash_style", "solid") or "solid"),
+        sticker_id=str(getattr(el, "sticker_id", "") or ""),
+        obscure_mode=str(getattr(el, "obscure_mode", "brush") or "brush"),
+        obscure_strength=int(getattr(el, "obscure_strength", 55) or 55),
+    )
+
+    before_roi = np.ascontiguousarray(base_rgb[y0:y1, x0:x1].copy())
+    after_roi = flatten_markup_onto_rgb_image(before_roi, [local_el])
+    base_rgb[y0:y1, x0:x1] = after_roi
+    return (y0, y1, x0, x1), before_roi, after_roi
 
 
 def flatten_markup_onto_rgb_image(
@@ -528,24 +1403,10 @@ def flatten_markup_onto_rgb_image(
     result = base_rgb.copy()
     h, w = result.shape[:2]
 
-    # 1. Apply privacy redactions (pixelate and blur) directly in RGB
+    # 1. Apply privacy redactions (pixelate and blur: box or circular brush) directly in RGB
     for el in elements:
-        if el.kind == "pixelate" and el.rect is not None:
-            rx = max(0, int(round(el.rect.x())))
-            ry = max(0, int(round(el.rect.y())))
-            rw = max(1, min(w - rx, int(round(el.rect.width()))))
-            rh = max(1, min(h - ry, int(round(el.rect.height()))))
-            if rw > 4 and rh > 4:
-                bs = max(8, int(min(rw, rh) / 8))
-                result = apply_pixelate(result, (rx, ry, rw, rh), block_size=bs)
-        elif el.kind == "blur" and el.rect is not None:
-            rx = max(0, int(round(el.rect.x())))
-            ry = max(0, int(round(el.rect.y())))
-            rw = max(1, min(w - rx, int(round(el.rect.width()))))
-            rh = max(1, min(h - ry, int(round(el.rect.height()))))
-            if rw > 4 and rh > 4:
-                rad = max(15, int(min(rw, rh) / 4)) | 1
-                result = apply_blur_redact(result, (rx, ry, rw, rh), radius=rad)
+        if el.kind in ("pixelate", "blur"):
+            result = _apply_obscure_element_to_rgb(result, el)
 
     # 2. Render vector annotations and callouts using QPainter directly in RGB888 / RGBA8888
     # Wrap result in contiguous RGB888 QImage directly without color conversions
@@ -557,80 +1418,30 @@ def flatten_markup_onto_rgb_image(
     painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
     for el in elements:
-        # Freehand Pen
-        if el.kind == "pen" and len(el.points) >= 2:
-            pen = QPen(el.color, max(1, el.stroke_width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            path = QPainterPath()
-            path.moveTo(el.points[0])
-            for pt in el.points[1:]:
-                path.lineTo(pt)
-            painter.drawPath(path)
+        el_opacity = max(0.15, min(1.0, float(getattr(el, "opacity", 1.0) if getattr(el, "opacity", None) is not None else 1.0)))
+        rot = float(getattr(el, "rotation_deg", 0.0) or 0.0)
 
-        # Fluorescent Highlighter (Uniform max-alpha blending without self-bleed)
-        elif el.kind == "highlighter" and len(el.points) >= 2:
-            hl_w = max(8, int(el.stroke_width * 2.6))
-            path = QPainterPath()
-            path.moveTo(el.points[0])
-            for pt in el.points[1:]:
-                path.lineTo(pt)
+        # Freehand Pen / Highlighter (Non-stacking opacity mask)
+        if el.kind in ("pen", "highlighter") and len(el.points) >= 2:
+            _draw_pen_stroke(painter, el, w, h)
 
-            # Render path to isolated transparent mask to cap overlapping stroke alpha at exactly alpha_val
-            stroke_mask = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
-            stroke_mask.fill(Qt.transparent)
-            mp = QPainter(stroke_mask)
-            mp.setRenderHint(QPainter.Antialiasing, True)
-            solid_col = QColor(el.color.red(), el.color.green(), el.color.blue(), 255)
-            mp.setPen(QPen(solid_col, hl_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            mp.setBrush(Qt.NoBrush)
-            mp.drawPath(path)
-            mp.end()
+        # Lines & Arrows (line, arrow, double_arrow)
+        elif el.kind in ALL_LINE_KINDS and el.start_pt and el.end_pt:
+            _draw_line_element(painter, el)
 
-            # Paint composite mask onto target image at controlled highlighter opacity (0.42)
-            painter.save()
-            painter.setOpacity(0.42)
-            painter.drawImage(0, 0, stroke_mask)
-            painter.restore()
+        # Shapes (rect, ellipse, triangle, pentagon, hexagon, star, heart_shape, speech_bubble)
+        elif el.kind in ALL_SHAPE_KINDS and el.rect is not None:
+            _draw_vector_shape(painter, el)
 
-        # Vector Arrow with filled arrowhead
-        elif el.kind == "arrow" and el.start_pt and el.end_pt:
-            p1 = el.start_pt
-            p2 = el.end_pt
-            dx = p2.x() - p1.x()
-            dy = p2.y() - p1.y()
-            if math.hypot(dx, dy) >= 4.0:
-                p_base, arrowhead = build_arrow_geometry(p1, p2, el.stroke_width)
-                # Shaft line
-                pen = QPen(el.color, max(1, el.stroke_width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-                painter.setPen(pen)
-                painter.setBrush(Qt.NoBrush)
-                painter.drawLine(p1, p_base)
-                # Arrowhead
-                painter.setPen(QPen(el.color, 1.0))
-                painter.setBrush(QBrush(el.color))
-                painter.drawPolygon(arrowhead)
-
-        # Rectangle Callout
-        elif el.kind == "rect" and el.rect is not None:
-            pen = QPen(el.color, max(1, el.stroke_width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRoundedRect(el.rect, 4.0, 4.0)
-
-        # Ellipse / Oval Callout
-        elif el.kind == "ellipse" and el.rect is not None:
-            pen = QPen(el.color, max(1, el.stroke_width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawEllipse(el.rect)
-
-        # Star Callout
-        elif el.kind == "star" and el.rect is not None:
-            pen = QPen(el.color, max(1, el.stroke_width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawPolygon(build_star_polygon_in_rect(el.rect))
+        # Vector Stickers
+        elif el.kind == "sticker" and el.rect is not None:
+            draw_vector_sticker(
+                painter,
+                el.rect.normalized(),
+                getattr(el, "sticker_id", "heart"),
+                rotation_deg=rot,
+                opacity=el_opacity,
+            )
 
         # Magnifier Loupe (supports two-point source -> target callout or single in-place loupe)
         elif el.kind == "magnifier":
@@ -677,48 +1488,12 @@ def flatten_markup_onto_rgb_image(
                 offset = loupe_pm.width() / 2.0
                 painter.drawPixmap(QPointF(cx - offset, cy - offset), loupe_pm)
 
-        # Text Callout Pill (Supports multi-line, clean wrapping, and auto-sizing)
+        # Text Callout Pill / Outline / Shadow / Plain (Supports multi-line, alignment, rotation & opacity)
         elif el.kind == "text" and el.rect is not None and el.text:
-            font = QFont("Segoe UI", max(10, int(el.stroke_width * 2.2)))
-            font.setBold(getattr(el, "font_bold", True))
-            font.setItalic(getattr(el, "font_italic", False))
-            painter.setFont(font)
-            metrics = painter.fontMetrics()
-
-            lines = el.text.split("\n")
-            max_line_w = max(metrics.horizontalAdvance(line) for line in lines) if lines else 40
-            line_h = metrics.lineSpacing()
-            total_text_h = line_h * max(1, len(lines))
-
-            pad_x, pad_y = 12.0, 8.0
-            rx, ry = el.rect.x(), el.rect.y()
-            pill_w = max_line_w + 2 * pad_x
-            pill_h = total_text_h + 2 * pad_y
-            pill_rect = QRectF(rx, ry, pill_w, pill_h)
-
-            sec_col = getattr(el, "bg_color", None)
-            if sec_col is not None and sec_col.alpha() == 0:
-                # Transparent secondary color: no background pill drawn!
-                pass
-            else:
-                corner_rad = min(12.0, pill_h / 2.0)
-                painter.setPen(QPen(QColor(255, 255, 255, 180), 1.2))
-                if sec_col is None or not sec_col.isValid():
-                    sec_brush = QColor(15, 20, 28, 220)
-                else:
-                    sec_brush = QColor(sec_col.red(), sec_col.green(), sec_col.blue(), 220)
-                painter.setBrush(sec_brush)
-                painter.drawRoundedRect(pill_rect, corner_rad, corner_rad)
-
-            # Use primary color for text font
-            text_color = el.color if el.color not in (QColor(0, 0, 0), QColor("#000000")) else QColor(255, 255, 255)
-            painter.setPen(QPen(text_color))
-
-            # Render each line with proper leading
-            cur_y = ry + pad_y + metrics.ascent()
-            for line in lines:
-                painter.drawText(QPointF(rx + pad_x, cur_y), line)
-                cur_y += line_h
+            painter.save()
+            painter.setOpacity(el_opacity)
+            _draw_text_element(painter, el)
+            painter.restore()
 
     painter.end()
 
@@ -835,12 +1610,13 @@ class _SwatchButton(QPushButton):
     left_clicked = Signal(QColor)
     right_clicked = Signal(QColor)
 
-    def __init__(self, color: QColor, name: str, parent: QWidget | None = None) -> None:
+    def __init__(self, color: QColor, name: str, parent: QWidget | None = None, size: int = 16) -> None:
         super().__init__(parent)
         self.color = color
         self.color_name = name
         self.is_transparent = (color.alpha() == 0 or name.lower().startswith("transparent"))
-        self.setFixedSize(16, 16)
+        self._swatch_size = max(12, int(size))
+        self.setFixedSize(self._swatch_size, self._swatch_size)
         tip_name = "Transparent / No fill" if self.is_transparent else f"{name} ({color.name()})"
         self.setToolTip(f"{tip_name}\n• Left-click: Set Primary (foreground)\n• Right-click: Set Secondary (background)")
         self.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -900,19 +1676,27 @@ class _PhotoshopColorPickerWidget(QWidget):
     secondary_color_changed = Signal(QColor)
     swap_requested = Signal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, large: bool = False) -> None:
         super().__init__(parent)
-        self.setFixedSize(38, 26)
+        self._large = bool(large)
         self.setToolTip("Primary (Foreground) & Secondary (Background) Colors\n• Click chip to edit color\n• Click ⇄ or press 'X' to swap")
-        self.primary_color: QColor = QColor(230, 40, 40)
-        self.secondary_color: QColor = QColor(20, 25, 35)
+        self.primary_color: QColor = QColor(17, 17, 17)
+        self.secondary_color: QColor = QColor(255, 255, 255)
+        self._is_dark: bool = False
 
-        # Primary chip (top-left)
-        self.primary_rect = QRect(2, 2, 16, 16)
-        # Secondary chip (bottom-right)
-        self.secondary_rect = QRect(11, 8, 16, 16)
-        # Swap button hit area (top-right)
-        self.swap_rect = QRect(25, 0, 13, 13)
+        if self._large:
+            self.setFixedSize(48, 46)
+            self.primary_rect = QRect(2, 4, 24, 24)
+            self.secondary_rect = QRect(16, 17, 24, 24)
+            self.swap_rect = QRect(28, 2, 18, 15)
+        else:
+            self.setFixedSize(38, 26)
+            # Primary chip (top-left)
+            self.primary_rect = QRect(2, 2, 16, 16)
+            # Secondary chip (bottom-right)
+            self.secondary_rect = QRect(11, 8, 16, 16)
+            # Swap button hit area (top-right)
+            self.swap_rect = QRect(25, 0, 13, 13)
 
     def set_primary_color(self, col: QColor) -> None:
         if col.isValid():
@@ -935,42 +1719,58 @@ class _PhotoshopColorPickerWidget(QWidget):
         self.secondary_color_changed.emit(self.secondary_color)
         self.swap_requested.emit()
 
+    def set_dark_mode(self, is_dark: bool) -> None:
+        self._is_dark = bool(is_dark)
+        self.update()
+
     def paintEvent(self, event: Any) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
+        is_dark = getattr(self, "_is_dark", False)
 
         # Secondary (background) chip behind
-        p.setPen(QPen(QColor("#7DA2CE"), 1.0))
+        rad = 3 if getattr(self, "_large", False) else 2
+        p.setPen(QPen(QColor("#64748B") if is_dark else QColor("#7DA2CE"), 1.2 if self._large else 1.0))
         if self.secondary_color.alpha() == 0:
             p.setBrush(QColor("#FFFFFF"))
-            p.drawRoundedRect(self.secondary_rect, 2, 2)
-            p.setPen(QPen(QColor("#E53935"), 1.5, Qt.SolidLine, Qt.RoundCap))
-            p.drawLine(self.secondary_rect.topRight() + QPoint(-1, 1), self.secondary_rect.bottomLeft() + QPoint(1, -1))
+            p.drawRoundedRect(self.secondary_rect, rad, rad)
+            p.setPen(QPen(QColor("#E53935"), 1.8 if self._large else 1.5, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(self.secondary_rect.topRight() + QPoint(-2, 2), self.secondary_rect.bottomLeft() + QPoint(2, -2))
         else:
             p.setBrush(self.secondary_color)
-            p.drawRoundedRect(self.secondary_rect, 2, 2)
+            p.drawRoundedRect(self.secondary_rect, rad, rad)
 
         # Primary (foreground) chip on top
-        p.setPen(QPen(QColor("#1E395B"), 1.2))
+        p.setPen(QPen(QColor("#E2E8F0") if is_dark else QColor("#1E395B"), 1.4 if self._large else 1.2))
         if self.primary_color.alpha() == 0:
             p.setBrush(QColor("#FFFFFF"))
-            p.drawRoundedRect(self.primary_rect, 2, 2)
-            p.setPen(QPen(QColor("#E53935"), 1.5, Qt.SolidLine, Qt.RoundCap))
-            p.drawLine(self.primary_rect.topRight() + QPoint(-1, 1), self.primary_rect.bottomLeft() + QPoint(1, -1))
+            p.drawRoundedRect(self.primary_rect, rad, rad)
+            p.setPen(QPen(QColor("#E53935"), 1.8 if self._large else 1.5, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(self.primary_rect.topRight() + QPoint(-2, 2), self.primary_rect.bottomLeft() + QPoint(2, -2))
         else:
             p.setBrush(self.primary_color)
-            p.drawRoundedRect(self.primary_rect, 2, 2)
+            p.drawRoundedRect(self.primary_rect, rad, rad)
 
-        # Subtle swap arrows in top-right
-        p.setPen(QPen(QColor("#475569"), 1.2, Qt.SolidLine, Qt.RoundCap))
-        # Top arrow ->
-        p.drawLine(27, 3, 34, 3)
-        p.drawLine(32, 1, 34, 3)
-        p.drawLine(32, 5, 34, 3)
-        # Bottom arrow <-
-        p.drawLine(34, 8, 27, 8)
-        p.drawLine(29, 6, 27, 8)
-        p.drawLine(29, 10, 27, 8)
+        # Crisp swap arrows in top-right
+        p.setPen(QPen(QColor("#CBD5E1") if is_dark else QColor("#475569"), 1.35 if self._large else 1.2, Qt.SolidLine, Qt.RoundCap))
+        if getattr(self, "_large", False):
+            # Top arrow ->
+            p.drawLine(31, 6, 42, 6)
+            p.drawLine(39, 3, 42, 6)
+            p.drawLine(39, 9, 42, 6)
+            # Bottom arrow <-
+            p.drawLine(42, 12, 31, 12)
+            p.drawLine(34, 9, 31, 12)
+            p.drawLine(34, 15, 31, 12)
+        else:
+            # Top arrow ->
+            p.drawLine(27, 3, 34, 3)
+            p.drawLine(32, 1, 34, 3)
+            p.drawLine(32, 5, 34, 3)
+            # Bottom arrow <-
+            p.drawLine(34, 8, 27, 8)
+            p.drawLine(29, 6, 27, 8)
+            p.drawLine(29, 10, 27, 8)
         p.end()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -1010,7 +1810,18 @@ class MarkupFloatingToolbar(QFrame):
     apply_requested = Signal()
     cancel_requested = Signal()
     save_requested = Signal()
+    font_family_changed = Signal(str)              # font family name
     text_format_changed = Signal(bool, bool)       # is_bold, is_italic
+    text_style_changed = Signal(str)               # 'pill', 'outline', 'shadow', 'plain'
+    text_align_changed = Signal(str)               # 'left', 'center', 'right'
+    opacity_changed = Signal(float)                # 0.15 .. 1.0
+    bg_opacity_changed = Signal(float)             # 0.0 .. 1.0
+    shape_filled_changed = Signal(bool)
+    line_style_changed = Signal(str)               # 'line', 'arrow', 'double_arrow'
+    dash_style_changed = Signal(str)               # 'solid', 'dashed', 'dotted'
+    sticker_changed = Signal(str)                  # 'heart', 'smiley', 'star', 'fire', 'check'
+    obscure_mode_changed = Signal(str)             # 'brush', 'box'
+    obscure_strength_changed = Signal(int)         # 15 .. 100
     magnifier_zoom_changed = Signal(float)         # zoom_factor (e.g. 2.5)
 
     QUICK_COLORS = [
@@ -1027,12 +1838,24 @@ class MarkupFloatingToolbar(QFrame):
         super().__init__(parent)
         self.active_tool: str = "pen"
         self.active_shape: str = "rect"  # 'rect', 'ellipse', 'star'
-        self.current_color = QColor(230, 40, 40)
-        self.secondary_color = QColor(20, 25, 35)
-        self.stroke_width: int = 4
+        self.current_color = QColor(17, 17, 17)
+        self.secondary_color = QColor(255, 255, 255)
+        self._last_opaque_secondary_color = QColor(255, 255, 255)
+        self.stroke_width: int = 16
         self.magnifier_zoom: float = 2.5
+        self.font_family: str = "Segoe UI"
         self.is_text_bold: bool = True
         self.is_text_italic: bool = False
+        self.text_style: str = "pill"
+        self.text_align: str = "left"
+        self.opacity: float = 1.0
+        self.bg_opacity: float = 0.85
+        self.shape_filled: bool = False
+        self.line_style: str = "arrow"
+        self.dash_style: str = "solid"
+        self.active_sticker: str = "smiley"
+        self.obscure_mode: str = "box"
+        self.obscure_strength: int = 55
         self._is_dragging: bool = False
         self._drag_pos: QPoint = QPoint()
         self._user_positioned: bool = False
@@ -1257,7 +2080,7 @@ class MarkupFloatingToolbar(QFrame):
         layout.addWidget(self.lbl_size)
 
         self.slider_width = QSlider(Qt.Horizontal)
-        self.slider_width.setRange(2, 36)
+        self.slider_width.setRange(2, 150)
         self.slider_width.setValue(self.stroke_width)
         self.slider_width.setFixedWidth(60)
         self.slider_width.setCursor(Qt.SizeHorCursor)
@@ -1771,10 +2594,12 @@ class MarkupFloatingToolbar(QFrame):
 
     def _set_tool(self, tool_id: str) -> None:
         norm = "magnify" if tool_id in ("magnify", "magnifier") else tool_id
-        if norm in ("rect", "ellipse", "star"):
+        if norm in ALL_SHAPE_KINDS:
             self.active_shape = norm
-            self._update_shape_button_ui()
-            norm = self.active_shape
+            if norm in ("rect", "ellipse", "star"):
+                self._update_shape_button_ui()
+        elif norm in ALL_LINE_KINDS:
+            self.line_style = norm
 
         self.active_tool = norm
         if norm in self.tool_buttons and not self.tool_buttons[norm].isChecked():
@@ -1799,7 +2624,7 @@ class MarkupFloatingToolbar(QFrame):
         self._set_tool(tool_id)
 
     def set_stroke_width(self, width: int) -> None:
-        clamped = max(2, min(48, int(width)))
+        clamped = max(2, min(200, int(width)))
         self.stroke_width = clamped
         if self.slider_width.value() != clamped:
             self.slider_width.blockSignals(True)
@@ -1825,10 +2650,27 @@ class MarkupFloatingToolbar(QFrame):
     def set_secondary_color(self, col: QColor) -> None:
         if col.isValid():
             self.secondary_color = col
+            if col.alpha() > 0:
+                self._last_opaque_secondary_color = QColor(col)
             if hasattr(self, "color_picker"):
                 self.color_picker.set_secondary_color(col)
             self._update_color_indicators()
             self.secondary_color_changed.emit(col)
+
+    def is_pill_bg_enabled(self) -> bool:
+        return self.secondary_color.alpha() > 0
+
+    def set_pill_bg_enabled(self, enabled: bool) -> None:
+        if enabled:
+            restore = getattr(self, "_last_opaque_secondary_color", QColor(20, 25, 35))
+            if not restore.isValid() or restore.alpha() == 0:
+                restore = QColor(20, 25, 35)
+            self.set_secondary_color(QColor(restore))
+            self.set_text_style("pill")
+        else:
+            self.set_secondary_color(QColor(0, 0, 0, 0))
+            if self.text_style == "pill":
+                self.set_text_style("plain")
 
     def swap_colors(self) -> None:
         if hasattr(self, "color_picker"):
@@ -1837,6 +2679,8 @@ class MarkupFloatingToolbar(QFrame):
             p, s = self.current_color, self.secondary_color
             self.current_color = s
             self.secondary_color = p
+            if self.secondary_color.alpha() > 0:
+                self._last_opaque_secondary_color = QColor(self.secondary_color)
             self._update_color_indicators()
             self.color_changed.emit(self.current_color)
             self.secondary_color_changed.emit(self.secondary_color)
@@ -1849,12 +2693,16 @@ class MarkupFloatingToolbar(QFrame):
 
     def _on_secondary_color_changed(self, col: QColor) -> None:
         self.secondary_color = col
+        if col.alpha() > 0:
+            self._last_opaque_secondary_color = QColor(col)
         self._update_color_indicators()
         self.secondary_color_changed.emit(col)
 
     def _on_colors_swapped(self) -> None:
         self.current_color = self.color_picker.primary_color
         self.secondary_color = self.color_picker.secondary_color
+        if self.secondary_color.alpha() > 0:
+            self._last_opaque_secondary_color = QColor(self.secondary_color)
         self._update_color_indicators()
         self.color_changed.emit(self.current_color)
         self.secondary_color_changed.emit(self.secondary_color)
@@ -1888,6 +2736,120 @@ class MarkupFloatingToolbar(QFrame):
         if hasattr(self, "btn_magnify_zoom"):
             self.btn_magnify_zoom.setText(f"{self.magnifier_zoom:.1f}x")
         self.magnifier_zoom_changed.emit(self.magnifier_zoom)
+
+    def set_font_family(self, family: str) -> None:
+        fam = (family or "").strip() or "Segoe UI"
+        if fam == self.font_family:
+            return
+        self.font_family = fam
+        self.font_family_changed.emit(fam)
+
+    def set_text_bold(self, bold: bool) -> None:
+        val = bool(bold)
+        if val == self.is_text_bold:
+            return
+        self.is_text_bold = val
+        if hasattr(self, "btn_bold") and self.btn_bold.isChecked() != val:
+            self.btn_bold.blockSignals(True)
+            self.btn_bold.setChecked(val)
+            self.btn_bold.blockSignals(False)
+        self.text_format_changed.emit(self.is_text_bold, self.is_text_italic)
+
+    def set_text_italic(self, italic: bool) -> None:
+        val = bool(italic)
+        if val == self.is_text_italic:
+            return
+        self.is_text_italic = val
+        if hasattr(self, "btn_italic") and self.btn_italic.isChecked() != val:
+            self.btn_italic.blockSignals(True)
+            self.btn_italic.setChecked(val)
+            self.btn_italic.blockSignals(False)
+        self.text_format_changed.emit(self.is_text_bold, self.is_text_italic)
+
+    def set_text_style(self, style: str) -> None:
+        norm = (style or "pill").strip().lower()
+        if norm not in ("pill", "outline", "shadow", "plain"):
+            norm = "pill"
+        if norm == self.text_style:
+            return
+        self.text_style = norm
+        if norm == "pill" and self.secondary_color.alpha() == 0:
+            restore = getattr(self, "_last_opaque_secondary_color", QColor(20, 25, 35))
+            if not restore.isValid() or restore.alpha() == 0:
+                restore = QColor(20, 25, 35)
+            self.set_secondary_color(QColor(restore))
+        self.text_style_changed.emit(norm)
+
+    def set_text_align(self, align: str) -> None:
+        norm = (align or "left").strip().lower()
+        if norm not in ("left", "center", "right"):
+            norm = "left"
+        if norm == self.text_align:
+            return
+        self.text_align = norm
+        self.text_align_changed.emit(norm)
+
+    def set_opacity(self, opacity: float) -> None:
+        clamped = round(max(0.15, min(1.0, float(opacity))), 2)
+        if abs(clamped - self.opacity) < 1e-3:
+            return
+        self.opacity = clamped
+        self.opacity_changed.emit(clamped)
+
+    def set_bg_opacity(self, opacity: float) -> None:
+        clamped = round(max(0.0, min(1.0, float(opacity))), 2)
+        if abs(clamped - self.bg_opacity) < 1e-3:
+            return
+        self.bg_opacity = clamped
+        self.bg_opacity_changed.emit(clamped)
+
+    def set_shape_filled(self, filled: bool) -> None:
+        val = bool(filled)
+        if val == self.shape_filled:
+            return
+        self.shape_filled = val
+        self.shape_filled_changed.emit(val)
+
+    def set_line_style(self, style: str) -> None:
+        norm = (style or "arrow").strip().lower()
+        if norm not in ALL_LINE_KINDS:
+            norm = "arrow"
+        self.line_style = norm
+        if self.active_tool in ALL_LINE_KINDS:
+            self.active_tool = norm
+        self.line_style_changed.emit(norm)
+
+    def set_dash_style(self, dash_style: str) -> None:
+        norm = (dash_style or "solid").strip().lower()
+        if norm not in ("solid", "outlined", "dashed", "dotted"):
+            norm = "solid"
+        if norm == getattr(self, "dash_style", "solid"):
+            return
+        self.dash_style = norm
+        self.dash_style_changed.emit(norm)
+
+    def set_active_sticker(self, sticker_id: str) -> None:
+        sid = (sticker_id or "heart").strip().lower()
+        if sid not in ALL_STICKER_IDS:
+            sid = "heart"
+        self.active_sticker = sid
+        self.sticker_changed.emit(sid)
+
+    def set_obscure_mode(self, mode: str) -> None:
+        norm = (mode or "brush").strip().lower()
+        if norm not in ("brush", "box"):
+            norm = "brush"
+        if norm == self.obscure_mode:
+            return
+        self.obscure_mode = norm
+        self.obscure_mode_changed.emit(norm)
+
+    def set_obscure_strength(self, strength: int) -> None:
+        clamped = max(15, min(100, int(strength)))
+        if clamped == self.obscure_strength:
+            return
+        self.obscure_strength = clamped
+        self.obscure_strength_changed.emit(clamped)
 
     def _on_bold_toggled(self, checked: bool) -> None:
         self.is_text_bold = bool(checked)

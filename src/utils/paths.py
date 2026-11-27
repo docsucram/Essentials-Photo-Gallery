@@ -56,13 +56,62 @@ def get_app_data_dir() -> Path:
     return p
 
 
-def get_default_db_dir() -> Path:
+def get_custom_db_dir() -> Path | None:
+    """Returns the user-configured custom database directory from QSettings, or None if using default."""
+    try:
+        from PySide6.QtCore import QSettings
+
+        raw = str(QSettings("PhotoGallery64", "PhotoGallery64").value("storage/custom_db_dir", "") or "").strip()
+        if raw:
+            return Path(raw)
+    except Exception:
+        pass
+    return None
+
+
+def set_custom_db_dir(path: Path | str | None) -> None:
+    """Persists or clears the custom database directory in QSettings."""
+    from PySide6.QtCore import QSettings
+
+    settings = QSettings("PhotoGallery64", "PhotoGallery64")
+    if path is None or not str(path).strip():
+        settings.remove("storage/custom_db_dir")
+    else:
+        settings.setValue("storage/custom_db_dir", str(Path(path)))
+    settings.sync()
+
+
+def is_cloud_or_network_path(path: Path | str) -> bool:
+    """
+    Returns True if ``path`` points to a UNC network share (\\\\server\\...) or sits inside
+    a cloud-synced folder (OneDrive, Dropbox, Google Drive, iCloudDrive) where SQLite WAL locking is unsafe.
+    """
+    s = str(path).strip()
+    if s.startswith("\\\\") or s.startswith("//"):
+        return True
+    lowered_parts = [part.lower() for part in Path(s).parts]
+    cloud_markers = ("onedrive", "dropbox", "google drive", "googledrive", "iclouddrive", "icloud drive")
+    return any(any(marker in part for marker in cloud_markers) for part in lowered_parts)
+
+
+def get_default_db_dir(*, ignore_custom: bool = False) -> Path:
     """
     Returns the directory where catalog.db and thumbnails.db should be stored.
-    In frozen/production mode, always uses %LOCALAPPDATA%/PhotoGallery/db to avoid
+    Respects ``storage/custom_db_dir`` when configured (outside pytest unless ``ignore_custom=True``).
+    In frozen/production mode, defaults to %LOCALAPPDATA%/PhotoGallery/db to avoid
     Windows 'Program Files' write-permission errors. In dev mode, prefers local 'db/'
     if writable, falling back to user AppData.
     """
+    if not ignore_custom and "PYTEST_CURRENT_TEST" not in os.environ:
+        custom = get_custom_db_dir()
+        if custom is not None:
+            try:
+                if custom.exists() or (custom.parent.exists() and not is_volume_offline(custom)):
+                    custom.mkdir(parents=True, exist_ok=True)
+                    return custom
+            except OSError:
+                return custom
+
     if is_frozen():
         db_dir = get_app_data_dir() / "db"
     else:

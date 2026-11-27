@@ -55,6 +55,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QPolygonF,
+    QTransform,
     QUndoCommand,
     QUndoStack,
 )
@@ -70,7 +71,9 @@ from PySide6.QtWidgets import (
     QGraphicsLineItem,
     QGraphicsOpacityEffect,
     QGraphicsPathItem,
+    QGraphicsPolygonItem,
     QGraphicsEllipseItem,
+    QGraphicsDropShadowEffect,
     QGraphicsPixmapItem,
     QGraphicsRectItem,
     QGraphicsSimpleTextItem,
@@ -165,19 +168,35 @@ from src.imaging.image_loader import (
     is_animated_image_file,
     transform_alpha_for_recipe,
 )
-from src.ui.crop_tool import CropOverlayItem, CropRatioComboBox, CropScene
+from src.ui.crop_tool import (
+    CropOverlayItem,
+    CropRatioComboBox,
+    CropScene,
+    get_rotation_cursor,
+    make_curved_rotation_cursor,
+)
 from src.ui.markup_overlay import (
+    ALL_LINE_KINDS,
+    ALL_SHAPE_KINDS,
+    ALL_STICKER_IDS,
     MarkupFloatingToolbar,
     MarkupElement,
     flatten_markup_onto_image,
     flatten_markup_onto_rgb_image,
+    flatten_markup_element_roi,
     build_arrow_geometry,
+    build_heart_path_in_rect,
+    build_regular_polygon_in_rect,
+    build_speech_bubble_path_in_rect,
     create_magnifier_pixmap,
     build_star_polygon_in_rect,
     compute_circle_tangent_lines,
     get_markup_element_bounds,
+    get_markup_element_unrotated_rect,
+    scale_markup_element,
     translate_markup_element,
     render_markup_element_pixmap,
+    make_round_rotation_cursor,
     _DraggableGripHandle,
 )
 from src.imaging.creative_effects import apply_blur_redact, apply_pixelate
@@ -1499,33 +1518,66 @@ class PixelArrayUndoCommand(QUndoCommand):
             self.bbox = None
         self._first_redo = True
 
+    @classmethod
+    def from_roi_patch(
+        cls,
+        viewer: SingleMediaViewer,
+        bbox: tuple[int, int, int, int],
+        before_patch: np.ndarray,
+        after_patch: np.ndarray,
+        description: str,
+        parent=None,
+    ) -> PixelArrayUndoCommand:
+        """Fast constructor using a pre-computed ROI patch without scanning full-frame arrays."""
+        obj = cls.__new__(cls)
+        QUndoCommand.__init__(obj, description, parent)
+        obj.viewer = viewer
+        obj.bbox = bbox
+        obj.before_patch = before_patch.copy()
+        obj.after_patch = after_patch.copy()
+        obj.full_frame = False
+        obj._first_redo = True
+        return obj
+
     def undo(self) -> None:
         self._first_redo = False
+        if getattr(self, "_before_markup_elements", None) is not None:
+            self.viewer._markup_elements = list(self._before_markup_elements)
         if self.full_frame:
             self.viewer.master_np_rgb = self.before_patch.copy()
-        elif self.bbox and self.viewer.master_np_rgb is not None:
+            self.viewer._update_display_proxy()
+            self.viewer._render_current_recipe()
+            self.viewer.set_zoom_mode("fit")
+            return
+        if self.bbox and self.viewer.master_np_rgb is not None:
             y1, y2, x1, x2 = self.bbox
             if y2 > y1 and x2 > x1:
-                self.viewer.master_np_rgb[y1:y2, x1:x2] = self.before_patch.copy()
+                self.viewer.master_np_rgb[y1:y2, x1:x2] = self.before_patch
+                self.viewer._refresh_viewport_after_master_roi(self.bbox)
+                return
         self.viewer._update_display_proxy()
         self.viewer._render_current_recipe()
-        if self.full_frame:
-            self.viewer.set_zoom_mode("fit")
 
     def redo(self) -> None:
         if self._first_redo:
             self._first_redo = False
             return
+        if getattr(self, "_after_markup_elements", None) is not None:
+            self.viewer._markup_elements = list(self._after_markup_elements)
         if self.full_frame:
             self.viewer.master_np_rgb = self.after_patch.copy()
-        elif self.bbox and self.viewer.master_np_rgb is not None:
+            self.viewer._update_display_proxy()
+            self.viewer._render_current_recipe()
+            self.viewer.set_zoom_mode("fit")
+            return
+        if self.bbox and self.viewer.master_np_rgb is not None:
             y1, y2, x1, x2 = self.bbox
             if y2 > y1 and x2 > x1:
-                self.viewer.master_np_rgb[y1:y2, x1:x2] = self.after_patch.copy()
+                self.viewer.master_np_rgb[y1:y2, x1:x2] = self.after_patch
+                self.viewer._refresh_viewport_after_master_roi(self.bbox)
+                return
         self.viewer._update_display_proxy()
         self.viewer._render_current_recipe()
-        if self.full_frame:
-            self.viewer.set_zoom_mode("fit")
 
 
 class _AlphaCutoutUndoCommand(QUndoCommand):
@@ -1708,6 +1760,12 @@ class SingleMediaViewer(QWidget):
     region_brush_size_shortcut_changed = Signal(int)              # synced back to Fine Tune brush size slider
     virtual_lights_canvas_changed = Signal(list, int)             # (virtual_lights, selected_idx)
     status_message_requested = Signal(str, int)                  # (message, timeout_ms)
+    markup_mode_changed = Signal(bool)                           # emitted when markup mode enters/exits
+    crop_mode_changed = Signal(bool)                             # emitted when crop mode enters/exits
+    crop_ui_state_changed = Signal()                             # emitted when crop ribbon controls need sync
+    markup_saved = Signal()                                      # emitted after markup save succeeds
+    markup_rotation_changed = Signal(float)                      # emitted when active markup element rotation changes
+    markup_selection_changed = Signal(bool, bool)                # (has_selection, is_text_element)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1758,6 +1816,7 @@ class SingleMediaViewer(QWidget):
 
         # Retouch (Magic Eraser) state
         self.is_retouch_mode: bool = False
+        self._use_ribbon_markup_controls: bool = False
         self.retouch_radius: int = 20
         self.main_window: Any = None
         self._retouch_active: bool = False
@@ -1808,6 +1867,7 @@ class SingleMediaViewer(QWidget):
         self._alpha_backdrop_item.setVisible(False)
         self.scene.addItem(self._alpha_backdrop_item)
         self.pixmap_item = QGraphicsPixmapItem()
+        self.pixmap_item.setTransformationMode(Qt.SmoothTransformation)
         self.scene.addItem(self.pixmap_item)
         self.scene.pixmap_item = self.pixmap_item
         self.scene.crop_applied.connect(self.apply_crop)
@@ -1884,7 +1944,7 @@ class SingleMediaViewer(QWidget):
         self.btn_hud_fav = QPushButton(self.cull_hud)
         self.btn_hud_fav.setToolTip("Favourite (F / Shift+F)")
         self.btn_hud_flag = QPushButton(self.cull_hud)
-        self.btn_hud_flag.setToolTip("Cycle Flag: Pick → Reject → Unreviewed (P / X / U)")
+        self.btn_hud_flag.setToolTip("Cycle Flag: Pick → Reject → Unreviewed (Z / X / U)")
         for b in (self.btn_hud_fav, self.btn_hud_flag):
             b.setFixedSize(28, 28)
             b.setIconSize(QSize(16, 16))
@@ -2054,7 +2114,7 @@ class SingleMediaViewer(QWidget):
         t_hbox.addWidget(self.slider_position, 1)
 
         self.lbl_video_time = QLabel("00:00 / 00:00", transport)
-        self.lbl_video_time.setStyleSheet("font-size: 11px; color: #333; margin: 0 4px;")
+        self.lbl_video_time.setStyleSheet("font-size: 11px; color: #1E395B; margin: 0 4px; background: transparent;")
         t_hbox.addWidget(self.lbl_video_time)
 
         # Volume control with icon to the right of the seek bar
@@ -2530,6 +2590,12 @@ class SingleMediaViewer(QWidget):
         self.btn_lama_model.setVisible(False)
         self._lama_dl_thread = None
 
+        self.btn_spot_compare = QPushButton("Compare (B)", self.retouch_toolbar)
+        self.btn_spot_compare.setToolTip("Click and hold (or hold B) to compare with the original unedited photo")
+        self.btn_spot_compare.setCursor(Qt.PointingHandCursor)
+        self.btn_spot_compare.pressed.connect(lambda: self.set_compare_mode(True))
+        self.btn_spot_compare.released.connect(lambda: self.set_compare_mode(False))
+
         btn_retouch_done = QPushButton("Done (Esc)", self.retouch_toolbar)
         btn_retouch_done.setIcon(make_symbol_icon("check", 14))
         btn_retouch_done.setIconSize(QSize(14, 14))
@@ -2541,6 +2607,7 @@ class SingleMediaViewer(QWidget):
         rt_layout.addWidget(lbl_brush)
         rt_layout.addWidget(self.slider_retouch_size)
         rt_layout.addWidget(self.btn_lama_model)
+        rt_layout.addWidget(self.btn_spot_compare)
         rt_layout.addWidget(btn_retouch_done)
         self.retouch_toolbar.hide()
 
@@ -2595,8 +2662,26 @@ class SingleMediaViewer(QWidget):
         self.markup_toolbar.color_changed.connect(lambda _: self._on_markup_settings_changed())
         if hasattr(self.markup_toolbar, "secondary_color_changed"):
             self.markup_toolbar.secondary_color_changed.connect(lambda _: self._on_markup_settings_changed())
+        if hasattr(self.markup_toolbar, "font_family_changed"):
+            self.markup_toolbar.font_family_changed.connect(self._on_markup_font_family_changed)
         if hasattr(self.markup_toolbar, "text_format_changed"):
             self.markup_toolbar.text_format_changed.connect(self._on_text_format_changed)
+        if hasattr(self.markup_toolbar, "text_style_changed"):
+            self.markup_toolbar.text_style_changed.connect(lambda _s: self._on_markup_settings_changed())
+        if hasattr(self.markup_toolbar, "text_align_changed"):
+            self.markup_toolbar.text_align_changed.connect(lambda _a: self._on_markup_settings_changed())
+        if hasattr(self.markup_toolbar, "opacity_changed"):
+            self.markup_toolbar.opacity_changed.connect(lambda _o: self._on_markup_settings_changed())
+        if hasattr(self.markup_toolbar, "shape_filled_changed"):
+            self.markup_toolbar.shape_filled_changed.connect(lambda _f: self._on_markup_settings_changed())
+        if hasattr(self.markup_toolbar, "line_style_changed"):
+            self.markup_toolbar.line_style_changed.connect(lambda _s: self._on_markup_settings_changed())
+        if hasattr(self.markup_toolbar, "dash_style_changed"):
+            self.markup_toolbar.dash_style_changed.connect(lambda _d: self._on_markup_settings_changed())
+        if hasattr(self.markup_toolbar, "obscure_mode_changed"):
+            self.markup_toolbar.obscure_mode_changed.connect(lambda _m: self._update_markup_cursor())
+        if hasattr(self.markup_toolbar, "obscure_strength_changed"):
+            self.markup_toolbar.obscure_strength_changed.connect(lambda _st: self._on_markup_settings_changed())
         if hasattr(self.markup_toolbar, "magnifier_zoom_changed"):
             self.markup_toolbar.magnifier_zoom_changed.connect(self._on_magnifier_zoom_changed)
         if hasattr(self.markup_toolbar, "btn_undo"):
@@ -2631,8 +2716,15 @@ class SingleMediaViewer(QWidget):
         if sp is not None:
             self._update_magnify_hover(sp)
 
+    def _on_markup_font_family_changed(self, _family: str) -> None:
+        self._update_inline_text_style()
+        if getattr(self, "_pending_markup_element", None) is not None:
+            self._on_markup_settings_changed()
+
     def _on_text_format_changed(self, is_bold: bool, is_italic: bool) -> None:
         self._update_inline_text_style()
+        if getattr(self, "_pending_markup_element", None) is not None:
+            self._on_markup_settings_changed()
 
     def _update_inline_text_style(self) -> None:
         """Dynamically styles and sizes the on-canvas inline text editor to match view scale and secondary background."""
@@ -2641,7 +2733,7 @@ class SingleMediaViewer(QWidget):
             return
         if getattr(self.markup_toolbar, "active_tool", "pen") != "text":
             return
-        width = getattr(self.markup_toolbar, "stroke_width", 4)
+        width = getattr(self.markup_toolbar, "stroke_width", 16)
         col = getattr(self.markup_toolbar, "current_color", QColor(230, 40, 40))
         sec_col = getattr(self.markup_toolbar, "secondary_color", QColor(20, 25, 35))
         view_scale = self.graphics_view.transform().m11()
@@ -2651,27 +2743,64 @@ class SingleMediaViewer(QWidget):
         screen_font_pt = max(9, int(round(master_font_pt * view_scale)))
         screen_pad_x = max(6, int(round(12.0 * view_scale)))
         screen_pad_y = max(4, int(round(8.0 * view_scale)))
-        if sec_col.alpha() == 0:
-            bg_qss = "background: transparent; border: 1.5px dashed rgba(56, 144, 240, 200);"
+        text_style = str(getattr(self.markup_toolbar, "text_style", "pill") or "pill").strip().lower()
+        bg_op = max(0.0, min(1.0, float(getattr(self.markup_toolbar, "bg_opacity", 0.85))))
+        if sec_col.alpha() == 0 or text_style != "pill":
+            bg_qss = "background: transparent; border: 1.5px dashed rgba(56, 144, 240, 190);"
         else:
-            bg_rgba = f"rgba({sec_col.red()}, {sec_col.green()}, {sec_col.blue()}, 220)"
+            bg_alpha = int(round(255 * bg_op))
+            bg_rgba = f"rgba({sec_col.red()}, {sec_col.green()}, {sec_col.blue()}, {bg_alpha})"
             bg_qss = f"background: {bg_rgba}; border: 1.5px solid #3890F0;"
+
+        # Store WYSIWYG outline/shadow parameters rendered directly in _InlineTextEdit.paintEvent
+        # so live typing, backspace-to-empty, paste, and style toggles work cleanly on the first keystroke.
+        outline_col = (
+            QColor(sec_col.red(), sec_col.green(), sec_col.blue(), max(25, int(round(255 * max(0.25, bg_op)))))
+            if (sec_col is not None and sec_col.isValid() and sec_col.alpha() > 0)
+            else QColor(17, 24, 39, max(25, int(round(255 * max(0.25, bg_op)))))
+        )
+        stroke_w = max(2.5, screen_font_pt * 0.22)
+        shadow_off = max(2.0, screen_font_pt * 0.09)
+        inp.viewport().setGraphicsEffect(None)
+        inp.setGraphicsEffect(None)
+        inp._effect_style = text_style
+        inp._outline_col = outline_col
+        inp._stroke_w = stroke_w
+        inp._shadow_off = shadow_off
+
+        font_family = str(getattr(self.markup_toolbar, "font_family", "Segoe UI") or "Segoe UI").replace("'", "")
         is_bold = getattr(self.markup_toolbar, "is_text_bold", True)
         is_italic = getattr(self.markup_toolbar, "is_text_italic", False)
+        text_align = getattr(self.markup_toolbar, "text_align", "left")
+        align_map = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter, "right": Qt.AlignRight}
+        inp.setAlignment(align_map.get(text_align, Qt.AlignLeft))
+
+        inp_font = QFont(font_family, screen_font_pt)
+        inp_font.setBold(bool(is_bold))
+        inp_font.setItalic(bool(is_italic))
+        inp.setFont(inp_font)
+        inp.document().setDefaultFont(inp_font)
+
+        doc_margin = max(2, int(math.ceil(stroke_w * 0.5)) + 1) if text_style == "outline" else 0
+        inp.document().setDocumentMargin(doc_margin)
+        pad_y = max(2, screen_pad_y - doc_margin)
+        pad_x = max(2, screen_pad_x - doc_margin)
 
         inp.setStyleSheet(f"""
             QTextEdit {{
                 {bg_qss}
                 color: {col.name()};
                 border-radius: 6px;
-                padding: {screen_pad_y}px {screen_pad_x}px;
-                font-family: 'Segoe UI';
+                padding: {pad_y}px {pad_x}px;
+                font-family: '{font_family}';
                 font-size: {screen_font_pt}pt;
                 font-weight: {'bold' if is_bold else 'normal'};
                 font-style: {'italic' if is_italic else 'normal'};
             }}
         """)
         self._adjust_inline_text_size()
+        inp.viewport().update()
+        inp.update()
 
     def _position_floating_toolbars(self) -> None:
         gw = self.graphics_view.width()
@@ -2783,62 +2912,65 @@ class SingleMediaViewer(QWidget):
             hud.hide()
             return
         is_fav, flag = self._get_current_cull_state()
+        hud_key = (bool(is_fav), int(flag))
+        if getattr(self, "_cull_hud_style_key", None) != hud_key:
+            self._cull_hud_style_key = hud_key
 
-        def _make_hud_icon(kind: str, color_hex: str, filled: bool = False) -> QIcon:
-            pm = QPixmap(32, 32)
-            pm.fill(Qt.transparent)
-            p = QPainter(pm)
-            p.setRenderHint(QPainter.Antialiasing, True)
-            col = QColor(color_hex)
-            pen = QPen(col, 2.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-            p.setPen(pen)
-            p.setBrush(QBrush(col) if filled else Qt.NoBrush)
-            if kind == "heart":
-                path = QPainterPath()
-                path.moveTo(16.0, 26.0)
-                path.cubicTo(6.0, 19.5, 4.5, 11.5, 9.0, 7.5)
-                path.cubicTo(12.2, 4.8, 15.0, 6.8, 16.0, 9.2)
-                path.cubicTo(17.0, 6.8, 19.8, 4.8, 23.0, 7.5)
-                path.cubicTo(27.5, 11.5, 26.0, 19.5, 16.0, 26.0)
-                p.drawPath(path)
-            elif kind == "flag":
-                p.drawLine(8, 5, 8, 27)
-                poly = QPolygonF([QPointF(8, 6), QPointF(25, 10.5), QPointF(8, 16)])
-                p.drawPolygon(poly)
-            elif kind == "flag_rejected":
-                p.setPen(QPen(QColor("#CBD5E1"), 2.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-                p.setBrush(Qt.NoBrush)
-                p.drawLine(8, 5, 8, 27)
-                poly = QPolygonF([QPointF(8, 6), QPointF(25, 10.5), QPointF(8, 16)])
-                p.drawPolygon(poly)
-                slash_pen = QPen(QColor("#EF4444"), 3.0, Qt.SolidLine, Qt.RoundCap)
-                p.setPen(slash_pen)
-                p.drawLine(5, 25, 27, 6)
-            p.end()
-            pm.setDevicePixelRatio(2.0)
-            return QIcon(pm)
+            def _make_hud_icon(kind: str, color_hex: str, filled: bool = False) -> QIcon:
+                pm = QPixmap(32, 32)
+                pm.fill(Qt.transparent)
+                p = QPainter(pm)
+                p.setRenderHint(QPainter.Antialiasing, True)
+                col = QColor(color_hex)
+                pen = QPen(col, 2.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                p.setPen(pen)
+                p.setBrush(QBrush(col) if filled else Qt.NoBrush)
+                if kind == "heart":
+                    path = QPainterPath()
+                    path.moveTo(16.0, 26.0)
+                    path.cubicTo(6.0, 19.5, 4.5, 11.5, 9.0, 7.5)
+                    path.cubicTo(12.2, 4.8, 15.0, 6.8, 16.0, 9.2)
+                    path.cubicTo(17.0, 6.8, 19.8, 4.8, 23.0, 7.5)
+                    path.cubicTo(27.5, 11.5, 26.0, 19.5, 16.0, 26.0)
+                    p.drawPath(path)
+                elif kind == "flag":
+                    p.drawLine(8, 5, 8, 27)
+                    poly = QPolygonF([QPointF(8, 6), QPointF(25, 10.5), QPointF(8, 16)])
+                    p.drawPolygon(poly)
+                elif kind == "flag_rejected":
+                    p.setPen(QPen(QColor("#CBD5E1"), 2.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                    p.setBrush(Qt.NoBrush)
+                    p.drawLine(8, 5, 8, 27)
+                    poly = QPolygonF([QPointF(8, 6), QPointF(25, 10.5), QPointF(8, 16)])
+                    p.drawPolygon(poly)
+                    slash_pen = QPen(QColor("#EF4444"), 3.0, Qt.SolidLine, Qt.RoundCap)
+                    p.setPen(slash_pen)
+                    p.drawLine(5, 25, 27, 6)
+                p.end()
+                pm.setDevicePixelRatio(2.0)
+                return QIcon(pm)
 
-        self.btn_hud_fav.setVisible(True)
-        self.btn_hud_fav.setIcon(_make_hud_icon("heart", "#F43F5E" if is_fav else "#CBD5E1", filled=is_fav))
-        if flag == 1:
-            self.btn_hud_flag.setIcon(_make_hud_icon("flag", "#E81123", filled=True))
-            flag_bg = "rgba(232, 17, 35, 48)"
-        elif flag == -1:
-            self.btn_hud_flag.setIcon(_make_hud_icon("flag_rejected", "#CBD5E1", filled=False))
-            flag_bg = "rgba(239, 68, 68, 42)"
-        else:
-            self.btn_hud_flag.setIcon(_make_hud_icon("flag", "#CBD5E1", filled=False))
-            flag_bg = "transparent"
+            self.btn_hud_fav.setVisible(True)
+            self.btn_hud_fav.setIcon(_make_hud_icon("heart", "#F43F5E" if is_fav else "#CBD5E1", filled=is_fav))
+            if flag == 1:
+                self.btn_hud_flag.setIcon(_make_hud_icon("flag", "#E81123", filled=True))
+                flag_bg = "rgba(232, 17, 35, 48)"
+            elif flag == -1:
+                self.btn_hud_flag.setIcon(_make_hud_icon("flag_rejected", "#CBD5E1", filled=False))
+                flag_bg = "rgba(239, 68, 68, 42)"
+            else:
+                self.btn_hud_flag.setIcon(_make_hud_icon("flag", "#CBD5E1", filled=False))
+                flag_bg = "transparent"
 
-        for btn, active_bg in (
-            (self.btn_hud_fav, "rgba(244, 63, 94, 48)" if is_fav else "transparent"),
-            (self.btn_hud_flag, flag_bg),
-        ):
-            btn.setStyleSheet(
-                f"QPushButton {{ background: {active_bg}; border: none; border-radius: 14px; }}"
-                "QPushButton:hover { background: rgba(255, 255, 255, 36); }"
-            )
-        hud.adjustSize()
+            for btn, active_bg in (
+                (self.btn_hud_fav, "rgba(244, 63, 94, 48)" if is_fav else "transparent"),
+                (self.btn_hud_flag, flag_bg),
+            ):
+                btn.setStyleSheet(
+                    f"QPushButton {{ background: {active_bg}; border: none; border-radius: 14px; }}"
+                    "QPushButton:hover { background: rgba(255, 255, 255, 36); }"
+                )
+            hud.adjustSize()
         hud.move(max(14, vp.width() - hud.width() - 14), 14)
         hud.show()
         hud.raise_()
@@ -2871,47 +3003,50 @@ class SingleMediaViewer(QWidget):
             btn.setParent(target_parent)
 
         is_dark = bool(getattr(mw, "current_theme", "dark") == "dark")
-        if is_dark:
-            btn.setStyleSheet(
-                "QPushButton { background-color: rgba(27, 30, 36, 240); "
-                "border: 1px solid rgba(100, 116, 139, 110); border-bottom: none; "
-                "border-top-left-radius: 7px; border-top-right-radius: 7px; "
-                "border-bottom-left-radius: 0px; border-bottom-right-radius: 0px; }"
-                "QPushButton:hover { background-color: rgba(42, 48, 60, 252); "
-                "border-color: rgba(148, 163, 184, 180); }"
-            )
-            col = QColor("#E2E8F0")
-        else:
-            btn.setStyleSheet(
-                "QPushButton { background-color: rgba(241, 245, 249, 242); "
-                "border: 1px solid rgba(148, 163, 184, 150); border-bottom: none; "
-                "border-top-left-radius: 7px; border-top-right-radius: 7px; "
-                "border-bottom-left-radius: 0px; border-bottom-right-radius: 0px; }"
-                "QPushButton:hover { background-color: rgba(226, 232, 240, 252); "
-                "border-color: rgba(100, 116, 139, 200); }"
-            )
-            col = QColor("#334155")
+        style_key = (is_dark, enabled)
+        if getattr(self, "_filmstrip_toggle_style_key", None) != style_key:
+            self._filmstrip_toggle_style_key = style_key
+            if is_dark:
+                btn.setStyleSheet(
+                    "QPushButton { background-color: rgba(27, 30, 36, 240); "
+                    "border: 1px solid rgba(100, 116, 139, 110); border-bottom: none; "
+                    "border-top-left-radius: 7px; border-top-right-radius: 7px; "
+                    "border-bottom-left-radius: 0px; border-bottom-right-radius: 0px; }"
+                    "QPushButton:hover { background-color: rgba(42, 48, 60, 252); "
+                    "border-color: rgba(148, 163, 184, 180); }"
+                )
+                col = QColor("#E2E8F0")
+            else:
+                btn.setStyleSheet(
+                    "QPushButton { background-color: rgba(241, 245, 249, 242); "
+                    "border: 1px solid rgba(148, 163, 184, 150); border-bottom: none; "
+                    "border-top-left-radius: 7px; border-top-right-radius: 7px; "
+                    "border-bottom-left-radius: 0px; border-bottom-right-radius: 0px; }"
+                    "QPushButton:hover { background-color: rgba(226, 232, 240, 252); "
+                    "border-color: rgba(100, 116, 139, 200); }"
+                )
+                col = QColor("#334155")
 
-        pm = QPixmap(36, 24)
-        pm.fill(Qt.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        p.setPen(QPen(col, 2.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        p.setBrush(Qt.NoBrush)
-        if enabled:
-            # Filmstrip open -> downward collapse chevron (hide)
-            p.drawPolyline([QPointF(11.0, 9.0), QPointF(18.0, 15.5), QPointF(25.0, 9.0)])
-        else:
-            # Filmstrip hidden -> upward expand chevron (show)
-            p.drawPolyline([QPointF(11.0, 15.5), QPointF(18.0, 9.0), QPointF(25.0, 15.5)])
-        p.end()
-        pm.setDevicePixelRatio(2.0)
+            pm = QPixmap(36, 24)
+            pm.fill(Qt.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.setPen(QPen(col, 2.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(Qt.NoBrush)
+            if enabled:
+                # Filmstrip open -> downward collapse chevron (hide)
+                p.drawPolyline([QPointF(11.0, 9.0), QPointF(18.0, 15.5), QPointF(25.0, 9.0)])
+            else:
+                # Filmstrip hidden -> upward expand chevron (show)
+                p.drawPolyline([QPointF(11.0, 15.5), QPointF(18.0, 9.0), QPointF(25.0, 15.5)])
+            p.end()
+            pm.setDevicePixelRatio(2.0)
 
-        btn.blockSignals(True)
-        btn.setChecked(enabled)
-        btn.setIcon(QIcon(pm))
-        btn.setToolTip("Hide Filmstrip" if enabled else "Show Filmstrip")
-        btn.blockSignals(False)
+            btn.blockSignals(True)
+            btn.setChecked(enabled)
+            btn.setIcon(QIcon(pm))
+            btn.setToolTip("Hide Filmstrip" if enabled else "Show Filmstrip")
+            btn.blockSignals(False)
         if target_parent is mw:
             vp_bl = vp.mapTo(mw, QPoint(10, vp.height()))
             dock = getattr(mw, "bottom_dock", None)
@@ -3702,6 +3837,8 @@ class SingleMediaViewer(QWidget):
         pix = self._build_pixmap_from_rgb_and_alpha(rendered_np, rendered_alpha)
         self._adjusted_pixmap = pix
         prev_sz = self.pixmap_item.pixmap().size()
+        if abs(self.pixmap_item.scale() - 1.0) > 1e-4:
+            self.pixmap_item.setScale(1.0)
         self.pixmap_item.setPixmap(pix)
         self._update_alpha_backdrop(pix.width(), pix.height(), rendered_alpha is not None)
         self.scene.setSceneRect(QRectF(0, 0, pix.width(), pix.height()))
@@ -3714,8 +3851,8 @@ class SingleMediaViewer(QWidget):
             self.render_face_regions(self._current_people_regions)
         self._sync_virtual_light_gizmos()
 
-        # Cache unedited original pixmap for instantaneous, high-fidelity compare
-        if self.current_recipe.is_default():
+        # Cache unedited original pixmap once per loaded image for instantaneous compare (\\)
+        if self.current_recipe.is_default() and getattr(self, "_original_pixmap", None) is None:
             self._original_pixmap = self._adjusted_pixmap
         elif getattr(self, "_original_pixmap", None) is None:
             default_rec = PhotoAdjustmentRecipe(crop_rect=self.current_recipe.crop_rect)
@@ -3782,6 +3919,10 @@ class SingleMediaViewer(QWidget):
                     }
                     """
                 )
+                if hasattr(self, "lbl_video_time"):
+                    self.lbl_video_time.setStyleSheet(
+                        "font-size: 11px; color: #E2E8F0; margin: 0 4px; background: transparent;"
+                    )
             else:
                 self.video_transport.setStyleSheet(
                     """
@@ -3805,6 +3946,10 @@ class SingleMediaViewer(QWidget):
                     }
                     """
                 )
+                if hasattr(self, "lbl_video_time"):
+                    self.lbl_video_time.setStyleSheet(
+                        "font-size: 11px; color: #1E395B; margin: 0 4px; background: transparent;"
+                    )
 
     def _apply_floating_toolbar_theme(self, is_dark: bool) -> None:
         if is_dark:
@@ -4126,6 +4271,15 @@ class SingleMediaViewer(QWidget):
             self._dismiss_depth_light_pane_if_active(keep_fine_tune=focus_straighten)
             self._crop_pre_existing_rect = self.current_recipe.crop_rect
             self._crop_pre_existing_straighten_deg = float(getattr(self.current_recipe, "straighten_deg", 0.0))
+            self._crop_pre_existing_persp_v = float(getattr(self.current_recipe, "perspective_v", 0.0))
+            self._crop_pre_existing_persp_h = float(getattr(self.current_recipe, "perspective_h", 0.0))
+            self._crop_pre_existing_flip_h = bool(getattr(self.current_recipe, "flip_h", False))
+            self._crop_pre_existing_flip_v = bool(getattr(self.current_recipe, "flip_v", False))
+            self._crop_perspective_v = self._crop_pre_existing_persp_v
+            self._crop_perspective_h = self._crop_pre_existing_persp_h
+            self._crop_flip_h = self._crop_pre_existing_flip_h
+            self._crop_flip_v = self._crop_pre_existing_flip_v
+            self._crop_valid_inscribed_rect = None
             self._crop_committed = False
 
             self.stop_face_tagging_mode()
@@ -4134,18 +4288,41 @@ class SingleMediaViewer(QWidget):
             self.set_markup_mode(False)
             self._update_face_overlays_visibility()
             self.graphics_view.setDragMode(ImageGraphicsView.NoDrag)
-            self.crop_toolbar.show()
-            self._position_floating_toolbars()
-            self.crop_toolbar.raise_()
+            if not getattr(self, "_use_ribbon_crop_controls", False):
+                self.crop_toolbar.show()
+                self._position_floating_toolbars()
+                self.crop_toolbar.raise_()
+            else:
+                self.crop_toolbar.hide()
 
-            # WLPG behavior: if image was already cropped or straightened, temporarily display
+            # WLPG behavior: if image was already cropped/straightened/warped, temporarily display
             # the uncropped/unrotated image with the crop/straighten overlay placed on top!
-            if self._crop_pre_existing_rect is not None or abs(self._crop_pre_existing_straighten_deg) >= 0.05:
+            has_pre_geo = (
+                self._crop_pre_existing_rect is not None
+                or abs(self._crop_pre_existing_straighten_deg) >= 0.05
+                or abs(self._crop_pre_existing_persp_v) >= 0.1
+                or abs(self._crop_pre_existing_persp_h) >= 0.1
+                or self._crop_pre_existing_flip_h
+                or self._crop_pre_existing_flip_v
+            )
+            if has_pre_geo:
                 self.current_recipe.crop_rect = None
                 self.current_recipe.straighten_deg = 0.0
+                self.current_recipe.perspective_v = 0.0
+                self.current_recipe.perspective_h = 0.0
+                self.current_recipe.flip_h = False
+                self.current_recipe.flip_v = False
                 self._original_pixmap = None
                 self._render_current_recipe()
             self.set_zoom_mode("fit")
+
+            # Capture a clean base RGB for ultra-fast 60 FPS live perspective/flip preview
+            if self.display_proxy_rgb is not None:
+                self._crop_preview_base_rgb = self.display_proxy_rgb.copy()
+            elif self.master_np_rgb is not None:
+                self._crop_preview_base_rgb = self.master_np_rgb.copy()
+            else:
+                self._crop_preview_base_rgb = None
 
             self.scene.crop_rect_item.set_master_scale(1.0)
 
@@ -4156,7 +4333,7 @@ class SingleMediaViewer(QWidget):
                 self.scene.crop_rect_item.setRect(QRectF(float(ml), float(mt), pw, ph))
                 self.scene.crop_rect_item.show()
                 self._sync_crop_ratio_from_rect(self.scene.crop_rect_item.rect())
-                self._show_status("Crop & Straighten: Drag handles or corners • X flip, G grid, Enter apply, Esc cancel", 5000)
+                self._show_status("Crop & Straighten: Drag handles or corners • X swap, G grid, B compare, Enter apply, Esc cancel", 5000)
             else:
                 if self.current_pil_image is not None:
                     w, h = self.current_pil_image.size
@@ -4164,18 +4341,33 @@ class SingleMediaViewer(QWidget):
                     self.scene.crop_rect_item.setRect(QRectF((w - cw) / 2.0, (h - ch) / 2.0, cw, ch))
                     self.scene.crop_rect_item.show()
                     self._sync_crop_ratio_from_rect(self.scene.crop_rect_item.rect())
-                self._show_status("Crop & Straighten: Drag handles to frame or corners to rotate • X flip, G grid, Enter apply, Esc cancel", 5000)
+                self._show_status("Crop & Straighten: Drag handles to frame or corners to rotate • X swap, G grid, B compare, Enter apply, Esc cancel", 5000)
 
             self._sync_crop_straighten_ui(self._crop_pre_existing_straighten_deg)
             if abs(self._crop_pre_existing_straighten_deg) >= 0.05:
                 self.scene.set_straighten_deg(self._crop_pre_existing_straighten_deg)
+            if (
+                abs(self._crop_perspective_v) >= 0.1
+                or abs(self._crop_perspective_h) >= 0.1
+                or self._crop_flip_h
+                or self._crop_flip_v
+            ):
+                self._update_crop_geometry_preview(fast_preview=False, clamp_crop_box=False)
 
             self._update_crop_custom_disclosure()
             self._update_crop_apply_button_text()
             if focus_straighten and hasattr(self, "btn_crop_straighten_line"):
                 self.btn_crop_straighten_line.setChecked(True)
+            self.crop_mode_changed.emit(True)
+            self.crop_ui_state_changed.emit()
         else:
             self.crop_toolbar.hide()
+            self._crop_preview_base_rgb = None
+            self._crop_valid_inscribed_rect = None
+            self._crop_perspective_v = 0.0
+            self._crop_perspective_h = 0.0
+            self._crop_flip_h = False
+            self._crop_flip_v = False
             if hasattr(self, "btn_crop_ai_expand"):
                 self.btn_crop_ai_expand.setChecked(False)
             if hasattr(self, "btn_crop_straighten_line"):
@@ -4184,31 +4376,51 @@ class SingleMediaViewer(QWidget):
                 self.btn_crop_straighten_line.blockSignals(False)
             self._sync_crop_straighten_ui(0.0, emit_signal=False)
             self.scene.set_allow_ai_expand(False)
+            self.scene.perspective_preview_active = False
+            self.scene.crop_rect_item.set_fine_grid_active(False)
             self.scene.clear_crop_rect()
             if self.pixmap_item:
+                self.pixmap_item.setTransformOriginPoint(0.0, 0.0)
                 self.pixmap_item.setRotation(0.0)
+                if abs(self.pixmap_item.scale() - 1.0) > 1e-4:
+                    self.pixmap_item.setScale(1.0)
             self._update_face_overlays_visibility()
             if not self.is_retouch_mode and not self.is_red_eye_mode and not self.is_face_tag_mode:
                 self.graphics_view.viewport().unsetCursor()
                 self.graphics_view.setDragMode(ImageGraphicsView.ScrollHandDrag)
 
-            # If user exited without committing (e.g. Cancel button or Esc), restore previous crop & straighten
-            if not getattr(self, "_crop_committed", False) and (
+            # If user exited without committing (e.g. Cancel button or Esc), restore previous crop/geometry
+            had_pre_geo = (
                 getattr(self, "_crop_pre_existing_rect", None) is not None
                 or abs(getattr(self, "_crop_pre_existing_straighten_deg", 0.0)) >= 0.05
-            ):
-                self.current_recipe.crop_rect = self._crop_pre_existing_rect
-                self.current_recipe.straighten_deg = float(getattr(self, "_crop_pre_existing_straighten_deg", 0.0))
-                self._original_pixmap = None
-                self._render_current_recipe()
-                self.set_zoom_mode("fit")
+                or abs(getattr(self, "_crop_pre_existing_persp_v", 0.0)) >= 0.1
+                or abs(getattr(self, "_crop_pre_existing_persp_h", 0.0)) >= 0.1
+                or bool(getattr(self, "_crop_pre_existing_flip_h", False))
+                or bool(getattr(self, "_crop_pre_existing_flip_v", False))
+            )
             if not getattr(self, "_crop_committed", False):
+                if had_pre_geo:
+                    self.current_recipe.crop_rect = self._crop_pre_existing_rect
+                    self.current_recipe.straighten_deg = float(getattr(self, "_crop_pre_existing_straighten_deg", 0.0))
+                    self.current_recipe.perspective_v = float(getattr(self, "_crop_pre_existing_persp_v", 0.0))
+                    self.current_recipe.perspective_h = float(getattr(self, "_crop_pre_existing_persp_h", 0.0))
+                    self.current_recipe.flip_h = bool(getattr(self, "_crop_pre_existing_flip_h", False))
+                    self.current_recipe.flip_v = bool(getattr(self, "_crop_pre_existing_flip_v", False))
+                    self._original_pixmap = None
+                if self.master_np_rgb is not None:
+                    self._render_current_recipe()
+                    self.set_zoom_mode("fit")
                 self.recipe_changed.emit(self.current_recipe)
 
             self._crop_pre_existing_rect = None
             self._crop_pre_existing_straighten_deg = 0.0
+            self._crop_pre_existing_persp_v = 0.0
+            self._crop_pre_existing_persp_h = 0.0
+            self._crop_pre_existing_flip_h = False
+            self._crop_pre_existing_flip_v = False
             self._crop_committed = False
             self._show_status("", 0)
+            self.crop_mode_changed.emit(False)
 
     def _load_saved_custom_ratios(self) -> list[dict[str, Any]]:
         import json
@@ -4318,8 +4530,13 @@ class SingleMediaViewer(QWidget):
 
     def _on_crop_grid_clicked(self) -> None:
         mode = self.scene.crop_rect_item.cycle_grid_mode()
+        self.set_crop_grid_mode(mode)
+
+    def set_crop_grid_mode(self, mode: str) -> None:
+        self.scene.crop_rect_item.set_grid_mode(mode)
         labels = {
             "thirds": ("Grid: 3×3 ▾", "Rule of Thirds (3×3)"),
+            "fine": ("Grid: 9×9 ▾", "Fine Grid (9×9)"),
             "golden": ("Grid: Phi ▾", "Golden Ratio (Phi)"),
             "diagonals": ("Grid: Diag ▾", "Diagonals"),
             "crosshair": ("Grid: + ▾", "Center Crosshair"),
@@ -4329,6 +4546,234 @@ class SingleMediaViewer(QWidget):
         if hasattr(self, "btn_crop_grid"):
             self.btn_crop_grid.setText(btn_text)
         self._show_status(f"Crop grid: {desc} (G to cycle)", 2000)
+        self.crop_ui_state_changed.emit()
+
+    def set_crop_ratio_text(self, text: str) -> None:
+        if hasattr(self, "combo_crop_ratio"):
+            idx = self.combo_crop_ratio.findText(text)
+            if idx >= 0 and self.combo_crop_ratio.currentIndex() != idx:
+                self.combo_crop_ratio.setCurrentIndex(idx)
+            else:
+                self._on_crop_ratio_changed(text)
+        self.crop_ui_state_changed.emit()
+
+    def set_crop_custom_ratio(self, w: float, h: float) -> None:
+        if hasattr(self, "txt_crop_w") and hasattr(self, "txt_crop_h"):
+            self.txt_crop_w.setText(f"{w:g}")
+            self.txt_crop_h.setText(f"{h:g}")
+            self._on_crop_custom_input_changed()
+        self.crop_ui_state_changed.emit()
+
+    def set_crop_straighten_deg(self, deg: float) -> None:
+        if not getattr(self, "is_crop_mode", False):
+            return
+        clamped = max(-15.0, min(15.0, float(deg)))
+        self._sync_crop_straighten_ui(clamped)
+        self.scene.set_straighten_deg(clamped)
+        if (
+            abs(getattr(self, "_crop_perspective_v", 0.0)) >= 0.1
+            or abs(getattr(self, "_crop_perspective_h", 0.0)) >= 0.1
+            or getattr(self, "_crop_flip_h", False)
+            or getattr(self, "_crop_flip_v", False)
+        ):
+            self._update_crop_geometry_preview(fast_preview=True, clamp_crop_box=True)
+        self._update_crop_apply_button_text()
+        self.crop_ui_state_changed.emit()
+
+    def set_crop_perspective_v(self, val: float) -> None:
+        if not getattr(self, "is_crop_mode", False):
+            return
+        self._crop_perspective_v = max(-100.0, min(100.0, float(val)))
+        self._update_crop_geometry_preview(fast_preview=True, clamp_crop_box=True)
+        self._update_crop_apply_button_text()
+        self.crop_ui_state_changed.emit()
+
+    def set_crop_perspective_h(self, val: float) -> None:
+        if not getattr(self, "is_crop_mode", False):
+            return
+        self._crop_perspective_h = max(-100.0, min(100.0, float(val)))
+        self._update_crop_geometry_preview(fast_preview=True, clamp_crop_box=True)
+        self._update_crop_apply_button_text()
+        self.crop_ui_state_changed.emit()
+
+    def set_crop_flip_h(self, enabled: bool) -> None:
+        if not getattr(self, "is_crop_mode", False):
+            return
+        self._crop_flip_h = bool(enabled)
+        self._update_crop_geometry_preview(fast_preview=False, clamp_crop_box=False)
+        self._update_crop_apply_button_text()
+        self.crop_ui_state_changed.emit()
+
+    def set_crop_flip_v(self, enabled: bool) -> None:
+        if not getattr(self, "is_crop_mode", False):
+            return
+        self._crop_flip_v = bool(enabled)
+        self._update_crop_geometry_preview(fast_preview=False, clamp_crop_box=False)
+        self._update_crop_apply_button_text()
+        self.crop_ui_state_changed.emit()
+
+    def set_crop_perspective_dragging(self, active: bool) -> None:
+        if not getattr(self, "is_crop_mode", False):
+            return
+        self.scene.crop_rect_item.set_fine_grid_active(bool(active))
+        if not active:
+            self._update_crop_geometry_preview(fast_preview=False, clamp_crop_box=False)
+
+    def _update_crop_geometry_preview(self, *, fast_preview: bool = True, clamp_crop_box: bool = True) -> None:
+        """Warps the cached display proxy live at 60 FPS for interactive Perspective & Flip preview."""
+        if not getattr(self, "is_crop_mode", False) or self.master_np_rgb is None or self.pixmap_item is None:
+            return
+        from src.imaging.opencv_engine import apply_geometry_transform
+
+        pv = float(getattr(self, "_crop_perspective_v", 0.0))
+        ph = float(getattr(self, "_crop_perspective_h", 0.0))
+        fh = bool(getattr(self, "_crop_flip_h", False))
+        fv = bool(getattr(self, "_crop_flip_v", False))
+        rot_deg = float(getattr(self.scene, "crop_rotation_deg", 0.0))
+        mh, mw = self.master_np_rgb.shape[:2]
+
+        has_persp_or_flip = abs(pv) >= 0.1 or abs(ph) >= 0.1 or fh or fv
+        self.scene.perspective_preview_active = has_persp_or_flip
+        if not has_persp_or_flip:
+            self._crop_valid_inscribed_rect = None
+            if getattr(self, "_adjusted_pixmap", None) is not None:
+                self.pixmap_item.setTransformOriginPoint(0.0, 0.0)
+                self.pixmap_item.setScale(1.0)
+                self.pixmap_item.setPixmap(self._adjusted_pixmap)
+                self.pixmap_item.setTransformOriginPoint(self._adjusted_pixmap.width() / 2.0, self._adjusted_pixmap.height() / 2.0)
+                self.pixmap_item.setRotation(rot_deg)
+            return
+
+        base_rgb = getattr(self, "_crop_preview_base_rgb", None)
+        if base_rgb is None:
+            base_rgb = self.master_np_rgb
+        bh, bw = base_rgb.shape[:2]
+        warped, valid_sub = apply_geometry_transform(
+            base_rgb,
+            straighten_deg=rot_deg,
+            perspective_v=pv,
+            perspective_h=ph,
+            flip_h=fh,
+            flip_v=fv,
+            auto_crop=False,
+            ai_fill=False,
+            fast_preview=fast_preview,
+        )
+        wh, ww = warped.shape[:2]
+        qimg = QImage(warped.data, ww, wh, ww * 3, QImage.Format_RGB888).copy()
+        pix = QPixmap.fromImage(qimg)
+        # Rotation is baked into the homography; anchor origin at (0, 0) so scaling proxy -> master stays centered at (0, 0, mw, mh)!
+        self.pixmap_item.setTransformOriginPoint(0.0, 0.0)
+        self.pixmap_item.setRotation(0.0)
+        self.pixmap_item.setPixmap(pix)
+        if ww > 0 and ww != mw:
+            self.pixmap_item.setScale(float(mw) / float(ww))
+        else:
+            self.pixmap_item.setScale(1.0)
+
+        if valid_sub is not None and bw > 0 and bh > 0:
+            sx = float(mw) / float(bw)
+            sy = float(mh) / float(bh)
+            vl = max(0, min(mw - 2, int(round(valid_sub[0] * sx))))
+            vt = max(0, min(mh - 2, int(round(valid_sub[1] * sy))))
+            vr = max(vl + 2, min(mw, int(round(valid_sub[2] * sx))))
+            vb = max(vt + 2, min(mh, int(round(valid_sub[3] * sy))))
+            self._crop_valid_inscribed_rect = (vl, vt, vr, vb)
+
+            ai_on = bool(hasattr(self, "btn_crop_ai_expand") and self.btn_crop_ai_expand.isChecked())
+            if clamp_crop_box and not ai_on and (abs(pv) >= 0.1 or abs(ph) >= 0.1):
+                cur_r = self.scene.get_crop_rect()
+                if cur_r is not None:
+                    nl = max(float(vl), cur_r.left())
+                    nt = max(float(vt), cur_r.top())
+                    nr = min(float(vr), cur_r.right())
+                    nb = min(float(vb), cur_r.bottom())
+                    if nr - nl >= 16.0 and nb - nt >= 16.0:
+                        self.scene.crop_rect_item.setRect(QRectF(nl, nt, nr - nl, nb - nt))
+                    else:
+                        self.scene.crop_rect_item.setRect(QRectF(float(vl), float(vt), float(vr - vl), float(vb - vt)))
+        else:
+            self._crop_valid_inscribed_rect = None
+
+    def run_crop_auto_perspective(self, mode: str = "vertical") -> tuple[float, float, float]:
+        if self.master_np_rgb is None or not getattr(self, "is_crop_mode", False):
+            return (0.0, 0.0, 0.0)
+        from src.imaging.opencv_engine import estimate_auto_perspective
+
+        deg, pv, ph = estimate_auto_perspective(self.master_np_rgb, mode=mode)
+        self._sync_crop_straighten_ui(deg)
+        self.scene.set_straighten_deg(deg)
+        self._crop_perspective_v = pv
+        self._crop_perspective_h = ph
+        self._update_crop_geometry_preview(fast_preview=False, clamp_crop_box=True)
+        self._update_crop_apply_button_text()
+        self.crop_ui_state_changed.emit()
+
+        parts: list[str] = []
+        if abs(deg) >= 0.1:
+            parts.append(f"{deg:+.1f}° tilt")
+        if abs(pv) >= 0.5:
+            parts.append(f"{int(round(pv)):+d} Vertical")
+        if abs(ph) >= 0.5:
+            parts.append(f"{int(round(ph)):+d} Horizontal")
+        if parts:
+            self._show_status("Auto Perspective: " + ", ".join(parts) + " (Enter to apply)", 3500)
+        else:
+            self._show_status("No strong vertical/horizontal lines detected", 3000)
+        return (deg, pv, ph)
+
+    def reset_crop_geometry(self) -> None:
+        if not getattr(self, "is_crop_mode", False):
+            return
+        self._crop_perspective_v = 0.0
+        self._crop_perspective_h = 0.0
+        self._crop_flip_h = False
+        self._crop_flip_v = False
+        self._sync_crop_straighten_ui(0.0)
+        self.scene.set_straighten_deg(0.0)
+        self._update_crop_geometry_preview(fast_preview=False, clamp_crop_box=False)
+        self._update_crop_apply_button_text()
+        self.crop_ui_state_changed.emit()
+        self._show_status("Straighten, Perspective & Flip reset", 2200)
+
+    def get_crop_ribbon_state(self) -> dict[str, Any]:
+        items: list[str] = []
+        cur_txt = "Free"
+        if hasattr(self, "combo_crop_ratio"):
+            items = [self.combo_crop_ratio.itemText(i) for i in range(self.combo_crop_ratio.count())]
+            cur_txt = self.combo_crop_ratio.currentText() or "Free"
+        rect = self.scene.get_crop_rect() if hasattr(self, "scene") else None
+        dims_txt = ""
+        if rect is not None and rect.width() > 0 and rect.height() > 0:
+            dims_txt = f"{int(round(rect.width()))} × {int(round(rect.height()))} px"
+        try:
+            cw = float(self.txt_crop_w.text().strip()) if hasattr(self, "txt_crop_w") and self.txt_crop_w.text().strip() else 4.0
+            ch = float(self.txt_crop_h.text().strip()) if hasattr(self, "txt_crop_h") and self.txt_crop_h.text().strip() else 3.0
+        except ValueError:
+            cw, ch = 4.0, 3.0
+        ai_on = bool(hasattr(self, "btn_crop_ai_expand") and self.btn_crop_ai_expand.isChecked())
+        will_fill = bool(
+            hasattr(self, "btn_crop_toolbar_apply")
+            and "Fill" in self.btn_crop_toolbar_apply.text()
+        )
+        return {
+            "ratio_items": items,
+            "ratio_text": cur_txt,
+            "show_delete_ratio": bool(hasattr(self, "btn_crop_delete_ratio") and self.btn_crop_delete_ratio.isVisible()),
+            "show_custom_ratio": cur_txt == "Custom",
+            "custom_w": cw,
+            "custom_h": ch,
+            "dims_text": dims_txt,
+            "flip_h": bool(getattr(self, "_crop_flip_h", False)),
+            "flip_v": bool(getattr(self, "_crop_flip_v", False)),
+            "grid_mode": self.scene.crop_rect_item.grid_mode() if hasattr(self, "scene") else "thirds",
+            "straighten_deg": float(getattr(self.scene, "crop_rotation_deg", 0.0)),
+            "straighten_line_checked": bool(hasattr(self, "btn_crop_straighten_line") and self.btn_crop_straighten_line.isChecked()),
+            "perspective_v": float(getattr(self, "_crop_perspective_v", 0.0)),
+            "perspective_h": float(getattr(self, "_crop_perspective_h", 0.0)),
+            "ai_expand": ai_on,
+            "will_fill": will_fill,
+        }
 
     def _on_crop_ratio_changed(self, text: str) -> None:
         if getattr(self, "_updating_crop_inputs", False):
@@ -4586,6 +5031,7 @@ class SingleMediaViewer(QWidget):
         rot = float(getattr(self.scene, "crop_rotation_deg", 0.0))
         self._sync_crop_straighten_ui(rot)
         self._update_crop_apply_button_text()
+        self.crop_ui_state_changed.emit()
 
     def _update_crop_apply_button_text(self) -> None:
         if not hasattr(self, "btn_crop_toolbar_apply"):
@@ -4594,6 +5040,8 @@ class SingleMediaViewer(QWidget):
         will_fill = False
         if ai_on:
             rot_deg = float(getattr(self.scene, "crop_rotation_deg", 0.0))
+            pv = float(getattr(self, "_crop_perspective_v", 0.0))
+            ph = float(getattr(self, "_crop_perspective_h", 0.0))
             rect = self.scene.get_crop_rect()
             extends_outside = False
             if rect is not None and self.master_np_rgb is not None:
@@ -4604,7 +5052,7 @@ class SingleMediaViewer(QWidget):
                     or rect.right() > mw + 0.5
                     or rect.bottom() > mh + 0.5
                 )
-            will_fill = extends_outside or abs(rot_deg) >= 0.05
+            will_fill = extends_outside or abs(rot_deg) >= 0.05 or abs(pv) >= 0.1 or abs(ph) >= 0.1
         self.btn_crop_toolbar_apply.setText("Apply & Fill" if will_fill else "Apply")
 
     def _on_crop_ai_expand_toggled(self, checked: bool) -> None:
@@ -4634,10 +5082,15 @@ class SingleMediaViewer(QWidget):
         if rect is None or rect.width() < 4 or rect.height() < 4:
             return False
 
-        # Reset any live preview rotation on pixmap item
-        rot_deg = getattr(self.scene, "crop_rotation_deg", 0.0)
+        # Reset any live preview rotation/scale on pixmap item
+        rot_deg = float(getattr(self.scene, "crop_rotation_deg", 0.0))
+        persp_v = float(getattr(self, "_crop_perspective_v", 0.0))
+        persp_h = float(getattr(self, "_crop_perspective_h", 0.0))
+        flip_h = bool(getattr(self, "_crop_flip_h", False))
+        flip_v = bool(getattr(self, "_crop_flip_v", False))
         if self.pixmap_item:
             self.pixmap_item.setRotation(0.0)
+            self.pixmap_item.setScale(1.0)
 
         master_h, master_w = self.master_np_rgb.shape[:2]
         raw_l = int(round(rect.left()))
@@ -4649,8 +5102,9 @@ class SingleMediaViewer(QWidget):
             hasattr(self, "btn_crop_ai_expand") and self.btn_crop_ai_expand.isChecked()
         )
         extends_outside = raw_l < 0 or raw_t < 0 or raw_r > master_w or raw_b > master_h
+        has_warp = abs(rot_deg) >= 0.05 or abs(persp_v) >= 0.1 or abs(persp_h) >= 0.1
 
-        if ai_expand_on and (extends_outside or abs(rot_deg) >= 0.05):
+        if ai_expand_on and (extends_outside or has_warp):
             import os
             max_px_x = max(16, master_w // 4)
             max_px_y = max(16, master_h // 4)
@@ -4659,13 +5113,29 @@ class SingleMediaViewer(QWidget):
             er = max(el + 4, min(master_w + max_px_x, raw_r))
             eb = max(et + 4, min(master_h + max_px_y, raw_b))
 
-            from src.imaging.opencv_engine import expand_canvas_with_ai_fill, straighten_with_ai_fill
+            from src.imaging.opencv_engine import (
+                apply_geometry_transform,
+                expand_canvas_with_ai_fill,
+                straighten_with_ai_fill,
+            )
 
             before_px = self.master_np_rgb.copy()
 
             def _compute_ai_expand(src_rgb: np.ndarray) -> np.ndarray:
                 work_rgb = src_rgb
-                if abs(rot_deg) >= 0.05:
+                if abs(persp_v) >= 0.1 or abs(persp_h) >= 0.1 or flip_h or flip_v:
+                    work_rgb, _ = apply_geometry_transform(
+                        work_rgb,
+                        straighten_deg=rot_deg,
+                        perspective_v=persp_v,
+                        perspective_h=persp_h,
+                        flip_h=flip_h,
+                        flip_v=flip_v,
+                        auto_crop=False,
+                        ai_fill=True,
+                        fast_preview=False,
+                    )
+                elif abs(rot_deg) >= 0.05:
                     work_rgb = straighten_with_ai_fill(work_rgb, rot_deg)
                 if extends_outside:
                     return expand_canvas_with_ai_fill(work_rgb, el, et, er, eb)
@@ -4765,9 +5235,41 @@ class SingleMediaViewer(QWidget):
         before = self.current_recipe.copy()
         before.crop_rect = getattr(self, "_crop_pre_existing_rect", None)
         before.straighten_deg = float(getattr(self, "_crop_pre_existing_straighten_deg", before.straighten_deg))
+        before.perspective_v = float(getattr(self, "_crop_pre_existing_persp_v", before.perspective_v))
+        before.perspective_h = float(getattr(self, "_crop_pre_existing_persp_h", before.perspective_h))
+        before.flip_h = bool(getattr(self, "_crop_pre_existing_flip_h", before.flip_h))
+        before.flip_v = bool(getattr(self, "_crop_pre_existing_flip_v", before.flip_v))
 
-        if abs(rot_deg) >= 0.05:
-            self.current_recipe.straighten_deg = float(rot_deg)
+        self.current_recipe.straighten_deg = float(rot_deg) if abs(rot_deg) >= 0.05 else 0.0
+        self.current_recipe.perspective_v = float(persp_v) if abs(persp_v) >= 0.1 else 0.0
+        self.current_recipe.perspective_h = float(persp_h) if abs(persp_h) >= 0.1 else 0.0
+        self.current_recipe.flip_h = bool(flip_h)
+        self.current_recipe.flip_v = bool(flip_v)
+
+        if (abs(persp_v) >= 0.1 or abs(persp_h) >= 0.1) and not getattr(self.current_recipe, "straighten_ai_fill", False):
+            from src.imaging.opencv_engine import (
+                build_perspective_homography,
+                compute_inscribed_rect_for_homography,
+            )
+            H_fin = build_perspective_homography(
+                master_w, master_h,
+                straighten_deg=self.current_recipe.straighten_deg,
+                perspective_v=self.current_recipe.perspective_v,
+                perspective_h=self.current_recipe.perspective_h,
+            )
+            ix1, iy1, ix2, iy2 = compute_inscribed_rect_for_homography(master_w, master_h, H_fin)
+            if new_crop is not None:
+                cl = max(ix1, new_crop[0])
+                ct = max(iy1, new_crop[1])
+                cr = min(ix2, new_crop[2])
+                cb = min(iy2, new_crop[3])
+                if cr > cl + 4 and cb > ct + 4:
+                    new_crop = (cl, ct, cr, cb)
+                else:
+                    new_crop = (ix1, iy1, ix2, iy2)
+            else:
+                new_crop = (ix1, iy1, ix2, iy2)
+        elif abs(rot_deg) >= 0.05:
             # Without AI Expand, clamp any explicit crop box inside the rotated inscribed rect
             # so mirrored/blank corner wedges never leak into the cropped result.
             if new_crop is not None and not getattr(self.current_recipe, "straighten_ai_fill", False):
@@ -4796,7 +5298,12 @@ class SingleMediaViewer(QWidget):
         self._crop_committed = True
         self._original_pixmap = None
 
-        action_name = "Crop Photo" if new_crop is not None else "Uncrop Photo"
+        if abs(persp_v) >= 0.1 or abs(persp_h) >= 0.1:
+            action_name = "Crop & Perspective"
+        elif flip_h or flip_v:
+            action_name = "Crop & Flip"
+        else:
+            action_name = "Crop Photo" if new_crop is not None else "Uncrop Photo"
         cmd = RecipeUndoCommand(self, before, self.current_recipe.copy(), action_name)
         self.undo_stack.push(cmd)
         self.set_crop_mode(False)
@@ -4842,7 +5349,7 @@ class SingleMediaViewer(QWidget):
         if mode == "retouch":
             self.is_retouch_mode = True
             self.is_red_eye_mode = False
-            self._show_status("Spot Fix (Blemish): Click or brush blemishes to heal with authentic texture transfer • [ / ] to resize", 5000)
+            self._show_status("Spot Fix (Blemish): Click or brush blemishes to heal • Shift+Drag for straight line • [ / ] to resize", 5000)
         elif mode == "erase":
             from src.ui.dialogs import prompt_and_download_lama_addon
             if not prompt_and_download_lama_addon(self, "Object Eraser"):
@@ -4850,7 +5357,7 @@ class SingleMediaViewer(QWidget):
                 return
             self.is_retouch_mode = True
             self.is_red_eye_mode = False
-            self._show_status("Spot Fix (Object Eraser): Paint over unwanted objects or people to erase with AI inpainting • [ / ] to resize", 5000)
+            self._show_status("Spot Fix (Object Eraser): Paint over objects to erase • Shift+Drag for straight line • [ / ] to resize", 5000)
         else:
             self.is_retouch_mode = False
             self.is_red_eye_mode = True
@@ -5121,6 +5628,12 @@ class SingleMediaViewer(QWidget):
         self._retouch_preview_items.clear()
         self._retouch_mask = None
         self._retouch_active = False
+        self._retouch_straight_line = False
+        self._retouch_line_item = None
+        self._retouch_guide_item = None
+        self._retouch_line_start_scene = None
+        self._retouch_line_start_master = None
+        self._retouch_line_end_master = None
 
     def _is_scene_pos_on_canvas(self, scene_pos: QPointF) -> bool:
         """Returns True only when scene_pos falls within the displayed photo canvas."""
@@ -5133,31 +5646,70 @@ class SingleMediaViewer(QWidget):
         mh, mw = self.master_np_rgb.shape[:2]
         return 0.0 <= scene_pos.x() < float(mw) and 0.0 <= scene_pos.y() < float(mh)
 
-    def _start_retouch(self, scene_pos: QPointF) -> None:
+    def _start_retouch(self, scene_pos: QPointF, straight_line: bool = False) -> None:
         if not self._is_scene_pos_on_canvas(scene_pos):
             return
         mx, my = self._scene_to_master(scene_pos.x(), scene_pos.y())
         self._retouch_mask = np.zeros(self.master_np_rgb.shape[:2], dtype=np.uint8)
         r_scene, r_master = self._get_effective_brush_radius()
-        cv2.circle(self._retouch_mask, (mx, my), r_master, 255, -1)
+        self._retouch_straight_line = bool(straight_line)
+        self._retouch_line_start_scene = QPointF(scene_pos)
+        self._retouch_line_start_master = (mx, my)
+        self._retouch_line_end_master = (mx, my)
+        self._retouch_line_radius_master = r_master
         is_erase = getattr(self, "spot_fix_sub_mode", "retouch") == "erase"
         pen_col = QColor("#C040FF") if is_erase else QColor("#FF9900")
         brush_col = QColor(192, 64, 255, 110) if is_erase else QColor(255, 153, 0, 110)
-        c_item = self.scene.addEllipse(
-            scene_pos.x() - r_scene,
-            scene_pos.y() - r_scene,
-            r_scene * 2,
-            r_scene * 2,
-            QPen(pen_col, 1),
-            QBrush(brush_col),
-        )
-        self._retouch_preview_items.append(c_item)
+
+        if self._retouch_straight_line:
+            stroke_pen = QPen(brush_col, max(2.0, r_scene * 2.0), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            line_item = self.scene.addLine(
+                scene_pos.x(), scene_pos.y(), scene_pos.x(), scene_pos.y(), stroke_pen
+            )
+            guide_pen = QPen(QColor(255, 255, 255, 230), 1.5, Qt.DashLine)
+            guide_pen.setCosmetic(True)
+            guide_item = self.scene.addLine(
+                scene_pos.x(), scene_pos.y(), scene_pos.x(), scene_pos.y(), guide_pen
+            )
+            self._retouch_line_item = line_item
+            self._retouch_guide_item = guide_item
+            self._retouch_preview_items.extend([line_item, guide_item])
+        else:
+            cv2.circle(self._retouch_mask, (mx, my), r_master, 255, -1)
+            c_item = self.scene.addEllipse(
+                scene_pos.x() - r_scene,
+                scene_pos.y() - r_scene,
+                r_scene * 2,
+                r_scene * 2,
+                QPen(pen_col, 1),
+                QBrush(brush_col),
+            )
+            self._retouch_preview_items.append(c_item)
         self._retouch_last_master_pt = (mx, my)
         self._retouch_active = True
 
     def _drag_retouch(self, scene_pos: QPointF) -> None:
         if not self._retouch_active or self._retouch_mask is None or self.master_np_rgb is None:
             return
+        if getattr(self, "_retouch_straight_line", False):
+            # Clamp endpoint cleanly to the displayed canvas bounds so edge-to-edge scratches work smoothly
+            if self.pixmap_item is not None and not self.pixmap_item.sceneBoundingRect().isEmpty():
+                rect = self.pixmap_item.sceneBoundingRect()
+                cx = max(rect.left(), min(rect.right(), scene_pos.x()))
+                cy = max(rect.top(), min(rect.bottom(), scene_pos.y()))
+            else:
+                mh, mw = self.master_np_rgb.shape[:2]
+                cx = max(0.0, min(float(mw - 1), scene_pos.x()))
+                cy = max(0.0, min(float(mh - 1), scene_pos.y()))
+            clamped = QPointF(cx, cy)
+            start_s = self._retouch_line_start_scene or clamped
+            if getattr(self, "_retouch_line_item", None) is not None:
+                self._retouch_line_item.setLine(start_s.x(), start_s.y(), clamped.x(), clamped.y())
+            if getattr(self, "_retouch_guide_item", None) is not None:
+                self._retouch_guide_item.setLine(start_s.x(), start_s.y(), clamped.x(), clamped.y())
+            self._retouch_line_end_master = self._scene_to_master(clamped.x(), clamped.y())
+            return
+
         if not self._is_scene_pos_on_canvas(scene_pos):
             self._retouch_last_master_pt = None
             return
@@ -5183,6 +5735,14 @@ class SingleMediaViewer(QWidget):
         if not self._retouch_active or self._retouch_mask is None or self.master_np_rgb is None:
             self._clear_retouch_overlay()
             return
+        if getattr(self, "_retouch_straight_line", False):
+            start_m = getattr(self, "_retouch_line_start_master", None)
+            end_m = getattr(self, "_retouch_line_end_master", None)
+            r_m = max(1, int(getattr(self, "_retouch_line_radius_master", 8)))
+            if start_m is not None and end_m is not None:
+                cv2.line(self._retouch_mask, start_m, end_m, 255, thickness=max(2, r_m * 2))
+                cv2.circle(self._retouch_mask, start_m, r_m, 255, -1)
+                cv2.circle(self._retouch_mask, end_m, r_m, 255, -1)
         self._retouch_active = False
 
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -5647,9 +6207,22 @@ class SingleMediaViewer(QWidget):
         self.is_markup_mode = bool(enabled)
         if self.is_markup_mode:
             self._dismiss_depth_light_pane_if_active()
+            self._markup_alt_select_active = False
+            app_inst = QApplication.instance()
+            if app_inst is not None and not getattr(self, "_markup_app_alt_filter_installed", False):
+                app_inst.installEventFilter(self)
+                self._markup_app_alt_filter_installed = True
             self._session_markup_command_count = 0
             self._markup_session_start_master = self.master_np_rgb.copy() if self.master_np_rgb is not None else None
             self._markup_session_start_undo_idx = self.undo_stack.index() if hasattr(self, "undo_stack") else 0
+            if self.master_np_rgb is not None and hasattr(self, "markup_toolbar"):
+                _mh, _mw = self.master_np_rgb.shape[:2]
+                _short_edge = min(_mh, _mw)
+                if _short_edge >= 600:
+                    _auto_w = max(12, min(48, int(round(_short_edge / 120.0))))
+                else:
+                    _auto_w = 16
+                self.markup_toolbar.set_stroke_width(_auto_w)
             self.stop_face_tagging_mode()
             self.set_crop_mode(False)
             self.set_retouch_mode(False)
@@ -5659,13 +6232,22 @@ class SingleMediaViewer(QWidget):
             self._update_markup_cursor()
             if hasattr(self.markup_toolbar, "btn_undo") and hasattr(self, "undo_stack"):
                 self.markup_toolbar.btn_undo.setEnabled(self.undo_stack.canUndo())
-            self.markup_toolbar.show()
-            self._position_floating_toolbars()
-            self.markup_toolbar.raise_()
+            if not getattr(self, "_use_ribbon_markup_controls", False):
+                self.markup_toolbar.show()
+                self._position_floating_toolbars()
+                self.markup_toolbar.raise_()
+            else:
+                self.markup_toolbar.hide()
             self._purge_all_transient_scene_items()
             self.update_revert_state()
-            self._show_status("Markup Mode: Choose Pen, Highlighter, Shapes, Text or Magnify • Enter to commit, Esc to close", 5000)
+            self._show_status("Markup Mode: Pen, Text, Shapes, Line, Obscure, Stickers, Magnify or Stamp • Drag top handle to rotate • Enter to commit, Esc to close", 5000)
+            self.markup_mode_changed.emit(True)
         else:
+            self._markup_alt_select_active = False
+            app_inst = QApplication.instance()
+            if app_inst is not None and getattr(self, "_markup_app_alt_filter_installed", False):
+                app_inst.removeEventFilter(self)
+                self._markup_app_alt_filter_installed = False
             if getattr(self, "_inline_text_input", None) is not None:
                 self._commit_inline_text()
             self._finalize_movable_markup()
@@ -5678,6 +6260,7 @@ class SingleMediaViewer(QWidget):
             self._purge_all_transient_scene_items()
             self.update_revert_state()
             self._show_status("", 0)
+            self.markup_mode_changed.emit(False)
 
     def _on_markup_save_requested(self) -> None:
         """Saves current image with pristine backup and displays status on toolbar."""
@@ -5685,9 +6268,16 @@ class SingleMediaViewer(QWidget):
             self._commit_inline_text()
         self._finalize_movable_markup()
         res = self.save_current_image_with_backup()
-        if res and hasattr(self, "markup_toolbar") and hasattr(self.markup_toolbar, "btn_save"):
-            self.markup_toolbar.btn_save.setText("Saved!")
-            QTimer.singleShot(1500, lambda: self.markup_toolbar.btn_save.setText("Save") if hasattr(self.markup_toolbar, "btn_save") else None)
+        if res:
+            self.markup_saved.emit()
+            if hasattr(self, "markup_toolbar") and hasattr(self.markup_toolbar, "btn_save"):
+                self.markup_toolbar.btn_save.setText("Saved!")
+                QTimer.singleShot(
+                    1500,
+                    lambda: self.markup_toolbar.btn_save.setText("Save")
+                    if hasattr(self.markup_toolbar, "btn_save")
+                    else None,
+                )
 
     def _update_markup_cursor(self) -> None:
         """Constructs a circular cursor matching the exact on-screen stroke width."""
@@ -5709,10 +6299,19 @@ class SingleMediaViewer(QWidget):
             hl_w = max(8, int(stroke_w * 2.6))
             d_screen = max(6, int(round(hl_w * scale)))
             rad = max(3, d_screen // 2)
+        elif tool in ("blur", "pixelate") and getattr(self.markup_toolbar, "obscure_mode", "brush") == "brush":
+            ob_r = max(10, int(round(stroke_w * 2.2)))
+            d_screen = max(8, int(round(ob_r * 2.0 * scale)))
+            rad = max(4, d_screen // 2)
+            col = QColor(56, 144, 240)
         elif tool in ("magnify", "magnifier"):
             # The magnifying lens is rendered live on scene in _update_magnify_hover;
             # use a clean precision crosshair cursor to avoid showing a confusing second circle!
             self.graphics_view.viewport().setCursor(Qt.CrossCursor)
+            return
+        elif tool == "select" or getattr(self, "_markup_alt_select_active", False):
+            from src.ui.markup_overlay import make_select_tool_cursor
+            self.graphics_view.viewport().setCursor(make_select_tool_cursor())
             return
         elif tool == "text":
             self.graphics_view.viewport().setCursor(Qt.IBeamCursor)
@@ -5721,7 +6320,7 @@ class SingleMediaViewer(QWidget):
             self.graphics_view.viewport().setCursor(Qt.CrossCursor)
             return
 
-        d = rad * 2
+        d = min(180, rad * 2)
         size = d + 8
         pm = QPixmap(size, size)
         pm.fill(Qt.transparent)
@@ -5758,21 +6357,37 @@ class SingleMediaViewer(QWidget):
             self._cleanup_magnify_preview()
         else:
             sp = getattr(self, "_last_mouse_scene_pos", None)
+            if sp is None and self.master_np_rgb is not None:
+                sp = self.graphics_view.mapToScene(self.graphics_view.viewport().rect().center())
             if sp is not None:
                 self._update_magnify_hover(sp)
         if getattr(self.markup_toolbar, "active_tool", "pen") == "text":
             self._update_inline_text_style()
 
-        if getattr(self, "_pending_markup_element", None) is not None:
-            col = getattr(self.markup_toolbar, "current_color", QColor(230, 40, 40))
-            width = getattr(self.markup_toolbar, "stroke_width", 4)
-            el = self._pending_markup_element
-            el.color = col
-            el.stroke_width = width
+        def _apply_tb_to_el(el: MarkupElement) -> None:
+            el.color = getattr(self.markup_toolbar, "current_color", QColor(230, 40, 40))
+            el.stroke_width = getattr(self.markup_toolbar, "stroke_width", 4)
             if hasattr(self.markup_toolbar, "secondary_color"):
                 el.bg_color = getattr(self.markup_toolbar, "secondary_color", None)
             if hasattr(self.markup_toolbar, "magnifier_zoom"):
                 el.zoom_factor = getattr(self.markup_toolbar, "magnifier_zoom", 2.5)
+            el.font_family = getattr(self.markup_toolbar, "font_family", "Segoe UI") or "Segoe UI"
+            el.font_bold = getattr(self.markup_toolbar, "is_text_bold", True)
+            el.font_italic = getattr(self.markup_toolbar, "is_text_italic", False)
+            el.text_style = getattr(self.markup_toolbar, "text_style", "pill")
+            el.text_align = getattr(self.markup_toolbar, "text_align", "left")
+            el.opacity = float(getattr(self.markup_toolbar, "opacity", 1.0))
+            el.bg_opacity = float(getattr(self.markup_toolbar, "bg_opacity", 0.85))
+            el.shape_filled = bool(getattr(self.markup_toolbar, "shape_filled", False))
+            el.line_style = getattr(self.markup_toolbar, "line_style", "arrow")
+            el.dash_style = str(getattr(self.markup_toolbar, "dash_style", "solid") or "solid")
+            if el.kind in ALL_LINE_KINDS and getattr(self.markup_toolbar, "line_style", None) in ALL_LINE_KINDS:
+                el.kind = str(getattr(self.markup_toolbar, "line_style"))
+            el.obscure_strength = int(getattr(self.markup_toolbar, "obscure_strength", 55))
+
+        if getattr(self, "_pending_markup_element", None) is not None:
+            el = self._pending_markup_element
+            _apply_tb_to_el(el)
             crop_tuple = self.current_recipe.crop_rect if self.current_recipe else None
             pm, top_left = render_markup_element_pixmap(el, self.master_np_rgb, crop_tuple)
             if self._pending_markup_item is not None and not pm.isNull():
@@ -5780,6 +6395,32 @@ class SingleMediaViewer(QWidget):
                 self._pending_markup_item.setPos(top_left)
             if self._pending_selection_box_item is not None:
                 self._pending_selection_box_item.setRect(get_markup_element_bounds(el))
+            self._update_active_markup_selection_handles()
+            self.markup_selection_changed.emit(True, el.kind == "text")
+        elif (
+            getattr(self, "_active_movable_element", None) is not None
+            and not getattr(self, "_is_moving_pending_markup", False)
+            and not getattr(self, "_markup_transform_mode", None)
+            and (
+                getattr(self, "_active_movable_before_roi", None) is not None
+                or getattr(self, "_active_movable_before_master", None) is not None
+            )
+            and not getattr(self, "_updating_active_el_live", False)
+        ):
+            self._updating_active_el_live = True
+            try:
+                el = self._active_movable_element
+                _apply_tb_to_el(el)
+                if hasattr(self, "undo_stack") and self.undo_stack.canUndo():
+                    self.undo_stack.undo()
+                    if self._markup_elements:
+                        self._markup_elements.pop()
+                    if self._markup_preview_items:
+                        it = self._markup_preview_items.pop()
+                        self._remove_scene_item(it)
+                self._commit_single_markup_element(el, f"Markup {el.kind.title()}")
+            finally:
+                self._updating_active_el_live = False
 
     def _get_magnifier_scene_radius(self) -> float:
         """Returns the scene radius for the magnifying lens so it maintains a prominent screen diameter."""
@@ -5798,25 +6439,614 @@ class SingleMediaViewer(QWidget):
         if getattr(self, "_magnify_hover_item", None) is not None:
             self._magnify_hover_item.setVisible(False)
 
+    def _clear_markup_selection_handles(self) -> None:
+        for h_item in getattr(self, "_pending_resize_handles", {}).values():
+            self._remove_scene_item(h_item)
+        self._pending_resize_handles = {}
+        if getattr(self, "_pending_selection_poly_item", None) is not None:
+            self._remove_scene_item(self._pending_selection_poly_item)
+            self._pending_selection_poly_item = None
+        if getattr(self, "_pending_rotate_stem", None) is not None:
+            self._remove_scene_item(self._pending_rotate_stem)
+            self._pending_rotate_stem = None
+        if getattr(self, "_pending_rotate_handle", None) is not None:
+            self._remove_scene_item(self._pending_rotate_handle)
+            self._pending_rotate_handle = None
+        if getattr(self, "_pending_rotate_badge", None) is not None:
+            self._remove_scene_item(self._pending_rotate_badge)
+            self._pending_rotate_badge = None
+
+    def _get_markup_oriented_geometry(
+        self, el: MarkupElement
+    ) -> tuple[QRectF, QPolygonF, dict[str, QPointF], QPointF, QPointF]:
+        """Returns (unrotated_rect, oriented_poly, rotated_corners_dict, top_mid_rot, knob_c_rot)."""
+        base_r = get_markup_element_unrotated_rect(el)
+        if base_r.isEmpty():
+            base_r = get_markup_element_bounds(el)
+        rot = float(getattr(el, "rotation_deg", 0.0) or 0.0)
+        pad = 4.0
+        padded_r = base_r.adjusted(-pad, -pad, pad, pad)
+        c = padded_r.center()
+        tr_rot = QTransform()
+        tr_rot.translate(c.x(), c.y())
+        tr_rot.rotate(rot)
+        tr_rot.translate(-c.x(), -c.y())
+
+        poly = tr_rot.map(QPolygonF(padded_r))
+        corners = {
+            "tl": tr_rot.map(padded_r.topLeft()),
+            "tr": tr_rot.map(padded_r.topRight()),
+            "bl": tr_rot.map(padded_r.bottomLeft()),
+            "br": tr_rot.map(padded_r.bottomRight()),
+        }
+        v_scale = max(0.05, float(self.graphics_view.transform().m11()))
+        stem_len = 26.0 / v_scale
+        top_mid = tr_rot.map(QPointF(padded_r.center().x(), padded_r.top()))
+        knob_c = tr_rot.map(QPointF(padded_r.center().x(), padded_r.top() - stem_len))
+        return base_r, poly, corners, top_mid, knob_c
+
+    def _update_active_markup_selection_handles(self, *, show_angle_badge: bool = False) -> None:
+        """Draws Crop-style oriented selection frame, rotated corner resize squares, and rotation knob."""
+        el = getattr(self, "_active_movable_element", None)
+        if el is None:
+            self._clear_markup_selection_handles()
+            return
+        bounds = get_markup_element_bounds(el)
+        if bounds.isEmpty():
+            self._clear_markup_selection_handles()
+            return
+
+        # Keep invisible/subtle bounds rect item for backward compatibility with tests checking _pending_selection_box_item
+        if getattr(self, "_pending_selection_box_item", None) is None:
+            box_item = QGraphicsRectItem(bounds)
+            box_item.setPen(QPen(Qt.transparent))
+            box_item.setBrush(Qt.NoBrush)
+            box_item.setZValue(9998)
+            self.scene.addItem(box_item)
+            self._pending_selection_box_item = box_item
+        else:
+            self._pending_selection_box_item.setRect(bounds)
+
+        can_orient = el.kind in ("text", "sticker") or el.kind in ALL_SHAPE_KINDS or el.kind in ALL_LINE_KINDS
+        can_resize = can_orient or (el.kind in ("pixelate", "blur") and getattr(el, "obscure_mode", "box") == "box")
+
+        if can_orient:
+            _base_r, poly, corners, top_mid, knob_c = self._get_markup_oriented_geometry(el)
+        else:
+            poly = QPolygonF(bounds)
+            corners = {
+                "tl": bounds.topLeft(),
+                "tr": bounds.topRight(),
+                "bl": bounds.bottomLeft(),
+                "br": bounds.bottomRight(),
+            }
+            top_mid = QPointF(bounds.center().x(), bounds.top())
+            knob_c = top_mid
+
+        poly_pen = QPen(QColor(56, 144, 240, 230), 1.5, Qt.DashLine)
+        poly_pen.setCosmetic(True)
+        if getattr(self, "_pending_selection_poly_item", None) is None:
+            p_item = QGraphicsPolygonItem(poly)
+            p_item.setPen(poly_pen)
+            p_item.setBrush(Qt.NoBrush)
+            p_item.setZValue(9999)
+            self.scene.addItem(p_item)
+            self._pending_selection_poly_item = p_item
+        else:
+            self._pending_selection_poly_item.setPolygon(poly)
+
+        tr = self.graphics_view.transform()
+        scale = max(0.05, float(tr.m11()))
+        hs = 8.5 / scale
+
+        if can_resize:
+            if not hasattr(self, "_pending_resize_handles") or self._pending_resize_handles is None:
+                self._pending_resize_handles = {}
+            h_pen = QPen(QColor("#2563EB"), 1.5)
+            h_pen.setCosmetic(True)
+            for key, pt in corners.items():
+                r_item = self._pending_resize_handles.get(key)
+                rect_h = QRectF(pt.x() - hs * 0.5, pt.y() - hs * 0.5, hs, hs)
+                if r_item is None:
+                    r_item = QGraphicsRectItem(rect_h)
+                    r_item.setPen(h_pen)
+                    r_item.setBrush(QBrush(QColor("#FFFFFF")))
+                    r_item.setZValue(10000)
+                    self.scene.addItem(r_item)
+                    self._pending_resize_handles[key] = r_item
+                else:
+                    r_item.setRect(rect_h)
+        else:
+            for h_item in getattr(self, "_pending_resize_handles", {}).values():
+                self._remove_scene_item(h_item)
+            self._pending_resize_handles = {}
+
+        if can_orient:
+            knob_r = 6.0 / scale
+            s_pen = QPen(QColor(56, 144, 240, 230), 1.5)
+            s_pen.setCosmetic(True)
+            if getattr(self, "_pending_rotate_stem", None) is None:
+                stem = QGraphicsLineItem(top_mid.x(), top_mid.y(), knob_c.x(), knob_c.y())
+                stem.setPen(s_pen)
+                stem.setZValue(9999)
+                self.scene.addItem(stem)
+                self._pending_rotate_stem = stem
+            else:
+                self._pending_rotate_stem.setLine(top_mid.x(), top_mid.y(), knob_c.x(), knob_c.y())
+
+            knob_rect = QRectF(knob_c.x() - knob_r, knob_c.y() - knob_r, knob_r * 2.0, knob_r * 2.0)
+            if getattr(self, "_pending_rotate_handle", None) is None:
+                knob = QGraphicsEllipseItem(knob_rect)
+                knob.setPen(s_pen)
+                knob.setBrush(QBrush(QColor("#2563EB")))
+                knob.setZValue(10001)
+                self.scene.addItem(knob)
+                self._pending_rotate_handle = knob
+            else:
+                self._pending_rotate_handle.setRect(knob_rect)
+
+            if show_angle_badge:
+                rot_val = float(getattr(el, "rotation_deg", 0.0) or 0.0)
+                badge_txt = f"{rot_val:+.0f}°" if abs(rot_val) >= 0.5 else "0°"
+                badge = getattr(self, "_pending_rotate_badge", None)
+                if badge is None:
+                    badge = QGraphicsSimpleTextItem(badge_txt)
+                    badge.setBrush(QBrush(QColor("#FFFFFF")))
+                    badge.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+                    badge.setZValue(10002)
+                    self.scene.addItem(badge)
+                    self._pending_rotate_badge = badge
+                else:
+                    badge.setText(badge_txt)
+                badge.setFont(QFont("Segoe UI", 9, QFont.Bold))
+                badge.setPos(knob_c.x() + 10.0 / scale, knob_c.y() - 10.0 / scale)
+                badge.setVisible(True)
+            elif getattr(self, "_pending_rotate_badge", None) is not None:
+                self._pending_rotate_badge.setVisible(False)
+            self.markup_rotation_changed.emit(float(getattr(el, "rotation_deg", 0.0) or 0.0))
+        else:
+            if getattr(self, "_pending_rotate_stem", None) is not None:
+                self._remove_scene_item(self._pending_rotate_stem)
+                self._pending_rotate_stem = None
+            if getattr(self, "_pending_rotate_handle", None) is not None:
+                self._remove_scene_item(self._pending_rotate_handle)
+                self._pending_rotate_handle = None
+            if getattr(self, "_pending_rotate_badge", None) is not None:
+                self._pending_rotate_badge.setVisible(False)
+
+    def _hit_test_markup_handles(self, sp: QPointF) -> str | None:
+        """Returns 'rotate', 'rotate_corner:<c>', 'resize:tl|tr|bl|br', or None."""
+        tr = self.graphics_view.transform()
+        scale = max(0.05, float(tr.m11()))
+        pad = 7.0 / scale
+        knob = getattr(self, "_pending_rotate_handle", None)
+        if knob is not None and knob.rect().adjusted(-pad, -pad, pad, pad).contains(sp):
+            return "rotate"
+        for key, item in getattr(self, "_pending_resize_handles", {}).items():
+            if item is not None and item.rect().adjusted(-pad, -pad, pad, pad).contains(sp):
+                return f"resize:{key}"
+
+        # Crop-style outer-corner rotation halo (outside oriented polygon near corners)
+        el = getattr(self, "_active_movable_element", None)
+        if el is not None and (el.kind in ("text", "sticker") or el.kind in ALL_SHAPE_KINDS):
+            _base_r, poly, corners, _tm, _kc = self._get_markup_oriented_geometry(el)
+            if not poly.containsPoint(sp, Qt.OddEvenFill):
+                halo_min = 8.0 / scale
+                halo_max = 30.0 / scale
+                for key, pt in corners.items():
+                    dist = math.hypot(sp.x() - pt.x(), sp.y() - pt.y())
+                    if halo_min <= dist <= halo_max:
+                        return f"rotate_corner:{key}"
+        return None
+
+    def _refresh_viewport_after_master_roi(
+        self, bbox: tuple[int, int, int, int] | None
+    ) -> None:
+        """Fast in-place full-res QPixmap ROI patch after an edit on master_np_rgb.
+        Never swaps pixmap dimensions or item scale, so viewport zoom/pan never shifts or flashes."""
+        if (
+            bbox is not None
+            and self.master_np_rgb is not None
+            and self.current_recipe.is_default()
+            and self.current_recipe.crop_rect is None
+            and getattr(self, "master_alpha", None) is None
+        ):
+            y0, y1, x0, x1 = bbox
+            mh, mw = self.master_np_rgb.shape[:2]
+            y0 = max(0, min(mh, int(y0)))
+            y1 = max(y0, min(mh, int(y1)))
+            x0 = max(0, min(mw, int(x0)))
+            x1 = max(x0, min(mw, int(x1)))
+            cur_pm = self.pixmap_item.pixmap()
+            if (
+                y1 > y0
+                and x1 > x0
+                and not cur_pm.isNull()
+                and cur_pm.width() == mw
+                and cur_pm.height() == mh
+                and abs(self.pixmap_item.scale() - 1.0) < 1e-4
+            ):
+                roi_rgb = np.ascontiguousarray(self.master_np_rgb[y0:y1, x0:x1])
+                rh, rw = roi_rgb.shape[:2]
+                roi_qimg = QImage(roi_rgb.data, rw, rh, rw * 3, QImage.Format_RGB888)
+                patched_pm = cur_pm.copy()
+                painter = QPainter(patched_pm)
+                painter.drawImage(x0, y0, roi_qimg)
+                painter.end()
+                self.pixmap_item.setPixmap(patched_pm)
+                self._adjusted_pixmap = patched_pm
+                if self.current_recipe.is_default() and getattr(self, "_original_pixmap", None) is None:
+                    self._original_pixmap = patched_pm
+
+                # Silently keep display_proxy_rgb in sync in memory (without touching pixmap_item scale)
+                if self.display_proxy_rgb is not None:
+                    ph, pw = self.display_proxy_rgb.shape[:2]
+                    if ph == mh and pw == mw:
+                        self.display_proxy_rgb[y0:y1, x0:x1] = self.master_np_rgb[y0:y1, x0:x1]
+                    elif ph > 0 and pw > 0 and mh > 0 and mw > 0:
+                        sx = pw / float(mw)
+                        sy = ph / float(mh)
+                        px0 = max(0, int(math.floor(x0 * sx)))
+                        py0 = max(0, int(math.floor(y0 * sy)))
+                        px1 = min(pw, int(math.ceil(x1 * sx)))
+                        py1 = min(ph, int(math.ceil(y1 * sy)))
+                        if px1 > px0 and py1 > py0:
+                            mx0 = max(0, int(math.floor(px0 / sx)))
+                            my0 = max(0, int(math.floor(py0 / sy)))
+                            mx1 = min(mw, int(math.ceil(px1 / sx)))
+                            my1 = min(mh, int(math.ceil(py1 / sy)))
+                            roi_src = self.master_np_rgb[my0:my1, mx0:mx1]
+                            if roi_src.size > 0:
+                                self.display_proxy_rgb[py0:py1, px0:px1] = cv2.resize(
+                                    roi_src, (px1 - px0, py1 - py0), interpolation=cv2.INTER_AREA
+                                )
+                return
+        self._update_display_proxy()
+        self._render_current_recipe()
+
+    def _restore_active_movable_before_state(self) -> None:
+        """Restores master_np_rgb to the pre-element state using fast ROI patch when available."""
+        roi_info = getattr(self, "_active_movable_before_roi", None)
+        if roi_info is not None and self.master_np_rgb is not None:
+            bbox, before_patch = roi_info
+            y0, y1, x0, x1 = bbox
+            if y1 > y0 and x1 > x0:
+                self.master_np_rgb[y0:y1, x0:x1] = before_patch
+                self._refresh_viewport_after_master_roi(bbox)
+                return
+        if getattr(self, "_active_movable_before_master", None) is not None:
+            self.master_np_rgb = self._active_movable_before_master.copy()
+            self._update_display_proxy()
+            self._render_current_recipe()
+
+    def _begin_pending_markup_preview(self, el_obj: MarkupElement, *, for_rotation: bool = False) -> None:
+        """Detaches active movable element into a fast scene-layer pixmap for 120 FPS drag/rotate."""
+        self._restore_active_movable_before_state()
+        if getattr(self, "_pending_markup_item", None) is not None:
+            self._remove_scene_item(self._pending_markup_item)
+            self._pending_markup_item = None
+        crop_tuple = self.current_recipe.crop_rect if self.current_recipe else None
+        if for_rotation:
+            orig_rot = float(getattr(el_obj, "rotation_deg", 0.0) or 0.0)
+            el_obj.rotation_deg = 0.0
+            pm, top_left = render_markup_element_pixmap(el_obj, self.master_np_rgb, crop_tuple)
+            el_obj.rotation_deg = orig_rot
+            if not pm.isNull():
+                base_r = get_markup_element_unrotated_rect(el_obj)
+                p_item = QGraphicsPixmapItem(pm)
+                p_item.setTransformationMode(Qt.SmoothTransformation)
+                p_item.setPos(top_left)
+                p_item.setTransformOriginPoint(base_r.center() - top_left)
+                p_item.setRotation(orig_rot)
+                p_item.setZValue(9995)
+                self.scene.addItem(p_item)
+                self._pending_markup_item = p_item
+                self._pending_markup_item_is_rot_cached = True
+                return
+        pm, top_left = render_markup_element_pixmap(el_obj, self.master_np_rgb, crop_tuple)
+        if not pm.isNull():
+            p_item = QGraphicsPixmapItem(pm)
+            p_item.setTransformationMode(Qt.SmoothTransformation)
+            p_item.setPos(top_left)
+            p_item.setZValue(9995)
+            self.scene.addItem(p_item)
+            self._pending_markup_item = p_item
+            self._pending_markup_item_is_rot_cached = False
+
+    def preview_active_markup_rotation(self, deg: float) -> None:
+        """Live 120 FPS transform-only rotation preview while dragging the Ribbon rotation slider."""
+        if getattr(self, "_inline_text_input", None) is not None:
+            self._commit_inline_text()
+        el = getattr(self, "_active_movable_element", None)
+        if el is None or not (el.kind in ("text", "sticker") or el.kind in ALL_SHAPE_KINDS):
+            return
+        if getattr(self, "_pending_markup_item", None) is None or not getattr(self, "_pending_markup_item_is_rot_cached", False):
+            self._begin_pending_markup_preview(el, for_rotation=True)
+        el.rotation_deg = float(deg)
+        if getattr(self, "_pending_markup_item", None) is not None:
+            self._pending_markup_item.setRotation(float(deg))
+        self._update_active_markup_selection_handles(show_angle_badge=True)
+
+    def set_active_markup_rotation(self, deg: float) -> None:
+        """Sets and commits rotation angle on the active movable element (Ribbon slider release / 0° reset)."""
+        if getattr(self, "_inline_text_input", None) is not None:
+            self._commit_inline_text()
+        el = getattr(self, "_active_movable_element", None)
+        if el is None:
+            return
+        if not (el.kind in ("text", "sticker") or el.kind in ALL_SHAPE_KINDS):
+            return
+        if getattr(self, "_pending_markup_item", None) is not None:
+            self._remove_scene_item(self._pending_markup_item)
+            self._pending_markup_item = None
+            self._pending_markup_item_is_rot_cached = False
+        if getattr(self, "_pending_rotate_badge", None) is not None:
+            self._pending_rotate_badge.setVisible(False)
+        el.rotation_deg = float(deg)
+        if (
+            (
+                getattr(self, "_active_movable_before_roi", None) is not None
+                or getattr(self, "_active_movable_before_master", None) is not None
+            )
+            and hasattr(self, "undo_stack")
+            and self.undo_stack.canUndo()
+        ):
+            self.undo_stack.undo()
+            if self._markup_elements:
+                self._markup_elements.pop()
+            if self._markup_preview_items:
+                it = self._markup_preview_items.pop()
+                self._remove_scene_item(it)
+            self._commit_single_markup_element(el, f"Markup {el.kind.title()}")
+
     def _finalize_movable_markup(self) -> None:
-        """Finalizes the active movable element and hides the selection outline."""
+        """Finalizes the active movable element and hides the selection outline and transform handles."""
+        self._clear_markup_selection_handles()
         if getattr(self, "_pending_selection_box_item", None) is not None:
             self._remove_scene_item(self._pending_selection_box_item)
             self._pending_selection_box_item = None
         if getattr(self, "_pending_markup_item", None) is not None:
             self._remove_scene_item(self._pending_markup_item)
             self._pending_markup_item = None
+        self._pending_markup_item_is_rot_cached = False
         self._active_movable_element = None
         self._active_movable_before_master = None
+        self._active_movable_before_roi = None
+        self._active_movable_from_reselect = False
+        self._active_movable_reselect_orig_master = None
         self._is_moving_pending_markup = False
+        self._markup_transform_mode = None
+        self._markup_resize_corner = None
+        self._markup_resize_anchor_rect = None
+        self._markup_rotate_start_angle = None
+        self._markup_rotate_orig_deg = 0.0
         self._move_markup_last_pt = None
+        self.markup_rotation_changed.emit(0.0)
+        self.markup_selection_changed.emit(False, False)
+
+    def _shift_markup_element_for_crop(self, el: MarkupElement) -> MarkupElement:
+        if self.current_recipe.crop_rect is None:
+            return el
+        l, t, _, _ = self.current_recipe.crop_rect
+        return MarkupElement(
+            kind=el.kind,
+            rect=QRectF(el.rect.x() + l, el.rect.y() + t, el.rect.width(), el.rect.height()) if el.rect else None,
+            start_pt=QPointF(el.start_pt.x() + l, el.start_pt.y() + t) if el.start_pt else None,
+            end_pt=QPointF(el.end_pt.x() + l, el.end_pt.y() + t) if el.end_pt else None,
+            points=[QPointF(pt.x() + l, pt.y() + t) for pt in el.points],
+            color=el.color,
+            bg_color=el.bg_color,
+            stroke_width=el.stroke_width,
+            text=el.text,
+            zoom_factor=el.zoom_factor,
+            font_family=getattr(el, "font_family", "Segoe UI") or "Segoe UI",
+            font_bold=getattr(el, "font_bold", True),
+            font_italic=getattr(el, "font_italic", False),
+            rotation_deg=float(getattr(el, "rotation_deg", 0.0) or 0.0),
+            text_style=str(getattr(el, "text_style", "pill") or "pill"),
+            text_align=str(getattr(el, "text_align", "left") or "left"),
+            opacity=float(getattr(el, "opacity", 1.0) if getattr(el, "opacity", None) is not None else 1.0),
+            bg_opacity=float(getattr(el, "bg_opacity", 0.85) if getattr(el, "bg_opacity", None) is not None else 0.85),
+            shape_filled=bool(getattr(el, "shape_filled", False)),
+            line_style=str(getattr(el, "line_style", "arrow") or "arrow"),
+            dash_style=str(getattr(el, "dash_style", "solid") or "solid"),
+            sticker_id=str(getattr(el, "sticker_id", "") or ""),
+            obscure_mode=str(getattr(el, "obscure_mode", "brush") or "brush"),
+            obscure_strength=int(getattr(el, "obscure_strength", 55) or 55),
+        )
+
+    def _rebuild_master_from_session_base(self, elements: list[MarkupElement]) -> np.ndarray | None:
+        """Re-composites master_np_rgb from the pre-markup session snapshot plus the given elements."""
+        base = getattr(self, "_markup_session_start_master", None)
+        if base is None:
+            return None
+        canvas = base.copy()
+        for elem in elements:
+            baked_el = self._shift_markup_element_for_crop(elem)
+            if flatten_markup_element_roi(canvas, baked_el) is None:
+                canvas = flatten_markup_onto_rgb_image(canvas, [baked_el])
+        return canvas
+
+    def _select_markup_element_at(self, sp: QPointF) -> bool:
+        """Hit-tests session markup elements top-to-bottom and detaches the hit element for editing."""
+        if not getattr(self, "_markup_elements", None) or self.master_np_rgb is None:
+            return False
+        self._finalize_movable_markup()
+        view_scale = max(0.05, float(self.graphics_view.transform().m11()))
+        pad = min(24.0, max(8.0, 10.0 / view_scale))
+
+        hit_idx: int | None = None
+        # Pass 1: exact inside-bounds hit (topmost first)
+        for idx in range(len(self._markup_elements) - 1, -1, -1):
+            el = self._markup_elements[idx]
+            bounds = get_markup_element_bounds(el)
+            if not bounds.isNull() and bounds.contains(sp):
+                hit_idx = idx
+                break
+        # Pass 2: padded hit for thin lines/arrows
+        if hit_idx is None:
+            for idx in range(len(self._markup_elements) - 1, -1, -1):
+                el = self._markup_elements[idx]
+                bounds = get_markup_element_bounds(el)
+                if not bounds.isNull() and bounds.adjusted(-pad, -pad, pad, pad).contains(sp):
+                    hit_idx = idx
+                    break
+
+        if hit_idx is None:
+            self.markup_selection_changed.emit(False, False)
+            return False
+
+        el = self._markup_elements.pop(hit_idx)
+        base_without = self._rebuild_master_from_session_base(self._markup_elements)
+        self._markup_elements.append(el)
+        if base_without is None:
+            self.markup_selection_changed.emit(False, False)
+            return False
+
+        # Re-render base_without + el on top so z-order matches the active selection
+        rebuilt = base_without.copy()
+        baked_el = self._shift_markup_element_for_crop(el)
+        roi_res = flatten_markup_element_roi(rebuilt, baked_el)
+        if roi_res is None:
+            rebuilt = flatten_markup_onto_rgb_image(rebuilt, [baked_el])
+        self.master_np_rgb = rebuilt
+        mh, mw = self.master_np_rgb.shape[:2]
+        self._refresh_viewport_after_master_roi((0, mh, 0, mw))
+
+        self._active_movable_element = el
+        self._active_movable_before_master = base_without
+        self._active_movable_before_roi = None
+        self._active_movable_from_reselect = True
+        self._active_movable_reselect_orig_master = rebuilt.copy()
+        self._update_active_markup_selection_handles()
+        self.markup_rotation_changed.emit(float(getattr(el, "rotation_deg", 0.0) or 0.0))
+        self.markup_selection_changed.emit(True, el.kind == "text")
+        return True
+
+    def _clone_markup_element(self, el: MarkupElement) -> MarkupElement:
+        return MarkupElement(
+            kind=el.kind,
+            rect=QRectF(el.rect) if el.rect is not None else None,
+            start_pt=QPointF(el.start_pt) if el.start_pt is not None else None,
+            end_pt=QPointF(el.end_pt) if el.end_pt is not None else None,
+            points=[QPointF(pt) for pt in el.points],
+            color=QColor(el.color) if el.color is not None else QColor(17, 17, 17),
+            bg_color=QColor(el.bg_color) if el.bg_color is not None else None,
+            stroke_width=el.stroke_width,
+            text=el.text,
+            zoom_factor=el.zoom_factor,
+            font_family=getattr(el, "font_family", "Segoe UI") or "Segoe UI",
+            font_bold=getattr(el, "font_bold", True),
+            font_italic=getattr(el, "font_italic", False),
+            rotation_deg=float(getattr(el, "rotation_deg", 0.0) or 0.0),
+            text_style=str(getattr(el, "text_style", "pill") or "pill"),
+            text_align=str(getattr(el, "text_align", "left") or "left"),
+            opacity=float(getattr(el, "opacity", 1.0) if getattr(el, "opacity", None) is not None else 1.0),
+            bg_opacity=float(getattr(el, "bg_opacity", 0.85) if getattr(el, "bg_opacity", None) is not None else 0.85),
+            shape_filled=bool(getattr(el, "shape_filled", False)),
+            line_style=str(getattr(el, "line_style", "arrow") or "arrow"),
+            dash_style=str(getattr(el, "dash_style", "solid") or "solid"),
+            sticker_id=str(getattr(el, "sticker_id", "") or ""),
+            obscure_mode=str(getattr(el, "obscure_mode", "brush") or "brush"),
+            obscure_strength=int(getattr(el, "obscure_strength", 55) or 55),
+        )
+
+    def copy_active_markup_element(self) -> bool:
+        """Copies the currently selected markup item to the session markup clipboard (Ctrl+C)."""
+        el = getattr(self, "_active_movable_element", None)
+        if el is None:
+            return False
+        self._markup_clipboard_element = self._clone_markup_element(el)
+        self._markup_paste_offset_count = 0
+        self._show_status("Markup item copied — press Ctrl+V to paste", 2500)
+        return True
+
+    def paste_markup_element(self) -> MarkupElement | None:
+        """Pastes the last copied markup item onto the canvas with a slight offset (Ctrl+V)."""
+        clip = getattr(self, "_markup_clipboard_element", None)
+        if clip is None or self.master_np_rgb is None:
+            return None
+        self._markup_paste_offset_count = getattr(self, "_markup_paste_offset_count", 0) + 1
+        step = 24.0 * self._markup_paste_offset_count
+        pasted = self._clone_markup_element(clip)
+        translate_markup_element(pasted, step, step)
+        self._finalize_movable_markup()
+        self._commit_single_markup_element(pasted, "Paste Markup Item")
+        return pasted
+
+    def delete_active_markup_element(self) -> bool:
+        """Deletes the currently selected markup element (undoable via Ctrl+Z)."""
+        el = getattr(self, "_active_movable_element", None)
+        if el is None or self.master_np_rgb is None:
+            return False
+        before_del = self.master_np_rgb.copy()
+        before_els = list(self._markup_elements)
+        if el in self._markup_elements:
+            self._markup_elements.remove(el)
+        if getattr(self, "_markup_preview_items", None):
+            it = self._markup_preview_items.pop()
+            self._remove_scene_item(it)
+        self._restore_active_movable_before_state()
+        mh, mw = self.master_np_rgb.shape[:2]
+        self._refresh_viewport_after_master_roi((0, mh, 0, mw))
+        after_del = self.master_np_rgb.copy()
+        cmd = PixelArrayUndoCommand(self, before_del, after_del, "Delete Markup Item")
+        cmd._before_markup_elements = before_els
+        cmd._after_markup_elements = list(self._markup_elements)
+        self.undo_stack.push(cmd)
+        self._finalize_movable_markup()
+        self.update_revert_state()
+        if self.current_media_id is not None:
+            self.pixel_edit_saved.emit(self.current_media_id, "")
+        return True
+
+    def duplicate_active_markup_element(self) -> MarkupElement | None:
+        """Clones the currently selected markup element with a slight offset and selects the clone."""
+        el = getattr(self, "_active_movable_element", None)
+        if el is None or self.master_np_rgb is None:
+            return None
+        dup = self._clone_markup_element(el)
+        translate_markup_element(dup, 24.0, 24.0)
+        self._finalize_movable_markup()
+        self._commit_single_markup_element(dup, "Duplicate Markup Item")
+        return dup
+
+    def edit_active_markup_text(self) -> bool:
+        """Reopens the inline text editor for the currently selected Text or Stamp markup item."""
+        el = getattr(self, "_active_movable_element", None)
+        if el is None or el.kind != "text" or el.rect is None:
+            return False
+        edit_pt = QPointF(el.rect.topLeft())
+        edit_txt = str(el.text or "")
+        edit_rot = float(getattr(el, "rotation_deg", 0.0) or 0.0)
+        if hasattr(self, "markup_toolbar"):
+            self.markup_toolbar.set_tool("text")
+            self.markup_toolbar.set_stroke_width(el.stroke_width)
+            self.markup_toolbar.set_primary_color(el.color)
+            if el.bg_color is not None:
+                self.markup_toolbar.set_secondary_color(el.bg_color)
+            self.markup_toolbar.set_font_family(getattr(el, "font_family", "Segoe UI"))
+            self.markup_toolbar.set_text_bold(getattr(el, "font_bold", True))
+            self.markup_toolbar.set_text_italic(getattr(el, "font_italic", False))
+            self.markup_toolbar.set_text_style(getattr(el, "text_style", "pill"))
+            self.markup_toolbar.set_text_align(getattr(el, "text_align", "left"))
+            self.markup_toolbar.set_opacity(getattr(el, "opacity", 1.0))
+        if el in self._markup_elements:
+            self._markup_elements.remove(el)
+        if getattr(self, "_markup_preview_items", None):
+            it = self._markup_preview_items.pop()
+            self._remove_scene_item(it)
+        self._restore_active_movable_before_state()
+        self._finalize_movable_markup()
+        self._open_inline_text_editor(edit_pt, initial_text=edit_txt, preserve_rotation=edit_rot)
+        return True
 
     def _commit_magnifier_callout(self, p_src: QPointF, p_tgt: QPointF) -> None:
         """Commits a 2-point circular loupe callout with connecting rays from p_src to p_tgt."""
         if self.master_np_rgb is None:
             return
         col = getattr(self.markup_toolbar, "current_color", QColor(230, 40, 40))
-        width = getattr(self.markup_toolbar, "stroke_width", 4)
+        width = getattr(self.markup_toolbar, "stroke_width", 16)
         zoom = getattr(self.markup_toolbar, "magnifier_zoom", 2.5)
         rad = self._get_magnifier_scene_radius()
 
@@ -5886,18 +7116,32 @@ class SingleMediaViewer(QWidget):
             self._magnify_rays_item.setPen(QPen(ring_col, max(1.5, w * 0.4), Qt.SolidLine, Qt.RoundCap))
             self._magnify_rays_item.setVisible(bool(tangents))
 
-            # 3. Magnified loupe at target cursor position
+            # 3. Magnified loupe at target cursor position (cached per source/radius/zoom for 120 FPS drag!)
             sample_src = p_src
             if self.current_recipe.crop_rect is not None:
                 cl, ct, _, _ = self.current_recipe.crop_rect
                 sample_src = QPointF(p_src.x() + cl, p_src.y() + ct)
-            loupe_pm = create_magnifier_pixmap(self.master_np_rgb, sample_src, rad, zoom_factor=zoom, ring_color=ring_col)
+            cache_key = (
+                id(self.master_np_rgb),
+                round(sample_src.x(), 1),
+                round(sample_src.y(), 1),
+                round(rad, 1),
+                round(zoom, 2),
+                ring_col.rgba(),
+            )
+            cached = getattr(self, "_magnify_cached_loupe", None)
+            if cached is not None and cached[0] == cache_key and not cached[1].isNull():
+                loupe_pm = cached[1]
+            else:
+                loupe_pm = create_magnifier_pixmap(self.master_np_rgb, sample_src, rad, zoom_factor=zoom, ring_color=ring_col)
+                self._magnify_cached_loupe = (cache_key, loupe_pm)
             if getattr(self, "_magnify_hover_item", None) is None:
                 self._magnify_hover_item = QGraphicsPixmapItem()
                 self._magnify_hover_item.setZValue(9998)
             if self._magnify_hover_item.scene() is not self.scene:
                 self.scene.addItem(self._magnify_hover_item)
-            self._magnify_hover_item.setPixmap(loupe_pm)
+            if self._magnify_hover_item.pixmap().cacheKey() != loupe_pm.cacheKey():
+                self._magnify_hover_item.setPixmap(loupe_pm)
             offset = loupe_pm.width() / 2.0
             self._magnify_hover_item.setPos(p_tgt.x() - offset, p_tgt.y() - offset)
             self._magnify_hover_item.setVisible(True)
@@ -5922,22 +7166,115 @@ class SingleMediaViewer(QWidget):
     def _remove_scene_item(self, item: Any) -> None:
         if item is not None:
             try:
-                self.scene.removeItem(item)
+                if item.scene() is self.scene:
+                    self.scene.removeItem(item)
             except Exception:
                 pass
 
+    def _cleanup_inline_text_rotate_gizmo(self) -> None:
+        for attr in ("_inline_text_rotate_stem", "_inline_text_rotate_handle"):
+            item = getattr(self, attr, None)
+            if item is not None:
+                self._remove_scene_item(item)
+                setattr(self, attr, None)
+
+    def _update_inline_text_rotate_gizmo(self) -> None:
+        """Draws a live rotation knob above the active inline text input so users can rotate immediately."""
+        inp = getattr(self, "_inline_text_input", None)
+        if inp is None or not getattr(self, "is_markup_mode", False):
+            self._cleanup_inline_text_rotate_gizmo()
+            return
+        g = inp.geometry()
+        top_mid_vp = QPoint(int(round(g.center().x())), int(round(g.top())))
+        top_mid = self.graphics_view.mapToScene(top_mid_vp)
+        tr = self.graphics_view.transform()
+        scale = max(0.05, float(tr.m11()))
+        stem_len = 26.0 / scale
+        knob_c = QPointF(top_mid.x(), top_mid.y() - stem_len)
+        knob_r = 6.0 / scale
+        self._inline_text_rotate_knob_scene = knob_c
+
+        s_pen = QPen(QColor(56, 144, 240, 230), 1.5)
+        s_pen.setCosmetic(True)
+        if getattr(self, "_inline_text_rotate_stem", None) is None:
+            stem = QGraphicsLineItem(top_mid.x(), top_mid.y(), knob_c.x(), knob_c.y())
+            stem.setPen(s_pen)
+            stem.setZValue(9999)
+            self.scene.addItem(stem)
+            self._inline_text_rotate_stem = stem
+        else:
+            self._inline_text_rotate_stem.setLine(top_mid.x(), top_mid.y(), knob_c.x(), knob_c.y())
+
+        knob_rect = QRectF(knob_c.x() - knob_r, knob_c.y() - knob_r, knob_r * 2.0, knob_r * 2.0)
+        if getattr(self, "_inline_text_rotate_handle", None) is None:
+            knob = QGraphicsEllipseItem(knob_rect)
+            knob.setPen(s_pen)
+            knob.setBrush(QBrush(QColor("#2563EB")))
+            knob.setZValue(10001)
+            self.scene.addItem(knob)
+            self._inline_text_rotate_handle = knob
+        else:
+            self._inline_text_rotate_handle.setRect(knob_rect)
+
+    def _hit_test_inline_rotate_knob(self, sp: QPointF) -> bool:
+        if getattr(self, "_inline_text_input", None) is None or getattr(self, "_inline_text_rotate_handle", None) is None:
+            return False
+        knob_c = getattr(self, "_inline_text_rotate_knob_scene", None)
+        if knob_c is None:
+            return False
+        scale = max(0.05, float(self.graphics_view.transform().m11()))
+        tol = 16.0 / scale
+        return math.hypot(sp.x() - knob_c.x(), sp.y() - knob_c.y()) <= tol
+
+    def _hit_test_inline_text_border(
+        self, vp_pt: QPoint, *, outer_pad: int = 7, inner_pad: int = 8
+    ) -> bool:
+        """Return True when viewport point lies along the active inline text box's border ring."""
+        inp = getattr(self, "_inline_text_input", None)
+        if inp is None or not inp.isVisible():
+            return False
+        g = inp.geometry()
+        in_pad = min(inner_pad, max(4, g.width() // 4), max(4, g.height() // 4))
+        outer_rect = g.adjusted(-outer_pad, -outer_pad, outer_pad, outer_pad)
+        inner_rect = g.adjusted(in_pad, in_pad, -in_pad, -in_pad)
+        return outer_rect.contains(vp_pt) and not inner_rect.contains(vp_pt)
+
+    def _move_inline_text_box_to(self, new_vp_pos: QPoint) -> None:
+        """Reposition the active uncommitted inline text box and keep scene coords & rotate knob synced."""
+        inp = getattr(self, "_inline_text_input", None)
+        if inp is None:
+            return
+        vp_rect = self.graphics_view.viewport().rect()
+        min_x = min(4, -inp.width() + 24)
+        max_x = max(4, vp_rect.width() - 24)
+        max_y = max(4, vp_rect.height() - 24)
+        clamped = QPoint(
+            max(min_x, min(max_x, int(new_vp_pos.x()))),
+            max(4, min(max_y, int(new_vp_pos.y()))),
+        )
+        inp.move(clamped)
+        self._inline_text_scene_pos = self.graphics_view.mapToScene(inp.pos())
+        self._update_inline_text_rotate_gizmo()
+        self.graphics_view.viewport().update()
+
     def _commit_inline_text(self) -> None:
         """Commits the active on-canvas inline text editor directly onto the photo."""
+        self._is_dragging_inline_text = False
         if getattr(self, "_inline_text_input", None) is None:
+            self._cleanup_inline_text_rotate_gizmo()
             return
         widget = self._inline_text_input
         txt = widget.toPlainText().strip() if hasattr(widget, "toPlainText") else widget.text().strip()
         sp = getattr(self, "_inline_text_scene_pos", None)
-        width = getattr(self.markup_toolbar, "stroke_width", 4)
+        width = getattr(self.markup_toolbar, "stroke_width", 16)
         col = getattr(self.markup_toolbar, "current_color", QColor(230, 40, 40))
 
         sec_col = getattr(self.markup_toolbar, "secondary_color", QColor(20, 25, 35))
+        preserved_rot = float(getattr(self, "_inline_text_preserved_rotation", 0.0) or 0.0)
+        self._inline_text_preserved_rotation = 0.0
 
+        self._cleanup_inline_text_rotate_gizmo()
+        self._inline_text_input.hide()
         self._inline_text_input.deleteLater()
         self._inline_text_input = None
         self._inline_text_scene_pos = None
@@ -5950,16 +7287,26 @@ class SingleMediaViewer(QWidget):
                 color=col,
                 bg_color=sec_col,
                 stroke_width=width,
+                font_family=getattr(self.markup_toolbar, "font_family", "Segoe UI") or "Segoe UI",
                 font_bold=getattr(self.markup_toolbar, "is_text_bold", True),
                 font_italic=getattr(self.markup_toolbar, "is_text_italic", False),
+                rotation_deg=preserved_rot,
+                text_style=getattr(self.markup_toolbar, "text_style", "pill"),
+                text_align=getattr(self.markup_toolbar, "text_align", "left"),
+                opacity=float(getattr(self.markup_toolbar, "opacity", 1.0)),
+                bg_opacity=float(getattr(self.markup_toolbar, "bg_opacity", 0.85)),
             )
             self._commit_single_markup_element(el, "Markup Text")
 
     def _cancel_inline_text(self) -> None:
+        self._is_dragging_inline_text = False
+        self._cleanup_inline_text_rotate_gizmo()
         if getattr(self, "_inline_text_input", None) is not None:
+            self._inline_text_input.hide()
             self._inline_text_input.deleteLater()
             self._inline_text_input = None
             self._inline_text_scene_pos = None
+            self._inline_text_preserved_rotation = 0.0
 
     def _adjust_inline_text_size(self) -> None:
         """Dynamically scales the on-canvas inline text editor to match typed multi-line contents."""
@@ -5976,16 +7323,21 @@ class SingleMediaViewer(QWidget):
         line_h = fm.lineSpacing()
         doc = inp.document()
         doc.setTextWidth(-1)
-        w = max(200, int(math.ceil(doc.idealWidth())) + 2 * screen_pad_x + 24)
-        h = max(line_h + 2 * screen_pad_y + 12, int(math.ceil(doc.size().height())) + 2 * screen_pad_y + 10)
+        style = str(getattr(inp, "_effect_style", "pill") or "pill").lower()
+        extra = 0
+        if style == "shadow":
+            extra = int(math.ceil(float(getattr(inp, "_shadow_off", 2.0) or 2.0) * 1.6)) + 2
+        elif style == "outline":
+            extra = int(math.ceil(float(getattr(inp, "_stroke_w", 3.0) or 3.0) * 0.5)) + 2
+        w = max(200, int(math.ceil(doc.idealWidth())) + 2 * screen_pad_x + 24 + extra)
+        h = max(line_h + 2 * screen_pad_y + 12 + extra, int(math.ceil(doc.size().height())) + 2 * screen_pad_y + 10 + extra)
         inp.resize(w, h)
+        self._update_inline_text_rotate_gizmo()
 
     def _commit_single_markup_element(self, el: MarkupElement, desc: str = "Markup") -> None:
         """Bakes a single markup element onto master_np_rgb and pushes to undo_stack."""
         if self.master_np_rgb is None or el is None:
             return
-
-        before = self.master_np_rgb.copy()
 
         # Shift elements if cropped
         if self.current_recipe.crop_rect is not None:
@@ -6001,18 +7353,40 @@ class SingleMediaViewer(QWidget):
                 stroke_width=el.stroke_width,
                 text=el.text,
                 zoom_factor=el.zoom_factor,
+                font_family=getattr(el, "font_family", "Segoe UI") or "Segoe UI",
                 font_bold=getattr(el, "font_bold", True),
                 font_italic=getattr(el, "font_italic", False),
+                rotation_deg=float(getattr(el, "rotation_deg", 0.0) or 0.0),
+                text_style=str(getattr(el, "text_style", "pill") or "pill"),
+                text_align=str(getattr(el, "text_align", "left") or "left"),
+                opacity=float(getattr(el, "opacity", 1.0) if getattr(el, "opacity", None) is not None else 1.0),
+                bg_opacity=float(getattr(el, "bg_opacity", 0.85) if getattr(el, "bg_opacity", None) is not None else 0.85),
+                shape_filled=bool(getattr(el, "shape_filled", False)),
+                line_style=str(getattr(el, "line_style", "arrow") or "arrow"),
+                sticker_id=str(getattr(el, "sticker_id", "") or ""),
+                obscure_mode=str(getattr(el, "obscure_mode", "brush") or "brush"),
+                obscure_strength=int(getattr(el, "obscure_strength", 55) or 55),
             )
             element_to_bake = shifted
         else:
             element_to_bake = el
 
-        # Bake directly onto RGB master without redundant RGB <-> BGR roundtrips
-        self.master_np_rgb = flatten_markup_onto_rgb_image(self.master_np_rgb, [element_to_bake])
+        # Fast ROI-only bake when possible (avoids 72MB full-frame copy & full QImage conversion)
+        roi_result = flatten_markup_element_roi(self.master_np_rgb, element_to_bake)
+        before_full: np.ndarray | None = None
+        if roi_result is not None:
+            bbox, before_roi, after_roi = roi_result
+            cmd = PixelArrayUndoCommand.from_roi_patch(self, bbox, before_roi, after_roi, desc)
+        else:
+            before_full = self.master_np_rgb.copy()
+            self.master_np_rgb = flatten_markup_onto_rgb_image(self.master_np_rgb, [element_to_bake])
+            cmd = PixelArrayUndoCommand(self, before_full, self.master_np_rgb.copy(), desc)
 
         self._session_markup_command_count = getattr(self, "_session_markup_command_count", 0) + 1
+        before_els = list(self._markup_elements)
         self._markup_elements.append(el)
+        cmd._before_markup_elements = before_els
+        cmd._after_markup_elements = list(self._markup_elements)
 
         # Record dummy preview item for test assertions
         if el.kind in ("pixelate", "blur", "magnifier", "magnify"):
@@ -6024,31 +7398,31 @@ class SingleMediaViewer(QWidget):
             p_item = QGraphicsPathItem()
             self._markup_preview_items.append(p_item)
 
-        cmd = PixelArrayUndoCommand(self, before, self.master_np_rgb.copy(), desc)
         self.undo_stack.push(cmd)
         if hasattr(self.markup_toolbar, "btn_undo"):
             self.markup_toolbar.btn_undo.setEnabled(True)
-        self._update_display_proxy()
-        self._render_current_recipe()
+        if roi_result is not None:
+            self._refresh_viewport_after_master_roi(roi_result[0])
+        else:
+            self._update_display_proxy()
+            self._render_current_recipe()
         self.update_revert_state()
         if self.current_media_id is not None:
             self.pixel_edit_saved.emit(self.current_media_id, "")
 
-        if el.kind not in ("pen", "highlighter"):
+        is_obscure_brush = (
+            el.kind in ("blur", "pixelate") and str(getattr(el, "obscure_mode", "box") or "box") == "brush"
+        )
+        if el.kind not in ("pen", "highlighter") and not is_obscure_brush:
             self._active_movable_element = el
-            self._active_movable_before_master = before.copy()
-            if getattr(self, "_pending_selection_box_item", None) is not None:
-                self._remove_scene_item(self._pending_selection_box_item)
-                self._pending_selection_box_item = None
-            bounds = get_markup_element_bounds(el)
-            if not bounds.isEmpty():
-                box_item = QGraphicsRectItem(bounds)
-                pen = QPen(QColor(56, 144, 240, 220), 1.5, Qt.DashLine)
-                box_item.setPen(pen)
-                box_item.setBrush(Qt.NoBrush)
-                box_item.setZValue(9999)
-                self.scene.addItem(box_item)
-                self._pending_selection_box_item = box_item
+            if roi_result is not None:
+                self._active_movable_before_roi = (roi_result[0], roi_result[1])
+                self._active_movable_before_master = None
+            else:
+                self._active_movable_before_roi = None
+                self._active_movable_before_master = before_full.copy() if before_full is not None else None
+            self._update_active_markup_selection_handles()
+            self.markup_selection_changed.emit(True, el.kind == "text")
 
     def _clamp_point_to_image(self, pt: QPointF) -> QPointF:
         if self.master_np_rgb is not None:
@@ -6060,6 +7434,385 @@ class SingleMediaViewer(QWidget):
         cx = max(0.0, min(float(w), pt.x()))
         cy = max(0.0, min(float(h), pt.y()))
         return QPointF(cx, cy)
+
+    def insert_markup_sticker(self, sticker_id: str, scene_pos: QPointF | None = None) -> MarkupElement | None:
+        """Drops a movable, resizable, rotatable vector sticker onto the photo."""
+        if not getattr(self, "is_markup_mode", False):
+            self.set_markup_mode(True)
+        if self.master_np_rgb is None:
+            return None
+        if getattr(self, "_inline_text_input", None) is not None:
+            self._commit_inline_text()
+        self._finalize_movable_markup()
+
+        sid = (sticker_id or "heart").strip().lower()
+        if sid not in ALL_STICKER_IDS:
+            sid = "heart"
+        h, w = self.master_np_rgb.shape[:2]
+        side = max(48.0, min(float(min(w, h)) * 0.22, 220.0))
+        if scene_pos is not None:
+            cx, cy = float(scene_pos.x()), float(scene_pos.y())
+        else:
+            vp_c = self.graphics_view.mapToScene(self.graphics_view.viewport().rect().center())
+            if QRectF(0.0, 0.0, float(w), float(h)).contains(vp_c):
+                cx, cy = float(vp_c.x()), float(vp_c.y())
+            else:
+                cx, cy = float(w) * 0.5, float(h) * 0.5
+
+        rx = max(8.0, min(float(w) - side - 8.0, cx - side * 0.5))
+        ry = max(8.0, min(float(h) - side - 8.0, cy - side * 0.5))
+        opacity = float(getattr(self.markup_toolbar, "opacity", 1.0)) if hasattr(self, "markup_toolbar") else 1.0
+
+        el = MarkupElement(
+            kind="sticker",
+            rect=QRectF(rx, ry, side, side),
+            sticker_id=sid,
+            stroke_width=4,
+            opacity=opacity,
+        )
+        self._commit_single_markup_element(el, f"Markup Sticker ({sid.title()})")
+        return el
+
+    def resolve_markup_stamp_text(self, stamp_kind: str, custom_text: str = "") -> str:
+        """Resolves editable preview/stamp text for location, date, camera, or watermark stamps."""
+        kind = (stamp_kind or "watermark").strip().lower()
+        custom = str(custom_text or "").strip()
+        if custom:
+            if kind == "watermark":
+                return custom if custom.startswith("©") else f"© {custom}"
+            return custom
+
+        rec: dict = {}
+        repo = getattr(self, "catalog_repo", None) or getattr(self, "repo", None)
+        if repo is not None and self.current_media_id is not None:
+            try:
+                got = repo.get_media_by_id(self.current_media_id)
+                if got:
+                    rec = dict(got)
+            except Exception:
+                rec = {}
+        if not rec and isinstance(getattr(self, "_current_record", None), dict):
+            rec = dict(self._current_record)
+
+        if kind == "location":
+            city = str(rec.get("location_city") or "").strip()
+            country = str(rec.get("location_country") or "").strip()
+            loc_name = str(rec.get("location_name") or "").strip()
+            parts = [p for p in (city, country) if p]
+            label = ", ".join(parts) if parts else loc_name
+            if not label:
+                lat = rec.get("lat") if rec.get("lat") is not None else rec.get("latitude")
+                lon = rec.get("lon") if rec.get("lon") is not None else rec.get("longitude")
+                if lat is not None and lon is not None:
+                    try:
+                        from src.core.geotag_resolver import reverse_geocode
+
+                        db_eng = getattr(getattr(self, "main_window", None), "engine", None)
+                        geo = reverse_geocode(float(lat), float(lon), db_engine=db_eng) or {}
+                        g_city = str(geo.get("name") or geo.get("admin2") or "").strip()
+                        g_country = str(geo.get("country") or "").strip()
+                        g_parts = [p for p in (g_city, g_country) if p]
+                        label = ", ".join(g_parts) or str(geo.get("formatted_address") or "").strip()
+                    except Exception:
+                        label = ""
+            return f"📍 {label or 'Location'}"
+        if kind == "date":
+            import datetime
+            dt_val = rec.get("date_taken") or rec.get("mtime")
+            label = ""
+            if isinstance(dt_val, (int, float)) and dt_val > 0:
+                try:
+                    label = datetime.datetime.fromtimestamp(float(dt_val)).strftime("%d %b %Y")
+                except Exception:
+                    label = ""
+            elif isinstance(dt_val, str) and dt_val.strip():
+                label = dt_val.strip()[:10]
+            if not label and getattr(self, "current_file_path", None):
+                try:
+                    with Image.open(self.current_file_path) as im_dt:
+                        exif = im_dt.getexif()
+                        dt_raw = str(exif.get(0x9003) or exif.get(0x0132) or "").strip()
+                        if len(dt_raw) >= 10:
+                            parsed = datetime.datetime.strptime(dt_raw[:10], "%Y:%m:%d")
+                            label = parsed.strftime("%d %b %Y")
+                except Exception:
+                    pass
+            return label or datetime.date.today().strftime("%d %b %Y")
+        if kind == "camera":
+            cam = str(rec.get("camera_model") or "").strip()
+            parts = [cam] if cam else []
+            fl = rec.get("focal_length")
+            if fl:
+                try:
+                    parts.append(f"{int(round(float(fl)))}mm")
+                except Exception:
+                    pass
+            fn = rec.get("f_number")
+            if fn:
+                try:
+                    parts.append(f"f/{float(fn):.1f}")
+                except Exception:
+                    pass
+            iso = rec.get("iso")
+            if iso:
+                try:
+                    parts.append(f"ISO {int(iso)}")
+                except Exception:
+                    pass
+            return " • ".join(parts) if parts else "Camera EXIF"
+        if kind == "watermark":
+            from PySide6.QtCore import QSettings
+
+            saved_wm = str(
+                QSettings("PhotoGallery64", "PhotoGallery64").value("markup/watermark_text", "") or ""
+            ).strip()
+            if saved_wm:
+                return saved_wm if saved_wm.startswith("©") else f"© {saved_wm}"
+            author = str(rec.get("author") or "").strip()
+            return f"© {author}" if author else "© Copyright"
+        return "Stamp"
+
+    def insert_markup_stamp(self, stamp_kind: str, custom_text: str = "") -> MarkupElement | None:
+        """Inserts a movable, rotatable text stamp derived from catalog/EXIF/reverse-geocoded metadata or custom text."""
+        if not getattr(self, "is_markup_mode", False):
+            self.set_markup_mode(True)
+        if self.master_np_rgb is None:
+            return None
+        if getattr(self, "_inline_text_input", None) is not None:
+            self._commit_inline_text()
+        self._finalize_movable_markup()
+
+        h, w = self.master_np_rgb.shape[:2]
+        stroke_w = max(4, min(28, int(round(min(w, h) / 72.0))))
+        col = QColor(255, 255, 255)
+        bg_col = QColor(20, 25, 35)
+        tb = getattr(self, "markup_toolbar", None)
+        style = str(getattr(tb, "text_style", "pill") or "pill") if tb is not None else "pill"
+        opacity = float(getattr(tb, "opacity", 1.0)) if tb is not None else 1.0
+        pos = QPointF(max(16.0, w * 0.05), max(16.0, h * 0.06))
+
+        kind = (stamp_kind or "watermark").strip().lower()
+        stamp_text = self.resolve_markup_stamp_text(kind, custom_text)
+        if kind == "watermark":
+            if style == "pill":
+                style = "shadow"
+            if abs(opacity - 1.0) < 1e-3:
+                opacity = 0.70
+            stroke_w = max(4, int(round(stroke_w * 0.85)))
+            pos = QPointF(max(16.0, w * 0.62), max(16.0, h * 0.86))
+
+        if hasattr(self, "markup_toolbar"):
+            self.markup_toolbar.set_tool("text")
+            self.markup_toolbar.set_text_style(style)
+            self.markup_toolbar.set_opacity(opacity)
+
+        el = MarkupElement(
+            kind="text",
+            rect=QRectF(pos.x(), pos.y(), 160, 36),
+            text=stamp_text,
+            color=col,
+            bg_color=bg_col,
+            stroke_width=stroke_w,
+            font_family=getattr(self.markup_toolbar, "font_family", "Segoe UI") or "Segoe UI",
+            font_bold=True,
+            font_italic=False,
+            rotation_deg=0.0,
+            text_style=style,
+            text_align="left",
+            opacity=opacity,
+            bg_opacity=float(getattr(self.markup_toolbar, "bg_opacity", 0.85) if hasattr(self, "markup_toolbar") else 0.85),
+        )
+        # Clamp inside right/bottom edge so stamp never spawns clipped off-image
+        bounds = get_markup_element_bounds(el)
+        if bounds.right() > w - 12.0:
+            el.rect.moveLeft(max(8.0, float(w) - bounds.width() - 12.0))
+        if bounds.bottom() > h - 12.0:
+            el.rect.moveTop(max(8.0, float(h) - bounds.height() - 12.0))
+
+        self._commit_single_markup_element(el, f"Markup Stamp ({kind.title()})")
+        return el
+
+    def _open_inline_text_editor(
+        self,
+        sp: QPointF,
+        initial_text: str = "",
+        preserve_rotation: float = 0.0,
+    ) -> None:
+        if getattr(self, "_inline_text_input", None) is not None:
+            self._commit_inline_text()
+
+        vp_pt = self.graphics_view.mapFromScene(sp)
+        view_scale = self.graphics_view.transform().m11()
+        if abs(view_scale) < 1e-4:
+            view_scale = 1.0
+
+        width = getattr(self.markup_toolbar, "stroke_width", 16)
+        master_font_pt = max(10, int(round(width * 2.2)))
+        screen_font_pt = max(9, int(round(master_font_pt * view_scale)))
+        screen_pad_x = max(8, int(round(12.0 * view_scale)))
+        screen_pad_y = max(4, int(round(6.0 * view_scale)))
+        font_family = str(getattr(self.markup_toolbar, "font_family", "Segoe UI") or "Segoe UI")
+        is_bold = getattr(self.markup_toolbar, "is_text_bold", True)
+        is_italic = getattr(self.markup_toolbar, "is_text_italic", False)
+
+        viewer_ref = self
+
+        class _InlineTextEdit(QTextEdit):
+            returnPressed = Signal()
+
+            def __init__(self, parent_vp: Any) -> None:
+                super().__init__(parent_vp)
+                self._effect_style: str = "pill"
+                self._outline_col: QColor = QColor(17, 24, 39, 245)
+                self._stroke_w: float = 3.0
+                self._shadow_off: float = 2.0
+                self.setMouseTracking(True)
+                self.viewport().setMouseTracking(True)
+                self.installEventFilter(self)
+                self.viewport().installEventFilter(self)
+                self.textChanged.connect(lambda: self.viewport().update())
+                self.cursorPositionChanged.connect(lambda: self.viewport().update())
+
+            def paintEvent(self, event: Any) -> None:
+                style = str(getattr(self, "_effect_style", "pill") or "pill").lower()
+                if style in ("outline", "shadow") and self.toPlainText():
+                    p = QPainter(self.viewport())
+                    p.setRenderHint(QPainter.Antialiasing, True)
+                    p.setRenderHint(QPainter.TextAntialiasing, True)
+                    p.translate(-self.horizontalScrollBar().value(), -self.verticalScrollBar().value())
+                    doc = self.document()
+                    doc_layout = doc.documentLayout()
+                    font = self.font()
+                    block = doc.begin()
+                    while block.isValid():
+                        br = doc_layout.blockBoundingRect(block)
+                        layout = block.layout()
+                        if layout is not None:
+                            btxt = block.text()
+                            for i in range(layout.lineCount()):
+                                line = layout.lineAt(i)
+                                seg = btxt[line.textStart():line.textStart() + line.textLength()]
+                                if not seg:
+                                    continue
+                                lp = line.position()
+                                lx = br.left() + line.naturalTextRect().left()
+                                ly = br.top() + lp.y() + line.ascent()
+                                if style == "outline":
+                                    t_path = QPainterPath()
+                                    t_path.addText(QPointF(lx, ly), font, seg)
+                                    p.setPen(QPen(self._outline_col, self._stroke_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                                    p.setBrush(Qt.NoBrush)
+                                    p.drawPath(t_path)
+                                elif style == "shadow":
+                                    off = self._shadow_off
+                                    p.setFont(font)
+                                    p.setPen(QPen(QColor(0, 0, 0, 155)))
+                                    p.drawText(QPointF(lx + off, ly + off), seg)
+                                    p.setPen(QPen(QColor(0, 0, 0, 75)))
+                                    p.drawText(QPointF(lx + off * 1.6, ly + off * 1.6), seg)
+                        block = block.next()
+                    p.end()
+                super().paintEvent(event)
+
+            def eventFilter(self, obj: Any, ev: Any) -> bool:
+                if viewer_ref._inline_text_input is self:
+                    etype = ev.type()
+                    if etype in (QEvent.MouseButtonPress, QEvent.MouseMove, QEvent.MouseButtonRelease):
+                        gv_vp = viewer_ref.graphics_view.viewport()
+                        vp_pt = obj.mapTo(gv_vp, ev.position().toPoint())
+                        if etype == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
+                            if viewer_ref._hit_test_inline_text_border(vp_pt):
+                                viewer_ref._is_dragging_inline_text = True
+                                viewer_ref._inline_text_drag_start_vp = vp_pt
+                                viewer_ref._inline_text_drag_orig_pos = self.pos()
+                                self.setCursor(Qt.SizeAllCursor)
+                                self.viewport().setCursor(Qt.SizeAllCursor)
+                                return True
+                        elif etype == QEvent.MouseMove:
+                            if getattr(viewer_ref, "_is_dragging_inline_text", False):
+                                delta = vp_pt - viewer_ref._inline_text_drag_start_vp
+                                viewer_ref._move_inline_text_box_to(viewer_ref._inline_text_drag_orig_pos + delta)
+                                self.setCursor(Qt.SizeAllCursor)
+                                self.viewport().setCursor(Qt.SizeAllCursor)
+                                return True
+                            on_border = viewer_ref._hit_test_inline_text_border(vp_pt)
+                            cur = Qt.SizeAllCursor if on_border else Qt.IBeamCursor
+                            self.setCursor(cur)
+                            self.viewport().setCursor(cur)
+                            if on_border:
+                                return True
+                        elif etype == QEvent.MouseButtonRelease and ev.button() == Qt.LeftButton:
+                            if getattr(viewer_ref, "_is_dragging_inline_text", False):
+                                viewer_ref._is_dragging_inline_text = False
+                                on_border = viewer_ref._hit_test_inline_text_border(vp_pt)
+                                cur = Qt.SizeAllCursor if on_border else Qt.IBeamCursor
+                                self.setCursor(cur)
+                                self.viewport().setCursor(cur)
+                                self.setFocus()
+                                return True
+                return super().eventFilter(obj, ev)
+
+            def keyPressEvent(self, e: Any) -> None:
+                if hasattr(e, "key") and e.key() in (Qt.Key_Return, Qt.Key_Enter):
+                    if not (e.modifiers() & (Qt.ShiftModifier | Qt.AltModifier)):
+                        self.returnPressed.emit()
+                        e.accept()
+                        return
+                super().keyPressEvent(e)
+
+        inp = _InlineTextEdit(self.graphics_view.viewport())
+        inp_font = QFont(font_family, screen_font_pt)
+        if is_bold:
+            inp_font.setBold(True)
+        if is_italic:
+            inp_font.setItalic(True)
+        inp.setFont(inp_font)
+        fm = QFontMetrics(inp_font)
+        line_h = fm.lineSpacing()
+
+        inp.setPlaceholderText("Type text note (Enter to commit, Shift+Enter for newline)...")
+        inp.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        inp.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        inp.setTabChangesFocus(True)
+        inp.document().setDocumentMargin(0)
+        if initial_text:
+            inp.setPlainText(initial_text)
+            inp.selectAll()
+        inp.move(max(4, vp_pt.x()), max(4, vp_pt.y()))
+        init_w = max(240, fm.horizontalAdvance("Type text note...") + 2 * screen_pad_x + 36)
+        init_h = max(38, line_h + 2 * screen_pad_y + 12)
+        inp.resize(init_w, init_h)
+        inp.textChanged.connect(self._adjust_inline_text_size)
+        inp.returnPressed.connect(self._commit_inline_text)
+        self._inline_text_input = inp
+        self._inline_text_scene_pos = sp
+        self._inline_text_preserved_rotation = float(preserve_rotation or 0.0)
+        self._update_inline_text_style()
+        inp.show()
+        inp.setFocus()
+        self._update_inline_text_rotate_gizmo()
+        self._markup_active = False
+
+    @staticmethod
+    def _constrain_markup_point(p1: QPointF, sp: QPointF, tool: str, obscure_mode: str = "box") -> QPointF:
+        """Applies Shift-drag aspect ratio (1:1 square shapes) or 45° angle snapping (lines)."""
+        if not (QApplication.keyboardModifiers() & Qt.ShiftModifier):
+            return sp
+        dx = sp.x() - p1.x()
+        dy = sp.y() - p1.y()
+        if tool in ALL_LINE_KINDS:
+            length = math.hypot(dx, dy)
+            if length < 1e-3:
+                return sp
+            ang = math.atan2(dy, dx)
+            snap_ang = round(ang / (math.pi / 4.0)) * (math.pi / 4.0)
+            return QPointF(p1.x() + math.cos(snap_ang) * length, p1.y() + math.sin(snap_ang) * length)
+        if tool in ALL_SHAPE_KINDS or (tool in ("blur", "pixelate") and obscure_mode == "box"):
+            side = max(abs(dx), abs(dy))
+            sx = 1.0 if dx >= 0 else -1.0
+            sy = 1.0 if dy >= 0 else -1.0
+            return QPointF(p1.x() + sx * side, p1.y() + sy * side)
+        return sp
 
     def _start_markup(self, sp: QPointF) -> None:
         if getattr(self, "_active_movable_element", None) is not None:
@@ -6074,7 +7827,18 @@ class SingleMediaViewer(QWidget):
             return
         tool = getattr(self.markup_toolbar, "active_tool", "pen")
         col = getattr(self.markup_toolbar, "current_color", QColor(230, 40, 40))
-        width = getattr(self.markup_toolbar, "stroke_width", 4)
+        width = getattr(self.markup_toolbar, "stroke_width", 16)
+        el_opacity = float(getattr(self.markup_toolbar, "opacity", 1.0))
+
+        if tool == "select":
+            if self._select_markup_element_at(sp):
+                el = getattr(self, "_active_movable_element", None)
+                if el is not None:
+                    self._is_moving_pending_markup = True
+                    self._markup_transform_mode = "move"
+                    self._move_markup_last_pt = sp
+                    self._begin_pending_markup_preview(el)
+            return
 
         if tool in ("magnify", "magnifier"):
             if getattr(self, "_magnify_source_pt", None) is None:
@@ -6090,76 +7854,7 @@ class SingleMediaViewer(QWidget):
             return
 
         elif tool == "text":
-            if getattr(self, "_inline_text_input", None) is not None:
-                self._commit_inline_text()
-
-            vp_pt = self.graphics_view.mapFromScene(sp)
-            view_scale = self.graphics_view.transform().m11()
-            if abs(view_scale) < 1e-4:
-                view_scale = 1.0
-
-            master_font_pt = max(10, int(round(width * 2.2)))
-            screen_font_pt = max(9, int(round(master_font_pt * view_scale)))
-            screen_pad_x = max(8, int(round(12.0 * view_scale)))
-            screen_pad_y = max(4, int(round(6.0 * view_scale)))
-            sec_col = getattr(self.markup_toolbar, "secondary_color", QColor(20, 25, 35))
-            if sec_col.alpha() == 0:
-                bg_qss = "background: transparent; border: 1.5px dashed rgba(56, 144, 240, 200);"
-            else:
-                bg_rgba = f"rgba({sec_col.red()}, {sec_col.green()}, {sec_col.blue()}, 220)"
-                bg_qss = f"background: {bg_rgba}; border: 1.5px solid #3890F0;"
-            is_bold = getattr(self.markup_toolbar, "is_text_bold", True)
-            is_italic = getattr(self.markup_toolbar, "is_text_italic", False)
-
-            class _InlineTextEdit(QTextEdit):
-                returnPressed = Signal()
-
-                def keyPressEvent(self, e: Any) -> None:
-                    if hasattr(e, "key") and e.key() in (Qt.Key_Return, Qt.Key_Enter):
-                        if not (e.modifiers() & (Qt.ShiftModifier | Qt.AltModifier)):
-                            self.returnPressed.emit()
-                            e.accept()
-                            return
-                    super().keyPressEvent(e)
-
-            inp = _InlineTextEdit(self.graphics_view.viewport())
-            inp_font = QFont("Segoe UI", screen_font_pt)
-            if is_bold:
-                inp_font.setBold(True)
-            if is_italic:
-                inp_font.setItalic(True)
-            inp.setFont(inp_font)
-            fm = QFontMetrics(inp_font)
-            line_h = fm.lineSpacing()
-
-            inp.setPlaceholderText("Type text note (Enter to commit, Shift+Enter for newline)...")
-            inp.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            inp.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            inp.setTabChangesFocus(True)
-            inp.document().setDocumentMargin(0)
-            inp.setStyleSheet(f"""
-                QTextEdit {{
-                    {bg_qss}
-                    color: {col.name()};
-                    border-radius: 6px;
-                    padding: {screen_pad_y}px {screen_pad_x}px;
-                    font-family: 'Segoe UI';
-                    font-size: {screen_font_pt}pt;
-                    font-weight: {'bold' if is_bold else 'normal'};
-                    font-style: {'italic' if is_italic else 'normal'};
-                }}
-            """)
-            inp.move(max(4, vp_pt.x()), max(4, vp_pt.y()))
-            init_w = max(240, fm.horizontalAdvance("Type text note...") + 2 * screen_pad_x + 36)
-            init_h = max(38, line_h + 2 * screen_pad_y + 12)
-            inp.resize(init_w, init_h)
-            inp.textChanged.connect(self._adjust_inline_text_size)
-            inp.returnPressed.connect(self._commit_inline_text)
-            inp.show()
-            inp.setFocus()
-            self._inline_text_input = inp
-            self._inline_text_scene_pos = sp
-            self._markup_active = False
+            self._open_inline_text_editor(sp)
             return
 
         if not hasattr(self, "_active_markup_scene_items"):
@@ -6178,16 +7873,18 @@ class SingleMediaViewer(QWidget):
 
         if tool == "pen":
             item = QGraphicsPathItem()
-            pen = QPen(col, max(1, width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            pen_col = QColor(col.red(), col.green(), col.blue(), 255)
+            pen = QPen(pen_col, max(1, width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
             item.setPen(pen)
             item.setBrush(Qt.NoBrush)
+            item.setOpacity(max(0.15, min(1.0, el_opacity)))
             path = QPainterPath(sp)
             item.setPath(path)
             self.scene.addItem(item)
             self._active_markup_scene_items.add(item)
             self._markup_current_item = item
             self._markup_current_element = MarkupElement(
-                kind="pen", points=[sp], color=col, stroke_width=width
+                kind="pen", points=[sp], color=col, stroke_width=width, opacity=el_opacity
             )
 
         elif tool == "highlighter":
@@ -6203,57 +7900,128 @@ class SingleMediaViewer(QWidget):
             self._active_markup_scene_items.add(item)
             self._markup_current_item = item
             self._markup_current_element = MarkupElement(
-                kind="highlighter", points=[sp], color=col, stroke_width=width
+                kind="highlighter", points=[sp], color=col, stroke_width=width, opacity=el_opacity
             )
 
-        elif tool == "arrow":
+        elif tool in ALL_LINE_KINDS:
+            from src.ui.markup_overlay import _pen_style_from_dash
+
+            dash_st = str(getattr(self.markup_toolbar, "dash_style", "solid") or "solid")
+            sec_col = getattr(self.markup_toolbar, "secondary_color", QColor(255, 255, 255))
             item = QGraphicsPathItem()
-            item.setPen(QPen(col, max(1, width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            item.setPen(QPen(col, max(1, width), _pen_style_from_dash(dash_st), Qt.RoundCap, Qt.RoundJoin))
             item.setBrush(QBrush(col))
+            item.setOpacity(max(0.15, min(1.0, el_opacity)))
             self.scene.addItem(item)
             self._active_markup_scene_items.add(item)
             self._markup_current_item = item
             self._markup_current_element = MarkupElement(
-                kind="arrow", start_pt=sp, end_pt=sp, color=col, stroke_width=width
+                kind=tool,
+                start_pt=sp,
+                end_pt=sp,
+                color=col,
+                bg_color=QColor(sec_col) if sec_col is not None and sec_col.isValid() else None,
+                stroke_width=width,
+                opacity=el_opacity,
+                line_style=tool,
+                dash_style=dash_st,
             )
 
-        elif tool in ("rect", "ellipse", "star"):
-            pen = QPen(col, max(1, width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        elif tool in ALL_SHAPE_KINDS:
+            from src.ui.markup_overlay import _pen_style_from_dash
+
+            filled = bool(getattr(self.markup_toolbar, "shape_filled", False))
+            dash_st = str(getattr(self.markup_toolbar, "dash_style", "solid") or "solid")
+            sec_col = getattr(self.markup_toolbar, "secondary_color", QColor(255, 255, 255))
+            pen = QPen(col, max(1, width), _pen_style_from_dash(dash_st), Qt.RoundCap, Qt.RoundJoin) if width > 0 else Qt.NoPen
+            if filled and sec_col is not None and sec_col.isValid() and sec_col.alpha() > 0:
+                brush = QBrush(QColor(sec_col.red(), sec_col.green(), sec_col.blue(), sec_col.alpha()))
+            else:
+                brush = Qt.NoBrush
             if tool == "rect":
                 item = QGraphicsRectItem(QRectF(sp, sp))
-                item.setPen(pen)
-                item.setBrush(Qt.NoBrush)
             elif tool == "ellipse":
                 item = QGraphicsEllipseItem(QRectF(sp, sp))
-                item.setPen(pen)
-                item.setBrush(Qt.NoBrush)
             else:
                 item = QGraphicsPathItem()
-                item.setPen(pen)
-                item.setBrush(Qt.NoBrush)
+            item.setPen(pen)
+            item.setBrush(brush)
+            item.setOpacity(max(0.15, min(1.0, el_opacity)))
             self.scene.addItem(item)
             self._active_markup_scene_items.add(item)
             self._markup_current_item = item
             self._markup_current_element = MarkupElement(
-                kind=tool, rect=QRectF(sp, sp), color=col, stroke_width=width
+                kind=tool,
+                rect=QRectF(sp, sp),
+                color=col,
+                bg_color=QColor(sec_col) if sec_col is not None and sec_col.isValid() else None,
+                stroke_width=width,
+                opacity=el_opacity,
+                shape_filled=filled,
+                dash_style=dash_st,
+            )
+
+        elif tool == "sticker":
+            from src.ui.markup_overlay import draw_vector_sticker
+
+            sid = str(getattr(self.markup_toolbar, "active_sticker", "smiley") or "smiley").strip().lower()
+            if sid not in ALL_STICKER_IDS:
+                sid = "smiley"
+            pm = QPixmap(256, 256)
+            pm.fill(Qt.transparent)
+            sp_painter = QPainter(pm)
+            sp_painter.setRenderHint(QPainter.Antialiasing, True)
+            draw_vector_sticker(sp_painter, QRectF(8, 8, 240, 240), sid, rotation_deg=0.0, opacity=el_opacity)
+            sp_painter.end()
+            item = QGraphicsPixmapItem(pm)
+            item.setTransformationMode(Qt.SmoothTransformation)
+            item.setPos(sp)
+            item.setScale(1.0 / 256.0)
+            item.setZValue(9995)
+            self.scene.addItem(item)
+            self._active_markup_scene_items.add(item)
+            self._markup_current_item = item
+            self._markup_current_element = MarkupElement(
+                kind="sticker", rect=QRectF(sp, sp), sticker_id=sid, stroke_width=4, opacity=el_opacity
             )
 
         elif tool in ("pixelate", "blur"):
-            item = QGraphicsRectItem(QRectF(sp, sp))
-            pen = QPen(col, 1.5, Qt.DashLine)
-            item.setPen(pen)
-            brush_col = QColor(col.red(), col.green(), col.blue(), 40)
-            item.setBrush(QBrush(brush_col))
-            self.scene.addItem(item)
-            self._active_markup_scene_items.add(item)
-            self._markup_current_item = item
-            self._markup_current_element = MarkupElement(
-                kind=tool, rect=QRectF(sp, sp), color=col, stroke_width=width
-            )
+            ob_mode = str(getattr(self.markup_toolbar, "obscure_mode", "brush") or "brush")
+            ob_str = int(getattr(self.markup_toolbar, "obscure_strength", 55) or 55)
+            if ob_mode == "brush":
+                ob_w = max(20, int(round(width * 4.4)))
+                item = QGraphicsPathItem()
+                pen = QPen(QColor(240, 245, 250, 255), ob_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                item.setPen(pen)
+                item.setBrush(Qt.NoBrush)
+                item.setOpacity(0.45)
+                path = QPainterPath(sp)
+                path.lineTo(QPointF(sp.x() + 0.1, sp.y() + 0.1))
+                item.setPath(path)
+                self.scene.addItem(item)
+                self._active_markup_scene_items.add(item)
+                self._markup_current_item = item
+                self._markup_current_element = MarkupElement(
+                    kind=tool, points=[sp], color=col, stroke_width=width, obscure_mode="brush", obscure_strength=ob_str
+                )
+            else:
+                item = QGraphicsRectItem(QRectF(sp, sp))
+                pen = QPen(col, 1.5, Qt.DashLine)
+                item.setPen(pen)
+                brush_col = QColor(col.red(), col.green(), col.blue(), 40)
+                item.setBrush(QBrush(brush_col))
+                self.scene.addItem(item)
+                self._active_markup_scene_items.add(item)
+                self._markup_current_item = item
+                self._markup_current_element = MarkupElement(
+                    kind=tool, rect=QRectF(sp, sp), color=col, stroke_width=width, obscure_mode="box", obscure_strength=ob_str
+                )
 
     def _drag_markup(self, sp: QPointF) -> None:
         sp = self._clamp_point_to_image(sp)
         tool = getattr(self.markup_toolbar, "active_tool", "pen")
+        if tool == "select":
+            return
         if tool in ("magnify", "magnifier"):
             self._update_magnify_hover(sp)
             return
@@ -6261,45 +8029,84 @@ class SingleMediaViewer(QWidget):
         if not self._markup_active or self._markup_current_item is None or self._markup_start_pt is None:
             return
         p1 = self._markup_start_pt
-        width = getattr(self.markup_toolbar, "stroke_width", 4)
+        width = getattr(self.markup_toolbar, "stroke_width", 16)
+        ob_mode_cur = getattr(self.markup_toolbar, "obscure_mode", "brush")
+        sp = self._clamp_point_to_image(self._constrain_markup_point(p1, sp, tool, ob_mode_cur))
 
-        if tool in ("pen", "highlighter"):
+        if tool in ("pen", "highlighter") or (tool in ("blur", "pixelate") and getattr(self.markup_toolbar, "obscure_mode", "brush") == "brush"):
             if self._markup_current_element:
-                self._markup_current_element.points.append(sp)
+                pts = self._markup_current_element.points
+                scale = max(0.05, float(self.graphics_view.transform().m11()))
+                min_step = max(1.5, 2.0 / scale)
+                if pts and math.hypot(sp.x() - pts[-1].x(), sp.y() - pts[-1].y()) < min_step:
+                    return
+                pts.append(sp)
                 path = self._markup_current_item.path()
                 path.lineTo(sp)
                 self._markup_current_item.setPath(path)
 
-        elif tool == "arrow":
+        elif tool in ALL_LINE_KINDS:
             dx = sp.x() - p1.x()
             dy = sp.y() - p1.y()
             if math.hypot(dx, dy) >= 4.0:
-                p_base, arrowhead = build_arrow_geometry(p1, sp, width)
                 path = QPainterPath()
-                path.moveTo(p1)
-                path.lineTo(p_base)
-                if arrowhead.count() >= 3:
-                    path.moveTo(arrowhead[0])
-                    for i in range(1, arrowhead.count()):
-                        path.lineTo(arrowhead[i])
-                    path.closeSubpath()
+                if tool == "line":
+                    path.moveTo(p1)
+                    path.lineTo(sp)
+                elif tool == "double_arrow":
+                    p_eb, head_e = build_arrow_geometry(p1, sp, width)
+                    p_sb, head_s = build_arrow_geometry(sp, p1, width)
+                    path.moveTo(p_sb)
+                    path.lineTo(p_eb)
+                    for head in (head_e, head_s):
+                        if head.count() >= 3:
+                            path.moveTo(head[0])
+                            for i in range(1, head.count()):
+                                path.lineTo(head[i])
+                            path.closeSubpath()
+                else:
+                    p_base, arrowhead = build_arrow_geometry(p1, sp, width)
+                    path.moveTo(p1)
+                    path.lineTo(p_base)
+                    if arrowhead.count() >= 3:
+                        path.moveTo(arrowhead[0])
+                        for i in range(1, arrowhead.count()):
+                            path.lineTo(arrowhead[i])
+                        path.closeSubpath()
                 self._markup_current_item.setPath(path)
             if self._markup_current_element:
                 self._markup_current_element.end_pt = sp
 
-        elif tool in ("rect", "ellipse", "star"):
+        elif tool in ALL_SHAPE_KINDS:
             r = QRectF(min(p1.x(), sp.x()), min(p1.y(), sp.y()), abs(sp.x() - p1.x()), abs(sp.y() - p1.y()))
             if tool in ("rect", "ellipse"):
                 self._markup_current_item.setRect(r)
+            elif tool == "heart_shape":
+                self._markup_current_item.setPath(build_heart_path_in_rect(r))
+            elif tool == "speech_bubble":
+                self._markup_current_item.setPath(build_speech_bubble_path_in_rect(r))
             else:
-                star_p = build_star_polygon_in_rect(r)
+                sides_map = {"triangle": 3, "pentagon": 5, "hexagon": 6}
+                poly = build_regular_polygon_in_rect(r, sides_map[tool], -90.0) if tool in sides_map else build_star_polygon_in_rect(r)
                 p = QPainterPath()
-                if not star_p.isEmpty():
-                    p.moveTo(star_p[0])
-                    for i in range(1, star_p.count()):
-                        p.lineTo(star_p[i])
-                    p.lineTo(star_p[0])
+                if not poly.isEmpty():
+                    p.moveTo(poly[0])
+                    for i in range(1, poly.count()):
+                        p.lineTo(poly[i])
+                    p.closeSubpath()
                 self._markup_current_item.setPath(p)
+            if self._markup_current_element:
+                self._markup_current_element.rect = r
+
+        elif tool == "sticker":
+            dx = sp.x() - p1.x()
+            dy = sp.y() - p1.y()
+            side = max(abs(dx), abs(dy))
+            x0 = p1.x() if dx >= 0 else p1.x() - side
+            y0 = p1.y() if dy >= 0 else p1.y() - side
+            r = QRectF(x0, y0, side, side)
+            self._markup_current_item.setPos(r.topLeft())
+            self._markup_current_item.setScale(max(1.0, side) / 256.0)
             if self._markup_current_element:
                 self._markup_current_element.rect = r
 
@@ -6312,6 +8119,9 @@ class SingleMediaViewer(QWidget):
     def _finish_markup(self, sp: QPointF) -> None:
         sp = self._clamp_point_to_image(sp)
         tool = getattr(self.markup_toolbar, "active_tool", "pen")
+        if tool == "select":
+            self._markup_active = False
+            return
         if tool in ("magnify", "magnifier"):
             self._markup_active = False
             src_pt = getattr(self, "_magnify_source_pt", None)
@@ -6331,7 +8141,11 @@ class SingleMediaViewer(QWidget):
 
         tool = getattr(self.markup_toolbar, "active_tool", "pen")
         col = getattr(self.markup_toolbar, "current_color", QColor(230, 40, 40))
-        width = getattr(self.markup_toolbar, "stroke_width", 4)
+        width = getattr(self.markup_toolbar, "stroke_width", 16)
+        ob_mode_fin = getattr(self.markup_toolbar, "obscure_mode", "brush")
+        p1_fin = getattr(self, "_markup_start_pt", None)
+        if p1_fin is not None and tool not in ("magnify", "magnifier"):
+            sp = self._clamp_point_to_image(self._constrain_markup_point(p1_fin, sp, tool, ob_mode_fin))
         element_to_commit: MarkupElement | None = None
 
         try:
@@ -6342,28 +8156,58 @@ class SingleMediaViewer(QWidget):
                         if len(self._markup_current_element.points) >= 2:
                             element_to_commit = self._markup_current_element
 
-                elif tool == "arrow":
+                elif tool in ALL_LINE_KINDS:
                     dx = sp.x() - p1.x()
                     dy = sp.y() - p1.y()
                     if math.hypot(dx, dy) >= 6.0 and self._markup_current_element:
                         self._markup_current_element.end_pt = sp
                         element_to_commit = self._markup_current_element
 
-                elif tool in ("rect", "ellipse", "star"):
+                elif tool in ALL_SHAPE_KINDS:
                     r = QRectF(min(p1.x(), sp.x()), min(p1.y(), sp.y()), abs(sp.x() - p1.x()), abs(sp.y() - p1.y()))
                     if r.width() >= 6 and r.height() >= 6 and self._markup_current_element:
                         self._markup_current_element.rect = r
                         element_to_commit = self._markup_current_element
 
+                elif tool == "sticker":
+                    dx = sp.x() - p1.x()
+                    dy = sp.y() - p1.y()
+                    side = max(abs(dx), abs(dy))
+                    if self._markup_current_element is not None:
+                        if side >= 12.0:
+                            x0 = p1.x() if dx >= 0 else p1.x() - side
+                            y0 = p1.y() if dy >= 0 else p1.y() - side
+                            self._markup_current_element.rect = QRectF(x0, y0, side, side)
+                        else:
+                            mh, mw = self.master_np_rgb.shape[:2] if self.master_np_rgb is not None else (800, 800)
+                            def_side = max(48.0, min(float(min(mw, mh)) * 0.16, 180.0))
+                            rx = max(4.0, min(float(mw) - def_side - 4.0, p1.x() - def_side * 0.5))
+                            ry = max(4.0, min(float(mh) - def_side - 4.0, p1.y() - def_side * 0.5))
+                            self._markup_current_element.rect = QRectF(rx, ry, def_side, def_side)
+                        element_to_commit = self._markup_current_element
+
                 elif tool in ("pixelate", "blur"):
-                    r = QRectF(min(p1.x(), sp.x()), min(p1.y(), sp.y()), abs(sp.x() - p1.x()), abs(sp.y() - p1.y()))
-                    if r.width() >= 8 and r.height() >= 8 and self.master_np_rgb is not None:
-                        rx = max(0, int(round(r.x())))
-                        ry = max(0, int(round(r.y())))
-                        rw = max(1, min(self.master_np_rgb.shape[1] - rx, int(round(r.width()))))
-                        rh = max(1, min(self.master_np_rgb.shape[0] - ry, int(round(r.height()))))
-                        if rw > 4 and rh > 4:
-                            element_to_commit = MarkupElement(kind=tool, rect=QRectF(rx, ry, rw, rh), color=col, stroke_width=width)
+                    ob_mode = getattr(self.markup_toolbar, "obscure_mode", "brush")
+                    ob_str = int(getattr(self.markup_toolbar, "obscure_strength", 55) or 55)
+                    if ob_mode == "brush" and self._markup_current_element is not None:
+                        self._markup_current_element.points.append(sp)
+                        element_to_commit = self._markup_current_element
+                    else:
+                        r = QRectF(min(p1.x(), sp.x()), min(p1.y(), sp.y()), abs(sp.x() - p1.x()), abs(sp.y() - p1.y()))
+                        if r.width() >= 8 and r.height() >= 8 and self.master_np_rgb is not None:
+                            rx = max(0, int(round(r.x())))
+                            ry = max(0, int(round(r.y())))
+                            rw = max(1, min(self.master_np_rgb.shape[1] - rx, int(round(r.width()))))
+                            rh = max(1, min(self.master_np_rgb.shape[0] - ry, int(round(r.height()))))
+                            if rw > 4 and rh > 4:
+                                element_to_commit = MarkupElement(
+                                    kind=tool,
+                                    rect=QRectF(rx, ry, rw, rh),
+                                    color=col,
+                                    stroke_width=width,
+                                    obscure_mode="box",
+                                    obscure_strength=ob_str,
+                                )
         finally:
             if cur_item is not None:
                 self._remove_scene_item(cur_item)
@@ -6384,8 +8228,9 @@ class SingleMediaViewer(QWidget):
             return
         self._finalize_movable_markup()
         if hasattr(self, "undo_stack") and self.undo_stack.canUndo():
+            prev_len = len(self._markup_elements)
             self.undo_stack.undo()
-            if self._markup_elements:
+            if len(self._markup_elements) == prev_len and self._markup_elements:
                 self._markup_elements.pop()
             if self._markup_preview_items:
                 it = self._markup_preview_items.pop()
@@ -6396,6 +8241,7 @@ class SingleMediaViewer(QWidget):
 
     def _cleanup_markup_temp_items(self) -> None:
         """Removes temporary floating preview items and cursor overlays without rolling back undo stack."""
+        self._clear_markup_selection_handles()
         for it in self._markup_preview_items:
             self._remove_scene_item(it)
         self._markup_preview_items.clear()
@@ -6545,6 +8391,8 @@ class SingleMediaViewer(QWidget):
         pix = self._build_pixmap_from_rgb_and_alpha(rendered_np, rendered_alpha)
         self._adjusted_pixmap = pix
         prev_sz = self.pixmap_item.pixmap().size()
+        if abs(self.pixmap_item.scale() - 1.0) > 1e-4:
+            self.pixmap_item.setScale(1.0)
         self.pixmap_item.setPixmap(pix)
         self._update_alpha_backdrop(pix.width(), pix.height(), rendered_alpha is not None)
         self.scene.setSceneRect(QRectF(0, 0, pix.width(), pix.height()))
@@ -7507,13 +9355,23 @@ class SingleMediaViewer(QWidget):
         self.wb_eyedropper_finished.emit()
         self._show_status(f"White Balance updated (Temp {int(round(temp)):+d}, Tint {int(round(tint)):+d})", 3000)
 
-    def apply_auto_adjust(self) -> None:
-        """Analyzes scene dynamic range & color cast using OpenCV and applies balanced parameters."""
+    def set_auto_adjust_options(self, options: dict[str, bool] | None) -> None:
+        self._auto_adjust_options = dict(options) if options else None
+
+    def apply_auto_adjust(self, options: dict[str, bool] | None = None) -> None:
+        """Analyzes scene dynamic range, color cast, and selected auto options, applying balanced parameters."""
         if self.master_np_rgb is None:
             return
-        auto_rec = analyze_auto_adjust(self.master_np_rgb)
+        eff_opts = options if options is not None else getattr(self, "_auto_adjust_options", None)
+        auto_rec = analyze_auto_adjust(self.master_np_rgb, options=eff_opts)
         auto_rec.crop_rect = self.current_recipe.crop_rect
-        auto_rec.straighten_deg = self.current_recipe.straighten_deg
+        if not (eff_opts and eff_opts.get("straighten", False)):
+            auto_rec.straighten_deg = self.current_recipe.straighten_deg
+        if not (eff_opts and eff_opts.get("perspective", False)):
+            auto_rec.perspective_v = getattr(self.current_recipe, "perspective_v", 0.0)
+        auto_rec.perspective_h = getattr(self.current_recipe, "perspective_h", 0.0)
+        auto_rec.flip_h = getattr(self.current_recipe, "flip_h", False)
+        auto_rec.flip_v = getattr(self.current_recipe, "flip_v", False)
         cmd = RecipeUndoCommand(self, self.current_recipe.copy(), auto_rec.copy(), "Auto Adjust")
         self.current_recipe = auto_rec
         self.undo_stack.push(cmd)
@@ -9012,12 +10870,12 @@ class SingleMediaViewer(QWidget):
             act_not_face.triggered.connect(
                 lambda: self._on_face_region_not_a_face(region_data, person_id, face_id)
             )
+            _mw_ref = self.window()
+            if hasattr(_mw_ref, "ribbon") and hasattr(_mw_ref.ribbon, "_apply_menu_polish"):
+                _mw_ref.ribbon._apply_menu_polish(menu)
             if not getattr(self, "_suppress_menu_exec", False):
                 menu.exec(screen_pos)
-            _mw_ref = self.window()
-        if hasattr(_mw_ref, "ribbon") and hasattr(_mw_ref.ribbon, "_apply_menu_polish"):
-            _mw_ref.ribbon._apply_menu_polish(menu)
-        return menu
+            return menu
 
         # 1. Confirm (if unconfirmed suggestion)
         if is_unconfirmed and face_id and person_id:
@@ -9498,30 +11356,44 @@ class SingleMediaViewer(QWidget):
             self.media_player is not None
             and self.media_player.playbackState() == QMediaPlayer.PlayingState
         )
-        act_toggle = menu.addAction("Pause" if is_playing else "Play")
+        act_toggle = menu.addAction(
+            make_wlpg_icon("pause" if is_playing else "play", 16),
+            "Pause" if is_playing else "Play",
+        )
         bold_font = QFont(act_toggle.font())
         bold_font.setBold(True)
         act_toggle.setFont(bold_font)
         act_toggle.triggered.connect(self.toggle_video_playback)
 
-        act_stop = menu.addAction("Stop")
+        act_stop = menu.addAction(make_wlpg_icon("stop", 16), "Stop")
         act_stop.triggered.connect(self.stop_video_playback)
 
         is_muted = bool(self.audio_output.isMuted()) if self.audio_output is not None else False
-        act_mute = menu.addAction("Unmute" if is_muted else "Mute")
+        act_mute = menu.addAction(
+            make_wlpg_icon("volume" if is_muted else "volume_mute", 16),
+            "Unmute" if is_muted else "Mute",
+        )
         act_mute.triggered.connect(self._toggle_mute)
 
         menu.addSeparator()
+
+        main_win = self.window()
+        is_immersive = bool(getattr(main_win, "_is_immersive_mode", False))
+        act_immersive = menu.addAction(
+            make_wlpg_icon("actual_size", 16),
+            "Exit immersive mode\tF4" if is_immersive else "Immersive mode\tF4",
+        )
+        if hasattr(main_win, "toggle_immersive_viewer_mode"):
+            act_immersive.triggered.connect(main_win.toggle_immersive_viewer_mode)
 
         act_save_frame = menu.addAction(make_wlpg_icon("camera", 16), "Save still frame as photo")
         act_save_frame.triggered.connect(self.save_current_video_frame)
 
         menu.addSeparator()
 
-        main_win = self.window()
         mid = self.current_media_id
 
-        open_with_menu = menu.addMenu("Open with")
+        open_with_menu = menu.addMenu(make_wlpg_icon("view_file", 16), "Open with")
         open_with_menu.setFont(QFont("Segoe UI", 9))
         act_default = open_with_menu.addAction("System default player")
         act_choose = open_with_menu.addAction("Choose another app...")
@@ -9546,7 +11418,7 @@ class SingleMediaViewer(QWidget):
         act_default.triggered.connect(_on_open_default)
         act_choose.triggered.connect(_on_open_choose)
 
-        act_loc = menu.addAction("Open file location")
+        act_loc = menu.addAction(make_wlpg_icon("folder_open", 16), "Open file location")
         def _on_open_loc() -> None:
             if hasattr(main_win, "open_file_location_for_media") and mid is not None:
                 main_win.open_file_location_for_media(mid)
@@ -9563,19 +11435,19 @@ class SingleMediaViewer(QWidget):
 
         menu.addSeparator()
 
-        act_copy = menu.addAction("Copy")
+        act_copy = menu.addAction(make_wlpg_icon("copy", 16), "Copy")
         act_copy.setShortcut("Ctrl+C")
         if hasattr(main_win, "copy_selection_to_clipboard"):
             act_copy.triggered.connect(main_win.copy_selection_to_clipboard)
 
-        act_del = menu.addAction("Delete")
+        act_del = menu.addAction(make_wlpg_icon("delete", 16), "Delete")
         act_del.setShortcut("Del")
         if hasattr(main_win, "delete_selection_to_recycle_bin"):
             act_del.triggered.connect(main_win.delete_selection_to_recycle_bin)
 
         menu.addSeparator()
 
-        act_prop = menu.addAction("Properties")
+        act_prop = menu.addAction(make_wlpg_icon("options", 16), "Properties")
         act_prop.setShortcut("Alt+Enter")
         def _on_prop() -> None:
             if hasattr(main_win, "open_file_properties") and self.current_media_id is not None:
@@ -9584,11 +11456,11 @@ class SingleMediaViewer(QWidget):
                 main_win.toggle_right_pane("info")
         act_prop.triggered.connect(_on_prop)
 
-        if not getattr(self, "_suppress_menu_exec", False):
-            menu.exec(self.video_widget.mapToGlobal(pos))
         _mw_ref = self.window()
         if hasattr(_mw_ref, "ribbon") and hasattr(_mw_ref.ribbon, "_apply_menu_polish"):
             _mw_ref.ribbon._apply_menu_polish(menu)
+        if not getattr(self, "_suppress_menu_exec", False):
+            menu.exec(self.video_widget.mapToGlobal(pos))
         return menu
 
     def _on_video_position_changed(self, pos_ms: int) -> None:
@@ -9605,6 +11477,34 @@ class SingleMediaViewer(QWidget):
         self.slider_position.setRange(0, max(1, dur_ms))
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        # Application-level Hold-Alt temporary Select handler (only active in Markup mode)
+        own_watched = (
+            self.graphics_view,
+            self.graphics_view.viewport(),
+            getattr(self, "slider_crop_straighten", None),
+            getattr(self, "lbl_crop_straighten", None),
+        )
+        if watched not in own_watched:
+            if getattr(self, "is_markup_mode", False) and QApplication.activeModalWidget() is None:
+                et = event.type()
+                if et == QEvent.KeyPress and isinstance(event, QKeyEvent) and event.key() == Qt.Key_Alt:
+                    if not isinstance(QApplication.focusWidget(), (QLineEdit, QTextEdit)):
+                        if not getattr(self, "_markup_alt_select_active", False):
+                            self._markup_alt_select_active = True
+                            self._update_markup_cursor()
+                        event.accept()
+                        return True
+                elif et == QEvent.KeyRelease and isinstance(event, QKeyEvent) and event.key() == Qt.Key_Alt:
+                    if getattr(self, "_markup_alt_select_active", False):
+                        self._markup_alt_select_active = False
+                        self._update_markup_cursor()
+                    event.accept()
+                    return True
+                elif et == QEvent.WindowDeactivate and getattr(self, "_markup_alt_select_active", False):
+                    self._markup_alt_select_active = False
+                    self._update_markup_cursor()
+            return False
+
         # Intercept graphics_view viewport mouse events for Retouch and Red Eye
         if watched in (self.graphics_view, self.graphics_view.viewport()):
             if watched is self.graphics_view.viewport() and event.type() == QEvent.Resize:
@@ -9697,7 +11597,8 @@ class SingleMediaViewer(QWidget):
             if self.is_retouch_mode:
                 if event.type() == QEvent.MouseButtonPress and getattr(event, "button", lambda: None)() == Qt.LeftButton:
                     sp = self.graphics_view.mapToScene(event.position().toPoint())
-                    self._start_retouch(sp)
+                    is_shift = bool(event.modifiers() & Qt.ShiftModifier)
+                    self._start_retouch(sp, straight_line=is_shift)
                     return True
                 elif event.type() == QEvent.MouseMove:
                     sp = self.graphics_view.mapToScene(event.position().toPoint())
@@ -9755,85 +11656,291 @@ class SingleMediaViewer(QWidget):
                     self._update_retouch_cursor()
 
             if getattr(self, "is_markup_mode", False):
-                if event.type() == QEvent.MouseButtonPress and getattr(event, "button", lambda: None)() == Qt.LeftButton:
+                def _begin_pending_preview(el_obj: MarkupElement, *, for_rotation: bool = False) -> None:
+                    self._begin_pending_markup_preview(el_obj, for_rotation=for_rotation)
+
+                if event.type() == QEvent.MouseButtonDblClick and getattr(event, "button", lambda: None)() == Qt.LeftButton:
                     sp = self.graphics_view.mapToScene(event.position().toPoint())
+                    el = getattr(self, "_active_movable_element", None)
+                    if el is None or el.kind != "text" or el.rect is None or not get_markup_element_bounds(el).contains(sp):
+                        self._select_markup_element_at(sp)
+                        el = getattr(self, "_active_movable_element", None)
+                    if el is not None and el.kind == "text" and el.rect is not None:
+                        bounds = get_markup_element_bounds(el)
+                        if bounds.contains(sp):
+                            if self.edit_active_markup_text():
+                                return True
+
+                if event.type() == QEvent.MouseButtonPress and getattr(event, "button", lambda: None)() == Qt.LeftButton:
+                    vp_pt = event.position().toPoint()
+                    sp = self.graphics_view.mapToScene(vp_pt)
+                    if getattr(self, "_inline_text_input", None) is not None:
+                        if self._hit_test_inline_rotate_knob(sp):
+                            self._commit_inline_text()
+                            el = getattr(self, "_active_movable_element", None)
+                            if el is not None:
+                                self._is_moving_pending_markup = True
+                                self._markup_transform_mode = "rotate"
+                                base_r = get_markup_element_unrotated_rect(el)
+                                c = base_r.center()
+                                self._markup_rotate_start_angle = math.degrees(math.atan2(sp.y() - c.y(), sp.x() - c.x()))
+                                self._markup_rotate_orig_deg = float(getattr(el, "rotation_deg", 0.0) or 0.0)
+                                self._move_markup_last_pt = sp
+                                _begin_pending_preview(el, for_rotation=True)
+                                self.graphics_view.viewport().setCursor(make_round_rotation_cursor())
+                                self._update_active_markup_selection_handles(show_angle_badge=True)
+                                return True
+                        elif self._hit_test_inline_text_border(vp_pt):
+                            self._is_dragging_inline_text = True
+                            self._inline_text_drag_start_vp = vp_pt
+                            self._inline_text_drag_orig_pos = self._inline_text_input.pos()
+                            self.graphics_view.viewport().setCursor(Qt.SizeAllCursor)
+                            return True
+                        else:
+                            # First click outside an active text editor (and outside its border) commits it cleanly
+                            self._commit_inline_text()
+                            return True
                     if getattr(self, "_active_movable_element", None) is not None:
-                        bounds = get_markup_element_bounds(self._active_movable_element)
+                        el = self._active_movable_element
+                        hit = self._hit_test_markup_handles(sp)
+                        if hit == "rotate" or (hit and hit.startswith("rotate_corner:")):
+                            self._is_moving_pending_markup = True
+                            self._markup_transform_mode = "rotate"
+                            base_r = get_markup_element_unrotated_rect(el)
+                            c = base_r.center()
+                            self._markup_rotate_start_angle = math.degrees(math.atan2(sp.y() - c.y(), sp.x() - c.x()))
+                            self._markup_rotate_orig_deg = float(getattr(el, "rotation_deg", 0.0) or 0.0)
+                            self._move_markup_last_pt = sp
+                            _begin_pending_preview(el, for_rotation=True)
+                            self.graphics_view.viewport().setCursor(make_round_rotation_cursor())
+                            self._update_active_markup_selection_handles(show_angle_badge=True)
+                            return True
+                        elif hit and hit.startswith("resize:"):
+                            self._is_moving_pending_markup = True
+                            self._markup_transform_mode = "resize"
+                            self._markup_resize_corner = hit.split(":", 1)[1]
+                            self._markup_resize_anchor_rect = get_markup_element_unrotated_rect(el)
+                            self._move_markup_last_pt = sp
+                            _begin_pending_preview(el)
+                            return True
+                        bounds = get_markup_element_bounds(el)
                         if bounds.contains(sp):
                             self._is_moving_pending_markup = True
+                            self._markup_transform_mode = "move"
                             self._move_markup_last_pt = sp
-                            if getattr(self, "_active_movable_before_master", None) is not None:
-                                self.master_np_rgb = self._active_movable_before_master.copy()
-                                self._update_display_proxy()
-                                self._render_current_recipe()
-                            crop_tuple = self.current_recipe.crop_rect if self.current_recipe else None
-                            pm, top_left = render_markup_element_pixmap(self._active_movable_element, self.master_np_rgb, crop_tuple)
-                            if not pm.isNull():
-                                p_item = QGraphicsPixmapItem(pm)
-                                p_item.setPos(top_left)
-                                p_item.setZValue(9995)
-                                self.scene.addItem(p_item)
-                                self._pending_markup_item = p_item
+                            _begin_pending_preview(el)
                             return True
                         else:
                             self._finalize_movable_markup()
+                            if getattr(self.markup_toolbar, "active_tool", "") == "text":
+                                return True
+                    # Hold Alt (or Ctrl+Click) temporarily selects & moves any existing item from any tool
+                    if (event.modifiers() & (Qt.AltModifier | Qt.ControlModifier)) and self._select_markup_element_at(sp):
+                        el_ctrl = getattr(self, "_active_movable_element", None)
+                        if el_ctrl is not None:
+                            self._is_moving_pending_markup = True
+                            self._markup_transform_mode = "move"
+                            self._move_markup_last_pt = sp
+                            _begin_pending_preview(el_ctrl)
+                            return True
                     self._start_markup(sp)
                     return True
                 elif event.type() == QEvent.MouseMove:
-                    sp = self.graphics_view.mapToScene(event.position().toPoint())
+                    vp_pt = event.position().toPoint()
+                    sp = self.graphics_view.mapToScene(vp_pt)
                     self._last_mouse_scene_pos = sp
+                    if getattr(self, "_is_dragging_inline_text", False) and getattr(self, "_inline_text_input", None) is not None:
+                        delta = vp_pt - self._inline_text_drag_start_vp
+                        self._move_inline_text_box_to(self._inline_text_drag_orig_pos + delta)
+                        self.graphics_view.viewport().setCursor(Qt.SizeAllCursor)
+                        return True
                     if getattr(self, "_is_moving_pending_markup", False) and getattr(self, "_move_markup_last_pt", None) is not None:
-                        dx = sp.x() - self._move_markup_last_pt.x()
-                        dy = sp.y() - self._move_markup_last_pt.y()
-                        self._move_markup_last_pt = sp
-                        if getattr(self, "_active_movable_element", None) is not None:
-                            translate_markup_element(self._active_movable_element, dx, dy)
-                            el = self._active_movable_element
+                        el = getattr(self, "_active_movable_element", None)
+                        t_mode = getattr(self, "_markup_transform_mode", "move") or "move"
+                        if el is not None:
                             crop_tuple = self.current_recipe.crop_rect if self.current_recipe else None
-                            if el.kind in ("pixelate", "blur", "magnifier", "magnify"):
+                            if t_mode == "rotate":
+                                base_r = get_markup_element_unrotated_rect(el)
+                                c = base_r.center()
+                                cur_ang = math.degrees(math.atan2(sp.y() - c.y(), sp.x() - c.x()))
+                                start_ang = getattr(self, "_markup_rotate_start_angle", None)
+                                orig_deg = float(getattr(self, "_markup_rotate_orig_deg", 0.0) or 0.0)
+                                if start_ang is not None:
+                                    delta = (cur_ang - start_ang + 180.0) % 360.0 - 180.0
+                                    ang = orig_deg + delta
+                                else:
+                                    ang = cur_ang + 90.0
+                                ang = (ang + 180.0) % 360.0 - 180.0
+                                if event.modifiers() & Qt.ShiftModifier:
+                                    ang = round(ang / 15.0) * 15.0
+                                else:
+                                    for snap_t in (0.0, 90.0, -90.0, 180.0, -180.0):
+                                        if abs(ang - snap_t) <= 3.0:
+                                            ang = snap_t
+                                            break
+                                el.rotation_deg = float(ang)
+                                if self._pending_markup_item is not None:
+                                    if getattr(self, "_pending_markup_item_is_rot_cached", False):
+                                        self._pending_markup_item.setRotation(float(ang))
+                                    else:
+                                        pm, top_left = render_markup_element_pixmap(el, self.master_np_rgb, crop_tuple)
+                                        if not pm.isNull():
+                                            self._pending_markup_item.setPixmap(pm)
+                                            self._pending_markup_item.setPos(top_left)
+                                self._update_active_markup_selection_handles(show_angle_badge=True)
+                                self._show_status(f"Rotation: {el.rotation_deg:.0f}° (hold Shift to snap 15°)", 1500)
+                            elif t_mode == "resize":
+                                anchor_r = getattr(self, "_markup_resize_anchor_rect", None) or get_markup_element_unrotated_rect(el)
+                                corner = getattr(self, "_markup_resize_corner", "br") or "br"
+                                rot = float(getattr(el, "rotation_deg", 0.0) or 0.0)
+                                local_sp = sp
+                                if abs(rot) >= 0.05:
+                                    c_a = anchor_r.center()
+                                    inv_tr = QTransform()
+                                    inv_tr.translate(c_a.x(), c_a.y())
+                                    inv_tr.rotate(-rot)
+                                    inv_tr.translate(-c_a.x(), -c_a.y())
+                                    local_sp = inv_tr.map(sp)
+                                x1, y1, x2, y2 = anchor_r.left(), anchor_r.top(), anchor_r.right(), anchor_r.bottom()
+                                if "l" in corner:
+                                    x1 = min(x2 - 12.0, local_sp.x())
+                                if "r" in corner:
+                                    x2 = max(x1 + 12.0, local_sp.x())
+                                if "t" in corner:
+                                    y1 = min(y2 - 12.0, local_sp.y())
+                                if "b" in corner:
+                                    y2 = max(y1 + 12.0, local_sp.y())
+                                if (event.modifiers() & Qt.ShiftModifier) and anchor_r.height() > 1.0:
+                                    aspect = max(0.05, float(anchor_r.width()) / float(anchor_r.height()))
+                                    nw = max(12.0, x2 - x1)
+                                    nh = max(12.0, y2 - y1)
+                                    if nw / aspect > nh:
+                                        nh = nw / aspect
+                                    else:
+                                        nw = nh * aspect
+                                    if "l" in corner:
+                                        x1 = x2 - nw
+                                    else:
+                                        x2 = x1 + nw
+                                    if "t" in corner:
+                                        y1 = y2 - nh
+                                    else:
+                                        y2 = y1 + nh
+                                scale_markup_element(el, QRectF(x1, y1, x2 - x1, y2 - y1))
                                 pm, top_left = render_markup_element_pixmap(el, self.master_np_rgb, crop_tuple)
                                 if self._pending_markup_item is not None and not pm.isNull():
                                     self._pending_markup_item.setPixmap(pm)
                                     self._pending_markup_item.setPos(top_left)
+                                self._update_active_markup_selection_handles()
                             else:
-                                if self._pending_markup_item is not None:
-                                    cur_pos = self._pending_markup_item.pos()
-                                    self._pending_markup_item.setPos(cur_pos.x() + dx, cur_pos.y() + dy)
-                            if self._pending_selection_box_item is not None:
-                                self._pending_selection_box_item.setRect(get_markup_element_bounds(el))
+                                dx = sp.x() - self._move_markup_last_pt.x()
+                                dy = sp.y() - self._move_markup_last_pt.y()
+                                self._move_markup_last_pt = sp
+                                translate_markup_element(el, dx, dy)
+                                if el.kind in ("pixelate", "blur", "magnifier", "magnify"):
+                                    pm, top_left = render_markup_element_pixmap(el, self.master_np_rgb, crop_tuple)
+                                    if self._pending_markup_item is not None and not pm.isNull():
+                                        self._pending_markup_item.setPixmap(pm)
+                                        self._pending_markup_item.setPos(top_left)
+                                else:
+                                    if self._pending_markup_item is not None:
+                                        cur_pos = self._pending_markup_item.pos()
+                                        self._pending_markup_item.setPos(cur_pos.x() + dx, cur_pos.y() + dy)
+                                self._update_active_markup_selection_handles()
                         return True
                     elif getattr(self, "_markup_active", False):
                         self._drag_markup(sp)
                         return True
                     else:
+                        if getattr(self, "_inline_text_input", None) is not None:
+                            if self._hit_test_inline_rotate_knob(sp):
+                                self.graphics_view.viewport().setCursor(make_round_rotation_cursor())
+                                return True
+                            if self._hit_test_inline_text_border(event.position().toPoint()):
+                                self.graphics_view.viewport().setCursor(Qt.SizeAllCursor)
+                                return True
                         if getattr(self, "_active_movable_element", None) is not None:
+                            hit = self._hit_test_markup_handles(sp)
+                            if hit == "rotate" or (hit and hit.startswith("rotate_corner:")):
+                                self.graphics_view.viewport().setCursor(make_round_rotation_cursor())
+                                return True
+                            elif hit in ("resize:tl", "resize:br"):
+                                self.graphics_view.viewport().setCursor(Qt.SizeFDiagCursor)
+                                return True
+                            elif hit in ("resize:tr", "resize:bl"):
+                                self.graphics_view.viewport().setCursor(Qt.SizeBDiagCursor)
+                                return True
                             bounds = get_markup_element_bounds(self._active_movable_element)
                             if bounds.contains(sp):
                                 self.graphics_view.viewport().setCursor(Qt.SizeAllCursor)
                                 return True
                         tool = getattr(self.markup_toolbar, "active_tool", "pen")
-                        if tool in ("magnify", "magnifier"):
+                        alt_down = bool(QApplication.keyboardModifiers() & Qt.AltModifier)
+                        if alt_down != getattr(self, "_markup_alt_select_active", False):
+                            self._markup_alt_select_active = alt_down
+                        if tool in ("magnify", "magnifier") and not alt_down:
                             self._update_magnify_hover(sp)
                         else:
                             self._update_markup_cursor()
                         return True
                 elif event.type() == QEvent.MouseButtonRelease and getattr(event, "button", lambda: None)() == Qt.LeftButton:
                     sp = self.graphics_view.mapToScene(event.position().toPoint())
+                    if getattr(self, "_is_dragging_inline_text", False):
+                        self._is_dragging_inline_text = False
+                        inp_box = getattr(self, "_inline_text_input", None)
+                        if inp_box is not None:
+                            inp_box.setFocus()
+                        self._update_markup_cursor()
+                        return True
                     if getattr(self, "_is_moving_pending_markup", False):
                         self._is_moving_pending_markup = False
+                        self._markup_transform_mode = None
+                        self._markup_resize_corner = None
+                        self._markup_resize_anchor_rect = None
+                        self._markup_rotate_start_angle = None
+                        self._markup_rotate_orig_deg = 0.0
+                        if getattr(self, "_pending_rotate_badge", None) is not None:
+                            self._pending_rotate_badge.setVisible(False)
                         if getattr(self, "_pending_markup_item", None) is not None:
                             self._remove_scene_item(self._pending_markup_item)
                             self._pending_markup_item = None
                         if getattr(self, "_active_movable_element", None) is not None:
                             el = self._active_movable_element
-                            if hasattr(self, "undo_stack") and self.undo_stack.canUndo():
-                                self.undo_stack.undo()
-                                if self._markup_elements:
-                                    self._markup_elements.pop()
-                                if self._markup_preview_items:
-                                    it = self._markup_preview_items.pop()
-                                    self._remove_scene_item(it)
-                            self._commit_single_markup_element(el, f"Markup {el.kind.title()}")
+                            if getattr(self, "_active_movable_from_reselect", False) and getattr(self, "_active_movable_before_master", None) is not None:
+                                # Reselected item: NEVER undo previous commands (e.g. deletes); re-bake cleanly from base_without
+                                base_clean = self._active_movable_before_master
+                                before_move = getattr(self, "_active_movable_reselect_orig_master", None)
+                                if before_move is None:
+                                    before_move = base_clean.copy()
+                                rebuilt = base_clean.copy()
+                                baked_el = self._shift_markup_element_for_crop(el)
+                                if flatten_markup_element_roi(rebuilt, baked_el) is None:
+                                    rebuilt = flatten_markup_onto_rgb_image(rebuilt, [baked_el])
+                                self.master_np_rgb = rebuilt
+                                mh, mw = self.master_np_rgb.shape[:2]
+                                self._refresh_viewport_after_master_roi((0, mh, 0, mw))
+                                cmd = PixelArrayUndoCommand(self, before_move, self.master_np_rgb.copy(), f"Transform {el.kind.title()}")
+                                cmd._before_markup_elements = list(self._markup_elements)
+                                cmd._after_markup_elements = list(self._markup_elements)
+                                self.undo_stack.push(cmd)
+                                self._active_movable_reselect_orig_master = self.master_np_rgb.copy()
+                                self._update_active_markup_selection_handles()
+                                self.update_revert_state()
+                                if self.current_media_id is not None:
+                                    self.pixel_edit_saved.emit(self.current_media_id, "")
+                            else:
+                                self._restore_active_movable_before_state()
+                                if self.master_np_rgb is not None:
+                                    mh, mw = self.master_np_rgb.shape[:2]
+                                    self._refresh_viewport_after_master_roi((0, mh, 0, mw))
+                                if hasattr(self, "undo_stack") and self.undo_stack.canUndo():
+                                    self.undo_stack.undo()
+                                    if el in self._markup_elements:
+                                        self._markup_elements.remove(el)
+                                    if self._markup_preview_items:
+                                        it = self._markup_preview_items.pop()
+                                        self._remove_scene_item(it)
+                                self._commit_single_markup_element(el, f"Markup {el.kind.title()}")
                         return True
                     elif getattr(self, "_markup_active", False):
                         self._finish_markup(sp)
@@ -9853,8 +11960,19 @@ class SingleMediaViewer(QWidget):
                     self._cleanup_markup_temp_items()
                     return True
 
+        if event.type() == QEvent.WindowDeactivate and getattr(self, "_markup_alt_select_active", False):
+            self._markup_alt_select_active = False
+            if getattr(self, "is_markup_mode", False):
+                self._update_markup_cursor()
+
         if event.type() == QEvent.KeyRelease and isinstance(event, QKeyEvent):
-            if event.key() == Qt.Key_Backslash:
+            if event.key() == Qt.Key_Alt and getattr(self, "_markup_alt_select_active", False):
+                self._markup_alt_select_active = False
+                if getattr(self, "is_markup_mode", False):
+                    self._update_markup_cursor()
+                event.accept()
+                return True
+            if event.key() in (Qt.Key_B, Qt.Key_Backslash) and not event.isAutoRepeat() and getattr(self, "_is_comparing", False):
                 self.set_compare_mode(False)
                 event.accept()
                 return True
@@ -9868,8 +11986,16 @@ class SingleMediaViewer(QWidget):
             return True
 
         if event.type() == QEvent.KeyPress and isinstance(event, QKeyEvent):
-            if event.key() == Qt.Key_Backslash:
-                self.set_compare_mode(True)
+            focus_w_pre = QApplication.focusWidget()
+            is_text_entry_pre = isinstance(focus_w_pre, (QLineEdit, QTextEdit, QPlainTextEdit))
+            if (
+                event.key() in (Qt.Key_B, Qt.Key_Backslash)
+                and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier))
+                and not is_text_entry_pre
+                and not self.current_is_video
+            ):
+                if not event.isAutoRepeat():
+                    self.set_compare_mode(True)
                 event.accept()
                 return True
 
@@ -9925,16 +12051,15 @@ class SingleMediaViewer(QWidget):
                     return True
 
             if getattr(self, "is_markup_mode", False):
-                if event.key() == Qt.Key_BracketLeft:
-                    cur = getattr(self.markup_toolbar, "stroke_width", 4)
-                    self.markup_toolbar.set_stroke_width(max(2, cur - 2))
+                if event.key() in (Qt.Key_BracketLeft, Qt.Key_BracketRight) and getattr(self, "_inline_text_input", None) is None:
+                    cur = int(getattr(self.markup_toolbar, "stroke_width", 4))
+                    tool = str(getattr(self.markup_toolbar, "active_tool", "pen"))
+                    max_w = 150 if tool in ("pen", "highlighter", "blur", "pixelate") else (48 if tool == "text" else 64)
+                    step = 2 if cur < 24 else (4 if cur < 64 else 8)
+                    nxt = max(2, cur - step) if event.key() == Qt.Key_BracketLeft else min(max_w, cur + step)
+                    self.markup_toolbar.set_stroke_width(nxt)
                     self._update_markup_cursor()
-                    event.accept()
-                    return True
-                elif event.key() == Qt.Key_BracketRight:
-                    cur = getattr(self.markup_toolbar, "stroke_width", 4)
-                    self.markup_toolbar.set_stroke_width(min(36, cur + 2))
-                    self._update_markup_cursor()
+                    self._show_status(f"Brush / Stroke Size: {nxt}px", 1500)
                     event.accept()
                     return True
                 elif event.key() == Qt.Key_X and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
@@ -9954,6 +12079,34 @@ class SingleMediaViewer(QWidget):
                 elif event.key() == Qt.Key_Y and (event.modifiers() & Qt.ControlModifier):
                     if hasattr(self, "undo_stack") and self.undo_stack.canRedo():
                         self.undo_stack.redo()
+                    event.accept()
+                    return True
+
+            if getattr(self, "is_markup_mode", False) and not isinstance(QApplication.focusWidget(), (QLineEdit, QTextEdit)):
+                if event.key() == Qt.Key_Alt and not event.isAutoRepeat():
+                    self._markup_alt_select_active = True
+                    self._update_markup_cursor()
+                    event.accept()
+                    return True
+                if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) and getattr(self, "_active_movable_element", None) is not None:
+                    self.delete_active_markup_element()
+                    event.accept()
+                    return True
+                if event.key() == Qt.Key_C and (event.modifiers() & Qt.ControlModifier) and getattr(self, "_active_movable_element", None) is not None:
+                    self.copy_active_markup_element()
+                    event.accept()
+                    return True
+                if event.key() == Qt.Key_V and (event.modifiers() & Qt.ControlModifier) and getattr(self, "_markup_clipboard_element", None) is not None:
+                    self.paste_markup_element()
+                    event.accept()
+                    return True
+                if event.key() == Qt.Key_D and (event.modifiers() & Qt.ControlModifier) and getattr(self, "_active_movable_element", None) is not None:
+                    self.duplicate_active_markup_element()
+                    event.accept()
+                    return True
+                if event.key() == Qt.Key_V and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier):
+                    if hasattr(self, "markup_toolbar"):
+                        self.markup_toolbar.set_tool("select")
                     event.accept()
                     return True
 

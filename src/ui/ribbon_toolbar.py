@@ -29,6 +29,7 @@ from PySide6.QtGui import (
     QActionGroup,
     QCloseEvent,
     QColor,
+    QConicalGradient,
     QContextMenuEvent,
     QCursor,
     QFont,
@@ -53,6 +54,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QFrame,
     QGridLayout,
@@ -66,6 +68,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QStackedWidget,
     QStyle,
     QStyleOptionButton,
     QStyleOptionToolButton,
@@ -665,6 +668,23 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
             )
         p.setPen(Qt.NoPen)
         p.setBrush(QColor("#2468A8"))
+        p.drawPolygon(head)
+
+    elif kind in ("restore", "reset_angle"):
+        # Clean circular counter-clockwise reset arrow (no photo silhouette)
+        p.setPen(QPen(QColor("#2563EB"), max(1.6, s * 0.12), Qt.SolidLine, Qt.RoundCap))
+        p.setBrush(Qt.NoBrush)
+        arc_r = QRectF(s * 0.18, s * 0.18, s * 0.64, s * 0.64)
+        p.drawArc(arc_r, 45 * 16, 270 * 16)
+        head = QPolygonF(
+            [
+                QPointF(s * 0.16, s * 0.38),
+                QPointF(s * 0.36, s * 0.18),
+                QPointF(s * 0.40, s * 0.42),
+            ]
+        )
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#2563EB"))
         p.drawPolygon(head)
 
     elif kind in ("zoom_out", "zoom_in"):
@@ -1431,6 +1451,26 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
             QPointF(s * 0.74, s * 0.46),
         ]))
 
+    elif kind == "line_plain":
+        p.setPen(QPen(QColor("#0078D7"), max(1.6, s * 0.11), Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.18, s * 0.80), QPointF(s * 0.82, s * 0.20))
+
+    elif kind == "line_double_arrow":
+        p.setPen(QPen(QColor("#0078D7"), max(1.4, s * 0.09), Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.28, s * 0.72), QPointF(s * 0.72, s * 0.28))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#0078D7"))
+        p.drawPolygon(QPolygonF([
+            QPointF(s * 0.86, s * 0.14),
+            QPointF(s * 0.58, s * 0.22),
+            QPointF(s * 0.78, s * 0.42),
+        ]))
+        p.drawPolygon(QPolygonF([
+            QPointF(s * 0.14, s * 0.86),
+            QPointF(s * 0.42, s * 0.78),
+            QPointF(s * 0.22, s * 0.58),
+        ]))
+
     elif kind == "rect":
         p.setPen(QPen(QColor("#0078D7"), max(1.4, s * 0.08)))
         p.setBrush(QColor(0, 120, 215, 35))
@@ -1441,12 +1481,74 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.setBrush(QColor(0, 120, 215, 35))
         p.drawEllipse(QRectF(s * 0.16, s * 0.20, s * 0.68, s * 0.60))
 
-    elif kind == "star":
+    elif kind == "triangle_shape":
+        p.setPen(QPen(QColor("#0078D7"), max(1.4, s * 0.08), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(QColor(0, 120, 215, 35))
+        p.drawPolygon(QPolygonF([
+            QPointF(s * 0.50, s * 0.14),
+            QPointF(s * 0.86, s * 0.82),
+            QPointF(s * 0.14, s * 0.82),
+        ]))
+
+    elif kind == "pentagon_shape":
+        p.setPen(QPen(QColor("#0078D7"), max(1.4, s * 0.08), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(QColor(0, 120, 215, 35))
+        pts = [QPointF(s * 0.5 + s * 0.36 * math.cos(math.radians(-90 + 72 * i)),
+                       s * 0.52 + s * 0.36 * math.sin(math.radians(-90 + 72 * i))) for i in range(5)]
+        p.drawPolygon(QPolygonF(pts))
+
+    elif kind == "hexagon_shape":
+        p.setPen(QPen(QColor("#0078D7"), max(1.4, s * 0.08), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(QColor(0, 120, 215, 35))
+        pts = [QPointF(s * 0.5 + s * 0.36 * math.cos(math.radians(-90 + 60 * i)),
+                       s * 0.5 + s * 0.36 * math.sin(math.radians(-90 + 60 * i))) for i in range(6)]
+        p.drawPolygon(QPolygonF(pts))
+
+    elif kind == "heart_shape":
+        from src.ui.markup_overlay import build_heart_path_in_rect
+        p.setPen(QPen(QColor("#0078D7"), max(1.4, s * 0.08), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(QColor(0, 120, 215, 35))
+        p.drawPath(build_heart_path_in_rect(QRectF(s * 0.12, s * 0.14, s * 0.76, s * 0.74)))
+
+    elif kind == "speech_bubble":
+        from src.ui.markup_overlay import build_speech_bubble_path_in_rect
+        p.setPen(QPen(QColor("#0078D7"), max(1.4, s * 0.08), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(QColor(0, 120, 215, 35))
+        p.drawPath(build_speech_bubble_path_in_rect(QRectF(s * 0.12, s * 0.16, s * 0.76, s * 0.72)))
+
+    elif kind == "star_shape":
         from src.ui.grid_view import _build_star_polygon
         star_p = _build_star_polygon(s * 0.5, s * 0.5, s * 0.38, s * 0.16)
         p.setPen(QPen(QColor("#0078D7"), max(1.4, s * 0.08)))
         p.setBrush(QColor(0, 120, 215, 35))
         p.drawPolygon(star_p)
+
+    elif kind == "obscure":
+        # Split droplet (blur) + mosaic tile (pixelate)
+        drop_path = QPainterPath()
+        drop_path.moveTo(s * 0.34, s * 0.16)
+        drop_path.cubicTo(s * 0.36, s * 0.28, s * 0.56, s * 0.48, s * 0.56, s * 0.64)
+        drop_path.cubicTo(s * 0.56, s * 0.80, s * 0.46, s * 0.86, s * 0.34, s * 0.86)
+        drop_path.cubicTo(s * 0.22, s * 0.86, s * 0.12, s * 0.80, s * 0.12, s * 0.64)
+        drop_path.cubicTo(s * 0.12, s * 0.48, s * 0.32, s * 0.28, s * 0.34, s * 0.16)
+        drop_path.closeSubpath()
+        p.setPen(QPen(QColor("#1D4ED8"), 1.0))
+        p.setBrush(QColor("#60A5FA"))
+        p.drawPath(drop_path)
+        cell = s * 0.20
+        p.setPen(QPen(QColor("#475569"), 0.7))
+        for gx, c1 in ((s * 0.50, "#3B82F6"), (s * 0.70, "#E2E8F0")):
+            for gy, c2 in ((s * 0.22, c1), (s * 0.42, "#94A3B8" if c1 == "#3B82F6" else "#3B82F6")):
+                p.setBrush(QColor(c2))
+                p.drawRect(QRectF(gx, gy, cell, cell))
+
+    elif kind == "sticker":
+        from src.ui.markup_overlay import draw_vector_sticker
+        draw_vector_sticker(p, QRectF(s * 0.12, s * 0.12, s * 0.76, s * 0.76), "smiley")
+
+    elif kind in ("sticker_heart", "sticker_smiley", "sticker_star", "sticker_fire", "sticker_check"):
+        from src.ui.markup_overlay import draw_vector_sticker
+        draw_vector_sticker(p, QRectF(s * 0.10, s * 0.10, s * 0.80, s * 0.80), kind.split("_", 1)[1])
 
     elif kind == "blur":
         # Professional digital imaging standard water droplet for soften/blur
@@ -1480,18 +1582,88 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
                 p.drawRect(QRectF(ix, iy, half, half))
 
     elif kind == "magnify":
-        p.setPen(QPen(QColor("#475569"), max(1.5, s * 0.10)))
-        p.setBrush(QColor(59, 130, 246, 50))
+        p.setPen(QPen(QColor("#2563EB"), max(1.6, s * 0.10)))
+        p.setBrush(QColor(96, 165, 250, 75))
         p.drawEllipse(QPointF(s * 0.42, s * 0.42), s * 0.26, s * 0.26)
-        p.setPen(QPen(QColor("#334155"), max(2.0, s * 0.12), Qt.SolidLine, Qt.RoundCap))
-        p.drawLine(QPointF(s * 0.62, s * 0.62), QPointF(s * 0.84, s * 0.84))
+        p.setPen(QPen(QColor("#E0F2FE"), max(1.0, s * 0.045), Qt.SolidLine, Qt.RoundCap))
+        p.setBrush(Qt.NoBrush)
+        p.drawArc(QRectF(s * 0.24, s * 0.24, s * 0.28, s * 0.28), 115 * 16, 70 * 16)
+        p.setPen(QPen(QColor("#64748B"), max(2.2, s * 0.12), Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.62, s * 0.62), QPointF(s * 0.85, s * 0.85))
 
     elif kind == "text":
-        p.setPen(QPen(QColor("#1E3A8A"), 1.0))
-        p.setBrush(QColor("#1E3A8A"))
-        f = QFont("Segoe UI", int(s * 0.68), QFont.Bold)
+        p.setPen(QPen(QColor("#93C5FD"), max(0.8, s * 0.03)))
+        p.setBrush(QColor("#2563EB"))
+        f = QFont("Segoe UI", max(1, int(s * 0.68)), QFont.Bold)
         p.setFont(f)
+        p.setPen(QPen(QColor("#3B82F6"), 1.0))
         p.drawText(QRectF(0, 0, s, s), Qt.AlignCenter, "T")
+
+    elif kind in ("align_left", "align_center", "align_right"):
+        p.setPen(QPen(QColor("#1E3A5F"), max(1.6, s * 0.115), Qt.SolidLine, Qt.RoundCap))
+        rows = [
+            (0.22, 0.86),
+            (0.41, 0.56),
+            (0.60, 0.86),
+            (0.79, 0.62),
+        ]
+        margin = s * 0.12
+        avail = s * 0.76
+        for ry_f, span_f in rows:
+            y = s * ry_f
+            bar_w = avail * span_f
+            if kind == "align_left":
+                x1, x2 = margin, margin + bar_w
+            elif kind == "align_right":
+                x2 = s - margin
+                x1 = x2 - bar_w
+            else:
+                x1 = (s - bar_w) * 0.5
+                x2 = x1 + bar_w
+            p.drawLine(QPointF(x1, y), QPointF(x2, y))
+
+    elif kind == "fill_bucket":
+        p.save()
+        p.translate(s * 0.46, s * 0.50)
+        p.rotate(-35)
+        p.setPen(QPen(QColor("#1E4E8C"), max(1.1, s * 0.06)))
+        p.setBrush(QColor("#93C5FD"))
+        p.drawRoundedRect(QRectF(-s * 0.22, -s * 0.16, s * 0.40, s * 0.36), 2.0, 2.0)
+        p.setPen(QPen(QColor("#475569"), max(1.2, s * 0.06), Qt.SolidLine, Qt.RoundCap))
+        p.setBrush(Qt.NoBrush)
+        p.drawArc(QRectF(-s * 0.16, -s * 0.30, s * 0.28, s * 0.24), 0, 180 * 16)
+        p.restore()
+        # Paint droplet pouring from bucket spout
+        drop = QPainterPath()
+        drop.moveTo(s * 0.76, s * 0.48)
+        drop.cubicTo(s * 0.88, s * 0.62, s * 0.88, s * 0.82, s * 0.76, s * 0.86)
+        drop.cubicTo(s * 0.64, s * 0.82, s * 0.64, s * 0.62, s * 0.76, s * 0.48)
+        p.setPen(QPen(QColor("#1D4ED8"), max(0.9, s * 0.04)))
+        p.setBrush(QColor("#3B82F6"))
+        p.drawPath(drop)
+
+    elif kind == "stamp":
+        # Glossy Aero rubber stamp & seal badge
+        p.setPen(QPen(QColor("#1E4E8C"), max(1.0, s * 0.045)))
+        knob_g = QLinearGradient(0, s * 0.12, 0, s * 0.44)
+        knob_g.setColorAt(0.0, QColor("#7CC4F8"))
+        knob_g.setColorAt(1.0, QColor("#2563EB"))
+        p.setBrush(knob_g)
+        p.drawEllipse(QPointF(s * 0.50, s * 0.26), s * 0.15, s * 0.14)
+        p.drawPolygon(QPolygonF([
+            QPointF(s * 0.41, s * 0.34),
+            QPointF(s * 0.59, s * 0.34),
+            QPointF(s * 0.64, s * 0.58),
+            QPointF(s * 0.36, s * 0.58),
+        ]))
+        base_g = QLinearGradient(0, s * 0.56, 0, s * 0.78)
+        base_g.setColorAt(0.0, QColor("#FDE68A"))
+        base_g.setColorAt(1.0, QColor("#D97706"))
+        p.setPen(QPen(QColor("#92400E"), max(1.0, s * 0.045)))
+        p.setBrush(base_g)
+        p.drawRoundedRect(QRectF(s * 0.18, s * 0.56, s * 0.64, s * 0.20), 2.5, 2.5)
+        p.setPen(QPen(QColor("#10B981"), max(1.8, s * 0.075), Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.16, s * 0.84), QPointF(s * 0.84, s * 0.84))
 
     elif kind == "swap":
         p.setPen(QPen(QColor("#2563EB"), 1.4, Qt.SolidLine, Qt.RoundCap))
@@ -1720,46 +1892,48 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         return icon
 
     elif kind in ("undo", "redo"):
-        p.setPen(QPen(QColor("#1D5A92"), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        p.setBrush(Qt.NoBrush)
-        path = QPainterPath()
-        if kind == "undo":
-            path.arcMoveTo(QRectF(s * 0.22, s * 0.24, s * 0.60, s * 0.60), 40)
-            path.arcTo(QRectF(s * 0.22, s * 0.24, s * 0.60, s * 0.60), 40, 160)
-            p.drawPath(path)
-            p.setBrush(QColor("#1D5A92"))
-            tri = QPolygonF([QPointF(s * 0.16, s * 0.44), QPointF(s * 0.34, s * 0.30), QPointF(s * 0.34, s * 0.56)])
-            p.drawPolygon(tri)
-        else:
-            path.arcMoveTo(QRectF(s * 0.18, s * 0.24, s * 0.60, s * 0.60), 140)
-            path.arcTo(QRectF(s * 0.18, s * 0.24, s * 0.60, s * 0.60), 140, -160)
-            p.drawPath(path)
-            p.setBrush(QColor("#1D5A92"))
-            tri = QPolygonF([QPointF(s * 0.84, s * 0.44), QPointF(s * 0.66, s * 0.30), QPointF(s * 0.66, s * 0.56)])
-            p.drawPolygon(tri)
+        def _draw_undo_redo(painter: QPainter, col: QColor, is_undo: bool) -> None:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            stroke_w = max(1.9, s * 0.085)
+            painter.setPen(QPen(col, stroke_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setBrush(Qt.NoBrush)
+            arc_r = QRectF(s * 0.22, s * 0.30, s * 0.56, s * 0.48)
+            path = QPainterPath()
+            if is_undo:
+                # Classic curved Undo arrow: tail at bottom-right sweeping counter-clockwise up and left
+                path.arcMoveTo(arc_r, -25)
+                path.arcTo(arc_r, -25, 195)
+                painter.drawPath(path)
+                painter.setPen(QPen(col, 1.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                painter.setBrush(col)
+                # Crisp arrowhead pointing down-left at the left end of the arc
+                tri = QPolygonF([
+                    QPointF(s * 0.14, s * 0.52),
+                    QPointF(s * 0.28, s * 0.31),
+                    QPointF(s * 0.37, s * 0.52),
+                ])
+                painter.drawPolygon(tri)
+            else:
+                # Mirrored curved Redo arrow: tail at bottom-left sweeping clockwise up and right
+                path.arcMoveTo(arc_r, 205)
+                path.arcTo(arc_r, 205, -195)
+                painter.drawPath(path)
+                painter.setPen(QPen(col, 1.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                painter.setBrush(col)
+                tri = QPolygonF([
+                    QPointF(s * 0.86, s * 0.52),
+                    QPointF(s * 0.72, s * 0.31),
+                    QPointF(s * 0.63, s * 0.52),
+                ])
+                painter.drawPolygon(tri)
+
+        _draw_undo_redo(p, QColor("#1D5A92"), kind == "undo")
         p.end()
 
         dis_pix = QPixmap(size, size)
         dis_pix.fill(Qt.transparent)
         dp = QPainter(dis_pix)
-        dp.setRenderHint(QPainter.Antialiasing, True)
-        dp.setPen(QPen(QColor("#9EB4CA"), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        dp.setBrush(Qt.NoBrush)
-        dpath = QPainterPath()
-        if kind == "undo":
-            dpath.arcMoveTo(QRectF(s * 0.22, s * 0.24, s * 0.60, s * 0.60), 40)
-            dpath.arcTo(QRectF(s * 0.22, s * 0.24, s * 0.60, s * 0.60), 40, 160)
-            dp.drawPath(dpath)
-            dp.setBrush(QColor("#9EB4CA"))
-            tri = QPolygonF([QPointF(s * 0.16, s * 0.44), QPointF(s * 0.34, s * 0.30), QPointF(s * 0.34, s * 0.56)])
-            dp.drawPolygon(tri)
-        else:
-            dpath.arcMoveTo(QRectF(s * 0.18, s * 0.24, s * 0.60, s * 0.60), 140)
-            dpath.arcTo(QRectF(s * 0.18, s * 0.24, s * 0.60, s * 0.60), 140, -160)
-            dp.drawPath(dpath)
-            dp.setBrush(QColor("#9EB4CA"))
-            tri = QPolygonF([QPointF(s * 0.84, s * 0.44), QPointF(s * 0.66, s * 0.30), QPointF(s * 0.66, s * 0.56)])
-            dp.drawPolygon(tri)
+        _draw_undo_redo(dp, QColor("#9EB4CA"), kind == "undo")
         dp.end()
 
         icon = QIcon(pix)
@@ -2133,6 +2307,11 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawRoundedRect(QRectF(s * 0.22, s * 0.20, s * 0.22, s * 0.60), 1.5, 1.5)
         p.drawRoundedRect(QRectF(s * 0.56, s * 0.20, s * 0.22, s * 0.60), 1.5, 1.5)
 
+    elif kind == "stop":
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#0078D4"))
+        p.drawRoundedRect(QRectF(s * 0.24, s * 0.24, s * 0.52, s * 0.52), 2.0, 2.0)
+
     elif kind in ("volume", "volume_low"):
         p.setPen(QPen(QColor("#0078D4"), 1.2))
         p.setBrush(QColor("#0078D4"))
@@ -2351,6 +2530,32 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.drawLine(QPointF(s * 0.62, s * 0.72), QPointF(s * 0.82, s * 0.72))
         p.drawLine(QPointF(s * 0.72, s * 0.62), QPointF(s * 0.72, s * 0.82))
 
+    elif kind == "select_cursor":
+        # Crisp WLPG selection pointer arrow (white body with navy outline + subtle blue sheen)
+        arrow_poly = QPolygonF([
+            QPointF(s * 0.24, s * 0.14),
+            QPointF(s * 0.24, s * 0.80),
+            QPointF(s * 0.42, s * 0.63),
+            QPointF(s * 0.56, s * 0.86),
+            QPointF(s * 0.66, s * 0.81),
+            QPointF(s * 0.52, s * 0.58),
+            QPointF(s * 0.76, s * 0.56),
+        ])
+        grad = QLinearGradient(s * 0.24, s * 0.14, s * 0.74, s * 0.84)
+        grad.setColorAt(0.0, QColor("#FFFFFF"))
+        grad.setColorAt(1.0, QColor("#CFE4FA"))
+        p.setPen(QPen(QColor("#1E395B"), max(1.3, s * 0.055), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(grad)
+        p.drawPolygon(arrow_poly)
+
+    elif kind == "duplicate":
+        # Overlapping twin cards icon
+        p.setPen(QPen(QColor("#2B6CB0"), max(1.1, s * 0.06)))
+        p.setBrush(QColor("#EBF4FC"))
+        p.drawRoundedRect(QRectF(s * 0.16, s * 0.14, s * 0.48, s * 0.54), 2.0, 2.0)
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawRoundedRect(QRectF(s * 0.34, s * 0.30, s * 0.50, s * 0.56), 2.0, 2.0)
+
     elif kind == "compare":
         # Split before/after comparison card
         p.setPen(QPen(QColor("#2B6CB0"), 1.1))
@@ -2538,6 +2743,161 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
         p.setBrush(hgrad)
         p.drawPath(heart)
 
+    elif kind == "flip_h":
+        # Two mirrored triangles across a vertical dashed symmetry axis
+        p.setPen(QPen(QColor("#64748B"), max(1.0, s * 0.06), Qt.DashLine))
+        p.drawLine(QPointF(s * 0.50, s * 0.14), QPointF(s * 0.50, s * 0.86))
+        left_tri = QPolygonF([
+            QPointF(s * 0.42, s * 0.22),
+            QPointF(s * 0.12, s * 0.78),
+            QPointF(s * 0.42, s * 0.78),
+        ])
+        p.setPen(QPen(QColor("#1D4ED8"), max(1.0, s * 0.06)))
+        p.setBrush(QColor("#3B82F6"))
+        p.drawPolygon(left_tri)
+        right_tri = QPolygonF([
+            QPointF(s * 0.58, s * 0.22),
+            QPointF(s * 0.88, s * 0.78),
+            QPointF(s * 0.58, s * 0.78),
+        ])
+        p.setPen(QPen(QColor("#3B82F6"), max(1.0, s * 0.06)))
+        p.setBrush(QColor("#DBEAFE"))
+        p.drawPolygon(right_tri)
+
+    elif kind == "flip_v":
+        # Two mirrored triangles across a horizontal dashed symmetry axis
+        p.setPen(QPen(QColor("#64748B"), max(1.0, s * 0.06), Qt.DashLine))
+        p.drawLine(QPointF(s * 0.14, s * 0.50), QPointF(s * 0.86, s * 0.50))
+        top_tri = QPolygonF([
+            QPointF(s * 0.22, s * 0.42),
+            QPointF(s * 0.78, s * 0.12),
+            QPointF(s * 0.78, s * 0.42),
+        ])
+        p.setPen(QPen(QColor("#1D4ED8"), max(1.0, s * 0.06)))
+        p.setBrush(QColor("#3B82F6"))
+        p.drawPolygon(top_tri)
+        bot_tri = QPolygonF([
+            QPointF(s * 0.22, s * 0.58),
+            QPointF(s * 0.78, s * 0.88),
+            QPointF(s * 0.78, s * 0.58),
+        ])
+        p.setPen(QPen(QColor("#3B82F6"), max(1.0, s * 0.06)))
+        p.setBrush(QColor("#DBEAFE"))
+        p.drawPolygon(bot_tri)
+
+    elif kind == "swap_ratio":
+        # Portrait & landscape rectangles with curved swap arrow
+        p.setPen(QPen(QColor("#3B82F6"), max(1.0, s * 0.065)))
+        p.setBrush(QColor("#EFF6FF"))
+        p.drawRoundedRect(QRectF(s * 0.14, s * 0.20, s * 0.40, s * 0.56), 1.8, 1.8)
+        p.setPen(QPen(QColor("#1D4ED8"), max(1.1, s * 0.065)))
+        p.setBrush(QColor("#BFDBFE"))
+        p.drawRoundedRect(QRectF(s * 0.34, s * 0.42, s * 0.54, s * 0.38), 1.8, 1.8)
+        p.setPen(QPen(QColor("#0F172A"), max(1.1, s * 0.065), Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.62, s * 0.22), QPointF(s * 0.82, s * 0.22))
+        p.drawLine(QPointF(s * 0.75, s * 0.14), QPointF(s * 0.83, s * 0.22))
+        p.drawLine(QPointF(s * 0.75, s * 0.30), QPointF(s * 0.83, s * 0.22))
+
+    elif kind == "crop_grid":
+        p.setPen(QPen(QColor("#2563EB"), max(1.1, s * 0.065)))
+        p.setBrush(QColor("#EFF6FF"))
+        p.drawRoundedRect(QRectF(s * 0.14, s * 0.14, s * 0.72, s * 0.72), 2.0, 2.0)
+        p.setPen(QPen(QColor("#60A5FA"), max(0.9, s * 0.05)))
+        p.drawLine(QPointF(s * 0.38, s * 0.16), QPointF(s * 0.38, s * 0.84))
+        p.drawLine(QPointF(s * 0.62, s * 0.16), QPointF(s * 0.62, s * 0.84))
+        p.drawLine(QPointF(s * 0.16, s * 0.38), QPointF(s * 0.84, s * 0.38))
+        p.drawLine(QPointF(s * 0.16, s * 0.62), QPointF(s * 0.84, s * 0.62))
+
+    elif kind == "straighten_line":
+        p.setPen(QPen(QColor("#94A3B8"), max(0.9, s * 0.05), Qt.DashLine))
+        p.drawLine(QPointF(s * 0.12, s * 0.50), QPointF(s * 0.88, s * 0.50))
+        p.setPen(QPen(QColor("#2563EB"), max(1.4, s * 0.085), Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(s * 0.16, s * 0.66), QPointF(s * 0.84, s * 0.34))
+        p.setPen(QPen(QColor("#1E3A8A"), max(0.9, s * 0.05)))
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawEllipse(QPointF(s * 0.16, s * 0.66), s * 0.08, s * 0.08)
+        p.drawEllipse(QPointF(s * 0.84, s * 0.34), s * 0.08, s * 0.08)
+
+    elif kind == "perspective_auto":
+        # Trapezoid outline straightening into crisp blue rectangle + gold sparkle
+        trap = QPolygonF([
+            QPointF(s * 0.24, s * 0.20),
+            QPointF(s * 0.76, s * 0.20),
+            QPointF(s * 0.86, s * 0.82),
+            QPointF(s * 0.14, s * 0.82),
+        ])
+        p.setPen(QPen(QColor("#64748B"), max(1.0, s * 0.055), Qt.DashLine))
+        p.setBrush(Qt.NoBrush)
+        p.drawPolygon(trap)
+        p.setPen(QPen(QColor("#2563EB"), max(1.2, s * 0.065)))
+        p.setBrush(QColor(59, 130, 246, 48))
+        p.drawRect(QRectF(s * 0.22, s * 0.22, s * 0.56, s * 0.58))
+        # Gold sparkle top-right
+        sx, sy, sr = s * 0.78, s * 0.22, s * 0.14
+        star = QPolygonF([
+            QPointF(sx, sy - sr),
+            QPointF(sx + sr * 0.3, sy - sr * 0.3),
+            QPointF(sx + sr, sy),
+            QPointF(sx + sr * 0.3, sy + sr * 0.3),
+            QPointF(sx, sy + sr),
+            QPointF(sx - sr * 0.3, sy + sr * 0.3),
+            QPointF(sx - sr, sy),
+            QPointF(sx - sr * 0.3, sy - sr * 0.3),
+        ])
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#F59E0B"))
+        p.drawPolygon(star)
+
+    elif kind == "ai_expand":
+        # Outer dashed expanded frame + inner photo + violet/gold sparkle
+        p.setPen(QPen(QColor("#7C3AED"), max(1.1, s * 0.055), Qt.DashLine))
+        p.setBrush(QColor(139, 92, 246, 26))
+        p.drawRoundedRect(QRectF(s * 0.10, s * 0.14, s * 0.80, s * 0.72), 2.5, 2.5)
+        p.setPen(QPen(QColor("#2563EB"), max(1.2, s * 0.06)))
+        p.setBrush(QColor("#DBEAFE"))
+        p.drawRoundedRect(QRectF(s * 0.24, s * 0.26, s * 0.52, s * 0.48), 1.8, 1.8)
+        # Sparkle badge
+        sx, sy, sr = s * 0.78, s * 0.22, s * 0.15
+        star = QPolygonF([
+            QPointF(sx, sy - sr),
+            QPointF(sx + sr * 0.3, sy - sr * 0.3),
+            QPointF(sx + sr, sy),
+            QPointF(sx + sr * 0.3, sy + sr * 0.3),
+            QPointF(sx, sy + sr),
+            QPointF(sx - sr * 0.3, sy + sr * 0.3),
+            QPointF(sx - sr, sy),
+            QPointF(sx - sr * 0.3, sy - sr * 0.3),
+        ])
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#8B5CF6"))
+        p.drawPolygon(star)
+
+    elif kind == "crop_apply":
+        # Clean crisp emerald green tick (no circle) matching WLPG aesthetics
+        p.setPen(QPen(QColor("#047857"), max(2.6, s * 0.145), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.NoBrush)
+        tick = QPolygonF([
+            QPointF(s * 0.18, s * 0.54),
+            QPointF(s * 0.40, s * 0.76),
+            QPointF(s * 0.82, s * 0.24),
+        ])
+        p.drawPolyline(tick)
+        p.setPen(QPen(QColor("#10B981"), max(1.8, s * 0.095), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.drawPolyline(tick)
+
+    elif kind == "crop_reset":
+        p.setPen(QPen(QColor("#2563EB"), max(1.3, s * 0.085), Qt.SolidLine, Qt.RoundCap))
+        p.setBrush(Qt.NoBrush)
+        p.drawArc(QRectF(s * 0.20, s * 0.20, s * 0.60, s * 0.60), 40 * 16, 260 * 16)
+        head = QPolygonF([
+            QPointF(s * 0.22, s * 0.16),
+            QPointF(s * 0.44, s * 0.22),
+            QPointF(s * 0.28, s * 0.38),
+        ])
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#2563EB"))
+        p.drawPolygon(head)
+
     else:
         p.setPen(QPen(QColor("#3E6B99"), 1.1))
         p.setBrush(QColor("#D8EAF9"))
@@ -2550,6 +2910,131 @@ def _render_aero_raw(kind: str, size: int = 20) -> QIcon:
 
 
 icon_provider.set_aero_renderer(_render_aero_raw)
+
+
+def make_rainbow_color_wheel_icon(is_dark: bool = False, size: int = 32) -> QIcon:
+    """Renders a crisp HiDPI MS Paint-style rainbow colour wheel with a top-right '+' badge."""
+    scale = 2.0
+    pm = QPixmap(int(size * scale), int(size * scale))
+    pm.setDevicePixelRatio(scale)
+    pm.fill(Qt.transparent)
+    wp = QPainter(pm)
+    wp.setRenderHint(QPainter.Antialiasing, True)
+    cx, cy, rad = size * 0.47, size * 0.53, size * 0.38
+    cg = QConicalGradient(cx, cy, 90.0)
+    for stop, col_hex in (
+        (0.00, "#FF2D2D"),
+        (0.16, "#FF9900"),
+        (0.33, "#FFE600"),
+        (0.50, "#22C55E"),
+        (0.66, "#06B6D4"),
+        (0.83, "#3B82F6"),
+        (0.92, "#A855F7"),
+        (1.00, "#FF2D2D"),
+    ):
+        cg.setColorAt(stop, QColor(col_hex))
+    wp.setPen(QPen(QColor("#64748B" if is_dark else "#94A3B8"), 0.9))
+    wp.setBrush(cg)
+    wp.drawEllipse(QPointF(cx, cy), rad, rad)
+    rg = QRadialGradient(cx, cy, rad)
+    rg.setColorAt(0.0, QColor(255, 255, 255, 215))
+    rg.setColorAt(0.45, QColor(255, 255, 255, 70))
+    rg.setColorAt(1.0, QColor(255, 255, 255, 0))
+    wp.setPen(Qt.NoPen)
+    wp.setBrush(rg)
+    wp.drawEllipse(QPointF(cx, cy), rad, rad)
+    # Crisp top-right '+' badge
+    bx, by, br = size * 0.765, size * 0.25, size * 0.175
+    wp.setPen(QPen(QColor("#CBD5E1" if is_dark else "#475569"), 1.1))
+    wp.setBrush(QColor("#1E293B" if is_dark else "#FFFFFF"))
+    wp.drawEllipse(QPointF(bx, by), br, br)
+    arm = br * 0.46
+    wp.setPen(QPen(QColor("#F8FAFC" if is_dark else "#334155"), 1.35, Qt.SolidLine, Qt.RoundCap))
+    wp.drawLine(QPointF(bx - arm, by), QPointF(bx + arm, by))
+    wp.drawLine(QPointF(bx, by - arm), QPointF(bx, by + arm))
+    wp.end()
+    return QIcon(pm)
+
+
+def _make_mk_text_style_icon(style_key: str, is_dark: bool = False) -> QIcon:
+    """Draws a crisp 16x16 preview icon for Text/Stamp background styles (Pill, Outline, Shadow, Plain)."""
+    pm = QPixmap(32, 32)
+    pm.setDevicePixelRatio(2.0)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.setRenderHint(QPainter.TextAntialiasing, True)
+    f = QFont("Segoe UI", 9, QFont.Bold)
+    p.setFont(f)
+    if style_key == "pill":
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#3B82F6" if is_dark else "#1E395B"))
+        p.drawRoundedRect(QRectF(1.0, 2.5, 14.0, 11.0), 3.0, 3.0)
+        p.setPen(QColor("#FFFFFF"))
+        p.drawText(QRectF(1.0, 1.5, 14.0, 13.0), Qt.AlignCenter, "A")
+    elif style_key == "outline":
+        out_col = QColor("#60A5FA" if is_dark else "#1D6FD8")
+        p.setPen(out_col)
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            p.drawText(QRectF(1.0 + dx, 1.5 + dy, 14.0, 13.0), Qt.AlignCenter, "A")
+        p.setPen(QColor("#1E293B" if is_dark else "#FFFFFF"))
+        p.drawText(QRectF(1.0, 1.5, 14.0, 13.0), Qt.AlignCenter, "A")
+    elif style_key == "shadow":
+        p.setPen(QColor(0, 0, 0, 150) if not is_dark else QColor(0, 0, 0, 210))
+        p.drawText(QRectF(2.5, 2.8, 14.0, 13.0), Qt.AlignCenter, "A")
+        p.setPen(QColor("#E2E8F0" if is_dark else "#1E395B"))
+        p.drawText(QRectF(1.0, 1.5, 14.0, 13.0), Qt.AlignCenter, "A")
+    else:
+        p.setPen(QColor("#CBD5E1" if is_dark else "#475569"))
+        p.drawText(QRectF(1.0, 1.5, 14.0, 13.0), Qt.AlignCenter, "A")
+    p.end()
+    return QIcon(pm)
+
+
+def _make_mk_dash_style_icon(dash_key: str, is_dark: bool = False) -> QIcon:
+    """Draws a crisp 16x16 preview icon for Line/Border dash styles (Solid, Outlined, Dashed, Dotted)."""
+    pm = QPixmap(32, 32)
+    pm.setDevicePixelRatio(2.0)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    col = QColor("#E2E8F0") if is_dark else QColor("#1E395B")
+    if dash_key == "outlined":
+        out_col = QColor("#60A5FA") if is_dark else QColor("#1D6FD8")
+        p.setPen(QPen(out_col, 5.0, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(2.5, 8.0), QPointF(13.5, 8.0))
+        p.setPen(QPen(QColor("#1E293B") if is_dark else QColor("#FFFFFF"), 2.2, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(2.5, 8.0), QPointF(13.5, 8.0))
+    else:
+        pen_style = Qt.DashLine if dash_key == "dashed" else (Qt.DotLine if dash_key == "dotted" else Qt.SolidLine)
+        p.setPen(QPen(col, 2.0, pen_style, Qt.RoundCap))
+        p.drawLine(QPointF(1.5, 8.0), QPointF(14.5, 8.0))
+    p.end()
+    return QIcon(pm)
+
+
+def _make_mk_shape_style_icon(style_key: str, is_dark: bool = False) -> QIcon:
+    """Draws a crisp 16x16 preview icon for Shape styles (Outline, Fill + Outline, Solid Fill)."""
+    pm = QPixmap(32, 32)
+    pm.setDevicePixelRatio(2.0)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    stroke_col = QColor("#60A5FA" if is_dark else "#1D6FD8")
+    fill_col = QColor("#334155" if is_dark else "#BFDBFE")
+    r = QRectF(2.5, 3.0, 11.0, 10.0)
+    if style_key == "outline":
+        p.setPen(QPen(stroke_col, 1.6))
+        p.setBrush(Qt.NoBrush)
+    elif style_key == "both":
+        p.setPen(QPen(stroke_col, 1.6))
+        p.setBrush(fill_col)
+    else:
+        p.setPen(Qt.NoPen)
+        p.setBrush(stroke_col)
+    p.drawRoundedRect(r, 2.0, 2.0)
+    p.end()
+    return QIcon(pm)
 
 
 def make_wlpg_icon(kind: str, size: int = 20) -> QIcon:
@@ -4064,6 +4549,27 @@ class _RibbonPage(QWidget):
 
     def minimumSizeHint(self) -> QSize:
         return QSize(100, 88)
+
+
+class _AdaptiveStackedWidget(QStackedWidget):
+    """QStackedWidget whose sizeHint matches ONLY its currently visible page."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.currentChanged.connect(lambda _idx: self.updateGeometry())
+
+    def sizeHint(self) -> QSize:
+        cur = self.currentWidget()
+        if cur is not None:
+            return cur.sizeHint()
+        return super().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:
+        cur = self.currentWidget()
+        if cur is not None:
+            return cur.minimumSizeHint()
+        return super().minimumSizeHint()
 
 
 class _FaceCarouselWidget(QWidget):
@@ -5869,6 +6375,66 @@ class RibbonToolbar(QWidget):
     exposure_menu_about_to_show = Signal()
     color_menu_about_to_show = Signal()
 
+    # Contextual Markup Tab Signals
+    markup_tool_changed = Signal(str)
+    markup_shape_changed = Signal(str)
+    markup_stroke_width_changed = Signal(int)
+    markup_primary_color_changed = Signal(QColor)
+    markup_secondary_color_changed = Signal(QColor)
+    markup_colors_swapped = Signal(QColor, QColor)
+    markup_font_family_changed = Signal(str)
+    markup_text_format_changed = Signal(bool, bool)
+    markup_text_style_changed = Signal(str)
+    markup_text_align_changed = Signal(str)
+    markup_opacity_changed = Signal(float)
+    markup_bg_opacity_changed = Signal(float)
+    markup_shape_filled_changed = Signal(bool)
+    markup_line_style_changed = Signal(str)
+    markup_dash_style_changed = Signal(str)
+    markup_sticker_requested = Signal(str)
+    markup_obscure_mode_changed = Signal(str)
+    markup_obscure_strength_changed = Signal(int)
+    markup_rotation_preview_changed = Signal(float)
+    markup_rotation_changed = Signal(float)
+    markup_rotation_reset_requested = Signal()
+    markup_pill_bg_toggled = Signal(bool)
+    markup_magnifier_zoom_changed = Signal(float)
+    markup_stamp_requested = Signal(str, str)  # (stamp_kind, custom_text)
+    markup_stamp_kind_selected = Signal(str)  # stamp_kind selected in Stamp ▾ menu (populates editable text box)
+    markup_delete_selected_requested = Signal()
+    markup_duplicate_selected_requested = Signal()
+    markup_copy_selected_requested = Signal()
+    markup_paste_requested = Signal()
+    markup_edit_text_requested = Signal()
+    markup_undo_requested = Signal()
+    markup_clear_requested = Signal()
+    markup_save_requested = Signal()
+    markup_save_copy_requested = Signal()
+    markup_close_requested = Signal()
+
+    # Contextual Crop & Perspective Ribbon signals
+    crop_ratio_text_changed = Signal(str)
+    crop_delete_ratio_requested = Signal()
+    crop_custom_ratio_changed = Signal(float, float)
+    crop_swap_ratio_requested = Signal()
+    crop_flip_h_toggled = Signal(bool)
+    crop_flip_v_toggled = Signal(bool)
+    crop_grid_mode_changed = Signal(str)
+    crop_straighten_changed = Signal(float)
+    crop_straighten_drag_started = Signal()
+    crop_straighten_drag_ended = Signal()
+    crop_straighten_line_toggled = Signal(bool)
+    crop_perspective_v_changed = Signal(float)
+    crop_perspective_h_changed = Signal(float)
+    crop_perspective_drag_started = Signal()
+    crop_perspective_drag_ended = Signal()
+    crop_auto_perspective_requested = Signal(str)
+    crop_reset_geometry_requested = Signal()
+    crop_ai_expand_toggled = Signal(bool)
+    crop_apply_requested = Signal()
+    crop_cancel_requested = Signal()
+    auto_adjust_options_changed = Signal(dict)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("RibbonToolbar")
@@ -6200,6 +6766,17 @@ class RibbonToolbar(QWidget):
 
         self.top_hbox.addStretch(1)
 
+        # Exit Immersive Mode Button (lives in the title bar when immersive mode hides the ribbon)
+        self.btn_exit_immersive = QPushButton("✕ Exit Immersive (F4)", self.top_header)
+        self.btn_exit_immersive.setObjectName("ExitImmersiveBtn")
+        self.btn_exit_immersive.setFixedHeight(22)
+        self.btn_exit_immersive.setCursor(Qt.PointingHandCursor)
+        self.btn_exit_immersive.setToolTip("Exit Immersive Viewer Mode (F4)")
+        self.btn_exit_immersive.clicked.connect(lambda: self.action_triggered.emit("toggle_immersive"))
+        self.btn_exit_immersive.hide()
+        self.top_hbox.addWidget(self.btn_exit_immersive)
+        self.top_hbox.addSpacing(4)
+
         self.btn_win_min = _WindowControlButton("min", self.top_header)
         self.btn_win_min.setObjectName("WinMinBtn")
         self.btn_win_min.setFixedSize(46, 32)
@@ -6278,6 +6855,8 @@ class RibbonToolbar(QWidget):
         self.tab_compare = self._build_compare_tab()
         self.tab_duplicates = self._build_duplicates_tab()
         self.tab_create_studio = self._build_create_studio_tab()
+        self.tab_markup = self._build_markup_tab()
+        self.tab_crop = self._build_crop_tab()
 
         self.tab_widget.addTab(self.tab_home, "Home")
         self.tab_widget.addTab(self.tab_edit, "Edit")
@@ -6289,11 +6868,15 @@ class RibbonToolbar(QWidget):
         self.tab_widget.addTab(self.tab_compare, "Compare")
         self.tab_widget.addTab(self.tab_duplicates, "Duplicates")
         self.tab_widget.addTab(self.tab_create_studio, "Create Studio")
+        self.tab_widget.addTab(self.tab_markup, "Markup")
+        self.tab_widget.addTab(self.tab_crop, "Crop")
         self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_batch_people), False)
         self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_map), False)
         self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_compare), False)
         self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_duplicates), False)
         self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_create_studio), False)
+        self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_markup), False)
+        self.tab_widget.tabBar().setTabVisible(self.tab_widget.indexOf(self.tab_crop), False)
 
         self.tab_widget.tabBarDoubleClicked.connect(self._on_tab_bar_double_clicked)
         self.tab_widget.tabBarClicked.connect(self._on_tab_bar_clicked)
@@ -6301,44 +6884,13 @@ class RibbonToolbar(QWidget):
             lambda _idx: self._apply_responsive_layout(self.width()) if self.isVisible() else None
         )
         self._apply_file_menu_stylesheet(getattr(self, "_dark_mode", False))
+        self._apply_crop_and_markup_theme(getattr(self, "_dark_mode", False))
 
-        # Right Corner: Minimize the Ribbon button and Exit Immersive Pill
+        # Right Corner: Settings, Help, Minimize Ribbon button
         right_corner = QWidget(self.tab_widget)
         rc_layout = QHBoxLayout(right_corner)
         rc_layout.setContentsMargins(2, 0, 8, 0)
         rc_layout.setSpacing(4)
-
-        # Exit Immersive Mode Button (subtle pill, hidden by default)
-        self.btn_exit_immersive = QPushButton("✕ Exit Immersive (F4)", right_corner)
-        self.btn_exit_immersive.setFixedHeight(22)
-        self.btn_exit_immersive.setCursor(Qt.PointingHandCursor)
-        self.btn_exit_immersive.setToolTip("Exit Immersive Viewer Mode (F4)")
-        self.btn_exit_immersive.setStyleSheet(
-            """
-            QPushButton {
-                border: 1px solid #70A6E8;
-                border-radius: 3px;
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FFFFFF, stop:0.4 #E8F1FC, stop:1 #D2E4F8);
-                color: #1E395B;
-                font-family: 'Segoe UI';
-                font-size: 8pt;
-                font-weight: 600;
-                padding: 1px 8px;
-                margin-right: 4px;
-            }
-            QPushButton:hover {
-                border: 1px solid #3399FF;
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FFFFFF, stop:0.4 #D9EBFC, stop:1 #B9DAFB);
-            }
-            QPushButton:pressed {
-                background: #A0C8F5;
-                border: 1px solid #2272D0;
-            }
-            """
-        )
-        self.btn_exit_immersive.clicked.connect(lambda: self.action_triggered.emit("toggle_immersive"))
-        self.btn_exit_immersive.hide()
-        rc_layout.addWidget(self.btn_exit_immersive)
 
         self.btn_ribbon_settings = QPushButton(right_corner)
         self.btn_ribbon_settings.setFixedSize(22, 22)
@@ -6448,6 +7000,7 @@ class RibbonToolbar(QWidget):
         self._index_custom_qat_sources()
         self._load_qat_settings()
         self._apply_aero_stylesheet()
+        self._apply_exit_immersive_theme(False, "wlpg_aero")
 
     def remove_embedded_scope_bar(self) -> None:
         """Removes the embedded ribbon scope bar so only the central one above the grid is used."""
@@ -6718,6 +7271,55 @@ class RibbonToolbar(QWidget):
 
         return container, btn_top
 
+    def _make_mk_split_tool_button(
+        self,
+        label: str,
+        icon_kind: str,
+        cat_id: str,
+        tip: str,
+        menu: QMenu,
+        fix_w: int = 48,
+    ) -> tuple[QWidget, QToolButton, QToolButton]:
+        """WLPG 2-part vertical split button for Markup Tools (top checkable icon, bottom dropdown)."""
+        container = QWidget(self.grp_mk_tools)
+        container.setObjectName("MarkupSplitContainer")
+        container.setFixedSize(fix_w, 73)
+        vbox = QVBoxLayout(container)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
+
+        btn_top = QToolButton(container)
+        btn_top.setObjectName("MarkupSplitTopBtn")
+        btn_top.setFixedSize(fix_w, 38)
+        btn_top.setCursor(Qt.PointingHandCursor)
+        btn_top.setIcon(make_wlpg_icon(icon_kind, 28))
+        btn_top.setIconSize(QSize(28, 28))
+        btn_top.setCheckable(True)
+        btn_top.setToolTip(tip)
+        btn_top.clicked.connect(lambda _c=False, cid=cat_id: self._on_ribbon_mk_category_clicked(cid))
+        vbox.addWidget(btn_top)
+
+        btn_bot = QToolButton(container)
+        btn_bot.setObjectName("MarkupSplitBottomBtn")
+        btn_bot.setFixedSize(fix_w, 35)
+        btn_bot.setCursor(Qt.PointingHandCursor)
+        btn_bot.setText(f"{label}\n▾")
+        btn_bot.setToolTip(f"{label} options")
+        btn_bot.setPopupMode(QToolButton.InstantPopup)
+        btn_bot.setMenu(menu)
+        vbox.addWidget(btn_bot)
+
+        btn_top.menu = btn_bot.menu
+        btn_top.container_widget = container
+        btn_top.btn_bottom = btn_bot
+        container._orig_w = fix_w
+        if hasattr(self, "_all_themed_buttons"):
+            btn_top._icon_kind = icon_kind
+            btn_top._is_large = True
+            self._all_themed_buttons.append(btn_top)
+
+        return container, btn_top, btn_bot
+
     def _make_split_tag_desc_button(self, parent: QWidget) -> tuple[QWidget, QToolButton]:
         """
         Creates an authentic WLPG 2-button vertical split Descriptive tag control:
@@ -6775,9 +7377,9 @@ class RibbonToolbar(QWidget):
 
     def _make_split_photo_grouping_button(self, parent: QWidget) -> tuple[QWidget, QToolButton]:
         """
-        Creates a 2-button vertical split 'Photo grouping' control in Home -> Organize:
-        - Top button: Toggles Expand / Collapse all photo groups in current view.
-        - Bottom button ('Photo\\ngrouping ▾'): Checkable Auto-group bursts & Auto-group RAW + JPEG + Expand/Collapse all.
+        Creates a 2-button vertical split 'Photo stacks' control in Home -> Organize:
+        - Top button: Master ON/OFF toggle for auto-stacking (collapses stacks & restores remembered burst/RAW+JPEG choices).
+        - Bottom button ('Photo\\nstacks ▾'): Checkable Auto-stack bursts & Auto-stack RAW + JPEG + Expand/Collapse all.
         """
         container = QWidget(parent)
         container.setObjectName("PhotoGroupingSplitContainer")
@@ -6796,8 +7398,12 @@ class RibbonToolbar(QWidget):
         btn_top.setIconSize(QSize(28, 28))
         btn_top.setToolButtonStyle(Qt.ToolButtonIconOnly)
         btn_top.setText("")
-        btn_top.setToolTip("Photo stacks: Click to expand/collapse stacks, or use arrow for Auto-stack toggles")
-        btn_top._tooltip_override = "Photo stacks: Click to expand/collapse stacks, or use arrow for Auto-stack toggles"
+        btn_top.setToolTip(
+            "Photo stacks: Toggle auto-stacking on/off (collapses & groups bursts / RAW + JPEG), or open arrow for options"
+        )
+        btn_top._tooltip_override = (
+            "Photo stacks: Toggle auto-stacking on/off (collapses & groups bursts / RAW + JPEG), or open arrow for options"
+        )
         btn_top.clicked.connect(lambda: self.action_triggered.emit("photo_grouping_primary"))
         vbox.addWidget(btn_top)
 
@@ -6881,6 +7487,135 @@ class RibbonToolbar(QWidget):
             self.btn_photo_grouping.blockSignals(True)
             self.btn_photo_grouping.setChecked(bool(auto_bursts or auto_raw_jpeg or eff_stacks_only))
             self.btn_photo_grouping.blockSignals(False)
+
+    def _make_split_auto_adjust_button(self, parent: QWidget) -> tuple[QWidget, QToolButton]:
+        """
+        Creates a 2-button vertical split 'Auto adjust' control in Edit -> Adjustments:
+        - Top button: Runs Auto Adjust immediately with the user's checked options.
+        - Bottom button ('Auto\\nadjust ▾'): Checkable menu toggling which passes Auto Adjust applies.
+        """
+        import json
+        from src.imaging.opencv_engine import DEFAULT_AUTO_ADJUST_OPTIONS
+
+        settings = QSettings("PhotoGallery64", "PhotoGallery64")
+        raw = settings.value("edit/auto_adjust_options", "")
+        saved: dict[str, bool] = dict(DEFAULT_AUTO_ADJUST_OPTIONS)
+        if isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    for k in saved:
+                        if k in parsed:
+                            saved[k] = bool(parsed[k])
+            except Exception:
+                pass
+        self._auto_adjust_options: dict[str, bool] = saved
+
+        container = QWidget(parent)
+        container.setObjectName("BadgesSplitContainer")
+        container.setFixedSize(56, 73)
+        container._orig_w = 56
+        vbox = QVBoxLayout(container)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
+
+        btn_top = QToolButton(container)
+        btn_top.setObjectName("BadgesTopBtn")
+        btn_top.setFixedSize(56, 38)
+        btn_top.setCheckable(False)
+        btn_top.setCursor(Qt.PointingHandCursor)
+        btn_top.setIcon(make_wlpg_icon("auto_adjust", 32))
+        btn_top.setIconSize(QSize(28, 28))
+        btn_top.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        btn_top.setText("")
+        btn_top.setToolTip("Automatically enhance photo using the checked Auto adjust options")
+        btn_top.clicked.connect(lambda: self.action_triggered.emit("auto_adjust"))
+        vbox.addWidget(btn_top)
+
+        btn_bot = QToolButton(container)
+        btn_bot.setObjectName("BadgesBottomBtn")
+        btn_bot.setFixedSize(56, 35)
+        btn_bot.setCursor(Qt.PointingHandCursor)
+        btn_bot.setText("Auto\nadjust ▾")
+        btn_bot.setToolTip("Choose which adjustments Auto adjust applies")
+        btn_bot.setPopupMode(QToolButton.InstantPopup)
+
+        menu = QMenu(btn_bot)
+        menu.setFont(QFont("Segoe UI", 9))
+        self._auto_adjust_actions: dict[str, QAction] = {}
+
+        def _persist_and_emit() -> None:
+            QSettings("PhotoGallery64", "PhotoGallery64").setValue(
+                "edit/auto_adjust_options", json.dumps(self._auto_adjust_options)
+            )
+            self.auto_adjust_options_changed.emit(dict(self._auto_adjust_options))
+
+        def _add_opt(key: str, label: str, tip: str) -> None:
+            act = menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(bool(self._auto_adjust_options.get(key, False)))
+            act.setToolTip(tip)
+            def _on_toggle(checked: bool, k: str = key) -> None:
+                self._auto_adjust_options[k] = bool(checked)
+                _persist_and_emit()
+            act.toggled.connect(_on_toggle)
+            self._auto_adjust_actions[key] = act
+
+        _add_opt("exposure_contrast", "Exposure && contrast", "Key-aware brightness, shadow/highlight recovery, contrast & black point")
+        _add_opt("colour_wb", "Colour && white balance", "Near-neutral CIE LAB white balance and skin-safe vibrance")
+        _add_opt("detail_clarity", "Detail && crispness", "Noise-aware sharpening and gentle midtone clarity")
+        menu.addSeparator()
+        _add_opt("denoise", "Reduce noise (low light)", "MAD noise-gated luminance & chroma denoise (0 on clean photos)")
+        _add_opt("dehaze", "Remove haze", "Conservative dark-channel haze recovery for misty scenes")
+        menu.addSeparator()
+        _add_opt("straighten", "Straighten", "Auto-level tilted horizons (-15° to +15°)")
+        _add_opt("perspective", "Perspective", "Confidence-gated vertical perspective correction for buildings")
+        menu.addSeparator()
+
+        act_reset = menu.addAction("Reset to defaults")
+        def _reset_defaults() -> None:
+            for k, dv in DEFAULT_AUTO_ADJUST_OPTIONS.items():
+                self._auto_adjust_options[k] = dv
+                a = self._auto_adjust_actions.get(k)
+                if a is not None:
+                    a.blockSignals(True)
+                    a.setChecked(dv)
+                    a.blockSignals(False)
+            _persist_and_emit()
+        act_reset.triggered.connect(_reset_defaults)
+
+        self._apply_menu_polish(menu)
+        btn_bot.setMenu(menu)
+        vbox.addWidget(btn_bot)
+
+        btn_top.menu = btn_bot.menu
+        btn_top.setMenu = btn_bot.setMenu
+        btn_top.popupMode = btn_bot.popupMode
+        btn_top.container_widget = container
+        btn_top.btn_bottom = btn_bot
+        btn_top.original_text = ""
+        btn_top._orig_text = ""
+
+        if hasattr(self, "_all_themed_buttons"):
+            btn_top._icon_kind = "auto_adjust"
+            btn_top._is_large = True
+            self._all_themed_buttons.append(btn_top)
+
+        return container, btn_top
+
+    def get_auto_adjust_options(self) -> dict[str, bool]:
+        from src.imaging.opencv_engine import DEFAULT_AUTO_ADJUST_OPTIONS
+        return dict(getattr(self, "_auto_adjust_options", DEFAULT_AUTO_ADJUST_OPTIONS))
+
+    def set_auto_adjust_options(self, options: dict[str, bool]) -> None:
+        from src.imaging.opencv_engine import DEFAULT_AUTO_ADJUST_OPTIONS
+        merged = dict(DEFAULT_AUTO_ADJUST_OPTIONS)
+        merged.update({k: bool(v) for k, v in options.items() if k in merged})
+        self._auto_adjust_options = merged
+        for k, act in getattr(self, "_auto_adjust_actions", {}).items():
+            act.blockSignals(True)
+            act.setChecked(bool(merged.get(k, False)))
+            act.blockSignals(False)
 
     def _make_split_badges_button(self, parent: QWidget) -> tuple[QWidget, QToolButton]:
         """
@@ -7918,6 +8653,16 @@ class RibbonToolbar(QWidget):
         event.accept()
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.MouseButtonDblClick:
+            if obj in (getattr(self, "sl_ribbon_straighten", None), getattr(self, "lbl_ribbon_straighten", None)):
+                self.sl_ribbon_straighten.setValue(0)
+                return True
+            if obj in (getattr(self, "sl_ribbon_persp_v", None), getattr(self, "lbl_ribbon_persp_v", None)):
+                self.sl_ribbon_persp_v.setValue(0)
+                return True
+            if obj in (getattr(self, "sl_ribbon_persp_h", None), getattr(self, "lbl_ribbon_persp_h", None)):
+                self.sl_ribbon_persp_h.setValue(0)
+                return True
         if event.type() == QEvent.ContextMenu:
             if not isinstance(obj, (QLineEdit, QMenu)):
                 if obj != getattr(self, "btn_file", None):
@@ -7953,6 +8698,74 @@ class RibbonToolbar(QWidget):
             self.btn_edit_save_copy.setEnabled(enabled)
             if hasattr(self.btn_edit_save_copy, "btn_bottom"):
                 self.btn_edit_save_copy.btn_bottom.setEnabled(enabled)
+
+    def set_video_viewer_mode(self, is_video: bool) -> None:
+        """Disables/greys out photo-only editing controls while viewing a video."""
+        vid = bool(is_video)
+        self._is_video_viewer_mode = vid
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+
+        for grp_attr in ("grp_edit_adjust", "grp_edit_effects"):
+            grp = getattr(self, grp_attr, None)
+            if grp is not None:
+                grp.setEnabled(not vid)
+        for target_attr in ("grp_edit_adjust", "effects_gallery"):
+            tw = getattr(self, target_attr, None)
+            if tw is not None:
+                if vid:
+                    eff = QGraphicsOpacityEffect(tw)
+                    eff.setOpacity(0.40)
+                    tw.setGraphicsEffect(eff)
+                else:
+                    tw.setGraphicsEffect(None)
+        for attr in ("btn_edit_rot_l", "btn_edit_rot_r", "btn_edit_people_tag"):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.setEnabled(not vid)
+        if vid:
+            self.set_save_enabled(False)
+            self.set_save_copy_enabled(False)
+            self.set_revert_enabled(False)
+
+    def set_immersive_mode(self, enabled: bool) -> None:
+        """Hides the entire ribbon tab bar & strips in Immersive Mode so only the title bar + Exit button remain."""
+        on = bool(enabled)
+        self._is_immersive_ribbon = on
+        if on:
+            if hasattr(self, "tab_widget"):
+                self.tab_widget.hide()
+            if hasattr(self, "qat_container"):
+                self.qat_container.hide()
+            if hasattr(self, "header_div_icon"):
+                self.header_div_icon.hide()
+            if hasattr(self, "header_div"):
+                self.header_div.hide()
+            if hasattr(self, "below_ribbon_bar"):
+                self.below_ribbon_bar.hide()
+            if hasattr(self, "scope_bar") and self.scope_bar is not None:
+                self.scope_bar.hide()
+            if hasattr(self, "btn_exit_immersive"):
+                self.btn_exit_immersive.show()
+            if hasattr(self, "top_header"):
+                self.top_header.show()
+                self.setFixedHeight(self.top_header.height())
+        else:
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(16777215)
+            if hasattr(self, "btn_exit_immersive"):
+                self.btn_exit_immersive.hide()
+            if hasattr(self, "tab_widget"):
+                self.tab_widget.show()
+            below = bool(getattr(self, "_qat_below_ribbon", False))
+            if hasattr(self, "qat_container"):
+                self.qat_container.setVisible(True)
+            if hasattr(self, "header_div_icon"):
+                self.header_div_icon.setVisible(not below)
+            if hasattr(self, "header_div"):
+                self.header_div.setVisible(not below)
+            if hasattr(self, "below_ribbon_bar"):
+                self.below_ribbon_bar.setVisible(below)
+        self.updateGeometry()
 
     def set_flag_state(self, is_flagged: bool) -> None:
         """Updates the highlighted check state of the Flag ribbon buttons in Home & Edit ribbons."""
@@ -8338,13 +9151,13 @@ class RibbonToolbar(QWidget):
         self.btn_home_rate.setMenu(rate_menu)
 
         self.btn_home_flag = self._make_btn("Flag", "flag", grp_org, checkable=True)
-        self.btn_home_flag.setToolTip("Toggle Pick flag (P), Reject (X), Unflag (U)")
-        self.btn_home_flag._tooltip_override = "Toggle Pick flag (P), Reject (X), Unflag (U)"
+        self.btn_home_flag.setToolTip("Toggle Pick flag (Z), Reject (X), Unflag (U)")
+        self.btn_home_flag._tooltip_override = "Toggle Pick flag (Z), Reject (X), Unflag (U)"
         self.btn_home_flag.setPopupMode(QToolButton.MenuButtonPopup)
         self.btn_home_flag.clicked.connect(lambda: self.action_triggered.emit("toggle_flag"))
         flag_menu = QMenu(self.btn_home_flag)
         flag_menu.setFont(QFont("Segoe UI", 9))
-        flag_menu.addAction(self._make_cull_menu_icon("flag_picked"), "Pick (P)", lambda: self.action_triggered.emit("flag_pick"))
+        flag_menu.addAction(self._make_cull_menu_icon("flag_picked"), "Pick (Z)", lambda: self.action_triggered.emit("flag_pick"))
         flag_menu.addAction(self._make_cull_menu_icon("flag_rejected"), "Reject (X)", lambda: self.action_triggered.emit("flag_reject"))
         flag_menu.addAction(self._make_cull_menu_icon("flag_unflagged"), "Unflag (U)", lambda: self.action_triggered.emit("flag_unflag"))
         flag_menu.addSeparator()
@@ -8625,10 +9438,8 @@ class RibbonToolbar(QWidget):
         # 5. Quick Adjustments / Adjustments Group
         self.grp_edit_adjust = _RibbonGroupBox("Quick adjustments", page)
 
-        self.btn_edit_auto = self._make_btn("Auto\nadjust", "auto_adjust", self.grp_edit_adjust, large=True)
-        self.btn_edit_auto.setToolTip("Automatically adjust brightness, contrast, and color")
-        self.btn_edit_auto.clicked.connect(lambda: self.action_triggered.emit("auto_adjust"))
-        self.grp_edit_adjust.content_layout.addWidget(self.btn_edit_auto)
+        self._auto_adjust_split_container, self.btn_edit_auto = self._make_split_auto_adjust_button(self.grp_edit_adjust)
+        self.grp_edit_adjust.content_layout.addWidget(self._auto_adjust_split_container)
 
         self.btn_edit_crop = self._make_btn("Crop", "crop", self.grp_edit_adjust, large=True)
         self.btn_edit_crop.setToolTip("Crop photo (draw crop rectangle)")
@@ -8701,12 +9512,12 @@ class RibbonToolbar(QWidget):
         self.stack_adj = stack_adj
         self.grp_edit_adjust.content_layout.addLayout(self.stack_adj)
 
-        self.btn_edit_fine_tune = self._make_btn("Fine\ntune", "fine_tune", self.grp_edit_adjust, large=True)
+        self.btn_edit_fine_tune = self._make_btn("Fine\ntune", "fine_tune", self.grp_edit_adjust, large=True, checkable=True)
         self.btn_edit_fine_tune.setToolTip("Fine-tune exposure, color, straighten, and detail (Ctrl+F)")
         self.btn_edit_fine_tune.clicked.connect(lambda: self.action_triggered.emit("fine_tune"))
         self.grp_edit_adjust.content_layout.addWidget(self.btn_edit_fine_tune)
 
-        self.btn_edit_depth_light = self._make_btn("Depth &\nlight", "depth_light", self.grp_edit_adjust, large=True)
+        self.btn_edit_depth_light = self._make_btn("Depth &\nlight", "depth_light", self.grp_edit_adjust, large=True, checkable=True)
         self.btn_edit_depth_light.setToolTip("Portrait bokeh, 3D depth relighting, and atmospheric haze")
         self.btn_edit_depth_light.clicked.connect(lambda: self.action_triggered.emit("depth_light_pane"))
         self.grp_edit_adjust.content_layout.addWidget(self.btn_edit_depth_light)
@@ -8774,8 +9585,22 @@ class RibbonToolbar(QWidget):
         self._set_edit_tab_mode("grid")
         return page
 
+    def set_edit_pane_mode(self, mode: str) -> None:
+        """Sync checked/selected appearance of Edit -> Fine tune and Depth & light buttons."""
+        for attr, target_mode in (
+            ("btn_edit_fine_tune", "fine_tune"),
+            ("btn_edit_depth_light", "depth_light"),
+        ):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.blockSignals(True)
+                btn.setChecked(mode == target_mode)
+                btn.blockSignals(False)
+
     def _set_edit_tab_mode(self, mode: Literal["grid", "viewer"]) -> None:
         is_viewer = (mode == "viewer")
+        if not is_viewer:
+            self.set_edit_pane_mode("")
         if hasattr(self, "grp_edit_iterate"):
             self.grp_edit_iterate.setVisible(is_viewer)
         if hasattr(self, "col_grid_manage"):
@@ -10303,7 +11128,7 @@ class RibbonToolbar(QWidget):
         self.btn_cmp_auto_advance.setProperty("_compare_icon_kind", "auto_advance")
         self.btn_cmp_auto_advance.setIcon(self._make_compare_icon("auto_advance"))
         self.btn_cmp_auto_advance.setToolTip(
-            "Auto-Advance Challenger\nWhen a pane is Pinned, rating (1-5) or flagging (P) the other pane automatically advances it to the next candidate."
+            "Auto-Advance Challenger\nWhen a pane is Pinned, rating (1-5) or flagging (Z) the other pane automatically advances it to the next candidate."
         )
         self.btn_cmp_auto_advance.clicked.connect(
             lambda checked: self.action_triggered.emit(f"compare_auto_advance:{1 if checked else 0}")
@@ -11209,19 +12034,2402 @@ class RibbonToolbar(QWidget):
                 size = 32 if getattr(btn, "_is_large", False) else 16
                 btn.setIcon(make_wlpg_icon(kind, size))
 
-    def set_active_mode(self, mode: Literal["grid", "viewer", "map", "batch_people", "people", "albums", "compare", "duplicates", "create_studio"]) -> None:
-        """Switches Ribbon context when entering/exiting Single Media Viewer, World Map, People, Compare, Duplicates, Batch People Tagging, or Create Studio."""
+    def _build_crop_tab(self) -> QWidget:
+        """Builds the contextual Crop & Perspective Ribbon tab (Aspect Ratio | Orientation | Straighten & Perspective | Fill | Close)."""
+        from PySide6.QtWidgets import QDoubleSpinBox
+        from src.ui.crop_tool import CropRatioComboBox
+
+        tab = _RibbonPage()
+        h = QHBoxLayout(tab)
+        h.setContentsMargins(4, 2, 4, 2)
+        h.setSpacing(4)
+
+        self._crop_syncing: bool = False
+
+        self._crop_small_themed_buttons: list[tuple[QToolButton, int]] = []
+
+        def _mk_small_btn(label: str, icon_kind: str, tip: str, parent_w: QWidget, *, right_pad: int = 6) -> QToolButton:
+            btn = QToolButton(parent_w)
+            btn.setObjectName("RibbonSmallBtn")
+            btn.setText(label)
+            btn.setIcon(make_wlpg_icon(icon_kind, 16))
+            btn.setIconSize(QSize(16, 16))
+            btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            btn.setAutoRaise(True)
+            btn.setFixedHeight(22)
+            btn.setToolTip(tip)
+            btn.setProperty("_icon_kind", icon_kind)
+            btn.setProperty("_icon_size", 16)
+            self._all_themed_buttons.append(btn)
+            self._crop_small_themed_buttons.append((btn, right_pad))
+            return btn
+
+        # ── Group 1: Aspect Ratio ────────────────────────────────────────────
+        grp_ratio = _RibbonGroupBox("Aspect Ratio", tab)
+        ratio_w = QWidget(grp_ratio)
+        ratio_v = QVBoxLayout(ratio_w)
+        ratio_v.setContentsMargins(2, 3, 2, 2)
+        ratio_v.setSpacing(6)
+
+        row_r1 = QHBoxLayout()
+        row_r1.setContentsMargins(0, 0, 0, 0)
+        row_r1.setSpacing(4)
+        self.combo_ribbon_crop_ratio = CropRatioComboBox(ratio_w)
+        self.combo_ribbon_crop_ratio.setFixedHeight(24)
+        self.combo_ribbon_crop_ratio.setMinimumWidth(132)
+        self.combo_ribbon_crop_ratio.setMaximumWidth(148)
+        self.combo_ribbon_crop_ratio.setStyleSheet(
+            "QComboBox { background: #FFFFFF; color: #1E293B; border: 1px solid #B8C4D4; "
+            "border-radius: 4px; padding: 1px 22px 1px 7px; font-family: 'Segoe UI'; font-size: 8.5pt; }"
+            "QComboBox:hover { border-color: #60A5FA; }"
+            "QComboBox::drop-down { border: none; width: 18px; }"
+        )
+        self.combo_ribbon_crop_ratio.setToolTip("Crop aspect ratio preset")
+        self.combo_ribbon_crop_ratio.currentTextChanged.connect(
+            lambda txt: self.crop_ratio_text_changed.emit(txt) if not self._crop_syncing else None
+        )
+        row_r1.addWidget(self.combo_ribbon_crop_ratio)
+
+        self.btn_ribbon_crop_del_ratio = QToolButton(ratio_w)
+        self.btn_ribbon_crop_del_ratio.setIcon(make_wlpg_icon("delete", 14))
+        self.btn_ribbon_crop_del_ratio.setIconSize(QSize(14, 14))
+        self.btn_ribbon_crop_del_ratio.setFixedSize(24, 24)
+        self.btn_ribbon_crop_del_ratio.setAutoRaise(True)
+        self.btn_ribbon_crop_del_ratio.setToolTip("Delete selected custom aspect ratio")
+        self.btn_ribbon_crop_del_ratio.setVisible(False)
+        self.btn_ribbon_crop_del_ratio.clicked.connect(self.crop_delete_ratio_requested.emit)
+        row_r1.addWidget(self.btn_ribbon_crop_del_ratio)
+        ratio_v.addLayout(row_r1)
+
+        # Row 2: Swap Aspect button (or Custom W x H spinboxes when Custom is selected)
+        row_r2 = QHBoxLayout()
+        row_r2.setContentsMargins(0, 0, 0, 0)
+        row_r2.setSpacing(4)
+        self.btn_ribbon_crop_swap = _mk_small_btn(
+            "Swap Aspect", "swap_ratio",
+            "Swap crop box orientation between Portrait and Landscape (X)",
+            ratio_w,
+        )
+        self.btn_ribbon_crop_swap.setFixedHeight(24)
+        self.btn_ribbon_crop_swap.clicked.connect(self.crop_swap_ratio_requested.emit)
+        row_r2.addWidget(self.btn_ribbon_crop_swap)
+
+        self.ribbon_crop_custom_wrap = QWidget(ratio_w)
+        cw_h = QHBoxLayout(self.ribbon_crop_custom_wrap)
+        cw_h.setContentsMargins(0, 0, 0, 0)
+        cw_h.setSpacing(3)
+        self.spin_ribbon_crop_w = QDoubleSpinBox(self.ribbon_crop_custom_wrap)
+        self.spin_ribbon_crop_w.setRange(0.1, 999.0)
+        self.spin_ribbon_crop_w.setDecimals(1)
+        self.spin_ribbon_crop_w.setValue(4.0)
+        self.spin_ribbon_crop_w.setFixedSize(56, 22)
+        self.spin_ribbon_crop_h = QDoubleSpinBox(self.ribbon_crop_custom_wrap)
+        self.spin_ribbon_crop_h.setRange(0.1, 999.0)
+        self.spin_ribbon_crop_h.setDecimals(1)
+        self.spin_ribbon_crop_h.setValue(3.0)
+        self.spin_ribbon_crop_h.setFixedSize(56, 22)
+        cw_h.addWidget(QLabel("W:", self.ribbon_crop_custom_wrap))
+        cw_h.addWidget(self.spin_ribbon_crop_w)
+        cw_h.addWidget(QLabel("× H:", self.ribbon_crop_custom_wrap))
+        cw_h.addWidget(self.spin_ribbon_crop_h)
+        self.spin_ribbon_crop_w.valueChanged.connect(
+            lambda _v: self.crop_custom_ratio_changed.emit(self.spin_ribbon_crop_w.value(), self.spin_ribbon_crop_h.value())
+            if not self._crop_syncing else None
+        )
+        self.spin_ribbon_crop_h.valueChanged.connect(
+            lambda _v: self.crop_custom_ratio_changed.emit(self.spin_ribbon_crop_w.value(), self.spin_ribbon_crop_h.value())
+            if not self._crop_syncing else None
+        )
+        self.ribbon_crop_custom_wrap.setVisible(False)
+        row_r2.addWidget(self.ribbon_crop_custom_wrap)
+        row_r2.addStretch(1)
+        ratio_v.addLayout(row_r2)
+
+        grp_ratio.content_layout.addWidget(ratio_w)
+        h.addWidget(grp_ratio)
+
+        # ── Group 2: Orientation & Grid ──────────────────────────────────────
+        grp_orient = _RibbonGroupBox("Orientation", tab)
+        ori_col = QWidget(grp_orient)
+        ori_v = QVBoxLayout(ori_col)
+        ori_v.setContentsMargins(2, 1, 2, 1)
+        ori_v.setSpacing(2)
+
+        self.btn_ribbon_crop_flip_h = _mk_small_btn("Flip horizontal", "flip_h", "Mirror photo left-to-right", ori_col)
+        self.btn_ribbon_crop_flip_h.setCheckable(True)
+        self.btn_ribbon_crop_flip_h.toggled.connect(
+            lambda c: self.crop_flip_h_toggled.emit(c) if not self._crop_syncing else None
+        )
+        self.btn_ribbon_crop_flip_v = _mk_small_btn("Flip vertical", "flip_v", "Mirror photo top-to-bottom", ori_col)
+        self.btn_ribbon_crop_flip_v.setCheckable(True)
+        self.btn_ribbon_crop_flip_v.toggled.connect(
+            lambda c: self.crop_flip_v_toggled.emit(c) if not self._crop_syncing else None
+        )
+
+        self.btn_ribbon_crop_grid = _mk_small_btn(
+            "Grid: 3×3", "crop_grid", "Choose composition & alignment grid (G)", ori_col, right_pad=18
+        )
+        self.btn_ribbon_crop_grid.setPopupMode(QToolButton.InstantPopup)
+        grid_menu = QMenu(self.btn_ribbon_crop_grid)
+        self._ribbon_crop_grid_actions: dict[str, QAction] = {}
+        for mode_id, label in (
+            ("thirds", "Rule of Thirds (3×3)"),
+            ("fine", "Fine Grid (9×9)"),
+            ("golden", "Golden Ratio"),
+            ("diagonals", "Diagonals"),
+            ("crosshair", "Center Crosshair"),
+            ("none", "No Grid"),
+        ):
+            act = grid_menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(mode_id == "thirds")
+            act.triggered.connect(lambda _checked=False, m=mode_id: self.crop_grid_mode_changed.emit(m))
+            self._ribbon_crop_grid_actions[mode_id] = act
+        self.btn_ribbon_crop_grid.setMenu(grid_menu)
+        self._apply_menu_polish(grid_menu)
+
+        ori_v.addWidget(self.btn_ribbon_crop_flip_h, 0, Qt.AlignLeft)
+        ori_v.addWidget(self.btn_ribbon_crop_flip_v, 0, Qt.AlignLeft)
+        ori_v.addWidget(self.btn_ribbon_crop_grid, 0, Qt.AlignLeft)
+        grp_orient.content_layout.addWidget(ori_col)
+        h.addWidget(grp_orient)
+
+        # ── Group 3: Straighten & Perspective ────────────────────────────────
+        grp_geo = _RibbonGroupBox("Straighten & Perspective", tab)
+        geo_w = QWidget(grp_geo)
+        geo_grid = QGridLayout(geo_w)
+        geo_grid.setContentsMargins(4, 0, 4, 0)
+        geo_grid.setHorizontalSpacing(6)
+        geo_grid.setVerticalSpacing(2)
+
+        def _make_geo_slider(min_v: int, max_v: int, tip: str, on_val, on_start, on_end) -> tuple[QSlider, QLabel]:
+            sl = QSlider(Qt.Horizontal, geo_w)
+            sl.setRange(min_v, max_v)
+            sl.setValue(0)
+            sl.setFixedWidth(124)
+            sl.setFixedHeight(20)
+            sl.setCursor(Qt.SizeHorCursor)
+            sl.setToolTip(tip)
+            sl.valueChanged.connect(lambda v: on_val(v) if not self._crop_syncing else None)
+            sl.sliderPressed.connect(on_start)
+            sl.sliderReleased.connect(on_end)
+            lbl = QLabel("0", geo_w)
+            lbl.setFixedWidth(38)
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            return sl, lbl
+
+        # Row 0: Straighten
+        lbl_str = QLabel("Straighten:", geo_w)
+        self.sl_ribbon_straighten, self.lbl_ribbon_straighten = _make_geo_slider(
+            -150, 150,
+            "Rotate photo (-15° to +15°). Double-click to reset to 0°.",
+            lambda v: (self.lbl_ribbon_straighten.setText(f"{v / 10.0:.1f}°"), self.crop_straighten_changed.emit(v / 10.0)),
+            self.crop_straighten_drag_started.emit,
+            self.crop_straighten_drag_ended.emit,
+        )
+        self.lbl_ribbon_straighten.setText("0.0°")
+        self.btn_ribbon_straighten_line = _mk_small_btn(
+            "Line", "straighten_line", "Draw a line along a horizon or vertical edge to level", geo_w, right_pad=6
+        )
+        self.btn_ribbon_straighten_line.setCheckable(True)
+        self.btn_ribbon_straighten_line.toggled.connect(
+            lambda c: self.crop_straighten_line_toggled.emit(c) if not self._crop_syncing else None
+        )
+        geo_grid.addWidget(lbl_str, 0, 0)
+        geo_grid.addWidget(self.sl_ribbon_straighten, 0, 1)
+        geo_grid.addWidget(self.lbl_ribbon_straighten, 0, 2)
+        geo_grid.addWidget(self.btn_ribbon_straighten_line, 0, 3, Qt.AlignLeft)
+
+        # Row 1: Vertical Perspective
+        lbl_pv = QLabel("Vertical:", geo_w)
+        self.sl_ribbon_persp_v, self.lbl_ribbon_persp_v = _make_geo_slider(
+            -100, 100,
+            "Vertical perspective / keystone correction (-100 to +100). Double-click to reset.",
+            lambda v: (self.lbl_ribbon_persp_v.setText(f"{v:+d}" if v != 0 else "0"), self.crop_perspective_v_changed.emit(float(v))),
+            self.crop_perspective_drag_started.emit,
+            self.crop_perspective_drag_ended.emit,
+        )
+        self.btn_ribbon_persp_auto = _mk_small_btn(
+            "Auto", "perspective_auto", "Auto-level horizon & converging verticals (click arrow for modes)", geo_w, right_pad=18
+        )
+        self.btn_ribbon_persp_auto.setPopupMode(QToolButton.MenuButtonPopup)
+        self.btn_ribbon_persp_auto.clicked.connect(lambda: self.crop_auto_perspective_requested.emit("vertical"))
+        auto_menu = QMenu(self.btn_ribbon_persp_auto)
+        auto_menu.addAction("Auto Vertical + Horizon", lambda: self.crop_auto_perspective_requested.emit("vertical"))
+        auto_menu.addAction("Auto Straighten Only", lambda: self.crop_auto_perspective_requested.emit("straighten"))
+        auto_menu.addAction("Auto Full Perspective", lambda: self.crop_auto_perspective_requested.emit("full"))
+        self.btn_ribbon_persp_auto.setMenu(auto_menu)
+        self._apply_menu_polish(auto_menu)
+        geo_grid.addWidget(lbl_pv, 1, 0)
+        geo_grid.addWidget(self.sl_ribbon_persp_v, 1, 1)
+        geo_grid.addWidget(self.lbl_ribbon_persp_v, 1, 2)
+        geo_grid.addWidget(self.btn_ribbon_persp_auto, 1, 3, Qt.AlignLeft)
+
+        # Row 2: Horizontal Perspective
+        lbl_ph = QLabel("Horizontal:", geo_w)
+        self.sl_ribbon_persp_h, self.lbl_ribbon_persp_h = _make_geo_slider(
+            -100, 100,
+            "Horizontal perspective correction (-100 to +100). Double-click to reset.",
+            lambda v: (self.lbl_ribbon_persp_h.setText(f"{v:+d}" if v != 0 else "0"), self.crop_perspective_h_changed.emit(float(v))),
+            self.crop_perspective_drag_started.emit,
+            self.crop_perspective_drag_ended.emit,
+        )
+        self.btn_ribbon_geo_reset = _mk_small_btn(
+            "Reset", "crop_reset", "Reset Straighten, Perspective, and Flip to neutral", geo_w, right_pad=6
+        )
+        self.btn_ribbon_geo_reset.clicked.connect(self.crop_reset_geometry_requested.emit)
+        geo_grid.addWidget(lbl_ph, 2, 0)
+        geo_grid.addWidget(self.sl_ribbon_persp_h, 2, 1)
+        geo_grid.addWidget(self.lbl_ribbon_persp_h, 2, 2)
+        geo_grid.addWidget(self.btn_ribbon_geo_reset, 2, 3, Qt.AlignLeft)
+
+        # Double-click individual sliders or readouts to reset that slider to 0
+        for w_dbl in (
+            self.sl_ribbon_straighten, self.lbl_ribbon_straighten,
+            self.sl_ribbon_persp_v, self.lbl_ribbon_persp_v,
+            self.sl_ribbon_persp_h, self.lbl_ribbon_persp_h,
+        ):
+            w_dbl.installEventFilter(self)
+
+        grp_geo.content_layout.addWidget(geo_w)
+        h.addWidget(grp_geo)
+
+        # ── Group 4: Fill ────────────────────────────────────────────────────
+        grp_fill = _RibbonGroupBox("Fill", tab)
+        self.btn_ribbon_crop_ai_expand = self._make_btn("AI\nExpand", "ai_expand", grp_fill, large=True)
+        self.btn_ribbon_crop_ai_expand.setToolTip(
+            "Fill empty rotated/perspective wedges or expanded margins using LaMa AI"
+        )
+        self.btn_ribbon_crop_ai_expand.setCheckable(True)
+        self.btn_ribbon_crop_ai_expand.toggled.connect(
+            lambda c: self.crop_ai_expand_toggled.emit(c) if not self._crop_syncing else None
+        )
+        grp_fill.content_layout.addWidget(self.btn_ribbon_crop_ai_expand)
+        h.addWidget(grp_fill)
+
+        # ── Group 5: Close ───────────────────────────────────────────────────
+        grp_close = _RibbonGroupBox("Close", tab)
+        self.btn_ribbon_crop_apply = self._make_btn("Apply\ncrop", "crop_apply", grp_close, large=True)
+        self.btn_ribbon_crop_apply.setToolTip("Apply crop, straighten & perspective (Enter)")
+        self.btn_ribbon_crop_apply.clicked.connect(self.crop_apply_requested.emit)
+        self.btn_ribbon_crop_cancel = self._make_btn("Cancel\ncrop", "close_file", grp_close, large=True)
+        self.btn_ribbon_crop_cancel.setToolTip("Cancel crop & perspective changes (Esc)")
+        self.btn_ribbon_crop_cancel.clicked.connect(self.crop_cancel_requested.emit)
+        grp_close.content_layout.addWidget(self.btn_ribbon_crop_apply)
+        grp_close.content_layout.addWidget(self.btn_ribbon_crop_cancel)
+        h.addWidget(grp_close)
+
+        h.addStretch(1)
+        return tab
+
+    def sync_crop_state(
+        self,
+        *,
+        ratio_items: list[str] | None = None,
+        ratio_text: str | None = None,
+        show_delete_ratio: bool | None = None,
+        show_custom_ratio: bool | None = None,
+        custom_w: float | None = None,
+        custom_h: float | None = None,
+        dims_text: str | None = None,
+        flip_h: bool | None = None,
+        flip_v: bool | None = None,
+        grid_mode: str | None = None,
+        straighten_deg: float | None = None,
+        straighten_line_checked: bool | None = None,
+        perspective_v: float | None = None,
+        perspective_h: float | None = None,
+        ai_expand: bool | None = None,
+        will_fill: bool | None = None,
+    ) -> None:
+        """Synchronizes contextual Crop Ribbon controls from SingleMediaViewer without feedback loops."""
+        if not hasattr(self, "tab_crop"):
+            return
+        self._crop_syncing = True
+        try:
+            if ratio_items is not None:
+                self.combo_ribbon_crop_ratio.clear()
+                self.combo_ribbon_crop_ratio.addItems(ratio_items)
+            if ratio_text is not None:
+                idx = self.combo_ribbon_crop_ratio.findText(ratio_text)
+                if idx >= 0:
+                    self.combo_ribbon_crop_ratio.setCurrentIndex(idx)
+            if show_delete_ratio is not None:
+                self.btn_ribbon_crop_del_ratio.setVisible(bool(show_delete_ratio))
+            if show_custom_ratio is not None:
+                self.ribbon_crop_custom_wrap.setVisible(bool(show_custom_ratio))
+                self.btn_ribbon_crop_swap.setVisible(not bool(show_custom_ratio))
+            if custom_w is not None:
+                self.spin_ribbon_crop_w.setValue(float(custom_w))
+            if custom_h is not None:
+                self.spin_ribbon_crop_h.setValue(float(custom_h))
+            if flip_h is not None:
+                self.btn_ribbon_crop_flip_h.setChecked(bool(flip_h))
+            if flip_v is not None:
+                self.btn_ribbon_crop_flip_v.setChecked(bool(flip_v))
+            if grid_mode is not None:
+                _grid_labels = {
+                    "thirds": "Grid: 3×3",
+                    "fine": "Grid: 9×9",
+                    "golden": "Grid: Golden",
+                    "diagonals": "Grid: Diag",
+                    "crosshair": "Grid: Cross",
+                    "none": "Grid: Off",
+                }
+                self.btn_ribbon_crop_grid.setText(_grid_labels.get(grid_mode, "Grid: 3×3"))
+                for m_id, act in self._ribbon_crop_grid_actions.items():
+                    act.setChecked(m_id == grid_mode)
+            if straighten_deg is not None:
+                iv = int(round(max(-15.0, min(15.0, float(straighten_deg))) * 10.0))
+                self.sl_ribbon_straighten.setValue(iv)
+                self.lbl_ribbon_straighten.setText(f"{iv / 10.0:.1f}°")
+            if straighten_line_checked is not None:
+                self.btn_ribbon_straighten_line.setChecked(bool(straighten_line_checked))
+            if perspective_v is not None:
+                iv = int(round(max(-100.0, min(100.0, float(perspective_v)))))
+                self.sl_ribbon_persp_v.setValue(iv)
+                self.lbl_ribbon_persp_v.setText(f"{iv:+d}" if iv != 0 else "0")
+            if perspective_h is not None:
+                iv = int(round(max(-100.0, min(100.0, float(perspective_h)))))
+                self.sl_ribbon_persp_h.setValue(iv)
+                self.lbl_ribbon_persp_h.setText(f"{iv:+d}" if iv != 0 else "0")
+            if ai_expand is not None:
+                self.btn_ribbon_crop_ai_expand.setChecked(bool(ai_expand))
+            if will_fill is not None:
+                self.btn_ribbon_crop_apply.setText("Apply &\nFill" if will_fill else "Apply\ncrop")
+        finally:
+            self._crop_syncing = False
+
+    def _build_markup_tab(self) -> QWidget:
+        """Contextual 'Markup' Ribbon tab with large WLPG tool icons and dynamic per-tool option cards."""
+        from src.ui.markup_overlay import (
+            ALL_LINE_KINDS,
+            ALL_SHAPE_KINDS,
+            _PhotoshopColorPickerWidget,
+            _SwatchButton,
+            get_markup_font_families,
+        )
+
+        page = _RibbonPage()
+        hbox = QHBoxLayout(page)
+        hbox.setContentsMargins(4, 2, 4, 2)
+        hbox.setSpacing(4)
+
+        self._mk_active_tool: str = "pen"
+        self._mk_active_shape: str = "rect"
+        self._mk_active_sticker: str = "smiley"
+        self._mk_active_stamp_kind: str = "watermark"
+        self._mk_line_style: str = "arrow"
+        self._mk_obscure_kind: str = "blur"
+        self._mk_obscure_mode: str = "brush"
+        self._mk_obscure_strength: int = 55
+        self._mk_magnifier_zoom: float = 2.5
+        self._mk_text_align: str = "left"
+        self._mk_opacity: float = 1.0
+        self._mk_bg_opacity: float = 0.85
+        self._mk_stroke_width: int = 16
+        self._mk_shape_filled: bool = False
+        self._mk_rotation_deg: float = 0.0
+        self._mk_primary_color: QColor = QColor(17, 17, 17)
+        self._mk_secondary_color: QColor = QColor(255, 255, 255)
+
+        # Group 1: Tools (Large WLPG buttons + Consistent Split Dropdowns for every tool with variants)
+        self.grp_mk_tools = _RibbonGroupBox("Tools", page)
+        self.mk_tool_group = QButtonGroup(self)
+        self.mk_tool_group.setExclusive(True)
+        self.mk_tool_buttons: dict[str, QToolButton] = {}
+        self.mk_category_buttons: dict[str, QToolButton] = {}
+
+        def _make_large_cat(label: str, icon_kind: str, cat_id: str, tip: str, fix_w: int = 48) -> QToolButton:
+            b = self._make_btn(label, icon_kind, self.grp_mk_tools, large=True, checkable=True)
+            b.setMinimumWidth(fix_w)
+            b.setFixedWidth(fix_w)
+            b._orig_min_w = fix_w
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _chk=False, cid=cat_id: self._on_ribbon_mk_category_clicked(cid))
+            self.mk_tool_group.addButton(b)
+            self.mk_category_buttons[cat_id] = b
+            self.grp_mk_tools.content_layout.addWidget(b)
+            return b
+
+        self.btn_mk_select = _make_large_cat(
+            "Select",
+            "select_cursor",
+            "select",
+            "Select, move, resize, rotate, or double-click items\n• Hold Alt: temporary Select from any tool\n• V: switch to Select tool",
+            40,
+        )
+        self.btn_mk_pen = _make_large_cat("Pen", "pen", "pen", "Freehand pen & semi-transparent highlighter", 38)
+        self.btn_mk_pen.setChecked(True)
+        self.btn_mk_text = _make_large_cat("Text", "text", "text", "Text callouts & social captions", 38)
+
+        # Shapes Split Button (Visual 4x2 MS Paint-style popup gallery + Solid Fill toggle)
+        self._mk_shape_menu = QMenu(self)
+        self._mk_shape_menu_actions: dict[str, QAction] = {}
+        self.mk_shape_group = QButtonGroup(self)
+        self.mk_shape_group.setExclusive(True)
+        self.mk_shape_buttons: dict[str, QToolButton] = {}
+        shape_specs = [
+            ("rect", "rect", "Box (Rectangle) — hold Shift for square"),
+            ("ellipse", "ellipse", "Oval / Circle — hold Shift for circle"),
+            ("triangle", "triangle_shape", "Triangle"),
+            ("pentagon", "pentagon_shape", "Pentagon"),
+            ("hexagon", "hexagon_shape", "Hexagon"),
+            ("star", "star_shape", "5-Point Star"),
+            ("heart_shape", "heart_shape", "Heart"),
+            ("speech_bubble", "speech_bubble", "Speech Bubble"),
+        ]
+        self._mk_shape_icon_map = {sid: sico for sid, sico, _ in shape_specs}
+        shp_popup_w = QWidget(self._mk_shape_menu)
+        shp_popup_grid = QGridLayout(shp_popup_w)
+        shp_popup_grid.setContentsMargins(6, 6, 6, 6)
+        shp_popup_grid.setSpacing(4)
+        for idx, (s_id, s_ico, s_tip) in enumerate(shape_specs):
+            sb = QToolButton(shp_popup_w)
+            sb.setIcon(make_wlpg_icon(s_ico, 20))
+            sb.setIconSize(QSize(20, 20))
+            sb.setFixedSize(32, 30)
+            sb.setCheckable(True)
+            sb.setChecked(s_id == "rect")
+            sb.setCursor(Qt.PointingHandCursor)
+            sb.setToolTip(s_tip)
+            sb.clicked.connect(
+                lambda _c=False, sid=s_id: (self._mk_shape_menu.close(), self._on_ribbon_mk_shape_chosen(sid))
+            )
+            self.mk_shape_group.addButton(sb)
+            self.mk_shape_buttons[s_id] = sb
+            shp_popup_grid.addWidget(sb, idx // 4, idx % 4)
+        shp_wa = QWidgetAction(self._mk_shape_menu)
+        shp_wa.setDefaultWidget(shp_popup_w)
+        self._mk_shape_menu.addAction(shp_wa)
+        split_shp, self.btn_mk_shape, self.btn_mk_shape_drop = self._make_mk_split_tool_button(
+            "Shapes",
+            "rect",
+            "shapes",
+            "Geometric & callout shapes (hold Shift for 1:1 square/circle)",
+            self._mk_shape_menu,
+            fix_w=44,
+        )
+        self.mk_tool_group.addButton(self.btn_mk_shape)
+        self.mk_category_buttons["shapes"] = self.btn_mk_shape
+        self.grp_mk_tools.content_layout.addWidget(split_shp)
+
+        # Line Split Button
+        self._mk_line_menu = QMenu(self)
+        self._mk_line_menu_actions: dict[str, QAction] = {}
+        self.mk_line_buttons: dict[str, Any] = {}
+        line_specs = [
+            ("line", "line_plain", "Straight Line (Shift: 45° snap)"),
+            ("arrow", "arrow", "Directional Arrow"),
+            ("double_arrow", "line_double_arrow", "Double-Ended Arrow"),
+        ]
+        self._mk_line_icon_map = {lid: lico for lid, lico, _ in line_specs}
+        for l_id, l_ico, l_lbl in line_specs:
+            act = self._mk_line_menu.addAction(make_wlpg_icon(l_ico, 16), l_lbl)
+            act.setCheckable(True)
+            act.setChecked(l_id == "arrow")
+            act.triggered.connect(lambda _c=False, lid=l_id: self._on_ribbon_mk_line_chosen(lid))
+            self._mk_line_menu_actions[l_id] = act
+        split_line, self.btn_mk_line, self.btn_mk_line_drop = self._make_mk_split_tool_button(
+            "Line",
+            "arrow",
+            "line",
+            "Straight line, directional arrow, or double-ended arrow",
+            self._mk_line_menu,
+            fix_w=40,
+        )
+        self.mk_tool_group.addButton(self.btn_mk_line)
+        self.mk_category_buttons["line"] = self.btn_mk_line
+        self.grp_mk_tools.content_layout.addWidget(split_line)
+
+        # Obscure Split Button (Blur Brush / Blur Box / Mosaic Brush / Mosaic Box)
+        self._mk_obscure_menu = QMenu(self)
+        self._mk_obscure_menu_actions: dict[tuple[str, str], QAction] = {}
+        for okind, omode, oico, olbl in [
+            ("blur", "brush", "blur", "Blur Brush (Circular)"),
+            ("blur", "box", "rect", "Blur Box (Rectangle)"),
+            ("pixelate", "brush", "pixelate", "Mosaic Brush (Circular)"),
+            ("pixelate", "box", "pixelate", "Mosaic Box (Rectangle)"),
+        ]:
+            act = self._mk_obscure_menu.addAction(make_wlpg_icon(oico, 16), olbl)
+            act.setCheckable(True)
+            act.setChecked(okind == "blur" and omode == "brush")
+            act.triggered.connect(
+                lambda _c=False, k=okind, m=omode: self._on_ribbon_mk_obscure_variant(k, m)
+            )
+            self._mk_obscure_menu_actions[(okind, omode)] = act
+        split_obs, self.btn_mk_obscure, self.btn_mk_obscure_drop = self._make_mk_split_tool_button(
+            "Obscure",
+            "obscure",
+            "obscure",
+            "Privacy Blur & Mosaic (Circular brush or box region)",
+            self._mk_obscure_menu,
+            fix_w=48,
+        )
+        self.mk_tool_group.addButton(self.btn_mk_obscure)
+        self.mk_category_buttons["obscure"] = self.btn_mk_obscure
+        self.grp_mk_tools.content_layout.addWidget(split_obs)
+
+        # Stickers Split Button (Visual 5-sticker popup gallery — works like Shapes, drag to draw)
+        self._mk_sticker_menu = QMenu(self)
+        self.mk_sticker_group = QButtonGroup(self)
+        self.mk_sticker_group.setExclusive(True)
+        self.mk_sticker_buttons: dict[str, QToolButton] = {}
+        sticker_specs = [
+            ("heart", "Heart", "sticker_heart"),
+            ("smiley", "Smiley", "sticker_smiley"),
+            ("star", "Star", "sticker_star"),
+            ("fire", "Fire", "sticker_fire"),
+            ("check", "Check", "sticker_check"),
+        ]
+        self._mk_sticker_icon_map = {sid: sico for sid, _lbl, sico in sticker_specs}
+        stk_popup_w = QWidget(self._mk_sticker_menu)
+        stk_popup_h = QHBoxLayout(stk_popup_w)
+        stk_popup_h.setContentsMargins(6, 6, 6, 6)
+        stk_popup_h.setSpacing(4)
+        for st_id, st_lbl, st_ico in sticker_specs:
+            stb = QToolButton(stk_popup_w)
+            stb.setIcon(make_wlpg_icon(st_ico, 26))
+            stb.setIconSize(QSize(26, 26))
+            stb.setFixedSize(36, 36)
+            stb.setCheckable(True)
+            stb.setChecked(st_id == self._mk_active_sticker)
+            stb.setCursor(Qt.PointingHandCursor)
+            stb.setToolTip(f"{st_lbl} sticker — click & drag on photo to draw")
+            stb.clicked.connect(
+                lambda _c=False, sid=st_id: (
+                    self._mk_sticker_menu.close(),
+                    self._on_ribbon_mk_sticker_chosen(sid),
+                )
+            )
+            self.mk_sticker_group.addButton(stb)
+            self.mk_sticker_buttons[st_id] = stb
+            stk_popup_h.addWidget(stb)
+        stk_wa = QWidgetAction(self._mk_sticker_menu)
+        stk_wa.setDefaultWidget(stk_popup_w)
+        self._mk_sticker_menu.addAction(stk_wa)
+        split_stk, self.btn_mk_stickers, self.btn_mk_stickers_drop = self._make_mk_split_tool_button(
+            "Stickers",
+            self._mk_sticker_icon_map.get(self._mk_active_sticker, "sticker_smiley"),
+            "stickers",
+            "Vector stickers — select a sticker and drag on photo to draw",
+            self._mk_sticker_menu,
+            fix_w=48,
+        )
+        self.mk_tool_group.addButton(self.btn_mk_stickers)
+        self.mk_category_buttons["stickers"] = self.btn_mk_stickers
+        self.grp_mk_tools.content_layout.addWidget(split_stk)
+
+        self.btn_mk_magnify = _make_large_cat("Magnify", "magnify", "magnify", "2-point circular zoom loupe callout", 46)
+
+        # Stamp Split Button (Place / Date / Camera / Watermark — updates Ribbon icon + editable preview box)
+        self._mk_stamp_menu = QMenu(self)
+        self._mk_stamp_action_group = QActionGroup(self)
+        self._mk_stamp_action_group.setExclusive(True)
+        self._mk_stamp_menu_actions: dict[str, QAction] = {}
+        self._mk_stamp_icon_map: dict[str, str] = {
+            "location": "geotag",
+            "date": "calendar",
+            "camera": "camera",
+            "watermark": "stamp",
+        }
+        self._mk_stamp_placeholders: dict[str, str] = {
+            "location": "Place (GPS)",
+            "date": "Date taken",
+            "camera": "Camera EXIF",
+            "watermark": "Copyright",
+        }
+        self.act_mk_stamp_place = self._mk_stamp_menu.addAction(
+            make_wlpg_icon("geotag", 16), "Place (Auto GPS Location)"
+        )
+        self.act_mk_stamp_date = self._mk_stamp_menu.addAction(
+            make_wlpg_icon("calendar", 16), "Date Taken"
+        )
+        self.act_mk_stamp_cam = self._mk_stamp_menu.addAction(
+            make_wlpg_icon("camera", 16), "Camera & Lens EXIF"
+        )
+        self._mk_stamp_menu.addSeparator()
+        self.act_mk_stamp_wm = self._mk_stamp_menu.addAction(
+            make_wlpg_icon("stamp", 16), "Watermark / Copyright"
+        )
+        for skind, sact in (
+            ("location", self.act_mk_stamp_place),
+            ("date", self.act_mk_stamp_date),
+            ("camera", self.act_mk_stamp_cam),
+            ("watermark", self.act_mk_stamp_wm),
+        ):
+            sact.setCheckable(True)
+            sact.setChecked(skind == self._mk_active_stamp_kind)
+            self._mk_stamp_action_group.addAction(sact)
+            self._mk_stamp_menu_actions[skind] = sact
+            sact.triggered.connect(lambda _c=False, k=skind: self._on_ribbon_mk_stamp_kind_chosen(k))
+        split_smp, self.btn_mk_stamp, self.btn_mk_stamp_drop = self._make_mk_split_tool_button(
+            "Stamp",
+            "stamp",
+            "stamp",
+            "Auto Place / Date / Camera stamps & custom Watermark (edit text, then click Insert)",
+            self._mk_stamp_menu,
+            fix_w=44,
+        )
+        self.mk_tool_group.addButton(self.btn_mk_stamp)
+        self.mk_category_buttons["stamp"] = self.btn_mk_stamp
+        self.grp_mk_tools.content_layout.addWidget(split_smp)
+
+        # Aliases so existing tool_id queries find the owning large button
+        self.mk_tool_buttons["select"] = self.btn_mk_select
+        self.mk_tool_buttons["pen"] = self.btn_mk_pen
+        self.mk_tool_buttons["highlighter"] = self.btn_mk_pen
+        self.mk_tool_buttons["text"] = self.btn_mk_text
+        for sk in ALL_SHAPE_KINDS:
+            self.mk_tool_buttons[sk] = self.btn_mk_shape
+        for lk in ALL_LINE_KINDS:
+            self.mk_tool_buttons[lk] = self.btn_mk_line
+        self.mk_tool_buttons["blur"] = self.btn_mk_obscure
+        self.mk_tool_buttons["pixelate"] = self.btn_mk_obscure
+        self.mk_tool_buttons["sticker"] = self.btn_mk_stickers
+        self.mk_tool_buttons["magnify"] = self.btn_mk_magnify
+        self.mk_tool_buttons["magnifier"] = self.btn_mk_magnify
+
+        self.grp_mk_tools.adjust_to_content()
+        hbox.addWidget(self.grp_mk_tools)
+
+        # Group 2: Dynamic Adaptive Contextual Tool Options Card (Clean, spacious sliders — no duplicate grids!)
+        self.grp_mk_options = _RibbonGroupBox("Pen Options", page)
+        self.mk_options_stack = _AdaptiveStackedWidget(self.grp_mk_options)
+        self.mk_options_stack.setFixedHeight(70)
+        self._mk_option_page_indices: dict[str, int] = {}
+
+        def _make_opt_page() -> tuple[QWidget, QVBoxLayout, QHBoxLayout, QHBoxLayout]:
+            pw = QWidget(self.mk_options_stack)
+            pv = QVBoxLayout(pw)
+            pv.setContentsMargins(6, 4, 6, 3)
+            pv.setSpacing(6)
+            r0 = QHBoxLayout()
+            r0.setContentsMargins(0, 0, 0, 0)
+            r0.setSpacing(5)
+            r1 = QHBoxLayout()
+            r1.setContentsMargins(0, 0, 0, 0)
+            r1.setSpacing(5)
+            pv.addLayout(r0)
+            pv.addLayout(r1)
+            return pw, pv, r0, r1
+
+        self._mk_width_sliders: list[tuple[QSlider, QLabel]] = []
+        self._mk_opacity_sliders: list[tuple[QSlider, QLabel]] = []
+        self._mk_rotation_sliders: list[tuple[QSlider, QLabel, QToolButton]] = []
+        self._mk_option_separators: list[QFrame] = []
+
+        def _make_width_pair(parent_w: QWidget, w_px: int = 104, max_w: int = 150) -> tuple[QSlider, QLabel]:
+            sl = QSlider(Qt.Horizontal, parent_w)
+            sl.setRange(2, max_w)
+            sl.setValue(min(max_w, self._mk_stroke_width))
+            sl.setFixedWidth(w_px)
+            sl.setCursor(Qt.SizeHorCursor)
+            sl.setToolTip("Adjust size or thickness ([ and ] keys)")
+            sl.valueChanged.connect(self._on_ribbon_mk_width_changed)
+            lbl = QLabel(f"{self._mk_stroke_width}px", parent_w)
+            lbl.setFixedWidth(34)
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self._mk_width_sliders.append((sl, lbl))
+            return sl, lbl
+
+        def _make_opacity_pair(parent_w: QWidget, w_px: int = 104) -> tuple[QSlider, QLabel]:
+            sl = QSlider(Qt.Horizontal, parent_w)
+            sl.setRange(15, 100)
+            sl.setValue(int(round(self._mk_opacity * 100)))
+            sl.setFixedWidth(w_px)
+            sl.setCursor(Qt.SizeHorCursor)
+            sl.setToolTip("Adjust opacity (15%–100%)")
+            sl.valueChanged.connect(self._on_ribbon_mk_opacity_changed)
+            lbl = QLabel(f"{int(round(self._mk_opacity * 100))}%", parent_w)
+            lbl.setFixedWidth(34)
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self._mk_opacity_sliders.append((sl, lbl))
+            return sl, lbl
+
+        def _make_rotation_pair(
+            parent_w: QWidget,
+            w_px: int = 92,
+            tip: str = "Adjust rotation angle (-180° to 180°)",
+        ) -> tuple[QSlider, QLabel, QToolButton]:
+            sl = QSlider(Qt.Horizontal, parent_w)
+            sl.setRange(-180, 180)
+            sl.setValue(int(round(self._mk_rotation_deg)))
+            sl.setFixedWidth(w_px)
+            sl.setCursor(Qt.SizeHorCursor)
+            sl.setToolTip(tip)
+            sl.valueChanged.connect(lambda v, s=sl: self._on_ribbon_mk_rotation_slider_value(v, s))
+            sl.sliderReleased.connect(lambda s=sl: self._on_ribbon_mk_rotation_slider_released(s))
+            lbl = QLabel("0°", parent_w)
+            lbl.setFixedWidth(30)
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            rb = QToolButton(parent_w)
+            rb.setIcon(make_wlpg_icon("restore", 14))
+            rb.setIconSize(QSize(14, 14))
+            rb.setFixedSize(22, 22)
+            rb.setCursor(Qt.PointingHandCursor)
+            rb.setToolTip("Reset rotation angle to 0°")
+            rb.clicked.connect(self.markup_rotation_reset_requested.emit)
+            self._mk_rotation_sliders.append((sl, lbl, rb))
+            return sl, lbl, rb
+
+        # --- Card 0: Pen Options (Size 2..150px + Opacity 15..100%) ---
+        pg_pen, _, pen_r0, pen_r1 = _make_opt_page()
+        sl_pw, lbl_pw = _make_width_pair(pg_pen, 108, 150)
+        sl_po, lbl_po = _make_opacity_pair(pg_pen, 108)
+        self.slider_mk_width = sl_pw
+        self.lbl_mk_width_val = lbl_pw
+        self.slider_mk_opacity = sl_po
+        self.lbl_mk_opacity_val = lbl_po
+        self.lbl_mk_size = QLabel("Size:", pg_pen)
+        self.lbl_mk_opacity = QLabel("Opacity:", pg_pen)
+        self.lbl_mk_size.setFixedWidth(50)
+        self.lbl_mk_opacity.setFixedWidth(50)
+        pen_r0.addWidget(self.lbl_mk_size)
+        pen_r0.addWidget(sl_pw)
+        pen_r0.addWidget(lbl_pw)
+        pen_r1.addWidget(self.lbl_mk_opacity)
+        pen_r1.addWidget(sl_po)
+        pen_r1.addWidget(lbl_po)
+        self._mk_option_page_indices["pen"] = self.mk_options_stack.addWidget(pg_pen)
+
+        # --- Card 1: Text Options (Spacious Typography + Size + Rotate; Background lives in its own Ribbon Group!) ---
+        pg_txt, txt_v, txt_r0, txt_r1 = _make_opt_page()
+        txt_v.setContentsMargins(4, 4, 4, 3)
+        txt_r0.setSpacing(3)
+        txt_r1.setSpacing(3)
+        self.cmb_mk_font = QComboBox(pg_txt)
+        self.cmb_mk_font.setFixedWidth(116)
+        self.cmb_mk_font.setFixedHeight(23)
+        self.cmb_mk_font.setToolTip("Font family for text callouts")
+        font_families = get_markup_font_families()
+        self.cmb_mk_font.addItems(font_families)
+        if "Segoe UI" in font_families:
+            self.cmb_mk_font.setCurrentText("Segoe UI")
+        self.cmb_mk_font.currentTextChanged.connect(self.markup_font_family_changed.emit)
+
+        self.btn_mk_bold = QToolButton(pg_txt)
+        self.btn_mk_bold.setText("B")
+        self.btn_mk_bold.setCheckable(True)
+        self.btn_mk_bold.setChecked(True)
+        self.btn_mk_bold.setFixedSize(22, 23)
+        self.btn_mk_bold.setCursor(Qt.PointingHandCursor)
+        self.btn_mk_bold.setToolTip("Bold text label")
+        self.btn_mk_bold.toggled.connect(lambda _c: self._emit_ribbon_mk_text_format())
+
+        self.btn_mk_italic = QToolButton(pg_txt)
+        self.btn_mk_italic.setText("I")
+        self.btn_mk_italic.setCheckable(True)
+        self.btn_mk_italic.setChecked(False)
+        self.btn_mk_italic.setFixedSize(22, 23)
+        self.btn_mk_italic.setCursor(Qt.PointingHandCursor)
+        self.btn_mk_italic.setToolTip("Italic text label")
+        self.btn_mk_italic.toggled.connect(lambda _c: self._emit_ribbon_mk_text_format())
+
+        self.mk_align_group = QButtonGroup(self)
+        self.mk_align_group.setExclusive(True)
+        self.btn_mk_align_left = QToolButton(pg_txt)
+        self.btn_mk_align_center = QToolButton(pg_txt)
+        self.btn_mk_align_right = QToolButton(pg_txt)
+        for al_btn, al_id, al_ico, al_tip in [
+            (self.btn_mk_align_left, "left", "align_left", "Align left inside box"),
+            (self.btn_mk_align_center, "center", "align_center", "Align center inside box"),
+            (self.btn_mk_align_right, "right", "align_right", "Align right inside box"),
+        ]:
+            al_btn.setIcon(make_wlpg_icon(al_ico, 15))
+            al_btn.setIconSize(QSize(15, 15))
+            al_btn.setCheckable(True)
+            al_btn.setChecked(al_id == "left")
+            al_btn.setFixedSize(22, 23)
+            al_btn.setCursor(Qt.PointingHandCursor)
+            al_btn.setToolTip(al_tip)
+            al_btn.clicked.connect(lambda _c=False, aid=al_id: self._set_ribbon_mk_text_align(aid))
+            self.mk_align_group.addButton(al_btn)
+
+        txt_r0.addWidget(self.cmb_mk_font)
+        txt_r0.addWidget(self.btn_mk_bold)
+        txt_r0.addWidget(self.btn_mk_italic)
+        txt_r0.addSpacing(2)
+        txt_r0.addWidget(self.btn_mk_align_left)
+        txt_r0.addWidget(self.btn_mk_align_center)
+        txt_r0.addWidget(self.btn_mk_align_right)
+        txt_r0.addStretch(1)
+
+        self._mk_text_size_presets: list[int] = [
+            12, 14, 16, 18, 21, 24, 28, 32, 36, 42, 48, 56, 64, 72, 80, 88, 96, 104, 120, 144, 168, 192, 240, 288, 360
+        ]
+        self.lbl_mk_txt_font = QLabel("Size:", pg_txt)
+        self.lbl_mk_txt_font.setFixedWidth(30)
+
+        size_pill = QFrame(pg_txt)
+        size_pill.setObjectName("MarkupTextSizePill")
+        size_pill.setFixedHeight(24)
+        self._mk_text_size_pill = size_pill
+        size_pill.setStyleSheet(
+            "QFrame#MarkupTextSizePill { background: #FFFFFF; border: 1px solid #B8C4D4; border-radius: 6px; }"
+            "QFrame#MarkupTextSizePill:hover { border-color: #60A5FA; }"
+        )
+        sp_h = QHBoxLayout(size_pill)
+        sp_h.setContentsMargins(1, 0, 1, 0)
+        sp_h.setSpacing(0)
+
+        self.btn_mk_txt_size_dec = QToolButton(size_pill)
+        self.btn_mk_txt_size_dec.setText("−")
+        self.btn_mk_txt_size_dec.setFixedSize(19, 22)
+        self.btn_mk_txt_size_dec.setCursor(Qt.PointingHandCursor)
+        self.btn_mk_txt_size_dec.setToolTip("Decrease text size")
+        self.btn_mk_txt_size_dec.setStyleSheet(
+            "QToolButton { border: none; background: transparent; font-size: 11pt; font-weight: 600; color: #334155; }"
+            "QToolButton:hover { background: #E2E8F0; border-radius: 4px; }"
+        )
+        self.btn_mk_txt_size_dec.clicked.connect(lambda: self._step_ribbon_mk_text_size(-1))
+
+        self.cmb_mk_txt_size = QComboBox(size_pill)
+        self.cmb_mk_txt_size.setEditable(True)
+        self.cmb_mk_txt_size.setInsertPolicy(QComboBox.NoInsert)
+        self.cmb_mk_txt_size.setFixedSize(44, 22)
+        self.cmb_mk_txt_size.setMaxVisibleItems(14)
+        self.cmb_mk_txt_size.setToolTip("Text font size (pt) — click for presets or type any size up to 440")
+        for pt in self._mk_text_size_presets:
+            self.cmb_mk_txt_size.addItem(str(pt), pt)
+        init_pt = max(10, int(round(self._mk_stroke_width * 2.2)))
+        self.cmb_mk_txt_size.setCurrentText(str(init_pt))
+        if self.cmb_mk_txt_size.lineEdit() is not None:
+            self.cmb_mk_txt_size.lineEdit().setAlignment(Qt.AlignCenter)
+            self.cmb_mk_txt_size.lineEdit().editingFinished.connect(self._on_ribbon_mk_text_size_edited)
+        self.cmb_mk_txt_size.setStyleSheet(
+            "QComboBox { border: none; background: transparent; color: #0F172A; "
+            "font-family: 'Segoe UI'; font-size: 9pt; font-weight: 600; padding: 0 2px 0 2px; }"
+            "QComboBox::drop-down { border: none; width: 6px; }"
+        )
+        self.cmb_mk_txt_size.activated.connect(self._on_ribbon_mk_text_size_activated)
+
+        self.btn_mk_txt_size_inc = QToolButton(size_pill)
+        self.btn_mk_txt_size_inc.setText("+")
+        self.btn_mk_txt_size_inc.setFixedSize(19, 22)
+        self.btn_mk_txt_size_inc.setCursor(Qt.PointingHandCursor)
+        self.btn_mk_txt_size_inc.setToolTip("Increase text size")
+        self.btn_mk_txt_size_inc.setStyleSheet(
+            "QToolButton { border: none; background: transparent; font-size: 11pt; font-weight: 600; color: #334155; }"
+            "QToolButton:hover { background: #E2E8F0; border-radius: 4px; }"
+        )
+        self.btn_mk_txt_size_inc.clicked.connect(lambda: self._step_ribbon_mk_text_size(+1))
+
+        sp_h.addWidget(self.btn_mk_txt_size_dec)
+        sp_h.addWidget(self.cmb_mk_txt_size)
+        sp_h.addWidget(self.btn_mk_txt_size_inc)
+
+        self.cmb_mk_text_style = QComboBox(pg_txt)
+        self.cmb_mk_text_style.setFixedWidth(124)
+        self.cmb_mk_text_style.setFixedHeight(23)
+        self.cmb_mk_text_style.setToolTip("Text style: Pill, Outline, Drop Shadow, or Plain")
+        self.cmb_mk_text_style.addItem(_make_mk_text_style_icon("pill"), "Pill", "pill")
+        self.cmb_mk_text_style.addItem(_make_mk_text_style_icon("outline"), "Outline", "outline")
+        self.cmb_mk_text_style.addItem(_make_mk_text_style_icon("shadow"), "Shadow", "shadow")
+        self.cmb_mk_text_style.addItem(_make_mk_text_style_icon("plain"), "Plain", "plain")
+        self.cmb_mk_text_style.currentIndexChanged.connect(self._on_ribbon_mk_text_style_changed)
+        txt_r1.addWidget(self.lbl_mk_txt_font)
+        txt_r1.addWidget(size_pill)
+        txt_r1.addSpacing(6)
+        txt_r1.addWidget(self.cmb_mk_text_style)
+        txt_r1.addStretch(1)
+        self._mk_option_page_indices["text"] = self.mk_options_stack.addWidget(pg_txt)
+
+        # --- Card 2: Shape Options (Balanced 2-column Office layout: Outline+Opacity | Style+Rotate) ---
+        pg_shp = QWidget(self.mk_options_stack)
+        shp_outer = QHBoxLayout(pg_shp)
+        shp_outer.setContentsMargins(6, 4, 6, 3)
+        shp_outer.setSpacing(8)
+
+        shp_left = QVBoxLayout()
+        shp_left.setContentsMargins(0, 0, 0, 0)
+        shp_left.setSpacing(6)
+        shp_lr0 = QHBoxLayout()
+        shp_lr0.setContentsMargins(0, 0, 0, 0)
+        shp_lr0.setSpacing(4)
+        shp_lr1 = QHBoxLayout()
+        shp_lr1.setContentsMargins(0, 0, 0, 0)
+        shp_lr1.setSpacing(4)
+        sl_sw, lbl_sw = _make_width_pair(pg_shp, 72, 64)
+        sl_so, lbl_so = _make_opacity_pair(pg_shp, 72)
+        self.lbl_mk_shp_w = QLabel("Outline:", pg_shp)
+        self.lbl_mk_shp_w.setFixedWidth(46)
+        self.lbl_mk_shp_o = QLabel("Opacity:", pg_shp)
+        self.lbl_mk_shp_o.setFixedWidth(46)
+        shp_lr0.addWidget(self.lbl_mk_shp_w)
+        shp_lr0.addWidget(sl_sw)
+        shp_lr0.addWidget(lbl_sw)
+        shp_lr1.addWidget(self.lbl_mk_shp_o)
+        shp_lr1.addWidget(sl_so)
+        shp_lr1.addWidget(lbl_so)
+        shp_left.addLayout(shp_lr0)
+        shp_left.addLayout(shp_lr1)
+
+        shp_sep = QFrame(pg_shp)
+        shp_sep.setFixedWidth(1)
+        shp_sep.setFixedHeight(50)
+        self._mk_option_separators.append(shp_sep)
+
+        shp_right = QVBoxLayout()
+        shp_right.setContentsMargins(0, 0, 0, 0)
+        shp_right.setSpacing(6)
+        shp_rr0 = QHBoxLayout()
+        shp_rr0.setContentsMargins(0, 0, 0, 0)
+        shp_rr0.setSpacing(4)
+        shp_rr1 = QHBoxLayout()
+        shp_rr1.setContentsMargins(0, 0, 0, 0)
+        shp_rr1.setSpacing(4)
+
+        self.lbl_mk_shp_fill = QLabel("Style:", pg_shp)
+        self.lbl_mk_shp_fill.setFixedWidth(40)
+        self.cmb_mk_shape_style = QComboBox(pg_shp)
+        self.cmb_mk_shape_style.setFixedWidth(114)
+        self.cmb_mk_shape_style.setFixedHeight(23)
+        self.cmb_mk_shape_style.setToolTip("Shape style — Fill uses Background colour")
+        self.cmb_mk_shape_style.addItem(_make_mk_shape_style_icon("outline"), "Outline", "outline")
+        self.cmb_mk_shape_style.addItem(_make_mk_shape_style_icon("solid"), "Solid", "solid")
+        self.cmb_mk_shape_style.addItem(_make_mk_shape_style_icon("both"), "Both", "both")
+        self.cmb_mk_shape_style.currentIndexChanged.connect(self._on_ribbon_mk_shape_style_changed)
+
+        # Hidden compatibility toggle kept synced with cmb_mk_shape_style for tests/menu
+        self.btn_mk_shape_fill = QToolButton(pg_shp)
+        self.btn_mk_shape_fill.setText("Fill")
+        self.btn_mk_shape_fill.setIcon(make_wlpg_icon("fill_bucket", 14))
+        self.btn_mk_shape_fill.setCheckable(True)
+        self.btn_mk_shape_fill.setChecked(False)
+        self.btn_mk_shape_fill.hide()
+        self.btn_mk_shape_fill.toggled.connect(self._on_ribbon_mk_shape_filled_toggled)
+
+        self.lbl_mk_shp_dash = QLabel("Line:", pg_shp)
+        self.lbl_mk_shp_dash.setFixedWidth(40)
+        self.cmb_mk_shape_dash = QComboBox(pg_shp)
+        self.cmb_mk_shape_dash.setFixedWidth(114)
+        self.cmb_mk_shape_dash.setFixedHeight(23)
+        self.cmb_mk_shape_dash.setToolTip("Shape border line style (Solid, Outlined, Dashed, Dotted)")
+        self.cmb_mk_shape_dash.addItem(_make_mk_dash_style_icon("solid"), "Solid", "solid")
+        self.cmb_mk_shape_dash.addItem(_make_mk_dash_style_icon("outlined"), "Outlined", "outlined")
+        self.cmb_mk_shape_dash.addItem(_make_mk_dash_style_icon("dashed"), "Dashed", "dashed")
+        self.cmb_mk_shape_dash.addItem(_make_mk_dash_style_icon("dotted"), "Dotted", "dotted")
+        self.cmb_mk_shape_dash.currentIndexChanged.connect(
+            lambda _i: self._on_ribbon_mk_dash_style_changed(str(self.cmb_mk_shape_dash.currentData() or "solid"))
+        )
+
+        shp_rr0.addWidget(self.lbl_mk_shp_fill)
+        shp_rr0.addWidget(self.cmb_mk_shape_style)
+        shp_rr0.addStretch(1)
+        shp_rr1.addWidget(self.lbl_mk_shp_dash)
+        shp_rr1.addWidget(self.cmb_mk_shape_dash)
+        shp_rr1.addStretch(1)
+        shp_right.addLayout(shp_rr0)
+        shp_right.addLayout(shp_rr1)
+
+        shp_outer.addLayout(shp_left)
+        shp_outer.addWidget(shp_sep, 0, Qt.AlignVCenter)
+        shp_outer.addLayout(shp_right)
+        self._mk_option_page_indices["shapes"] = self.mk_options_stack.addWidget(pg_shp)
+
+        # --- Card 3: Line Options (Width + Opacity | Line Dash Style) ---
+        pg_line = QWidget(self.mk_options_stack)
+        ln_outer = QHBoxLayout(pg_line)
+        ln_outer.setContentsMargins(6, 4, 6, 3)
+        ln_outer.setSpacing(8)
+        ln_left = QVBoxLayout()
+        ln_left.setContentsMargins(0, 0, 0, 0)
+        ln_left.setSpacing(6)
+        ln_r0 = QHBoxLayout()
+        ln_r0.setContentsMargins(0, 0, 0, 0)
+        ln_r0.setSpacing(4)
+        ln_r1 = QHBoxLayout()
+        ln_r1.setContentsMargins(0, 0, 0, 0)
+        ln_r1.setSpacing(4)
+        sl_lw, lbl_lw = _make_width_pair(pg_line, 86, 64)
+        sl_lo, lbl_lo = _make_opacity_pair(pg_line, 86)
+        self.lbl_mk_ln_w = QLabel("Width:", pg_line)
+        self.lbl_mk_ln_o = QLabel("Opacity:", pg_line)
+        self.lbl_mk_ln_w.setFixedWidth(48)
+        self.lbl_mk_ln_o.setFixedWidth(48)
+        ln_r0.addWidget(self.lbl_mk_ln_w)
+        ln_r0.addWidget(sl_lw)
+        ln_r0.addWidget(lbl_lw)
+        ln_r1.addWidget(self.lbl_mk_ln_o)
+        ln_r1.addWidget(sl_lo)
+        ln_r1.addWidget(lbl_lo)
+        ln_left.addLayout(ln_r0)
+        ln_left.addLayout(ln_r1)
+
+        ln_sep = QFrame(pg_line)
+        ln_sep.setFixedWidth(1)
+        ln_sep.setFixedHeight(50)
+        self._mk_option_separators.append(ln_sep)
+
+        ln_right = QVBoxLayout()
+        ln_right.setContentsMargins(0, 0, 0, 0)
+        ln_right.setSpacing(4)
+        self.lbl_mk_ln_dash = QLabel("Line Style:", pg_line)
+        self.cmb_mk_line_dash = QComboBox(pg_line)
+        self.cmb_mk_line_dash.setFixedWidth(106)
+        self.cmb_mk_line_dash.setFixedHeight(23)
+        self.cmb_mk_line_dash.setToolTip("Line stroke style (Solid, Outlined, Dashed, Dotted)")
+        self.cmb_mk_line_dash.addItem(_make_mk_dash_style_icon("solid"), "Solid", "solid")
+        self.cmb_mk_line_dash.addItem(_make_mk_dash_style_icon("outlined"), "Outlined", "outlined")
+        self.cmb_mk_line_dash.addItem(_make_mk_dash_style_icon("dashed"), "Dashed", "dashed")
+        self.cmb_mk_line_dash.addItem(_make_mk_dash_style_icon("dotted"), "Dotted", "dotted")
+        self.cmb_mk_line_dash.currentIndexChanged.connect(
+            lambda _i: self._on_ribbon_mk_dash_style_changed(str(self.cmb_mk_line_dash.currentData() or "solid"))
+        )
+        ln_right.addWidget(self.lbl_mk_ln_dash)
+        ln_right.addWidget(self.cmb_mk_line_dash)
+        ln_right.addStretch(1)
+
+        ln_outer.addLayout(ln_left)
+        ln_outer.addWidget(ln_sep, 0, Qt.AlignVCenter)
+        ln_outer.addLayout(ln_right)
+        self._mk_option_page_indices["line"] = self.mk_options_stack.addWidget(pg_line)
+
+        # --- Card 4: Obscure Options (Size hidden in Box mode; Strength always shown) ---
+        pg_obs, _, obs_r0, obs_r1 = _make_opt_page()
+        sl_ow, lbl_ow = _make_width_pair(pg_obs, 108, 150)
+        self.slider_mk_obs_size = sl_ow
+        self.lbl_mk_obs_sz_val = lbl_ow
+        self.slider_mk_obs_strength = QSlider(Qt.Horizontal, pg_obs)
+        self.slider_mk_obs_strength.setRange(15, 100)
+        self.slider_mk_obs_strength.setValue(self._mk_obscure_strength)
+        self.slider_mk_obs_strength.setFixedWidth(108)
+        self.slider_mk_obs_strength.setCursor(Qt.SizeHorCursor)
+        self.slider_mk_obs_strength.setToolTip("Adjust blur or mosaic pixelation strength (15%–100%)")
+        self.slider_mk_obs_strength.valueChanged.connect(self._on_ribbon_mk_obscure_strength_changed)
+        self.lbl_mk_obs_strength_val = QLabel(f"{self._mk_obscure_strength}%", pg_obs)
+        self.lbl_mk_obs_strength_val.setFixedWidth(34)
+        self.lbl_mk_obs_strength_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lbl_mk_obs_sz = QLabel("Size:", pg_obs)
+        self.lbl_mk_obs_str = QLabel("Strength:", pg_obs)
+        self.lbl_mk_obs_sz.setFixedWidth(54)
+        self.lbl_mk_obs_str.setFixedWidth(54)
+        obs_r0.addWidget(self.lbl_mk_obs_sz)
+        obs_r0.addWidget(sl_ow)
+        obs_r0.addWidget(lbl_ow)
+        obs_r1.addWidget(self.lbl_mk_obs_str)
+        obs_r1.addWidget(self.slider_mk_obs_strength)
+        obs_r1.addWidget(self.lbl_mk_obs_strength_val)
+        self._mk_option_page_indices["obscure"] = self.mk_options_stack.addWidget(pg_obs)
+
+        # --- Card 5: Sticker Options (Opacity; rotation & resizing live on-canvas) ---
+        pg_stk, _, stk_r0, stk_r1 = _make_opt_page()
+        sl_sto, lbl_sto = _make_opacity_pair(pg_stk, 112)
+        self.lbl_mk_stk_o = QLabel("Opacity:", pg_stk)
+        self.lbl_mk_stk_o.setFixedWidth(50)
+        stk_r0.addWidget(self.lbl_mk_stk_o)
+        stk_r0.addWidget(sl_sto)
+        stk_r0.addWidget(lbl_sto)
+        stk_r0.addStretch(1)
+        self._mk_option_page_indices["stickers"] = self.mk_options_stack.addWidget(pg_stk)
+
+        # --- Card 6: Magnify Options (Zoom Slider 1.2x..5.0x + Circle Size Slider) ---
+        pg_mag, _, mag_r0, mag_r1 = _make_opt_page()
+        self.lbl_mk_mag_zoom = QLabel("Zoom:", pg_mag)
+        self.lbl_mk_mag_zoom.setFixedWidth(46)
+        self.slider_mk_mag_zoom = QSlider(Qt.Horizontal, pg_mag)
+        self.slider_mk_mag_zoom.setRange(12, 50)
+        self.slider_mk_mag_zoom.setValue(int(round(self._mk_magnifier_zoom * 10)))
+        self.slider_mk_mag_zoom.setFixedWidth(108)
+        self.slider_mk_mag_zoom.setCursor(Qt.SizeHorCursor)
+        self.slider_mk_mag_zoom.setToolTip("Adjust magnifier zoom factor (1.2x – 5.0x, or scroll mouse wheel)")
+        self.slider_mk_mag_zoom.valueChanged.connect(
+            lambda v: self._on_ribbon_mk_magnify_zoom_chosen(round(v / 10.0, 1))
+        )
+        self.lbl_mk_mag_zoom_val = QLabel(f"{self._mk_magnifier_zoom:.1f}x", pg_mag)
+        self.lbl_mk_mag_zoom_val.setFixedWidth(34)
+        self.lbl_mk_mag_zoom_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        mag_r0.addWidget(self.lbl_mk_mag_zoom)
+        mag_r0.addWidget(self.slider_mk_mag_zoom)
+        mag_r0.addWidget(self.lbl_mk_mag_zoom_val)
+
+        sl_mw, lbl_mw = _make_width_pair(pg_mag, 108, 48)
+        sl_mw.setToolTip("Adjust initial magnifier circle & loupe size ([ and ] keys)")
+        lbl_mw.setText(f"{int((45 + (min(48, self._mk_stroke_width) - 2) * 5) * 2)}px")
+        self.slider_mk_mag_size = sl_mw
+        self.lbl_mk_mag_sz_val = lbl_mw
+        self.lbl_mk_mag_sz = QLabel("Size:", pg_mag)
+        self.lbl_mk_mag_sz.setFixedWidth(46)
+        self.lbl_mk_mag_sz.setToolTip("Adjust initial magnifier circle & loupe size")
+        mag_r1.addWidget(self.lbl_mk_mag_sz)
+        mag_r1.addWidget(sl_mw)
+        mag_r1.addWidget(lbl_mw)
+        self._mk_option_page_indices["magnify"] = self.mk_options_stack.addWidget(pg_mag)
+
+        # --- Card 7: Watermark & Stamp Options (Place/Date/Camera/Watermark live in Stamp ▾ split menu) ---
+        pg_smp, _, smp_r0, smp_r1 = _make_opt_page()
+        self.txt_mk_watermark = QLineEdit(pg_smp)
+        self.txt_mk_watermark.setPlaceholderText("Copyright")
+        self.txt_mk_watermark.setFixedWidth(134)
+        self.txt_mk_watermark.setFixedHeight(23)
+        self.txt_mk_watermark.setToolTip("Edit stamp text before inserting (press Enter or click Insert)")
+        saved_wm = str(QSettings("PhotoGallery64", "PhotoGallery64").value("markup/watermark_text", "") or "")
+        if saved_wm:
+            self.txt_mk_watermark.setText(saved_wm)
+
+        def _on_stamp_text_edited(txt: str) -> None:
+            if getattr(self, "_mk_active_stamp_kind", "watermark") == "watermark":
+                QSettings("PhotoGallery64", "PhotoGallery64").setValue("markup/watermark_text", txt.strip())
+
+        self.txt_mk_watermark.textChanged.connect(_on_stamp_text_edited)
+
+        def _on_insert_stamp_clicked() -> None:
+            kind = getattr(self, "_mk_active_stamp_kind", "watermark") or "watermark"
+            txt_val = self.txt_mk_watermark.text().strip()
+            if kind == "watermark":
+                qs = QSettings("PhotoGallery64", "PhotoGallery64")
+                qs.setValue("markup/watermark_text", txt_val)
+                qs.sync()
+            self.markup_stamp_requested.emit(kind, txt_val)
+
+        self._on_insert_mk_stamp = _on_insert_stamp_clicked
+        self.txt_mk_watermark.returnPressed.connect(_on_insert_stamp_clicked)
+        self.btn_mk_stamp_wm = QToolButton(pg_smp)
+        self.btn_mk_stamp_wm.setText("Insert")
+        self.btn_mk_stamp_wm.setIcon(make_wlpg_icon("stamp", 14))
+        self.btn_mk_stamp_wm.setIconSize(QSize(14, 14))
+        self.btn_mk_stamp_wm.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_mk_stamp_wm.setFixedSize(68, 23)
+        self.btn_mk_stamp_wm.setCursor(Qt.PointingHandCursor)
+        self.btn_mk_stamp_wm.setToolTip("Insert the stamp text onto the photo (Enter)")
+        self.btn_mk_stamp_wm.clicked.connect(_on_insert_stamp_clicked)
+
+        self.cmb_mk_stamp_style = QComboBox(pg_smp)
+        self.cmb_mk_stamp_style.setFixedWidth(120)
+        self.cmb_mk_stamp_style.setFixedHeight(23)
+        self.cmb_mk_stamp_style.setToolTip("Stamp badge style (Pill, Outline, Shadow, Plain)")
+        self.cmb_mk_stamp_style.addItem(_make_mk_text_style_icon("pill"), "Pill", "pill")
+        self.cmb_mk_stamp_style.addItem(_make_mk_text_style_icon("outline"), "Outline", "outline")
+        self.cmb_mk_stamp_style.addItem(_make_mk_text_style_icon("shadow"), "Shadow", "shadow")
+        self.cmb_mk_stamp_style.addItem(_make_mk_text_style_icon("plain"), "Plain", "plain")
+        self.cmb_mk_stamp_style.currentIndexChanged.connect(
+            lambda idx: self.cmb_mk_text_style.setCurrentIndex(idx) if hasattr(self, "cmb_mk_text_style") else None
+        )
+        smp_r0.addWidget(self.txt_mk_watermark)
+        smp_r0.addWidget(self.cmb_mk_stamp_style)
+        smp_r0.addWidget(self.btn_mk_stamp_wm)
+
+        sl_smo, lbl_smo = _make_opacity_pair(pg_smp, 120)
+        self.lbl_mk_smp_op = QLabel("Opacity:", pg_smp)
+        self.lbl_mk_smp_op.setFixedWidth(52)
+        smp_r1.addWidget(self.lbl_mk_smp_op)
+        smp_r1.addWidget(sl_smo)
+        smp_r1.addWidget(lbl_smo)
+        smp_r1.addStretch(1)
+        self._mk_option_page_indices["stamp"] = self.mk_options_stack.addWidget(pg_smp)
+
+        # --- Card 8: Select Options (Edit Text / Duplicate / Delete; Ctrl+C/V works from any tool) ---
+        pg_sel, _, sel_r0, sel_r1 = _make_opt_page()
+        self.btn_mk_sel_edit_text = QToolButton(pg_sel)
+        self.btn_mk_sel_edit_text.setText("Edit Text")
+        self.btn_mk_sel_edit_text.setIcon(make_wlpg_icon("text", 14))
+        self.btn_mk_sel_edit_text.setIconSize(QSize(14, 14))
+        self.btn_mk_sel_edit_text.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_mk_sel_edit_text.setFixedSize(82, 23)
+        self.btn_mk_sel_edit_text.setCursor(Qt.PointingHandCursor)
+        self.btn_mk_sel_edit_text.setToolTip("Edit text of selected Text or Stamp item (or double-click it)")
+        self.btn_mk_sel_edit_text.setEnabled(False)
+        self.btn_mk_sel_edit_text.clicked.connect(self.markup_edit_text_requested.emit)
+
+        self.btn_mk_sel_dup = QToolButton(pg_sel)
+        self.btn_mk_sel_dup.setText("Duplicate")
+        self.btn_mk_sel_dup.setIcon(make_wlpg_icon("duplicate", 14))
+        self.btn_mk_sel_dup.setIconSize(QSize(14, 14))
+        self.btn_mk_sel_dup.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_mk_sel_dup.setFixedSize(90, 23)
+        self.btn_mk_sel_dup.setCursor(Qt.PointingHandCursor)
+        self.btn_mk_sel_dup.setToolTip("Duplicate selected markup item (Ctrl+D, or Ctrl+C / Ctrl+V from any tool)")
+        self.btn_mk_sel_dup.setEnabled(False)
+        self.btn_mk_sel_dup.clicked.connect(self.markup_duplicate_selected_requested.emit)
+
+        self.btn_mk_sel_delete = QToolButton(pg_sel)
+        self.btn_mk_sel_delete.setText("Delete")
+        self.btn_mk_sel_delete.setIcon(make_wlpg_icon("delete", 14))
+        self.btn_mk_sel_delete.setIconSize(QSize(14, 14))
+        self.btn_mk_sel_delete.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_mk_sel_delete.setFixedSize(74, 23)
+        self.btn_mk_sel_delete.setCursor(Qt.PointingHandCursor)
+        self.btn_mk_sel_delete.setToolTip("Delete selected markup item (Del)")
+        self.btn_mk_sel_delete.setEnabled(False)
+        self.btn_mk_sel_delete.clicked.connect(self.markup_delete_selected_requested.emit)
+
+        sel_r0.addWidget(self.btn_mk_sel_edit_text)
+        sel_r0.addWidget(self.btn_mk_sel_dup)
+        sel_r0.addStretch(1)
+
+        sel_r1.addWidget(self.btn_mk_sel_delete)
+        sel_r1.addStretch(1)
+        self._mk_option_page_indices["select"] = self.mk_options_stack.addWidget(pg_sel)
+
+        self.grp_mk_options.content_layout.addWidget(self.mk_options_stack)
+        hbox.addWidget(self.grp_mk_options)
+
+        self._switch_mk_option_card("pen")
+
+        # Group 3: Colours (Dual Picker + 3x6 Larger 18px Swatches + Paint-style Rainbow Colour Wheel)
+        self.grp_mk_colors = _RibbonGroupBox("Colours", page)
+        colors_w = QWidget(self.grp_mk_colors)
+        colors_h = QHBoxLayout(colors_w)
+        colors_h.setContentsMargins(3, 2, 3, 2)
+        colors_h.setSpacing(4)
+
+        self.mk_color_picker = _PhotoshopColorPickerWidget(colors_w, large=True)
+        self.mk_color_picker.set_primary_color(self._mk_primary_color)
+        self.mk_color_picker.set_secondary_color(self._mk_secondary_color)
+        self.mk_color_picker.primary_color_changed.connect(self._on_ribbon_mk_primary_color)
+        self.mk_color_picker.secondary_color_changed.connect(self._on_ribbon_mk_secondary_color)
+        self.mk_color_picker.swap_requested.connect(self._on_ribbon_mk_colors_swapped)
+        colors_h.addWidget(self.mk_color_picker, 0, Qt.AlignVCenter)
+
+        swatches_w = QWidget(colors_w)
+        swatches_grid = QGridLayout(swatches_w)
+        swatches_grid.setContentsMargins(0, 1, 0, 1)
+        swatches_grid.setSpacing(3)
+        social_palette = [
+            ("#111111", "Black"),
+            ("#64748B", "Slate Grey"),
+            ("#FFFFFF", "White"),
+            ("#E53935", "Red"),
+            ("#FB8C00", "Orange"),
+            ("#FFB300", "Amber"),
+            ("#FFEB3B", "Yellow"),
+            ("#8BC34A", "Lime"),
+            ("#4CAF50", "Green"),
+            ("#009688", "Teal"),
+            ("#00BCD4", "Cyan"),
+            ("#2196F3", "Sky Blue"),
+            ("#3F51B5", "Indigo"),
+            ("#8E24AA", "Purple"),
+            ("#E91E63", "Pink"),
+            ("#F48FB1", "Soft Pink"),
+            ("#795548", "Brown"),
+            ("TRANSPARENT", "Transparent / None"),
+        ]
+        self.mk_swatch_buttons: dict[str, Any] = {}
+        for idx, (hex_col, name) in enumerate(social_palette):
+            col = QColor(0, 0, 0, 0) if hex_col == "TRANSPARENT" else QColor(hex_col)
+            btn_sw = _SwatchButton(col, name, swatches_w, size=18)
+            btn_sw.left_clicked.connect(self._on_ribbon_mk_primary_color)
+            btn_sw.right_clicked.connect(self._on_ribbon_mk_secondary_color)
+            swatches_grid.addWidget(btn_sw, idx // 6, idx % 6)
+            self.mk_swatch_buttons[hex_col.upper()] = btn_sw
+
+        colors_h.addWidget(swatches_w, 0, Qt.AlignVCenter)
+
+        # Standalone MS Paint-style Rainbow Colour Wheel with '+' badge
+        self.btn_mk_custom_color = QToolButton(colors_w)
+        self.btn_mk_custom_color.setFixedSize(36, 36)
+        self.btn_mk_custom_color.setIconSize(QSize(32, 32))
+        self.btn_mk_custom_color.setCursor(Qt.PointingHandCursor)
+        self.btn_mk_custom_color.setToolTip(
+            "Edit colours (Custom colour picker)\n• Left-click: Primary colour\n• Right-click: Secondary colour"
+        )
+        self.btn_mk_custom_color.clicked.connect(self._pick_ribbon_mk_primary_color)
+        self.btn_mk_custom_color.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.btn_mk_custom_color.customContextMenuRequested.connect(lambda _p: self._pick_ribbon_mk_secondary_color())
+        colors_h.addWidget(self.btn_mk_custom_color, 0, Qt.AlignVCenter)
+
+        self.grp_mk_colors.content_layout.addWidget(colors_w)
+        self.grp_mk_colors.adjust_to_content()
+        hbox.addWidget(self.grp_mk_colors)
+        self._update_ribbon_mk_color_indicators()
+
+        # Group 4: Edit (Undo & Clear)
+        self.grp_mk_edit = _RibbonGroupBox("Edit", page)
+        self.btn_mk_undo = self._make_btn("Undo", "undo", self.grp_mk_edit, large=True)
+        self.btn_mk_undo.setFixedWidth(42)
+        self.btn_mk_undo.setMinimumWidth(42)
+        self.btn_mk_undo.setToolTip("Undo last markup element (Ctrl+Z)")
+        self.btn_mk_undo.setEnabled(False)
+        self.btn_mk_undo.clicked.connect(self.markup_undo_requested.emit)
+
+        self.btn_mk_clear = self._make_btn("Clear", "eraser", self.grp_mk_edit, large=True)
+        self.btn_mk_clear.setFixedWidth(42)
+        self.btn_mk_clear.setMinimumWidth(42)
+        self.btn_mk_clear.setToolTip("Clear all annotations from photo")
+        self.btn_mk_clear.clicked.connect(self.markup_clear_requested.emit)
+
+        self.grp_mk_edit.content_layout.addWidget(self.btn_mk_undo)
+        self.grp_mk_edit.content_layout.addWidget(self.btn_mk_clear)
+        self.grp_mk_edit.adjust_to_content()
+        hbox.addWidget(self.grp_mk_edit)
+
+        # Group 5: Save & Close (Save + Split Save as Copy + Close Markup)
+        self.grp_mk_close = _RibbonGroupBox("Save & Close", page)
+        self.btn_mk_save = self._make_btn("Save", "save", self.grp_mk_close, large=True)
+        self.btn_mk_save.setFixedWidth(42)
+        self.btn_mk_save.setMinimumWidth(42)
+        self.btn_mk_save.setToolTip("Save changes to original photo (Ctrl+S)")
+        self.btn_mk_save.clicked.connect(self.markup_save_requested.emit)
+
+        split_mk_copy, self.btn_mk_save_copy = self._make_split_save_copy_button(self.grp_mk_close)
+
+        self.btn_mk_close = self._make_btn("Close\nMarkup", "close_file", self.grp_mk_close, large=True)
+        self.btn_mk_close.setFixedWidth(48)
+        self.btn_mk_close.setMinimumWidth(48)
+        self.btn_mk_close.setToolTip("Finish markup session (Esc)")
+        self.btn_mk_close.clicked.connect(self.markup_close_requested.emit)
+
+        self.grp_mk_close.content_layout.addWidget(self.btn_mk_save)
+        self.grp_mk_close.content_layout.addWidget(split_mk_copy)
+        self.grp_mk_close.content_layout.addWidget(self.btn_mk_close)
+        self.grp_mk_close.adjust_to_content()
+        hbox.addWidget(self.grp_mk_close)
+
+        hbox.addStretch(1)
+        self._apply_markup_tab_theme(getattr(self, "_dark_mode", False))
+        return page
+
+    def _switch_mk_option_card(self, cat_id: str) -> None:
+        titles = {
+            "select": "Select Options",
+            "pen": "Pen Options",
+            "text": "Text",
+            "shapes": "Shape Options",
+            "line": "Line Options",
+            "obscure": "Obscure Options",
+            "stickers": "Sticker Options",
+            "magnify": "Magnify Options",
+            "stamp": "Watermark & Stamp",
+        }
+        idx = getattr(self, "_mk_option_page_indices", {}).get(cat_id, 0)
+        if hasattr(self, "mk_options_stack"):
+            self.mk_options_stack.setCurrentIndex(idx)
+            cur_wgt = self.mk_options_stack.currentWidget()
+            if cur_wgt is not None:
+                lay = cur_wgt.layout()
+                if lay is not None:
+                    lay.invalidate()
+                    lay.activate()
+                target_w = max(120, cur_wgt.sizeHint().width())
+                self.mk_options_stack.setFixedWidth(target_w)
+            self.mk_options_stack.updateGeometry()
+        if hasattr(self, "grp_mk_options"):
+            self.grp_mk_options.setTitle(titles.get(cat_id, "Tool Options"))
+            self.grp_mk_options.adjust_to_content()
+        if hasattr(self, "grp_mk_text_bg"):
+            self.grp_mk_text_bg.setVisible(cat_id == "text")
+            if cat_id == "text":
+                self.grp_mk_text_bg.adjust_to_content()
+        btn = getattr(self, "mk_category_buttons", {}).get(cat_id)
+        if btn is not None and not btn.isChecked():
+            btn.blockSignals(True)
+            btn.setChecked(True)
+            btn.blockSignals(False)
+
+    def _on_ribbon_mk_category_clicked(self, cat_id: str) -> None:
+        self._switch_mk_option_card(cat_id)
+        if cat_id == "select":
+            self._mk_active_tool = "select"
+            self.markup_tool_changed.emit("select")
+        elif cat_id == "pen":
+            self._mk_active_tool = "pen"
+            self.markup_tool_changed.emit("pen")
+        elif cat_id == "text":
+            self._mk_active_tool = "text"
+            self.markup_tool_changed.emit("text")
+        elif cat_id == "shapes":
+            self._mk_active_tool = self._mk_active_shape
+            self.markup_tool_changed.emit(self._mk_active_shape)
+        elif cat_id == "line":
+            self._mk_active_tool = self._mk_line_style
+            self.markup_tool_changed.emit(self._mk_line_style)
+        elif cat_id == "obscure":
+            self._mk_active_tool = self._mk_obscure_kind
+            self.markup_tool_changed.emit(self._mk_obscure_kind)
+            self.markup_obscure_mode_changed.emit(self._mk_obscure_mode)
+        elif cat_id == "stickers":
+            self._mk_active_tool = "sticker"
+            self.markup_sticker_requested.emit(self._mk_active_sticker)
+            self.markup_tool_changed.emit("sticker")
+        elif cat_id == "magnify":
+            self._mk_active_tool = "magnify"
+            self.markup_tool_changed.emit("magnify")
+        elif cat_id == "stamp":
+            self._mk_active_tool = "text"
+            self.markup_stamp_kind_selected.emit(getattr(self, "_mk_active_stamp_kind", "watermark"))
+
+    def _on_ribbon_mk_stamp_kind_chosen(self, stamp_kind: str) -> None:
+        kind = (stamp_kind or "watermark").strip().lower()
+        if kind not in ("location", "date", "camera", "watermark"):
+            kind = "watermark"
+        self._mk_active_stamp_kind = kind
+        act = getattr(self, "_mk_stamp_menu_actions", {}).get(kind)
+        if act is not None and not act.isChecked():
+            act.blockSignals(True)
+            act.setChecked(True)
+            act.blockSignals(False)
+        ico_kind = getattr(self, "_mk_stamp_icon_map", {}).get(kind, "stamp")
+        if hasattr(self, "btn_mk_stamp"):
+            self.btn_mk_stamp._icon_kind = ico_kind
+            self.btn_mk_stamp.setIcon(make_wlpg_icon(ico_kind, 28))
+        if hasattr(self, "btn_mk_stamp_wm"):
+            self.btn_mk_stamp_wm.setIcon(make_wlpg_icon(ico_kind, 14))
+        if hasattr(self, "txt_mk_watermark"):
+            self.txt_mk_watermark.setPlaceholderText(
+                getattr(self, "_mk_stamp_placeholders", {}).get(kind, "Copyright")
+            )
+        self._switch_mk_option_card("stamp")
+        self.markup_stamp_kind_selected.emit(kind)
+
+    def set_markup_stamp_preview_text(self, text: str) -> None:
+        """Populates the editable Stamp text box without overwriting saved watermark QSettings."""
+        if hasattr(self, "txt_mk_watermark"):
+            self.txt_mk_watermark.blockSignals(True)
+            self.txt_mk_watermark.setText(str(text or ""))
+            self.txt_mk_watermark.blockSignals(False)
+
+    def _apply_ribbon_mk_pen_preset(self, opacity: float, width: int) -> None:
+        self._mk_active_tool = "pen"
+        self.markup_tool_changed.emit("pen")
+        self._on_ribbon_mk_width_changed(width)
+        self._on_ribbon_mk_opacity_changed(int(round(opacity * 100)))
+
+    def _on_ribbon_mk_sticker_chosen(self, sticker_id: str) -> None:
+        from src.ui.markup_overlay import ALL_STICKER_IDS
+
+        sid = (sticker_id or "smiley").strip().lower()
+        if sid not in ALL_STICKER_IDS:
+            return
+        self._mk_active_sticker = sid
+        self._mk_active_tool = "sticker"
+        stb = getattr(self, "mk_sticker_buttons", {}).get(sid)
+        if stb is not None:
+            stb.blockSignals(True)
+            stb.setChecked(True)
+            stb.blockSignals(False)
+        ico_kind = getattr(self, "_mk_sticker_icon_map", {}).get(sid, f"sticker_{sid}")
+        if hasattr(self, "btn_mk_stickers"):
+            self.btn_mk_stickers._icon_kind = ico_kind
+            self.btn_mk_stickers.setIcon(make_wlpg_icon(ico_kind, 28))
+        self._switch_mk_option_card("stickers")
+        self.markup_sticker_requested.emit(sid)
+
+    def _on_ribbon_mk_shape_chosen(self, shape_id: str) -> None:
+        from src.ui.markup_overlay import ALL_SHAPE_KINDS
+
+        if shape_id in ALL_SHAPE_KINDS:
+            self._mk_active_shape = shape_id
+            self._mk_active_tool = shape_id
+            sb = getattr(self, "mk_shape_buttons", {}).get(shape_id)
+            if sb is not None:
+                sb.blockSignals(True)
+                sb.setChecked(True)
+                sb.blockSignals(False)
+            for s_id, act in getattr(self, "_mk_shape_menu_actions", {}).items():
+                act.setChecked(s_id == shape_id)
+            ico_kind = getattr(self, "_mk_shape_icon_map", {}).get(shape_id, "rect")
+            if hasattr(self, "btn_mk_shape"):
+                self.btn_mk_shape._icon_kind = ico_kind
+                self.btn_mk_shape.setIcon(make_wlpg_icon(ico_kind, 28))
+            self._switch_mk_option_card("shapes")
+            self.markup_shape_changed.emit(shape_id)
+
+    def _on_ribbon_mk_shape_style_changed(self, _idx: int) -> None:
+        if not hasattr(self, "cmb_mk_shape_style"):
+            return
+        mode = str(self.cmb_mk_shape_style.currentData() or "outline")
+        if mode == "outline":
+            if self._mk_stroke_width <= 0:
+                self._on_ribbon_mk_width_changed(4)
+            self._on_ribbon_mk_shape_filled_toggled(False)
+        elif mode == "both":
+            if self._mk_stroke_width <= 0:
+                self._on_ribbon_mk_width_changed(4)
+            self._on_ribbon_mk_shape_filled_toggled(True)
+        elif mode == "solid":
+            self._on_ribbon_mk_shape_filled_toggled(True)
+            self.markup_stroke_width_changed.emit(0)
+
+    def _on_ribbon_mk_shape_filled_toggled(self, checked: bool) -> None:
+        self._mk_shape_filled = bool(checked)
+        if hasattr(self, "btn_mk_shape_fill") and self.btn_mk_shape_fill.isChecked() != self._mk_shape_filled:
+            self.btn_mk_shape_fill.blockSignals(True)
+            self.btn_mk_shape_fill.setChecked(self._mk_shape_filled)
+            self.btn_mk_shape_fill.blockSignals(False)
+        if hasattr(self, "_act_mk_shape_fill_menu") and self._act_mk_shape_fill_menu.isChecked() != self._mk_shape_filled:
+            self._act_mk_shape_fill_menu.blockSignals(True)
+            self._act_mk_shape_fill_menu.setChecked(self._mk_shape_filled)
+            self._act_mk_shape_fill_menu.blockSignals(False)
+        if hasattr(self, "cmb_mk_shape_style"):
+            cur_mode = str(self.cmb_mk_shape_style.currentData() or "outline")
+            if self._mk_shape_filled and cur_mode == "outline":
+                self.cmb_mk_shape_style.blockSignals(True)
+                idx_both = self.cmb_mk_shape_style.findData("both")
+                self.cmb_mk_shape_style.setCurrentIndex(idx_both if idx_both >= 0 else 2)
+                self.cmb_mk_shape_style.blockSignals(False)
+            elif not self._mk_shape_filled and cur_mode != "outline":
+                self.cmb_mk_shape_style.blockSignals(True)
+                self.cmb_mk_shape_style.setCurrentIndex(0)
+                self.cmb_mk_shape_style.blockSignals(False)
+        self.markup_shape_filled_changed.emit(self._mk_shape_filled)
+
+    def _on_ribbon_mk_dash_style_changed(self, dash_style: str) -> None:
+        norm = (dash_style or "solid").strip().lower()
+        if norm not in ("solid", "outlined", "dashed", "dotted"):
+            norm = "solid"
+        self._mk_dash_style = norm
+        for attr in ("cmb_mk_shape_dash", "cmb_mk_line_dash"):
+            cmb = getattr(self, attr, None)
+            if cmb is not None:
+                idx = cmb.findData(norm)
+                if idx >= 0 and cmb.currentIndex() != idx:
+                    cmb.blockSignals(True)
+                    cmb.setCurrentIndex(idx)
+                    cmb.blockSignals(False)
+        self.markup_dash_style_changed.emit(norm)
+
+    def _on_ribbon_mk_line_chosen(self, line_id: str) -> None:
+        from src.ui.markup_overlay import ALL_LINE_KINDS
+
+        if line_id in ALL_LINE_KINDS:
+            self._mk_line_style = line_id
+            self._mk_active_tool = line_id
+            for l_id, act in getattr(self, "_mk_line_menu_actions", {}).items():
+                act.setChecked(l_id == line_id)
+            ico_kind = getattr(self, "_mk_line_icon_map", {}).get(line_id, "arrow")
+            if hasattr(self, "btn_mk_line"):
+                self.btn_mk_line._icon_kind = ico_kind
+                self.btn_mk_line.setIcon(make_wlpg_icon(ico_kind, 28))
+            self._switch_mk_option_card("line")
+            self.markup_line_style_changed.emit(line_id)
+            self.markup_tool_changed.emit(line_id)
+
+    def _sync_mk_obscure_size_visibility(self) -> None:
+        is_brush = getattr(self, "_mk_obscure_mode", "brush") == "brush"
+        for attr in ("lbl_mk_obs_sz", "slider_mk_obs_size", "lbl_mk_obs_sz_val"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                w.setVisible(is_brush)
+
+    def _on_ribbon_mk_obscure_variant(self, kind: str, mode: str) -> None:
+        if kind in ("blur", "pixelate") and mode in ("brush", "box"):
+            self._mk_obscure_kind = kind
+            self._mk_obscure_mode = mode
+            self._mk_active_tool = kind
+            for (k, m), act in getattr(self, "_mk_obscure_menu_actions", {}).items():
+                act.setChecked(k == kind and m == mode)
+            if hasattr(self, "btn_mk_obscure"):
+                ico_k = "blur" if kind == "blur" else "pixelate"
+                self.btn_mk_obscure._icon_kind = ico_k
+                self.btn_mk_obscure.setIcon(make_wlpg_icon(ico_k, 28))
+            self._sync_mk_obscure_size_visibility()
+            self._switch_mk_option_card("obscure")
+            self.markup_obscure_mode_changed.emit(mode)
+            self.markup_tool_changed.emit(kind)
+
+    def _on_ribbon_mk_obscure_kind(self, kind: str) -> None:
+        self._on_ribbon_mk_obscure_variant(kind, self._mk_obscure_mode)
+
+    def _on_ribbon_mk_obscure_mode(self, mode: str) -> None:
+        self._on_ribbon_mk_obscure_variant(self._mk_obscure_kind, mode)
+
+    def _on_ribbon_mk_obscure_strength_changed(self, val: int) -> None:
+        clamped = max(15, min(100, int(val)))
+        self._mk_obscure_strength = clamped
+        if hasattr(self, "lbl_mk_obs_strength_val"):
+            self.lbl_mk_obs_strength_val.setText(f"{clamped}%")
+        self.markup_obscure_strength_changed.emit(clamped)
+
+    def _on_ribbon_mk_magnify_zoom_chosen(self, zoom_val: float) -> None:
+        clamped = max(1.2, min(5.0, round(float(zoom_val), 1)))
+        self._mk_magnifier_zoom = clamped
+        if hasattr(self, "lbl_mk_mag_zoom_val"):
+            self.lbl_mk_mag_zoom_val.setText(f"{clamped:.1f}x")
+        if hasattr(self, "slider_mk_mag_zoom"):
+            sv = int(round(clamped * 10))
+            if self.slider_mk_mag_zoom.value() != sv:
+                self.slider_mk_mag_zoom.blockSignals(True)
+                self.slider_mk_mag_zoom.setValue(sv)
+                self.slider_mk_mag_zoom.blockSignals(False)
+        self.markup_magnifier_zoom_changed.emit(self._mk_magnifier_zoom)
+
+    def _on_ribbon_mk_rotation_slider_value(self, deg_val: int, src_slider: QSlider | None = None) -> None:
+        clamped = max(-180, min(180, int(round(float(deg_val)))))
+        self._mk_rotation_deg = float(clamped)
+        txt = f"{clamped}°" if clamped != 0 else "0°"
+        for sl, lbl, _rst in getattr(self, "_mk_rotation_sliders", []):
+            if sl is not src_slider and sl.value() != clamped:
+                sl.blockSignals(True)
+                sl.setValue(clamped)
+                sl.blockSignals(False)
+            lbl.setText(txt)
+        if src_slider is not None and src_slider.isSliderDown():
+            self.markup_rotation_preview_changed.emit(self._mk_rotation_deg)
+        else:
+            self.markup_rotation_changed.emit(self._mk_rotation_deg)
+
+    def _on_ribbon_mk_rotation_slider_released(self, src_slider: QSlider) -> None:
+        clamped = max(-180, min(180, int(src_slider.value())))
+        self._mk_rotation_deg = float(clamped)
+        self.markup_rotation_changed.emit(self._mk_rotation_deg)
+
+    def _on_ribbon_mk_rotation_changed(self, deg_val: int) -> None:
+        self._on_ribbon_mk_rotation_slider_value(deg_val, None)
+
+    def _apply_ribbon_mk_text_pt(self, pt: int) -> None:
+        clamped_pt = max(10, min(440, int(pt)))
+        sw = max(2, min(200, int(round(clamped_pt / 2.2))))
+        if hasattr(self, "cmb_mk_txt_size"):
+            self.cmb_mk_txt_size.blockSignals(True)
+            self.cmb_mk_txt_size.setCurrentText(str(clamped_pt))
+            self.cmb_mk_txt_size.blockSignals(False)
+        self._on_ribbon_mk_width_changed(sw, keep_txt_pt=clamped_pt)
+
+    def _step_ribbon_mk_text_size(self, delta: int) -> None:
+        presets = getattr(self, "_mk_text_size_presets", [12, 16, 24, 36, 48, 72, 96, 144, 240])
+        try:
+            cur = int(round(float(self.cmb_mk_txt_size.currentText().strip())))
+        except Exception:
+            cur = max(10, int(round(self._mk_stroke_width * 2.2)))
+        if delta > 0:
+            nxt = next((p for p in presets if p > cur), min(440, cur + 16))
+        else:
+            nxt = next((p for p in reversed(presets) if p < cur), max(10, cur - 4))
+        self._apply_ribbon_mk_text_pt(nxt)
+
+    def _on_ribbon_mk_text_size_activated(self, idx: int) -> None:
+        if not hasattr(self, "cmb_mk_txt_size"):
+            return
+        pt = self.cmb_mk_txt_size.itemData(idx)
+        if pt is not None:
+            self._apply_ribbon_mk_text_pt(int(pt))
+
+    def _on_ribbon_mk_text_size_edited(self) -> None:
+        if not hasattr(self, "cmb_mk_txt_size"):
+            return
+        txt = self.cmb_mk_txt_size.currentText().strip()
+        try:
+            pt = int(round(float(txt)))
+        except ValueError:
+            pt = max(10, int(round(self._mk_stroke_width * 2.2)))
+        self._apply_ribbon_mk_text_pt(pt)
+
+    def _on_ribbon_mk_width_changed(self, val: int, *, keep_txt_pt: int | None = None) -> None:
+        clamped = max(2, min(200, int(val)))
+        self._mk_stroke_width = clamped
+        mag_lbl = getattr(self, "lbl_mk_mag_sz_val", None)
+        for sl, lbl in getattr(self, "_mk_width_sliders", []):
+            sl_val = min(sl.maximum(), clamped)
+            if sl.value() != sl_val:
+                sl.blockSignals(True)
+                sl.setValue(sl_val)
+                sl.blockSignals(False)
+            if lbl is mag_lbl:
+                lbl.setText(f"{int((45 + (sl_val - 2) * 5) * 2)}px")
+            else:
+                lbl.setText(f"{sl_val}px")
+        if hasattr(self, "cmb_mk_txt_size"):
+            pt_val = keep_txt_pt if keep_txt_pt is not None else max(10, int(round(clamped * 2.2)))
+            self.cmb_mk_txt_size.blockSignals(True)
+            self.cmb_mk_txt_size.setCurrentText(str(pt_val))
+            self.cmb_mk_txt_size.blockSignals(False)
+        self.markup_stroke_width_changed.emit(clamped)
+
+    def _on_ribbon_mk_opacity_changed(self, val: int) -> None:
+        clamped = max(15, min(100, int(val)))
+        self._mk_opacity = round(clamped / 100.0, 2)
+        for sl, lbl in getattr(self, "_mk_opacity_sliders", []):
+            if sl.value() != clamped:
+                sl.blockSignals(True)
+                sl.setValue(clamped)
+                sl.blockSignals(False)
+            lbl.setText(f"{clamped}%")
+        self.markup_opacity_changed.emit(self._mk_opacity)
+
+    def _on_ribbon_mk_bg_opacity_changed(self, val: int) -> None:
+        clamped = max(0, min(100, int(val)))
+        self._mk_bg_opacity = round(clamped / 100.0, 2)
+        if hasattr(self, "lbl_mk_bg_opacity_val"):
+            self.lbl_mk_bg_opacity_val.setText(f"{clamped}%")
+        self.markup_bg_opacity_changed.emit(self._mk_bg_opacity)
+
+    def _on_ribbon_mk_text_style_changed(self, _idx: int) -> None:
+        if hasattr(self, "cmb_mk_text_style"):
+            style = str(self.cmb_mk_text_style.currentData() or "pill")
+            self.markup_text_style_changed.emit(style)
+
+    def _set_ribbon_mk_text_align(self, align_id: str) -> None:
+        norm = (align_id or "left").strip().lower()
+        if norm not in ("left", "center", "right"):
+            norm = "left"
+        self._mk_text_align = norm
+        for a_name, attr in (("left", "btn_mk_align_left"), ("center", "btn_mk_align_center"), ("right", "btn_mk_align_right")):
+            ab = getattr(self, attr, None)
+            if ab is not None:
+                ab.blockSignals(True)
+                ab.setChecked(a_name == norm)
+                ab.blockSignals(False)
+        self.markup_text_align_changed.emit(norm)
+
+    def _emit_ribbon_mk_text_format(self) -> None:
+        is_b = bool(self.btn_mk_bold.isChecked()) if hasattr(self, "btn_mk_bold") else True
+        is_i = bool(self.btn_mk_italic.isChecked()) if hasattr(self, "btn_mk_italic") else False
+        self.markup_text_format_changed.emit(is_b, is_i)
+
+    def _on_ribbon_mk_primary_color(self, col: QColor) -> None:
+        if not col.isValid():
+            return
+        self._mk_primary_color = QColor(col)
+        if hasattr(self, "mk_color_picker"):
+            self.mk_color_picker.blockSignals(True)
+            self.mk_color_picker.set_primary_color(col)
+            self.mk_color_picker.blockSignals(False)
+        self._update_ribbon_mk_color_indicators()
+        self.markup_primary_color_changed.emit(QColor(col))
+
+    def _on_ribbon_mk_secondary_color(self, col: QColor) -> None:
+        if not col.isValid():
+            return
+        self._mk_secondary_color = QColor(col)
+        if hasattr(self, "mk_color_picker"):
+            self.mk_color_picker.blockSignals(True)
+            self.mk_color_picker.set_secondary_color(col)
+            self.mk_color_picker.blockSignals(False)
+        if hasattr(self, "btn_mk_pill_bg"):
+            self.btn_mk_pill_bg.blockSignals(True)
+            self.btn_mk_pill_bg.setChecked(col.alpha() > 0)
+            self.btn_mk_pill_bg.blockSignals(False)
+        self._update_ribbon_mk_color_indicators()
+        self.markup_secondary_color_changed.emit(QColor(col))
+
+    def _on_ribbon_mk_colors_swapped(self) -> None:
+        if hasattr(self, "mk_color_picker"):
+            self._mk_primary_color = QColor(self.mk_color_picker.primary_color)
+            self._mk_secondary_color = QColor(self.mk_color_picker.secondary_color)
+        if hasattr(self, "btn_mk_pill_bg"):
+            self.btn_mk_pill_bg.blockSignals(True)
+            self.btn_mk_pill_bg.setChecked(self._mk_secondary_color.alpha() > 0)
+            self.btn_mk_pill_bg.blockSignals(False)
+        self._update_ribbon_mk_color_indicators()
+        self.markup_colors_swapped.emit(QColor(self._mk_primary_color), QColor(self._mk_secondary_color))
+
+    def _pick_ribbon_mk_primary_color(self) -> None:
+        col = QColorDialog.getColor(self._mk_primary_color, self, "Select Primary (Foreground) Color")
+        if col.isValid():
+            self._on_ribbon_mk_primary_color(col)
+
+    def _pick_ribbon_mk_secondary_color(self) -> None:
+        col = QColorDialog.getColor(self._mk_secondary_color, self, "Select Secondary (Background) Color")
+        if col.isValid():
+            self._on_ribbon_mk_secondary_color(col)
+
+    def _update_ribbon_mk_color_indicators(self) -> None:
+        if not hasattr(self, "mk_swatch_buttons"):
+            return
+        p_hex = self._mk_primary_color.name().upper()
+        s_hex = self._mk_secondary_color.name().upper()
+        for hex_col, btn in self.mk_swatch_buttons.items():
+            if getattr(btn, "is_transparent", False):
+                is_p = self._mk_primary_color.alpha() == 0
+                is_s = self._mk_secondary_color.alpha() == 0
+                btn.setText("•" if is_p else ("◦" if is_s else ""))
+                btn.update()
+                continue
+            is_p = hex_col == p_hex and self._mk_primary_color.alpha() != 0
+            is_s = hex_col == s_hex and self._mk_secondary_color.alpha() != 0
+            if is_p and is_s:
+                btn.setText("•")
+                btn.setStyleSheet(
+                    f"QPushButton {{ background-color: {hex_col}; color: #00FFCC; font-weight: 900; "
+                    f"font-size: 13px; border: 2px solid #005FB8; border-radius: 9px; padding-bottom: 2px; }}"
+                )
+            elif is_p:
+                dot_color = "#FFFFFF" if QColor(hex_col).lightness() < 140 else "#000000"
+                btn.setText("•")
+                btn.setStyleSheet(
+                    f"QPushButton {{ background-color: {hex_col}; color: {dot_color}; font-weight: 900; "
+                    f"font-size: 13px; border: 2px solid #005FB8; border-radius: 9px; padding-bottom: 2px; }}"
+                )
+            elif is_s:
+                dot_color = "#FFFFFF" if QColor(hex_col).lightness() < 140 else "#000000"
+                btn.setText("○")
+                btn.setStyleSheet(
+                    f"QPushButton {{ background-color: {hex_col}; color: {dot_color}; font-weight: bold; "
+                    f"font-size: 10px; border: 2px dashed #334155; border-radius: 9px; padding-bottom: 1px; }}"
+                )
+            else:
+                if hex_col == "#FFFFFF":
+                    border_col = "#999999"
+                elif getattr(self, "_dark_mode", False):
+                    border_col = "#64748B"
+                else:
+                    border_col = hex_col
+                btn.setText("")
+                btn.setStyleSheet(
+                    f"QPushButton {{ background-color: {hex_col}; border: 1px solid {border_col}; border-radius: 9px; }}"
+                    f"QPushButton:hover {{ border: 2px solid #005FB8; }}"
+                )
+
+    def _apply_markup_tab_theme(self, is_dark: bool) -> None:
+        if not hasattr(self, "tab_markup"):
+            return
+        icons_posix = get_icons_dir().as_posix()
+        arrow_svg = (
+            f"{icons_posix}/arrow_dropdown_mini_dark.svg"
+            if is_dark
+            else f"{icons_posix}/arrow_dropdown_mini.svg"
+        )
+        # Match Fine Tune's exact 'Look:' dropdown aesthetic across Dark and Light/Aero themes
+        if is_dark:
+            cmb_qss = (
+                "QComboBox { background-color: #252B36; color: #F1F5F9; border: 1px solid #475569; "
+                "border-radius: 4px; padding: 1px 22px 1px 7px; font-family: 'Segoe UI'; font-size: 8.5pt; }"
+                "QComboBox:hover { border-color: #60A5FA; background-color: #2C3442; }"
+                "QComboBox:focus { border-color: #3B82F6; }"
+                "QComboBox:disabled { color: #64748B; background-color: #1E222A; }"
+                "QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; "
+                "width: 18px; border-left: 1px solid #3A4454; border-top-right-radius: 4px; border-bottom-right-radius: 4px; "
+                "background: transparent; }"
+                f"QComboBox::down-arrow {{ image: url({arrow_svg}); width: 10px; height: 10px; }}"
+                "QComboBox QAbstractItemView { background-color: #1B1E24; color: #E2E8F0; "
+                "border: 1px solid #3E4756; selection-background-color: #2563EB; selection-color: #FFFFFF; outline: none; }"
+            )
+            view_qss = (
+                "QAbstractItemView { background-color: #1B1E24; color: #E2E8F0; "
+                "selection-background-color: #2563EB; selection-color: #FFFFFF; outline: none; }"
+            )
+            edit_qss = (
+                "QLineEdit { background: #252B36; color: #F1F5F9; border: 1px solid #475569; "
+                "border-radius: 4px; padding: 1px 7px; font-family: 'Segoe UI'; font-size: 8.5pt; }"
+                "QLineEdit:focus { border-color: #3B82F6; }"
+            )
+            btn_qss = (
+                "QToolButton { background: #262C36; color: #E2E8F0; border: 1px solid #3E4756; "
+                "border-radius: 4px; padding: 1px 6px; font-family: 'Segoe UI'; font-size: 8.5pt; }"
+                "QToolButton:hover { background: #313946; border-color: #60A5FA; }"
+                "QToolButton:checked { background: #1E3A5F; border-color: #3B82F6; color: #FFFFFF; }"
+                "QToolButton:disabled { color: #64748B; background: #1E222A; border-color: #2E3440; }"
+            )
+            lbl_qss = "QLabel { color: #D8E0EA; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent; }"
+        else:
+            cmb_qss = (
+                "QComboBox { background-color: #FFFFFF; color: #1E293B; border: 1px solid #CBD5E1; "
+                "border-radius: 4px; padding: 1px 22px 1px 7px; font-family: 'Segoe UI'; font-size: 8.5pt; }"
+                "QComboBox:hover { border-color: #7BA7C9; background-color: #F8FBFF; }"
+                "QComboBox:focus { border-color: #2563EB; }"
+                "QComboBox:disabled { color: #8A99AD; background-color: #F1F5F9; }"
+                "QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; "
+                "width: 18px; border-left: 1px solid #E2E8F0; border-top-right-radius: 4px; border-bottom-right-radius: 4px; "
+                "background: #F8FAFC; }"
+                f"QComboBox::down-arrow {{ image: url({arrow_svg}); width: 10px; height: 10px; }}"
+                "QComboBox QAbstractItemView { background-color: #FFFFFF; color: #1E293B; "
+                "border: 1px solid #CBD5E1; selection-background-color: #E4F0FC; selection-color: #0F172A; outline: none; }"
+            )
+            view_qss = (
+                "QAbstractItemView { background-color: #FFFFFF; color: #1E293B; "
+                "selection-background-color: #E4F0FC; selection-color: #0F172A; outline: none; }"
+            )
+            edit_qss = (
+                "QLineEdit { background: #FFFFFF; color: #1E293B; border: 1px solid #CBD5E1; "
+                "border-radius: 4px; padding: 1px 7px; font-family: 'Segoe UI'; font-size: 8.5pt; }"
+                "QLineEdit:focus { border-color: #2563EB; }"
+            )
+            btn_qss = (
+                "QToolButton { background: #F8FAFC; color: #1E395B; border: 1px solid #CBD5E1; "
+                "border-radius: 4px; padding: 1px 6px; font-family: 'Segoe UI'; font-size: 8.5pt; }"
+                "QToolButton:hover { background: #E4F0FC; border-color: #7BA7C9; }"
+                "QToolButton:checked { background: #CBE2F8; border-color: #3388E8; color: #0E294B; }"
+                "QToolButton:disabled { color: #94A3B8; background: #F1F5F9; border-color: #CBD5E1; }"
+            )
+            lbl_qss = "QLabel { color: #1E395B; font-family: 'Segoe UI'; font-size: 8.5pt; background: transparent; }"
+        for cmb_attr, min_popup_w in (
+            ("cmb_mk_font", 148),
+            ("cmb_mk_text_style", 124),
+            ("cmb_mk_stamp_style", 118),
+            ("cmb_mk_shape_style", 132),
+            ("cmb_mk_shape_dash", 118),
+            ("cmb_mk_line_dash", 114),
+        ):
+            cmb = getattr(self, cmb_attr, None)
+            if cmb is not None:
+                cmb.setStyleSheet(cmb_qss)
+                if cmb.view() is not None:
+                    cmb.view().setStyleSheet(view_qss)
+                    cmb.view().setMinimumWidth(max(min_popup_w, cmb.width()))
+        for cmb_attr in ("cmb_mk_text_style", "cmb_mk_stamp_style"):
+            cmb = getattr(self, cmb_attr, None)
+            if cmb is not None:
+                for idx, sk in enumerate(("pill", "outline", "shadow", "plain")):
+                    if idx < cmb.count():
+                        cmb.setItemIcon(idx, _make_mk_text_style_icon(sk, is_dark))
+        if hasattr(self, "cmb_mk_shape_style"):
+            for idx, sk in enumerate(("outline", "solid", "both")):
+                if idx < self.cmb_mk_shape_style.count():
+                    self.cmb_mk_shape_style.setItemIcon(idx, _make_mk_shape_style_icon(sk, is_dark))
+        for cmb_attr in ("cmb_mk_shape_dash", "cmb_mk_line_dash"):
+            cmb = getattr(self, cmb_attr, None)
+            if cmb is not None:
+                for idx, dk in enumerate(("solid", "outlined", "dashed", "dotted")):
+                    if idx < cmb.count():
+                        cmb.setItemIcon(idx, _make_mk_dash_style_icon(dk, is_dark))
+        if hasattr(self, "txt_mk_watermark"):
+            self.txt_mk_watermark.setStyleSheet(edit_qss)
+        for lbl_attr in (
+            "lbl_mk_size", "lbl_mk_width_val", "lbl_mk_opacity", "lbl_mk_opacity_val",
+            "lbl_mk_txt_font", "lbl_mk_txt_rot", "lbl_mk_txt_bg_op", "lbl_mk_bg_opacity_val",
+            "lbl_mk_shp_w", "lbl_mk_shp_o", "lbl_mk_shp_fill", "lbl_mk_shp_dash",
+            "lbl_mk_ln_w", "lbl_mk_ln_o", "lbl_mk_ln_dash", "lbl_mk_obs_sz", "lbl_mk_obs_str",
+            "lbl_mk_obs_strength_val", "lbl_mk_stk_o", "lbl_mk_stk_r",
+            "lbl_mk_mag_zoom", "lbl_mk_mag_zoom_val", "lbl_mk_mag_sz", "lbl_mk_smp_op", "lbl_mk_sel_r",
+        ):
+            lbl = getattr(self, lbl_attr, None)
+            if lbl is not None:
+                lbl.setStyleSheet(lbl_qss)
+        for sep in getattr(self, "_mk_option_separators", []):
+            sep.setStyleSheet(f"background: {'#2E3440' if is_dark else '#C5D5E6'}; border: none;")
+        for _sl, wlbl in getattr(self, "_mk_width_sliders", []):
+            wlbl.setStyleSheet(lbl_qss)
+        for _sl, olbl in getattr(self, "_mk_opacity_sliders", []):
+            olbl.setStyleSheet(lbl_qss)
+        for _sl, rlbl, _rb in getattr(self, "_mk_rotation_sliders", []):
+            rlbl.setStyleSheet(lbl_qss)
+        if hasattr(self, "mk_color_picker") and hasattr(self.mk_color_picker, "set_dark_mode"):
+            self.mk_color_picker.set_dark_mode(is_dark)
+        self._update_ribbon_mk_color_indicators()
+
+        icon_only_btn_qss = btn_qss.replace("padding: 1px 6px;", "padding: 0px;")
+        for b in (
+            list(getattr(self, "mk_shape_buttons", {}).values())
+            + list(getattr(self, "mk_sticker_buttons", {}).values())
+        ):
+            if b is not None:
+                b.setStyleSheet(icon_only_btn_qss)
+
+        small_btns = [
+            "btn_mk_bold", "btn_mk_italic",
+            "btn_mk_align_left", "btn_mk_align_center", "btn_mk_align_right",
+            "btn_mk_txt_rot0", "btn_mk_shape_fill", "btn_mk_shp_rot0",
+            "btn_mk_stk_rot0", "btn_mk_stamp_wm", "btn_mk_custom_color",
+            "btn_mk_sel_edit_text", "btn_mk_sel_dup", "btn_mk_sel_copy", "btn_mk_sel_paste", "btn_mk_sel_delete",
+        ]
+        for attr in small_btns:
+            b = getattr(self, attr, None)
+            if b is not None:
+                if attr == "btn_mk_bold":
+                    b.setStyleSheet(icon_only_btn_qss.replace("font-size: 8.5pt;", "font-size: 9pt; font-weight: 900;"))
+                elif attr == "btn_mk_italic":
+                    b.setStyleSheet(icon_only_btn_qss.replace("font-size: 8.5pt;", "font-size: 9pt; font-style: italic; font-weight: bold;"))
+                elif attr in (
+                    "btn_mk_align_left", "btn_mk_align_center", "btn_mk_align_right",
+                    "btn_mk_txt_rot0", "btn_mk_shp_rot0", "btn_mk_stk_rot0", "btn_mk_custom_color",
+                ):
+                    b.setStyleSheet(icon_only_btn_qss)
+                else:
+                    b.setStyleSheet(btn_qss)
+
+        # Render crisp theme-aware alignment bars & reset-angle arrows so dark mode has high contrast
+        bar_col = QColor("#E2E8F0") if is_dark else QColor("#1E395B")
+        for attr, al_mode in (
+            ("btn_mk_align_left", "left"),
+            ("btn_mk_align_center", "center"),
+            ("btn_mk_align_right", "right"),
+        ):
+            ab = getattr(self, attr, None)
+            if ab is not None:
+                pm = QPixmap(30, 30)
+                pm.setDevicePixelRatio(2.0)
+                pm.fill(Qt.transparent)
+                p = QPainter(pm)
+                p.setRenderHint(QPainter.Antialiasing, True)
+                p.setPen(QPen(bar_col, 1.5, Qt.SolidLine, Qt.RoundCap))
+                for y_pos, frac in ((3.2, 0.80), (6.1, 0.52), (9.0, 0.78), (11.9, 0.46)):
+                    lw = 15.0 * frac
+                    if al_mode == "left":
+                        x0 = 1.6
+                    elif al_mode == "center":
+                        x0 = (15.0 - lw) * 0.5
+                    else:
+                        x0 = 13.4 - lw
+                    p.drawLine(QPointF(x0, y_pos), QPointF(x0 + lw, y_pos))
+                p.end()
+                ab.setIcon(QIcon(pm))
+
+        rst_col = QColor("#60A5FA") if is_dark else QColor("#1D6FD8")
+        rst_pm = QPixmap(28, 28)
+        rst_pm.setDevicePixelRatio(2.0)
+        rst_pm.fill(Qt.transparent)
+        rp = QPainter(rst_pm)
+        rp.setRenderHint(QPainter.Antialiasing, True)
+        rp.setPen(QPen(rst_col, 1.65, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        rp.drawArc(QRectF(2.5, 2.5, 9.0, 9.0), 40 * 16, 280 * 16)
+        rp.setBrush(rst_col)
+        rp.setPen(Qt.NoPen)
+        rp.drawPolygon(QPolygonF([QPointF(10.6, 1.6), QPointF(11.6, 5.1), QPointF(8.0, 4.3)]))
+        rp.end()
+        rst_ico = QIcon(rst_pm)
+        rst_btn_qss = (
+            "QToolButton { background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 0px; }"
+            + (
+                "QToolButton:hover { background: #313946; border-color: #60A5FA; }"
+                "QToolButton:pressed { background: #1E3A5F; border-color: #3B82F6; }"
+                if is_dark
+                else "QToolButton:hover { background: #E4F0FC; border-color: #7BA7C9; }"
+                "QToolButton:pressed { background: #CBE2F8; border-color: #3388E8; }"
+            )
+        )
+        for _sl, _rlbl, rb in getattr(self, "_mk_rotation_sliders", []):
+            rb.setIcon(rst_ico)
+            rb.setStyleSheet(rst_btn_qss)
+
+        # Paint-style circular rainbow colour wheel with top-right '+' badge
+        if hasattr(self, "btn_mk_custom_color"):
+            self.btn_mk_custom_color.setIcon(make_rainbow_color_wheel_icon(is_dark, 32))
+            self.btn_mk_custom_color.setStyleSheet(
+                "QToolButton { background: transparent; border: 1px solid transparent; border-radius: 18px; padding: 0px; }"
+                + (
+                    "QToolButton:hover { background: #313946; border-color: #60A5FA; }"
+                    if is_dark
+                    else "QToolButton:hover { background: #E4F0FC; border-color: #7BA7C9; }"
+                )
+            )
+
+    def set_markup_selection_state(self, has_selection: bool, is_text: bool = False) -> None:
+        """Enables/disables contextual Select Options actions based on active markup selection."""
+        has_sel = bool(has_selection)
+        for attr in ("btn_mk_sel_delete", "btn_mk_sel_dup", "btn_mk_sel_copy"):
+            b = getattr(self, attr, None)
+            if b is not None:
+                b.setEnabled(has_sel)
+        if hasattr(self, "btn_mk_sel_edit_text"):
+            self.btn_mk_sel_edit_text.setEnabled(has_sel and bool(is_text))
+
+    def flash_markup_saved(self) -> None:
+        if hasattr(self, "btn_mk_save"):
+            self.btn_mk_save.setText("Saved!")
+            QTimer.singleShot(
+                1500,
+                lambda: self.btn_mk_save.setText("Save") if hasattr(self, "btn_mk_save") else None,
+            )
+
+    def sync_markup_state(
+        self,
+        *,
+        active_tool: str | None = None,
+        active_shape: str | None = None,
+        active_sticker: str | None = None,
+        stroke_width: int | None = None,
+        primary_color: QColor | None = None,
+        secondary_color: QColor | None = None,
+        font_family: str | None = None,
+        is_bold: bool | None = None,
+        is_italic: bool | None = None,
+        text_style: str | None = None,
+        text_align: str | None = None,
+        opacity: float | None = None,
+        bg_opacity: float | None = None,
+        shape_filled: bool | None = None,
+        line_style: str | None = None,
+        obscure_mode: str | None = None,
+        obscure_strength: int | None = None,
+        magnifier_zoom: float | None = None,
+        can_undo: bool | None = None,
+        rotation_deg: float | None = None,
+    ) -> None:
+        """Syncs contextual Markup Ribbon widgets and active option card from viewer/toolbar state."""
+        from src.ui.markup_overlay import ALL_LINE_KINDS, ALL_SHAPE_KINDS, ALL_STICKER_IDS
+
+        if active_sticker in ALL_STICKER_IDS:
+            self._mk_active_sticker = active_sticker
+            stb = getattr(self, "mk_sticker_buttons", {}).get(active_sticker)
+            if stb is not None:
+                stb.blockSignals(True)
+                stb.setChecked(True)
+                stb.blockSignals(False)
+            ico_kind = getattr(self, "_mk_sticker_icon_map", {}).get(active_sticker, f"sticker_{active_sticker}")
+            if hasattr(self, "btn_mk_stickers"):
+                self.btn_mk_stickers._icon_kind = ico_kind
+                self.btn_mk_stickers.setIcon(make_wlpg_icon(ico_kind, 28))
+
+        if active_shape in ALL_SHAPE_KINDS:
+            self._mk_active_shape = active_shape
+            sb = getattr(self, "mk_shape_buttons", {}).get(active_shape)
+            if sb is not None:
+                sb.blockSignals(True)
+                sb.setChecked(True)
+                sb.blockSignals(False)
+            for s_id, act in getattr(self, "_mk_shape_menu_actions", {}).items():
+                act.setChecked(s_id == active_shape)
+            ico_kind = getattr(self, "_mk_shape_icon_map", {}).get(active_shape, "rect")
+            if hasattr(self, "btn_mk_shape"):
+                self.btn_mk_shape._icon_kind = ico_kind
+                self.btn_mk_shape.setIcon(make_wlpg_icon(ico_kind, 28))
+
+        if line_style in ALL_LINE_KINDS:
+            self._mk_line_style = line_style
+            lb = getattr(self, "mk_line_buttons", {}).get(line_style)
+            if lb is not None:
+                lb.blockSignals(True)
+                lb.setChecked(True)
+                lb.blockSignals(False)
+            for l_id, act in getattr(self, "_mk_line_menu_actions", {}).items():
+                act.setChecked(l_id == line_style)
+            ico_kind = getattr(self, "_mk_line_icon_map", {}).get(line_style, "arrow")
+            if hasattr(self, "btn_mk_line"):
+                self.btn_mk_line._icon_kind = ico_kind
+                self.btn_mk_line.setIcon(make_wlpg_icon(ico_kind, 28))
+
+        if shape_filled is not None and hasattr(self, "btn_mk_shape_fill"):
+            self._mk_shape_filled = bool(shape_filled)
+            self.btn_mk_shape_fill.blockSignals(True)
+            self.btn_mk_shape_fill.setChecked(bool(shape_filled))
+            self.btn_mk_shape_fill.blockSignals(False)
+            if hasattr(self, "_act_mk_shape_fill_menu"):
+                self._act_mk_shape_fill_menu.blockSignals(True)
+                self._act_mk_shape_fill_menu.setChecked(bool(shape_filled))
+                self._act_mk_shape_fill_menu.blockSignals(False)
+
+        if obscure_mode in ("brush", "box"):
+            self._mk_obscure_mode = obscure_mode
+            for (k, m), act in getattr(self, "_mk_obscure_menu_actions", {}).items():
+                act.setChecked(k == self._mk_obscure_kind and m == obscure_mode)
+            self._sync_mk_obscure_size_visibility()
+
+        if obscure_strength is not None and hasattr(self, "slider_mk_obs_strength"):
+            clamped_s = max(15, min(100, int(obscure_strength)))
+            self._mk_obscure_strength = clamped_s
+            self.slider_mk_obs_strength.blockSignals(True)
+            self.slider_mk_obs_strength.setValue(clamped_s)
+            self.slider_mk_obs_strength.blockSignals(False)
+            if hasattr(self, "lbl_mk_obs_strength_val"):
+                self.lbl_mk_obs_strength_val.setText(f"{clamped_s}%")
+
+        if active_tool is not None:
+            norm = "magnify" if active_tool in ("magnify", "magnifier") else active_tool
+            self._mk_active_tool = norm
+            if norm == "select":
+                cat = "select"
+            elif norm in ("pen", "highlighter"):
+                cat = "pen"
+            elif norm == "text":
+                cat = "text"
+            elif norm in ALL_SHAPE_KINDS:
+                cat = "shapes"
+            elif norm in ALL_LINE_KINDS:
+                cat = "line"
+            elif norm in ("blur", "pixelate"):
+                cat = "obscure"
+                self._mk_obscure_kind = norm
+                for (k, m), act in getattr(self, "_mk_obscure_menu_actions", {}).items():
+                    act.setChecked(k == norm and m == self._mk_obscure_mode)
+                if hasattr(self, "btn_mk_obscure"):
+                    ico_k = "blur" if norm == "blur" else "pixelate"
+                    self.btn_mk_obscure._icon_kind = ico_k
+                    self.btn_mk_obscure.setIcon(make_wlpg_icon(ico_k, 28))
+            elif norm == "sticker":
+                cat = "stickers"
+            elif norm == "magnify":
+                cat = "magnify"
+            else:
+                cat = "pen"
+            self._switch_mk_option_card(cat)
+
+        if stroke_width is not None:
+            clamped = max(2, min(200, int(stroke_width)))
+            self._mk_stroke_width = clamped
+            mag_lbl = getattr(self, "lbl_mk_mag_sz_val", None)
+            for sl, lbl in getattr(self, "_mk_width_sliders", []):
+                sl_val = min(sl.maximum(), clamped)
+                sl.blockSignals(True)
+                sl.setValue(sl_val)
+                sl.blockSignals(False)
+                if lbl is mag_lbl:
+                    lbl.setText(f"{int((45 + (sl_val - 2) * 5) * 2)}px")
+                else:
+                    lbl.setText(f"{clamped}px")
+            if hasattr(self, "cmb_mk_txt_size"):
+                self.cmb_mk_txt_size.blockSignals(True)
+                self.cmb_mk_txt_size.setCurrentText(str(max(10, int(round(clamped * 2.2)))))
+                self.cmb_mk_txt_size.blockSignals(False)
+
+        if primary_color is not None and primary_color.isValid():
+            self._mk_primary_color = QColor(primary_color)
+            if hasattr(self, "mk_color_picker"):
+                self.mk_color_picker.blockSignals(True)
+                self.mk_color_picker.set_primary_color(primary_color)
+                self.mk_color_picker.blockSignals(False)
+
+        if secondary_color is not None and secondary_color.isValid():
+            self._mk_secondary_color = QColor(secondary_color)
+            if hasattr(self, "mk_color_picker"):
+                self.mk_color_picker.blockSignals(True)
+                self.mk_color_picker.set_secondary_color(secondary_color)
+                self.mk_color_picker.blockSignals(False)
+
+        self._update_ribbon_mk_color_indicators()
+
+        if font_family is not None and hasattr(self, "cmb_mk_font"):
+            self.cmb_mk_font.blockSignals(True)
+            idx = self.cmb_mk_font.findText(font_family)
+            if idx >= 0:
+                self.cmb_mk_font.setCurrentIndex(idx)
+            self.cmb_mk_font.blockSignals(False)
+
+        if is_bold is not None and hasattr(self, "btn_mk_bold"):
+            self.btn_mk_bold.blockSignals(True)
+            self.btn_mk_bold.setChecked(bool(is_bold))
+            self.btn_mk_bold.blockSignals(False)
+
+        if is_italic is not None and hasattr(self, "btn_mk_italic"):
+            self.btn_mk_italic.blockSignals(True)
+            self.btn_mk_italic.setChecked(bool(is_italic))
+            self.btn_mk_italic.blockSignals(False)
+
+        if text_style is not None and hasattr(self, "cmb_mk_text_style"):
+            self.cmb_mk_text_style.blockSignals(True)
+            idx_st = self.cmb_mk_text_style.findData(str(text_style).lower())
+            if idx_st >= 0:
+                self.cmb_mk_text_style.setCurrentIndex(idx_st)
+            self.cmb_mk_text_style.blockSignals(False)
+            if hasattr(self, "cmb_mk_stamp_style"):
+                self.cmb_mk_stamp_style.blockSignals(True)
+                if idx_st >= 0:
+                    self.cmb_mk_stamp_style.setCurrentIndex(idx_st)
+                self.cmb_mk_stamp_style.blockSignals(False)
+
+        if text_align is not None:
+            norm_al = str(text_align).lower()
+            if norm_al in ("left", "center", "right"):
+                self._mk_text_align = norm_al
+                for a_name, attr in (("left", "btn_mk_align_left"), ("center", "btn_mk_align_center"), ("right", "btn_mk_align_right")):
+                    ab = getattr(self, attr, None)
+                    if ab is not None:
+                        ab.blockSignals(True)
+                        ab.setChecked(a_name == norm_al)
+                        ab.blockSignals(False)
+
+        if opacity is not None:
+            pct = max(15, min(100, int(round(float(opacity) * 100))))
+            self._mk_opacity = round(pct / 100.0, 2)
+            for sl, lbl in getattr(self, "_mk_opacity_sliders", []):
+                sl.blockSignals(True)
+                sl.setValue(pct)
+                sl.blockSignals(False)
+                lbl.setText(f"{pct}%")
+
+        if bg_opacity is not None and hasattr(self, "slider_mk_bg_opacity"):
+            bg_pct = max(0, min(100, int(round(float(bg_opacity) * 100))))
+            self._mk_bg_opacity = round(bg_pct / 100.0, 2)
+            self.slider_mk_bg_opacity.blockSignals(True)
+            self.slider_mk_bg_opacity.setValue(bg_pct)
+            self.slider_mk_bg_opacity.blockSignals(False)
+            if hasattr(self, "lbl_mk_bg_opacity_val"):
+                self.lbl_mk_bg_opacity_val.setText(f"{bg_pct}%")
+
+        if magnifier_zoom is not None:
+            clamped_z = max(1.2, min(5.0, round(float(magnifier_zoom), 1)))
+            self._mk_magnifier_zoom = clamped_z
+            if hasattr(self, "slider_mk_mag_zoom"):
+                self.slider_mk_mag_zoom.blockSignals(True)
+                self.slider_mk_mag_zoom.setValue(int(round(clamped_z * 10)))
+                self.slider_mk_mag_zoom.blockSignals(False)
+            if hasattr(self, "lbl_mk_mag_zoom_val"):
+                self.lbl_mk_mag_zoom_val.setText(f"{clamped_z:.1f}x")
+
+        if can_undo is not None and hasattr(self, "btn_mk_undo"):
+            self.btn_mk_undo.setEnabled(bool(can_undo))
+
+        if rotation_deg is not None:
+            deg_val = float(rotation_deg)
+            clamped_r = max(-180, min(180, int(round(deg_val))))
+            self._mk_rotation_deg = float(clamped_r)
+            lbl_rot = f"{clamped_r}°" if abs(clamped_r) >= 1 else "0°"
+            for sl, rlbl, _rst in getattr(self, "_mk_rotation_sliders", []):
+                sl.blockSignals(True)
+                sl.setValue(clamped_r)
+                sl.blockSignals(False)
+                rlbl.setText(lbl_rot)
+
+    def set_active_mode(self, mode: Literal["grid", "viewer", "map", "batch_people", "people", "albums", "compare", "duplicates", "create_studio", "markup", "crop"]) -> None:
+        """Switches Ribbon context when entering/exiting Single Media Viewer, World Map, People, Compare, Duplicates, Batch People Tagging, Create Studio, Markup, or Crop."""
         tab_map = getattr(self, "tab_map", None)
         tab_batch = getattr(self, "tab_batch_people", None)
         tab_compare = getattr(self, "tab_compare", None)
         tab_duplicates = getattr(self, "tab_duplicates", None)
         tab_studio = getattr(self, "tab_create_studio", None)
+        tab_markup = getattr(self, "tab_markup", None)
+        tab_crop = getattr(self, "tab_crop", None)
+
+        if mode == "crop":
+            # Keep Single Image View tabs (Edit | Create | View) alongside contextual Crop tab
+            self._set_tab_visible(self.tab_edit, True)
+            self._set_tab_visible(self.tab_create, True)
+            self._set_tab_visible(self.tab_view, True)
+            self._set_tab_visible(tab_crop, True)
+            self._set_edit_tab_mode("viewer")
+            if tab_crop is not None:
+                self.tab_widget.setCurrentWidget(tab_crop)
+            for tab in (self.tab_home, self.tab_find, tab_map, tab_batch, tab_compare, tab_duplicates, tab_studio, tab_markup):
+                self._set_tab_visible(tab, False)
+            if hasattr(self, "scope_bar") and self.scope_bar is not None:
+                self.scope_bar.setVisible(False)
+            for attr, vis in (
+                ("grp_arrange", False),
+                ("grp_details", False),
+                ("grp_layout", False),
+                ("btn_toggle_nav_pane", False),
+                ("btn_toggle_filmstrip", True),
+                ("slider_zoom", False),
+                ("btn_zoom_actual", True),
+                ("btn_zoom_fit", True),
+            ):
+                if hasattr(self, attr):
+                    getattr(self, attr).setVisible(vis)
+            if hasattr(self, "grp_panes"):
+                self.grp_panes.adjust_to_content()
+            if hasattr(self, "grp_zoom"):
+                self.grp_zoom.adjust_to_content()
+            self.tab_widget.tabBar().adjustSize()
+            self.tab_widget.tabBar().updateGeometry()
+            self.tab_widget.updateGeometry()
+            self.tab_widget.tabBar().update()
+            return
+
+        if mode == "markup":
+            # Keep Single Image View tabs (Edit | Create | View) alongside contextual Markup tab
+            self._set_tab_visible(self.tab_edit, True)
+            self._set_tab_visible(self.tab_create, True)
+            self._set_tab_visible(self.tab_view, True)
+            self._set_tab_visible(tab_markup, True)
+            self._set_edit_tab_mode("viewer")
+            if tab_markup is not None:
+                self.tab_widget.setCurrentWidget(tab_markup)
+            for tab in (self.tab_home, self.tab_find, tab_map, tab_batch, tab_compare, tab_duplicates, tab_studio, tab_crop):
+                self._set_tab_visible(tab, False)
+            if hasattr(self, "scope_bar") and self.scope_bar is not None:
+                self.scope_bar.setVisible(False)
+            if hasattr(self, "grp_arrange"):
+                self.grp_arrange.setVisible(False)
+            if hasattr(self, "grp_details"):
+                self.grp_details.setVisible(False)
+            if hasattr(self, "grp_layout"):
+                self.grp_layout.setVisible(False)
+            if hasattr(self, "btn_toggle_nav_pane"):
+                self.btn_toggle_nav_pane.setVisible(False)
+            if hasattr(self, "btn_toggle_filmstrip"):
+                self.btn_toggle_filmstrip.setVisible(True)
+            if hasattr(self, "grp_panes"):
+                self.grp_panes.adjust_to_content()
+            if hasattr(self, "slider_zoom"):
+                self.slider_zoom.setVisible(False)
+            if hasattr(self, "btn_zoom_actual"):
+                self.btn_zoom_actual.setVisible(True)
+            if hasattr(self, "btn_zoom_fit"):
+                self.btn_zoom_fit.setVisible(True)
+            if hasattr(self, "grp_zoom"):
+                self.grp_zoom.adjust_to_content()
+            self.tab_widget.tabBar().adjustSize()
+            self.tab_widget.tabBar().updateGeometry()
+            self.tab_widget.updateGeometry()
+            self.tab_widget.tabBar().update()
+            return
 
         if mode == "create_studio":
             self._set_tab_visible(tab_studio, True)
             if tab_studio is not None:
                 self.tab_widget.setCurrentWidget(tab_studio)
-            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map, tab_batch, tab_compare, tab_duplicates):
+            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map, tab_batch, tab_compare, tab_duplicates, tab_markup, tab_crop):
                 self._set_tab_visible(tab, False)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
                 self.scope_bar.setVisible(False)
@@ -11235,7 +14443,7 @@ class RibbonToolbar(QWidget):
             self._set_tab_visible(tab_duplicates, True)
             if tab_duplicates is not None:
                 self.tab_widget.setCurrentWidget(tab_duplicates)
-            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map, tab_batch, tab_compare, tab_studio):
+            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map, tab_batch, tab_compare, tab_studio, tab_markup, tab_crop):
                 self._set_tab_visible(tab, False)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
                 self.scope_bar.setVisible(False)
@@ -11247,7 +14455,7 @@ class RibbonToolbar(QWidget):
             self._set_tab_visible(tab_compare, True)
             if tab_compare is not None:
                 self.tab_widget.setCurrentWidget(tab_compare)
-            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map, tab_batch, tab_duplicates, tab_studio):
+            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map, tab_batch, tab_duplicates, tab_studio, tab_markup, tab_crop):
                 self._set_tab_visible(tab, False)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
                 self.scope_bar.setVisible(False)
@@ -11259,7 +14467,7 @@ class RibbonToolbar(QWidget):
             self._set_tab_visible(tab_batch, True)
             if tab_batch is not None:
                 self.tab_widget.setCurrentWidget(tab_batch)
-            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map, tab_compare, tab_duplicates, tab_studio):
+            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_map, tab_compare, tab_duplicates, tab_studio, tab_markup, tab_crop):
                 self._set_tab_visible(tab, False)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
                 self.scope_bar.setVisible(False)
@@ -11271,7 +14479,7 @@ class RibbonToolbar(QWidget):
             self._set_tab_visible(tab_map, True)
             if tab_map is not None:
                 self.tab_widget.setCurrentWidget(tab_map)
-            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_batch, tab_compare, tab_duplicates, tab_studio):
+            for tab in (self.tab_home, self.tab_edit, self.tab_find, self.tab_create, self.tab_view, tab_batch, tab_compare, tab_duplicates, tab_studio, tab_markup, tab_crop):
                 self._set_tab_visible(tab, False)
             self.set_active_view_button("map")
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
@@ -11287,7 +14495,7 @@ class RibbonToolbar(QWidget):
             self._set_tab_visible(self.tab_view, True)
             self._set_edit_tab_mode("viewer")
             self.tab_widget.setCurrentWidget(self.tab_edit)
-            for tab in (self.tab_home, self.tab_find, tab_map, tab_batch, tab_compare, tab_duplicates, tab_studio):
+            for tab in (self.tab_home, self.tab_find, tab_map, tab_batch, tab_compare, tab_duplicates, tab_studio, tab_markup, tab_crop):
                 self._set_tab_visible(tab, False)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
                 self.scope_bar.setVisible(False)
@@ -11325,10 +14533,10 @@ class RibbonToolbar(QWidget):
             self._set_edit_tab_mode("grid")
             if (
                 self.tab_widget.currentIndex() < 0
-                or self.tab_widget.currentWidget() in (self.tab_edit, tab_batch, tab_map, tab_compare, tab_duplicates, tab_studio)
+                or self.tab_widget.currentWidget() in (self.tab_edit, tab_batch, tab_map, tab_compare, tab_duplicates, tab_studio, tab_markup, tab_crop)
             ):
                 self.tab_widget.setCurrentWidget(self.tab_home)
-            for tab in (tab_map, tab_batch, tab_compare, tab_duplicates, tab_studio):
+            for tab in (tab_map, tab_batch, tab_compare, tab_duplicates, tab_studio, tab_markup, tab_crop):
                 self._set_tab_visible(tab, False)
             if hasattr(self, "scope_bar") and self.scope_bar is not None:
                 self.scope_bar.setVisible(True)
@@ -11770,7 +14978,8 @@ class RibbonToolbar(QWidget):
             QToolButton#PhotoGroupingTopBtn,
             QToolButton#BadgesTopBtn,
             QToolButton#MosaicLayoutTopBtn,
-            QToolButton#SaveCopyTopBtn {
+            QToolButton#SaveCopyTopBtn,
+            QToolButton#MarkupSplitTopBtn {
                 background: transparent;
                 border: 1px solid transparent;
                 border-top-left-radius: 3px;
@@ -11784,7 +14993,8 @@ class RibbonToolbar(QWidget):
             QToolButton#PhotoGroupingTopBtn:hover,
             QToolButton#BadgesTopBtn:hover,
             QToolButton#MosaicLayoutTopBtn:hover,
-            QToolButton#SaveCopyTopBtn:hover {
+            QToolButton#SaveCopyTopBtn:hover,
+            QToolButton#MarkupSplitTopBtn:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #FFFDF5, stop:1 #FCE7A2);
                 border: 1px solid #D9B152;
@@ -11794,21 +15004,24 @@ class RibbonToolbar(QWidget):
             QToolButton#PhotoGroupingTopBtn:pressed,
             QToolButton#BadgesTopBtn:pressed,
             QToolButton#MosaicLayoutTopBtn:pressed,
-            QToolButton#SaveCopyTopBtn:pressed {
+            QToolButton#SaveCopyTopBtn:pressed,
+            QToolButton#MarkupSplitTopBtn:pressed {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #FCE293, stop:1 #F7CE65);
                 border: 1px solid #C28B10;
             }
             QToolButton#PhotoGroupingTopBtn:checked,
             QToolButton#BadgesTopBtn:checked,
-            QToolButton#MosaicLayoutTopBtn:checked {
+            QToolButton#MosaicLayoutTopBtn:checked,
+            QToolButton#MarkupSplitTopBtn:checked {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #EAF3FD, stop:0.5 #D2E7FA, stop:1 #BBDDF7);
                 border: 1px solid #7DA2CE;
             }
             QToolButton#PhotoGroupingTopBtn:checked:hover,
             QToolButton#BadgesTopBtn:checked:hover,
-            QToolButton#MosaicLayoutTopBtn:checked:hover {
+            QToolButton#MosaicLayoutTopBtn:checked:hover,
+            QToolButton#MarkupSplitTopBtn:checked:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #F3F8FE, stop:0.5 #DCECFB, stop:1 #C7E3F9);
                 border: 1px solid #5B8BC2;
@@ -11818,7 +15031,8 @@ class RibbonToolbar(QWidget):
             QToolButton#PhotoGroupingBottomBtn,
             QToolButton#BadgesBottomBtn,
             QToolButton#MosaicLayoutBottomBtn,
-            QToolButton#SaveCopyBottomBtn {
+            QToolButton#SaveCopyBottomBtn,
+            QToolButton#MarkupSplitBottomBtn {
                 background: transparent;
                 border: 1px solid transparent;
                 border-top-left-radius: 0px;
@@ -11836,7 +15050,8 @@ class RibbonToolbar(QWidget):
             QToolButton#PhotoGroupingBottomBtn:hover,
             QToolButton#BadgesBottomBtn:hover,
             QToolButton#MosaicLayoutBottomBtn:hover,
-            QToolButton#SaveCopyBottomBtn:hover {
+            QToolButton#SaveCopyBottomBtn:hover,
+            QToolButton#MarkupSplitBottomBtn:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #FFFDF5, stop:1 #FCE7A2);
                 border: 1px solid #D9B152;
@@ -11847,7 +15062,8 @@ class RibbonToolbar(QWidget):
             QToolButton#BadgesBottomBtn:pressed,
             QToolButton#MosaicLayoutBottomBtn:pressed,
             QToolButton#MosaicLayoutBottomBtn:checked,
-            QToolButton#SaveCopyBottomBtn:pressed {
+            QToolButton#SaveCopyBottomBtn:pressed,
+            QToolButton#MarkupSplitBottomBtn:pressed {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #FCE293, stop:1 #F7CE65);
                 border: 1px solid #C28B10;
@@ -11857,7 +15073,8 @@ class RibbonToolbar(QWidget):
             QToolButton#PhotoGroupingBottomBtn::menu-indicator,
             QToolButton#BadgesBottomBtn::menu-indicator,
             QToolButton#MosaicLayoutBottomBtn::menu-indicator,
-            QToolButton#SaveCopyBottomBtn::menu-indicator {
+            QToolButton#SaveCopyBottomBtn::menu-indicator,
+            QToolButton#MarkupSplitBottomBtn::menu-indicator {
                 image: none;
                 width: 0px;
                 height: 0px;
@@ -12060,6 +15277,7 @@ class RibbonToolbar(QWidget):
             if hasattr(btn, "_theme_mode"):
                 btn._theme_mode = "aero"
             btn.update()
+        self._apply_markup_tab_theme(False)
         self._apply_file_menu_stylesheet(False)
 
     def _apply_corner_buttons_theme(self, is_dark: bool) -> None:
@@ -12123,8 +15341,85 @@ class RibbonToolbar(QWidget):
             pm_h.setDevicePixelRatio(2.0)
             self.btn_ribbon_help.setIcon(QIcon(pm_h))
 
+    def _apply_exit_immersive_theme(self, is_dark: bool, theme_mode: str = "wlpg_aero") -> None:
+        btn = getattr(self, "btn_exit_immersive", None)
+        if btn is None:
+            return
+        if is_dark:
+            btn.setStyleSheet(
+                """
+                QPushButton {
+                    border: 1px solid #3E4756;
+                    border-radius: 3px;
+                    background: #262C36;
+                    color: #E2E8F0;
+                    font-family: 'Segoe UI';
+                    font-size: 8pt;
+                    font-weight: 600;
+                    padding: 1px 8px;
+                }
+                QPushButton:hover {
+                    border: 1px solid #60A5FA;
+                    background: #334155;
+                    color: #FFFFFF;
+                }
+                QPushButton:pressed {
+                    background: #1E3A5F;
+                    border: 1px solid #3B82F6;
+                    color: #FFFFFF;
+                }
+                """
+            )
+        elif theme_mode == "modern":
+            btn.setStyleSheet(
+                """
+                QPushButton {
+                    border: 1px solid #CBD5E1;
+                    border-radius: 3px;
+                    background: #FFFFFF;
+                    color: #0F172A;
+                    font-family: 'Segoe UI';
+                    font-size: 8pt;
+                    font-weight: 600;
+                    padding: 1px 8px;
+                }
+                QPushButton:hover {
+                    border: 1px solid #0F6CBD;
+                    background: #EEF4FA;
+                }
+                QPushButton:pressed {
+                    background: #D9E9F7;
+                    border: 1px solid #0B5394;
+                }
+                """
+            )
+        else:
+            btn.setStyleSheet(
+                """
+                QPushButton {
+                    border: 1px solid #70A6E8;
+                    border-radius: 3px;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FFFFFF, stop:0.4 #E8F1FC, stop:1 #D2E4F8);
+                    color: #1E395B;
+                    font-family: 'Segoe UI';
+                    font-size: 8pt;
+                    font-weight: 600;
+                    padding: 1px 8px;
+                }
+                QPushButton:hover {
+                    border: 1px solid #3399FF;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FFFFFF, stop:0.4 #D9EBFC, stop:1 #B9DAFB);
+                }
+                QPushButton:pressed {
+                    background: #A0C8F5;
+                    border: 1px solid #2272D0;
+                }
+                """
+            )
+
     def _apply_arrange_box_theme(self, is_dark: bool) -> None:
         self._apply_corner_buttons_theme(is_dark)
+        self._apply_exit_immersive_theme(is_dark, getattr(self, "_current_theme_mode", "wlpg_aero"))
         arrange_box = getattr(self, "_arrange_box", None)
         if arrange_box is not None:
             if is_dark:
@@ -12190,10 +15485,68 @@ class RibbonToolbar(QWidget):
             for b in scroll_btns:
                 b.setStyleSheet(btn_style)
 
+    def _apply_crop_and_markup_theme(self, is_dark: bool) -> None:
+        """Applies consistent Light/Dark styling to Crop Ribbon controls and the Markup Text Size pill."""
+        if is_dark:
+            fg = "#E2E8F0"
+            hover_bg = "#2D3542"
+            hover_bd = "#475569"
+            chk_bg = "#1E3A5F"
+            chk_bd = "#3B82F6"
+            chk_fg = "#93C5FD"
+            field_bg = "#232933"
+            field_bd = "#3E4756"
+            pill_btn_hover = "#334155"
+        else:
+            fg = "#1E293B"
+            hover_bg = "rgba(180, 215, 250, 0.45)"
+            hover_bd = "#7DA2CE"
+            chk_bg = "#CCE4FC"
+            chk_bd = "#3B82F6"
+            chk_fg = "#0F172A"
+            field_bg = "#FFFFFF"
+            field_bd = "#B8C4D4"
+            pill_btn_hover = "#E2E8F0"
+
+        for btn, rpad in getattr(self, "_crop_small_themed_buttons", []):
+            btn.setStyleSheet(
+                f"QToolButton {{ color: {fg}; background: transparent; border: 1px solid transparent; "
+                f"border-radius: 3px; text-align: left; padding: 1px {rpad}px 1px 4px; font-family: 'Segoe UI'; font-size: 8.5pt; }}"
+                f"QToolButton:hover {{ background: {hover_bg}; border-color: {hover_bd}; }}"
+                f"QToolButton:checked {{ background: {chk_bg}; border-color: {chk_bd}; color: {chk_fg}; }}"
+            )
+
+        if hasattr(self, "combo_ribbon_crop_ratio"):
+            self.combo_ribbon_crop_ratio.setStyleSheet(
+                f"QComboBox {{ background: {field_bg}; color: {fg}; border: 1px solid {field_bd}; "
+                "border-radius: 4px; padding: 1px 22px 1px 7px; font-family: 'Segoe UI'; font-size: 8.5pt; }"
+                "QComboBox:hover { border-color: #60A5FA; }"
+                "QComboBox::drop-down { border: none; width: 18px; }"
+            )
+
+        if hasattr(self, "_mk_text_size_pill"):
+            self._mk_text_size_pill.setStyleSheet(
+                f"QFrame#MarkupTextSizePill {{ background: {field_bg}; border: 1px solid {field_bd}; border-radius: 6px; }}"
+                "QFrame#MarkupTextSizePill:hover { border-color: #60A5FA; }"
+            )
+        if hasattr(self, "cmb_mk_txt_size"):
+            self.cmb_mk_txt_size.setStyleSheet(
+                f"QComboBox {{ border: none; background: transparent; color: {fg}; "
+                "font-family: 'Segoe UI'; font-size: 9pt; font-weight: 600; padding: 0 2px 0 2px; }"
+                "QComboBox::drop-down { border: none; width: 6px; }"
+            )
+        for pbtn in (getattr(self, "btn_mk_txt_size_dec", None), getattr(self, "btn_mk_txt_size_inc", None)):
+            if pbtn is not None:
+                pbtn.setStyleSheet(
+                    f"QToolButton {{ border: none; background: transparent; font-size: 11pt; font-weight: 600; color: {fg}; }}"
+                    f"QToolButton:hover {{ background: {pill_btn_hover}; border-radius: 4px; }}"
+                )
+
     def set_dark_mode(self, is_dark: bool) -> None:
         self._dark_mode = bool(is_dark)
         self._is_dark = self._dark_mode
         self._apply_arrange_box_theme(self._dark_mode)
+        self._apply_crop_and_markup_theme(self._dark_mode)
         self._prune_dead_ribbon_buttons()
         for btn in getattr(self, "_responsive_large_buttons", []):
             if hasattr(btn, "_is_dark"):
@@ -12414,7 +15767,8 @@ class RibbonToolbar(QWidget):
             QToolButton#PhotoGroupingTopBtn,
             QToolButton#BadgesTopBtn,
             QToolButton#MosaicLayoutTopBtn,
-            QToolButton#SaveCopyTopBtn {
+            QToolButton#SaveCopyTopBtn,
+            QToolButton#MarkupSplitTopBtn {
                 background: transparent;
                 border: 1px solid transparent;
                 border-radius: 3px;
@@ -12431,14 +15785,17 @@ class RibbonToolbar(QWidget):
             QToolButton#MosaicLayoutTopBtn:hover,
             QToolButton#MosaicLayoutBottomBtn:hover,
             QToolButton#SaveCopyTopBtn:hover,
-            QToolButton#SaveCopyBottomBtn:hover {
+            QToolButton#SaveCopyBottomBtn:hover,
+            QToolButton#MarkupSplitTopBtn:hover,
+            QToolButton#MarkupSplitBottomBtn:hover {
                 background: #2A323D;
                 border: 1px solid #475569;
             }
             QToolButton#PhotoGroupingTopBtn:checked,
             QToolButton#BadgesTopBtn:checked,
             QToolButton#MosaicLayoutTopBtn:checked,
-            QToolButton#MosaicLayoutBottomBtn:checked {
+            QToolButton#MosaicLayoutBottomBtn:checked,
+            QToolButton#MarkupSplitTopBtn:checked {
                 background: #2A3A50;
                 border: 1px solid #60A5FA;
             }
@@ -12447,7 +15804,8 @@ class RibbonToolbar(QWidget):
             QToolButton#PhotoGroupingBottomBtn,
             QToolButton#BadgesBottomBtn,
             QToolButton#MosaicLayoutBottomBtn,
-            QToolButton#SaveCopyBottomBtn {
+            QToolButton#SaveCopyBottomBtn,
+            QToolButton#MarkupSplitBottomBtn {
                 background: transparent;
                 border: 1px solid transparent;
                 border-radius: 3px;
@@ -12462,7 +15820,8 @@ class RibbonToolbar(QWidget):
             QToolButton#PhotoGroupingBottomBtn::menu-indicator,
             QToolButton#BadgesBottomBtn::menu-indicator,
             QToolButton#MosaicLayoutBottomBtn::menu-indicator,
-            QToolButton#SaveCopyBottomBtn::menu-indicator {
+            QToolButton#SaveCopyBottomBtn::menu-indicator,
+            QToolButton#MarkupSplitBottomBtn::menu-indicator {
                 image: none;
                 width: 0px;
                 height: 0px;
@@ -12639,6 +15998,7 @@ class RibbonToolbar(QWidget):
                 carousel.set_dark_mode(True)
         if hasattr(self, "effects_gallery") and hasattr(self.effects_gallery, "set_dark_mode"):
             self.effects_gallery.set_dark_mode(True)
+        self._apply_markup_tab_theme(True)
         self._apply_file_menu_stylesheet(True)
 
     def apply_theme_mode(self, theme_name: str) -> None:
@@ -12964,7 +16324,8 @@ class RibbonToolbar(QWidget):
             QToolButton#PhotoGroupingTopBtn,
             QToolButton#BadgesTopBtn,
             QToolButton#MosaicLayoutTopBtn,
-            QToolButton#SaveCopyTopBtn {
+            QToolButton#SaveCopyTopBtn,
+            QToolButton#MarkupSplitTopBtn {
                 background: transparent;
                 border: 1px solid transparent;
                 border-top-left-radius: 4px;
@@ -12978,7 +16339,8 @@ class RibbonToolbar(QWidget):
             QToolButton#PhotoGroupingTopBtn:hover,
             QToolButton#BadgesTopBtn:hover,
             QToolButton#MosaicLayoutTopBtn:hover,
-            QToolButton#SaveCopyTopBtn:hover {
+            QToolButton#SaveCopyTopBtn:hover,
+            QToolButton#MarkupSplitTopBtn:hover {
                 background: #E5E7EB;
                 border: 1px solid #D1D5DB;
             }
@@ -12987,14 +16349,16 @@ class RibbonToolbar(QWidget):
             QToolButton#PhotoGroupingTopBtn:pressed,
             QToolButton#BadgesTopBtn:pressed,
             QToolButton#MosaicLayoutTopBtn:pressed,
-            QToolButton#SaveCopyTopBtn:pressed {
+            QToolButton#SaveCopyTopBtn:pressed,
+            QToolButton#MarkupSplitTopBtn:pressed {
                 background: #D1D5DB;
                 border: 1px solid #9CA3AF;
             }
             QToolButton#PhotoGroupingTopBtn:checked,
             QToolButton#BadgesTopBtn:checked,
             QToolButton#MosaicLayoutTopBtn:checked,
-            QToolButton#MosaicLayoutBottomBtn:checked {
+            QToolButton#MosaicLayoutBottomBtn:checked,
+            QToolButton#MarkupSplitTopBtn:checked {
                 background: #EFF6FF;
                 border: 1px solid #BFDBFE;
                 color: #0F6CBD;
@@ -13012,7 +16376,8 @@ class RibbonToolbar(QWidget):
             QToolButton#PhotoGroupingBottomBtn,
             QToolButton#BadgesBottomBtn,
             QToolButton#MosaicLayoutBottomBtn,
-            QToolButton#SaveCopyBottomBtn {
+            QToolButton#SaveCopyBottomBtn,
+            QToolButton#MarkupSplitBottomBtn {
                 background: transparent;
                 border: 1px solid transparent;
                 border-top-left-radius: 0px;
@@ -13030,7 +16395,8 @@ class RibbonToolbar(QWidget):
             QToolButton#PhotoGroupingBottomBtn:hover,
             QToolButton#BadgesBottomBtn:hover,
             QToolButton#MosaicLayoutBottomBtn:hover,
-            QToolButton#SaveCopyBottomBtn:hover {
+            QToolButton#SaveCopyBottomBtn:hover,
+            QToolButton#MarkupSplitBottomBtn:hover {
                 background: #E5E7EB;
                 border: 1px solid #D1D5DB;
             }
@@ -13048,7 +16414,8 @@ class RibbonToolbar(QWidget):
             QToolButton#PhotoGroupingBottomBtn::menu-indicator,
             QToolButton#BadgesBottomBtn::menu-indicator,
             QToolButton#MosaicLayoutBottomBtn::menu-indicator,
-            QToolButton#SaveCopyBottomBtn::menu-indicator {
+            QToolButton#SaveCopyBottomBtn::menu-indicator,
+            QToolButton#MarkupSplitBottomBtn::menu-indicator {
                 image: none;
                 width: 0px;
                 height: 0px;
@@ -13135,6 +16502,7 @@ class RibbonToolbar(QWidget):
             if hasattr(btn, "_theme_mode"):
                 btn._theme_mode = "modern"
             btn.update()
+        self._apply_markup_tab_theme(False)
         self._apply_file_menu_stylesheet(False)
 
 

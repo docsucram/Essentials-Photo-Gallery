@@ -2908,6 +2908,7 @@ class TagAndCaptionDock(QDockWidget):
         self.setMaximumWidth(700)
 
         self._current_mode: Literal["info", "fine_tune", "depth_light"] = "info"
+        self._is_video_mode: bool = False
         self._selected_ids: list[int] = []
         self._current_rating: int = 0
         self._current_flag: int = 0
@@ -3018,18 +3019,20 @@ class TagAndCaptionDock(QDockWidget):
         h_layout.addWidget(self.btn_close_dock)
         outer_vbox.addWidget(header_row)
 
-        # Mode Stack: Page 0 = Information & Tags, Page 1 = Fine-Tune, Page 2 = Depth & Light, Page 3 = Custom Inspector
+        # Mode Stack: Page 0 = Information & Tags, Page 1 = Fine-Tune, Page 2 = Depth & Light, Page 3 = Custom Inspector, Page 4 = Video Unavailable Notice
         self.mode_stack = QStackedWidget(self.container)
 
         self.page_info = self._build_info_page()
         self.page_fine_tune = self._build_fine_tune_page()
         self.page_depth_light = self._build_depth_light_page()
         self.page_custom_inspector = self._build_custom_inspector_page()
+        self.page_video_unavailable = self._build_video_unavailable_page()
 
         self.mode_stack.addWidget(self.page_info)
         self.mode_stack.addWidget(self.page_fine_tune)
         self.mode_stack.addWidget(self.page_depth_light)
         self.mode_stack.addWidget(self.page_custom_inspector)
+        self.mode_stack.addWidget(self.page_video_unavailable)
         outer_vbox.addWidget(self.mode_stack, 1)
 
         self.setWidget(self.container)
@@ -3111,12 +3114,77 @@ class TagAndCaptionDock(QDockWidget):
         if hasattr(self, "lbl_custom_inspector_title"):
             self.lbl_custom_inspector_title.hide()
 
-    def set_mode(self, mode: Literal["info", "fine_tune", "depth_light", "custom_inspector"]) -> None:
-        """Switches between Tag & Caption (Ctrl+I), Fine-Tune (Ctrl+F), Depth & Light, and Custom Inspector."""
-        prev_mode = getattr(self, "_current_mode", "info")
-        self._current_mode = mode
-        if prev_mode == "fine_tune" and mode != "fine_tune":
-            self.clear_mask_editing_session()
+    def _build_video_unavailable_page(self) -> QWidget:
+        """Placeholder notice shown when Fine Tune or Depth & Light is open for a video file."""
+        page = QWidget(self.mode_stack)
+        page.setObjectName("VideoUnavailablePage")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(18, 28, 18, 24)
+        lay.setSpacing(10)
+        lay.addStretch(1)
+
+        card = QFrame(page)
+        card.setObjectName("VideoUnavailableCard")
+        card_lay = QVBoxLayout(card)
+        card_lay.setContentsMargins(16, 20, 16, 20)
+        card_lay.setSpacing(8)
+        card_lay.setAlignment(Qt.AlignCenter)
+
+        self.lbl_video_unavail_icon = QLabel("🎬", card)
+        self.lbl_video_unavail_icon.setAlignment(Qt.AlignCenter)
+        self.lbl_video_unavail_icon.setStyleSheet("font-size: 24pt; border: none; background: transparent;")
+        card_lay.addWidget(self.lbl_video_unavail_icon)
+
+        self.lbl_video_unavail_title = QLabel("Fine Tune", card)
+        self.lbl_video_unavail_title.setAlignment(Qt.AlignCenter)
+        self.lbl_video_unavail_title.setFont(QFont("Segoe UI", 11, QFont.DemiBold))
+        card_lay.addWidget(self.lbl_video_unavail_title)
+
+        self.lbl_video_unavail_msg = QLabel("Not available for video files.", card)
+        self.lbl_video_unavail_msg.setAlignment(Qt.AlignCenter)
+        self.lbl_video_unavail_msg.setWordWrap(True)
+        self.lbl_video_unavail_msg.setFont(QFont("Segoe UI", 9.5, QFont.DemiBold))
+        card_lay.addWidget(self.lbl_video_unavail_msg)
+
+        self.lbl_video_unavail_sub = QLabel(
+            "Switch to a photo to use this tool, or open Information to view details and tags.",
+            card,
+        )
+        self.lbl_video_unavail_sub.setAlignment(Qt.AlignCenter)
+        self.lbl_video_unavail_sub.setWordWrap(True)
+        self.lbl_video_unavail_sub.setFont(QFont("Segoe UI", 8.5))
+        card_lay.addWidget(self.lbl_video_unavail_sub)
+
+        self.btn_video_unavail_info = QPushButton("View Information", card)
+        self.btn_video_unavail_info.setCursor(Qt.PointingHandCursor)
+        self.btn_video_unavail_info.clicked.connect(lambda: self.set_mode("info"))
+        card_lay.addSpacing(4)
+        card_lay.addWidget(self.btn_video_unavail_info, 0, Qt.AlignCenter)
+
+        lay.addWidget(card)
+        lay.addStretch(2)
+        self._video_unavail_card = card
+        return page
+
+    def set_video_mode(self, is_video: bool) -> None:
+        """Marks whether the active item is a video so photo-only panes display a clear notice."""
+        self._is_video_mode = bool(is_video)
+        self._sync_mode_stack_page()
+
+    def _sync_mode_stack_page(self) -> None:
+        mode = getattr(self, "_current_mode", "info")
+        if getattr(self, "_is_video_mode", False) and mode in ("fine_tune", "depth_light"):
+            if mode == "fine_tune":
+                self.clear_mask_editing_session()
+            title = "Depth & Light" if mode == "depth_light" else "Fine Tune"
+            if hasattr(self, "lbl_video_unavail_title"):
+                self.lbl_video_unavail_title.setText(title)
+            if hasattr(self, "lbl_video_unavail_msg"):
+                self.lbl_video_unavail_msg.setText("Not available for video files.")
+            self.setMinimumWidth(260)
+            self.mode_stack.setCurrentIndex(4)
+            return
+
         if mode == "custom_inspector":
             self.setMinimumWidth(295)
             self.mode_stack.setCurrentIndex(3)
@@ -3129,6 +3197,16 @@ class TagAndCaptionDock(QDockWidget):
         else:
             self.setMinimumWidth(240)
             self.mode_stack.setCurrentIndex(0)
+
+    def set_mode(self, mode: Literal["info", "fine_tune", "depth_light", "custom_inspector"]) -> None:
+        """Switches between Tag & Caption (Ctrl+I), Fine-Tune (Ctrl+F), Depth & Light, and Custom Inspector."""
+        prev_mode = getattr(self, "_current_mode", "info")
+        self._current_mode = mode
+        if prev_mode == "fine_tune" and mode != "fine_tune":
+            self.clear_mask_editing_session()
+        elif prev_mode == "depth_light" and mode != "depth_light":
+            self.clear_depth_light_session()
+        self._sync_mode_stack_page()
         self.updateGeometry()
         self.show()
         self.dock_mode_changed.emit(mode)
@@ -3138,19 +3216,32 @@ class TagAndCaptionDock(QDockWidget):
         self.dock_mode_changed.emit(getattr(self, "_current_mode", "info"))
 
     def hideEvent(self, event: Any) -> None:
-        if getattr(self, "_current_mode", "info") == "fine_tune":
+        cur = getattr(self, "_current_mode", "info")
+        if cur == "fine_tune":
             self.clear_mask_editing_session()
+        elif cur == "depth_light":
+            self.clear_depth_light_session()
         self.dock_mode_changed.emit("")
         super().hideEvent(event)
 
     def clear_mask_editing_session(self) -> None:
-        """Clears active mask overlay & brush editing when Fine Tune (Advanced) is closed."""
+        """Clears active mask overlay, brush editing & WB eyedropper when Fine Tune is closed."""
         self._clear_region_brush_buttons()
         self._set_mask_preview_visible(False)
         self.region_mask_preview_toggled.emit("")
         self.region_brush_mode_changed.emit("", "", self.slider_region_brush_size.value() if hasattr(self, "slider_region_brush_size") else 40, True)
         if getattr(self, "_active_region_scope", "whole") != "whole":
             self.set_active_region_scope("whole")
+        if hasattr(self, "btn_wb_eyedropper") and self.btn_wb_eyedropper.isChecked():
+            self.btn_wb_eyedropper.setChecked(False)
+
+    def clear_depth_light_session(self) -> None:
+        """Clears active subject mask preview overlay when Depth & Light is closed."""
+        if hasattr(self, "btn_toggle_mask_preview") and self.btn_toggle_mask_preview.isChecked():
+            self.btn_toggle_mask_preview.blockSignals(True)
+            self.btn_toggle_mask_preview.setChecked(False)
+            self.btn_toggle_mask_preview.blockSignals(False)
+        self.mask_preview_toggled.emit(False)
 
     def focus_filename_rename(self) -> None:
         """Switches to Information mode, reveals dock, and focuses filename input with select-all."""
@@ -3494,7 +3585,7 @@ class TagAndCaptionDock(QDockWidget):
         self.btn_flag.setCursor(Qt.PointingHandCursor)
         self.btn_flag.setIconSize(QSize(15, 15))
         self.btn_flag.setStyleSheet("QPushButton { padding: 0px; margin: 0px; border: none; text-align: left; }")
-        self.btn_flag.setToolTip("Cycle Flag: Pick → Reject → Unflagged (P / X / U)")
+        self.btn_flag.setToolTip("Cycle Flag: Pick → Reject → Unflagged (Z / X / U)")
         self.btn_flag.clicked.connect(self._on_flag_button_clicked)
         flag_hbox.addWidget(self.btn_flag)
 
@@ -4529,11 +4620,11 @@ class TagAndCaptionDock(QDockWidget):
         action_bar.setSpacing(6)
         action_bar.setContentsMargins(0, 6, 0, 4)
 
-        self.btn_hold_compare = QPushButton("Hold to Compare (Original)", content)
+        self.btn_hold_compare = QPushButton("Hold to Compare (B)", content)
         self.btn_hold_compare.setObjectName("FineTuneActionBtn")
         self.btn_hold_compare.setFixedHeight(26)
         self.btn_hold_compare.setCursor(Qt.PointingHandCursor)
-        self.btn_hold_compare.setToolTip("Click and hold to preview original unedited photo (\\)")
+        self.btn_hold_compare.setToolTip("Click and hold (or hold B) to compare with the original unedited photo")
         self.btn_hold_compare.pressed.connect(self.compare_started.emit)
         self.btn_hold_compare.released.connect(self.compare_ended.emit)
         action_bar.addWidget(self.btn_hold_compare, 1)
@@ -5949,11 +6040,11 @@ class TagAndCaptionDock(QDockWidget):
         action_bar.setSpacing(5)
         action_bar.setContentsMargins(0, 4, 0, 4)
 
-        self.btn_dl_hold_compare = QPushButton("Hold to Compare (Original)", content)
+        self.btn_dl_hold_compare = QPushButton("Hold to Compare (B)", content)
         self.btn_dl_hold_compare.setObjectName("FineTuneActionBtn")
         self.btn_dl_hold_compare.setFixedHeight(26)
         self.btn_dl_hold_compare.setCursor(Qt.PointingHandCursor)
-        self.btn_dl_hold_compare.setToolTip("Click and hold to preview original unedited photo (\\)")
+        self.btn_dl_hold_compare.setToolTip("Click and hold (or hold B) to compare with the original unedited photo")
         self.btn_dl_hold_compare.pressed.connect(self.compare_started.emit)
         self.btn_dl_hold_compare.released.connect(self.compare_ended.emit)
         action_bar.addWidget(self.btn_dl_hold_compare)
@@ -7468,15 +7559,15 @@ class TagAndCaptionDock(QDockWidget):
             self._current_favourite = bool(is_favourite)
         if self._current_flag == -1:
             self.btn_flag.setIcon(self._make_info_cull_icon("reject", True))
-            self.btn_flag.setToolTip("Rejected — click to clear flag (P / X / U)")
+            self.btn_flag.setToolTip("Rejected — click to clear flag (Z / X / U)")
             flag_bg = "rgba(239, 68, 68, 38)"
         elif self._current_flag == 1:
             self.btn_flag.setIcon(self._make_info_cull_icon("pick", True))
-            self.btn_flag.setToolTip("Picked — click to mark Rejected (P / X / U)")
+            self.btn_flag.setToolTip("Picked — click to mark Rejected (Z / X / U)")
             flag_bg = "rgba(220, 38, 38, 42)"
         else:
             self.btn_flag.setIcon(self._make_info_cull_icon("pick", False))
-            self.btn_flag.setToolTip("Unflagged — click to mark Picked (P / X / U)")
+            self.btn_flag.setToolTip("Unflagged — click to mark Picked (Z / X / U)")
             flag_bg = "transparent"
         if hasattr(self, "btn_info_fav"):
             self.btn_info_fav.setVisible(True)
@@ -7846,6 +7937,28 @@ class TagAndCaptionDock(QDockWidget):
         if hasattr(self, "page_custom_inspector"):
             bg = "#1B1E24" if is_dark else "#FFFFFF"
             self.page_custom_inspector.setStyleSheet(f"QWidget#CustomInspectorPage {{ background-color: {bg}; }}")
+        if hasattr(self, "page_video_unavailable"):
+            bg = "#1B1E24" if is_dark else "#FFFFFF"
+            card_bg = "#22262E" if is_dark else "#F8FAFC"
+            card_border = "#2D323B" if is_dark else "#E2E8F0"
+            title_c = "#93C5FD" if is_dark else "#0F4C81"
+            msg_c = "#E2E8F0" if is_dark else "#1E293B"
+            sub_c = "#94A3B8" if is_dark else "#64748B"
+            btn_bg = "#262B34" if is_dark else "#FFFFFF"
+            btn_border = "#3B4252" if is_dark else "#CBD5E1"
+            btn_hover = "#2E3440" if is_dark else "#F1F5F9"
+            self.page_video_unavailable.setStyleSheet(f"QWidget#VideoUnavailablePage {{ background-color: {bg}; }}")
+            if hasattr(self, "_video_unavail_card"):
+                self._video_unavail_card.setStyleSheet(
+                    f"QFrame#VideoUnavailableCard {{ background-color: {card_bg}; border: 1px solid {card_border}; border-radius: 8px; }}"
+                )
+            self.lbl_video_unavail_title.setStyleSheet(f"color: {title_c}; border: none; background: transparent;")
+            self.lbl_video_unavail_msg.setStyleSheet(f"color: {msg_c}; border: none; background: transparent;")
+            self.lbl_video_unavail_sub.setStyleSheet(f"color: {sub_c}; border: none; background: transparent;")
+            self.btn_video_unavail_info.setStyleSheet(
+                f"QPushButton {{ background: {btn_bg}; color: {msg_c}; border: 1px solid {btn_border}; border-radius: 4px; padding: 5px 12px; font-weight: 600; }}"
+                f"QPushButton:hover {{ background: {btn_hover}; border-color: #3B82F6; }}"
+            )
         if hasattr(self, "custom_inspector_scroll"):
             hosted = self.custom_inspector_scroll.widget()
             if hosted is not None and hasattr(hosted, "apply_theme_mode"):

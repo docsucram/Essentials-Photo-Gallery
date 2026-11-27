@@ -1163,6 +1163,30 @@ class DualDatabaseEngine:
             except Exception:
                 pass
 
+    def quick_check_catalog(self) -> tuple[bool, str]:
+        """Runs PRAGMA quick_check(1) on catalog.db via the shared read/write engine."""
+        if str(self.catalog_path) == ":memory:":
+            return (True, "ok")
+        return quick_check_db(self.catalog_path)
+
+    def quick_check_thumbnails(self) -> tuple[bool, str]:
+        """Runs PRAGMA quick_check(1) on thumbnails.db."""
+        if str(self.thumbnails_path) == ":memory:":
+            return (True, "ok")
+        return quick_check_db(self.thumbnails_path)
+
+    def checkpoint_and_close_all(self) -> None:
+        """Flushes SQLite WAL journals (TRUNCATE) across both databases and closes all tracked connections."""
+        with self.write_lock, self.thumb_write_lock:
+            for label, getter in (("catalog", self.catalog_conn), ("thumbnails", self.thumbnails_conn)):
+                try:
+                    c = getter()
+                    c.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                    c.commit()
+                except Exception:
+                    pass
+            self.close_all()
+
     def reset_all_databases(self) -> None:
         """Closes all connections, deletes catalog.db & thumbnails.db (+ WAL/SHM), and recreates fresh schemas."""
         with self.write_lock, self.thumb_write_lock:
@@ -1177,3 +1201,131 @@ class DualDatabaseEngine:
                     except OSError:
                         pass
             self.initialize_schemas()
+
+
+def quick_check_db(db_path: Path | str) -> tuple[bool, str]:
+    """
+    Runs ``PRAGMA quick_check(1);`` on a SQLite database file and returns
+    ``(True, "ok")`` if healthy, or ``(False, reason)`` if corrupted/unreadable.
+    """
+    p = Path(db_path)
+    if not p.is_file():
+        return (False, f"Database file not found: {p}")
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(str(p), timeout=10.0)
+        row = conn.execute("PRAGMA quick_check(1);").fetchone()
+        res = str(row[0]).strip() if row else ""
+        if res.lower() == "ok":
+            return (True, "ok")
+        return (False, res or "quick_check returned empty result")
+    except sqlite3.DatabaseError as exc:
+        return (False, str(exc))
+    except Exception as exc:
+        return (False, str(exc))
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def migrate_database_directory(
+    src_dir: Path | str,
+    dest_dir: Path | str,
+    *,
+    progress_cb: Any = None,
+    cancel_cb: Any = None,
+) -> list[str]:
+    """
+    Safely copies ``catalog.db``, ``thumbnails.db``, and optional ``semantic_vectors.db``
+    from ``src_dir`` to ``dest_dir`` in 1 MB chunks, verifies >= 1.25x free space and exact
+    byte sizes, commits atomically via ``os.replace``, and removes source files (+ ``-wal`` /
+    ``-shm``) only after all files succeed. Returns list of migrated filenames.
+    """
+    import os
+    import shutil
+
+    src = Path(src_dir).resolve()
+    dst = Path(dest_dir).resolve()
+    if src == dst:
+        return []
+    dst.mkdir(parents=True, exist_ok=True)
+
+    db_names = ("catalog.db", "thumbnails.db", "semantic_vectors.db")
+    to_move: list[tuple[Path, Path, int]] = []
+    total_bytes = 0
+    for name in db_names:
+        sp = src / name
+        if sp.is_file():
+            sz = sp.stat().st_size
+            to_move.append((sp, dst / name, sz))
+            total_bytes += sz
+
+    if not to_move:
+        return []
+
+    usage = shutil.disk_usage(dst)
+    required = int(total_bytes * 1.25)
+    if usage.free < required:
+        need_mb = required / (1024 * 1024)
+        free_mb = usage.free / (1024 * 1024)
+        raise OSError(
+            f"Not enough free disk space in '{dst}' (need {need_mb:.1f} MB with safety margin, only {free_mb:.1f} MB available)."
+        )
+
+    staged: list[tuple[Path, Path, Path, int]] = []
+    bytes_done = 0
+    chunk_size = 1024 * 1024  # 1 MB
+    try:
+        for sp, dp, expected_sz in to_move:
+            part = dp.with_name(f"{dp.name}.migrating")
+            with open(sp, "rb") as rf, open(part, "wb") as wf:
+                while True:
+                    if cancel_cb is not None and cancel_cb():
+                        raise InterruptedError("Database relocation cancelled")
+                    buf = rf.read(chunk_size)
+                    if not buf:
+                        break
+                    wf.write(buf)
+                    bytes_done += len(buf)
+                    if progress_cb is not None:
+                        progress_cb(bytes_done, total_bytes, sp.name)
+            actual_sz = part.stat().st_size
+            if actual_sz != expected_sz:
+                raise IOError(f"Size mismatch copying {sp.name}: expected {expected_sz}, got {actual_sz}")
+            staged.append((sp, part, dp, expected_sz))
+
+        # Commit all staged files atomically
+        migrated_names: list[str] = []
+        for sp, part, dp, _sz in staged:
+            os.replace(part, dp)
+            migrated_names.append(sp.name)
+
+        # Delete source files and stale WAL/SHM only after every destination file is committed
+        for sp, _part, _dp, _sz in staged:
+            for suffix in ("", "-wal", "-shm"):
+                cand = sp if not suffix else sp.with_name(sp.name + suffix)
+                try:
+                    if cand.exists():
+                        cand.unlink()
+                except OSError:
+                    pass
+        return migrated_names
+    except Exception:
+        for _sp, part, _dp, _sz in staged:
+            try:
+                if part.exists():
+                    part.unlink()
+            except OSError:
+                pass
+        # Also clean up the active file being copied if it failed mid-copy
+        for _sp, dp, _sz in to_move:
+            p_rem = dp.with_name(f"{dp.name}.migrating")
+            try:
+                if p_rem.exists():
+                    p_rem.unlink()
+            except OSError:
+                pass
+        raise

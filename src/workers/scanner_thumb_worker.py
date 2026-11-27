@@ -1892,6 +1892,7 @@ class ThumbnailDecodeWorker(QRunnable):
                     buf = QBuffer(ba)
                     buf.open(QIODevice.ReadOnly)
                     t_reader = QImageReader(buf)
+                    t_reader.setDecideFormatFromContent(True)
                     t_reader.setAutoTransform(True)
                     orig_sz = t_reader.size()
                     if orig_sz.isValid() and (
@@ -1931,6 +1932,7 @@ class ThumbnailDecodeWorker(QRunnable):
                             buf = QBuffer(ba)
                             buf.open(QIODevice.ReadOnly)
                             t_reader = QImageReader(buf)
+                            t_reader.setDecideFormatFromContent(True)
                             t_reader.setAutoTransform(True)
                             qimg = t_reader.read()
                             buf.close()
@@ -1973,6 +1975,7 @@ class ThumbnailDecodeWorker(QRunnable):
         # For 16-bit/float TIFFs or CMYK files where QImageReader can clip or miss profiles,
         # check after QImageReader read and apply QColorSpace -> sRGB conversion cleanly.
         reader = QImageReader(str(self.file_path))
+        reader.setDecideFormatFromContent(True)
         reader.setAutoTransform(True)
         orig_size = reader.size()
         target_size: QSize | None = None

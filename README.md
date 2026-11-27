@@ -37,7 +37,7 @@ Standalone 64-bit Windows installers (`EssentialsPhotoGallery_Setup_x64.exe`) ar
 ## Highlights & Features
 
 - **Classic WLPG Ribbon Look & Feel (with Modern Themes, 4 Layouts & Integrated QAT)**
-  Recreates the authentic ribbon layout (*Home*, *Edit*, *Find*, *Create*, *View*) plus contextual tabs (*Edit* in Single Image View, *Map* in World Map View, *Compare*, *Duplicates*), integrated title bar with Quick Access Toolbar (QAT), optional left navigation sections (*Albums*, *Folders*, *Date Taken*, *Places*, *Tags*, *People*, *Ratings*, plus optional *Cameras* and AI *Subjects*), and right-hand tag/information pane. Supports three themes (**Classic Aero (Light)**, **Microsoft Fluent (Windows 11)**, and **Dark Studio**), four gallery layout modes (**Grid**, uniform **Tiles**, row-justified **Mosaic**, and portrait-priority **Masonry**), customizable thumbnail **Badges** (Flags, Favourites, Photo groups, plus optional monochrome Geotagged / Descriptive tagged / People tagged indicators), a searchable `F1` Keyboard Shortcuts modal, and custom `Alt+1..9` Quick-Tag hotkeys assignable directly inside **Manage Tags**.
+  Recreates the authentic ribbon layout (*Home*, *Edit*, *Find*, *Create*, *View*) plus contextual tabs (*Edit*, *Crop*, *Markup* in Single Image View; *Map* in World Map View; *Compare*; *Duplicates*), integrated title bar with Quick Access Toolbar (QAT), optional left navigation sections (*Albums*, *Folders*, *Date Taken*, *Places*, *Tags*, *People*, *Ratings*, plus optional *Cameras* and AI *Subjects*), and right-hand tag/information pane. Supports three themes (**Classic Aero (Light)**, **Microsoft Fluent (Windows 11)**, and **Dark Studio**), four gallery layout modes (**Grid**, uniform **Tiles**, row-justified **Mosaic**, and portrait-priority **Masonry**), customizable thumbnail **Badges**, fast Lightroom-style **`Z` / `X`** Pick/Reject culling shortcuts, a searchable `F1` Keyboard Shortcuts modal, and custom `Alt+1..9` Quick-Tag hotkeys assignable directly inside **Manage Tags**.
 
 - **Built for Large Libraries (64-Bit Architecture)**
   WLPG was a 32-bit app that would frequently hit out-of-memory errors on large collections or high-megapixel cameras. Essentials Photo Gallery is native 64-bit with virtualised grid scrolling and separate SQLite catalog and thumbnail databases, designed to stay snappy even with **500,000+ photos and videos**.
@@ -65,7 +65,7 @@ Standalone 64-bit Windows installers (`EssentialsPhotoGallery_Setup_x64.exe`) ar
   - **Photo Collage** (grid, masonry, scattered Polaroid, and *Then & Now* layouts)
   - **Photo Fuse** (combine the best smiles/expressions from a burst into one shot)
   - **Panoramic Stitching** (automatic stitcher inspired by Microsoft ICE)
-  - **Portrait Depth Blur, Relighting & Colour Pop** alongside Crop/Uncrop, Straighten, Spot Fix (Retouch & Red Eye), Exposure, Colour, Look Profiles & `.cube` 3D LUTs, Video Frame Capture (*Save still frame as photo*), and Vector Markup & Privacy Redaction
+  - **Portrait Depth Blur, Relighting & Colour Pop** alongside contextual Crop / Perspective Keystone correction, Configurable Auto Adjust, Spot Fix (`Shift+Drag` line healing & Red Eye), Hold-to-Compare (`B`), Look Profiles & `.cube` 3D LUTs, Video Frame Capture (*Save still frame as photo*), and Contextual Vector Markup & Privacy Redaction
   - **Contact Sheet & Photo Printing**
 
 - **Duplicate & Burst Photo Finder, Progressive Find Similar & Optional `MobileCLIP-S1` Semantic Search**
@@ -86,9 +86,9 @@ Standalone 64-bit Windows installers (`EssentialsPhotoGallery_Setup_x64.exe`) ar
 
 ## Metadata, Non-Destructive Safety & Data Ownership
 
-Essentials Photo Gallery is **100% folder-first and local**: your photos stay in your existing folders with no cloud account, no subscription, and no telemetry.
+Essentials Photo Gallery is **100% folder-first and local**: your photos stay in your existing folders with no cloud account, no subscription, and no telemetry. The only optional background network call is a configurable (default: weekly) check against GitHub Releases for app updates (which can be adjusted or disabled anytime in **File → Options → General**).
 
-- **Catalog-Only Safe Mode (Default):** Ratings, flags, descriptive tags, captions, people tags, albums, smart albums, OCR text, and face embeddings live strictly in `%LOCALAPPDATA%\PhotoGallery\db\catalog.db` (and WebP thumbnails in `thumbnails.db`) until you explicitly enable **Write to files** in **File → Options**.
+- **Catalog-Only Safe Mode & Relocatable Storage:** Ratings, flags, descriptive tags, captions, people tags, albums, smart albums, OCR text, and face embeddings live strictly in `%LOCALAPPDATA%\PhotoGallery\db\catalog.db` (and WebP thumbnails in `thumbnails.db`) until you explicitly enable **Write metadata changes to original files** in **File → Options → General**. Databases and thumbnail caches can also be moved to another drive in **File → Options → Database**.
 - **Surgical XMP Write-Back:** When write-back is enabled, metadata writes preserve unrelated third-party XMP namespaces (such as Adobe Lightroom / Camera Raw `crs:*` develop settings, darktable edit history, and copyright fields), preserve file modification timestamps (`mtime`), and always write `.xmp` sidecars for camera RAW files rather than touching RAW containers.
 - **OneDrive Files On-Demand Safe:** Online-only cloud placeholders (`OFFLINE` / `RECALL_ON_OPEN` / `RECALL_ON_DATA_ACCESS`) are never opened by background scanners, thumbnail workers, face detection, OCR, or duplicate hashing—so browsing never triggers unintended gigabyte cloud downloads.
 - **Automatic `.OriginalFiles/` Backups:** Before saving destructive image edits, Essentials Photo Gallery stashes an untouched original in `<folder>/.OriginalFiles/` so you can revert to original at any time.
