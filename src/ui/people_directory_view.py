@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRunnable, QSettings, QSize, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRunnable, QSettings, QSize, Qt, QThread, QThreadPool, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -853,6 +853,7 @@ class PeopleDirectoryView(QWidget):
     unnamed_selected = Signal(list, object)    # (face_ids, thumb_blob)
     review_suggestions_requested = Signal()     # Opens BatchPeopleView
     directory_updated = Signal()
+    face_models_downloaded = Signal()
 
     def __init__(
         self,
@@ -868,6 +869,8 @@ class PeopleDirectoryView(QWidget):
         self._cluster_gen_id: int = 0
         self._named_cache_ts: float = 0.0
         self._unnamed_cache_ts: float = 0.0
+        self._face_notice_dismissed: bool = False
+        self._face_dl_thread: QThread | None = None
         self._cluster_pool = QThreadPool(self)
         self._cluster_pool.setMaxThreadCount(1)
         self._cluster_cancel: Any = None
@@ -981,6 +984,41 @@ class PeopleDirectoryView(QWidget):
         h_layout.addWidget(self.btn_refresh)
 
         main_layout.addWidget(header_bar)
+
+        # ---------------------------------------------------------------------
+        # 1b. Subtle Face Model Missing Notice Banner
+        # ---------------------------------------------------------------------
+        self.face_model_banner = QFrame(self)
+        self.face_model_banner.setObjectName("PeopleFaceModelBanner")
+        banner_layout = QHBoxLayout(self.face_model_banner)
+        banner_layout.setContentsMargins(20, 7, 20, 7)
+        banner_layout.setSpacing(10)
+
+        self.lbl_face_model_notice = QLabel(
+            "Face recognition models (~281 MB) are not downloaded yet — "
+            "new photos won't be scanned for faces until installed.",
+            self.face_model_banner,
+        )
+        self.lbl_face_model_notice.setFont(QFont("Segoe UI", 9))
+        self.lbl_face_model_notice.setWordWrap(True)
+        banner_layout.addWidget(self.lbl_face_model_notice, 1)
+
+        self.btn_download_face_models = QPushButton("Download && Scan (~281 MB)", self.face_model_banner)
+        self.btn_download_face_models.setObjectName("btnDownloadFaceModels")
+        self.btn_download_face_models.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_download_face_models.clicked.connect(self._on_download_face_models_clicked)
+        banner_layout.addWidget(self.btn_download_face_models)
+
+        self.btn_dismiss_face_notice = QPushButton("✕", self.face_model_banner)
+        self.btn_dismiss_face_notice.setFixedSize(22, 22)
+        self.btn_dismiss_face_notice.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_dismiss_face_notice.setToolTip("Dismiss")
+        self.btn_dismiss_face_notice.clicked.connect(self._dismiss_face_model_banner)
+        banner_layout.addWidget(self.btn_dismiss_face_notice)
+
+        self.face_model_banner.setVisible(False)
+        self._apply_face_banner_theme(is_dark=False)
+        main_layout.addWidget(self.face_model_banner)
 
         # ---------------------------------------------------------------------
         # 2. Scrollable Directory Area (with minimalist vertical scrollbar)
@@ -1111,6 +1149,8 @@ class PeopleDirectoryView(QWidget):
         """Fetches named people off the GUI thread (zero UI freeze) and computes unnamed clusters in background."""
         import os
         import time
+
+        self._update_face_model_banner()
 
         now = time.monotonic()
         try:
@@ -1616,8 +1656,116 @@ class PeopleDirectoryView(QWidget):
             self.lbl_sec1_title.setStyleSheet("color: #1E293B;")
             self.lbl_sec2_title.setStyleSheet("color: #1E293B;")
             self.lbl_empty.setStyleSheet("color: #64748B; font-size: 14px; margin-top: 60px;")
+        self._apply_face_banner_theme(is_dark=is_dark)
         if self.isVisible():
             self._render_grids()
+
+    def _apply_face_banner_theme(self, is_dark: bool) -> None:
+        """Styles the yellow face-model notice banner for Light or Dark Studio mode."""
+        if not hasattr(self, "face_model_banner"):
+            return
+        if is_dark:
+            self.face_model_banner.setStyleSheet(
+                "QFrame#PeopleFaceModelBanner { background-color: #2B2512; border-bottom: 1px solid #785E18; }"
+            )
+            self.lbl_face_model_notice.setStyleSheet("color: #FDE68A; background: transparent; border: none;")
+            self.btn_download_face_models.setStyleSheet(
+                "QPushButton#btnDownloadFaceModels { background-color: #423514; border: 1px solid #B45309; "
+                "border-radius: 4px; color: #FDE68A; font-family: 'Segoe UI'; font-size: 8.5pt; "
+                "font-weight: 600; padding: 3px 10px; }"
+                "QPushButton#btnDownloadFaceModels:hover { background-color: #57441A; border-color: #D97706; }"
+                "QPushButton#btnDownloadFaceModels:disabled { opacity: 0.7; }"
+            )
+            self.btn_dismiss_face_notice.setStyleSheet(
+                "QPushButton { background: transparent; border: none; color: #FDE68A; font-weight: bold; }"
+                "QPushButton:hover { background-color: #423514; border-radius: 3px; }"
+            )
+        else:
+            self.face_model_banner.setStyleSheet(
+                "QFrame#PeopleFaceModelBanner { background-color: #FFFBEB; border-bottom: 1px solid #FDE68A; }"
+            )
+            self.lbl_face_model_notice.setStyleSheet("color: #78350F; background: transparent; border: none;")
+            self.btn_download_face_models.setStyleSheet(
+                "QPushButton#btnDownloadFaceModels { background-color: #FEF3C7; border: 1px solid #F59E0B; "
+                "border-radius: 4px; color: #92400E; font-family: 'Segoe UI'; font-size: 8.5pt; "
+                "font-weight: 600; padding: 3px 10px; }"
+                "QPushButton#btnDownloadFaceModels:hover { background-color: #FDE68A; border-color: #D97706; }"
+                "QPushButton#btnDownloadFaceModels:disabled { color: #A16207; }"
+            )
+            self.btn_dismiss_face_notice.setStyleSheet(
+                "QPushButton { background: transparent; border: none; color: #78350F; font-weight: bold; }"
+                "QPushButton:hover { background-color: #FEF3C7; border-radius: 3px; }"
+            )
+
+    def _dismiss_face_model_banner(self) -> None:
+        self._face_notice_dismissed = True
+        if hasattr(self, "face_model_banner"):
+            self.face_model_banner.setVisible(False)
+
+    def _update_face_model_banner(self) -> None:
+        """Shows a subtle yellow notice when face models are missing and InsightFace is available."""
+        if not hasattr(self, "face_model_banner"):
+            return
+        if self._face_dl_thread is not None and self._face_dl_thread.isRunning():
+            self.face_model_banner.setVisible(True)
+            return
+        if self._face_notice_dismissed:
+            self.face_model_banner.setVisible(False)
+            return
+        try:
+            from src.core.face_engine import FaceEngine
+
+            probe = FaceEngine.probe_status()
+            available = bool(probe.get("available", False))
+            backend_ok = bool(probe.get("insightface_installed", False))
+        except Exception:
+            available = True
+            backend_ok = False
+        self.face_model_banner.setVisible((not available) and backend_ok)
+
+    def _on_download_face_models_clicked(self) -> None:
+        """Downloads InsightFace buffalo_l models on a background thread and triggers scanning."""
+        if self._face_dl_thread is not None and self._face_dl_thread.isRunning():
+            return
+        from src.core.face_engine import FaceEngine
+
+        self.btn_download_face_models.setEnabled(False)
+        self.btn_download_face_models.setText("Downloading (~281 MB)...")
+        self.lbl_face_model_notice.setText(
+            "Downloading face recognition models (~281 MB) — you can keep browsing while this finishes..."
+        )
+
+        class _PeopleFaceDlWorker(QThread):
+            finished_ok = Signal(bool)
+
+            def run(self) -> None:
+                ok = FaceEngine.download_models("buffalo_l", force_reinstall=False)
+                self.finished_ok.emit(bool(ok))
+
+        worker = _PeopleFaceDlWorker(self)
+
+        def _on_done(ok: bool) -> None:
+            self._face_dl_thread = None
+            self.btn_download_face_models.setEnabled(True)
+            self.btn_download_face_models.setText("Download && Scan (~281 MB)")
+            if ok:
+                self.face_model_banner.setVisible(False)
+                self.face_models_downloaded.emit()
+            else:
+                self.lbl_face_model_notice.setText(
+                    "Face recognition models (~281 MB) are not downloaded yet — "
+                    "new photos won't be scanned for faces until installed."
+                )
+                QMessageBox.warning(
+                    self,
+                    "Download Failed",
+                    "Could not download or initialize InsightFace models. "
+                    "Check your internet connection and try again.",
+                )
+
+        worker.finished_ok.connect(_on_done)
+        self._face_dl_thread = worker
+        worker.start()
 
     # -------------------------------------------------------------------------
     # Actions: Name Cluster, Rename, Merge, Review Suggestions

@@ -1274,6 +1274,7 @@ class PhotoGalleryMainWindow(QMainWindow):
         self.people_directory_view.unnamed_selected.connect(self._on_directory_unnamed_selected)
         self.people_directory_view.review_suggestions_requested.connect(self.open_batch_people_view)
         self.people_directory_view.directory_updated.connect(self.refresh_people_navigation_and_autocomplete)
+        self.people_directory_view.face_models_downloaded.connect(self._maybe_start_startup_face_scan)
         self.person_header_bar.unnamed_person_named.connect(self._on_unnamed_person_named)
         self.central_stack.addWidget(self.people_directory_view)
 
