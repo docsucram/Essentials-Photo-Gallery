@@ -181,14 +181,28 @@ class CropOverlayItem(QGraphicsRectItem):
             cx, cy = self._rect.center().x(), self._rect.center().y()
             w = self._rect.width()
             h = w / ratio
-            if self.scene() and self.scene().sceneRect().isValid():
-                s_rect = self.scene().sceneRect()
-                if h > s_rect.height() * 0.95:
-                    h = s_rect.height() * 0.85
+            bounds = QRectF()
+            scene = self.scene()
+            if scene is not None:
+                if hasattr(scene, "_crop_bounds_rect"):
+                    bounds = scene._crop_bounds_rect()
+                elif scene.sceneRect().isValid():
+                    bounds = scene.sceneRect()
+            if not bounds.isEmpty():
+                if h > bounds.height() * 0.95:
+                    h = bounds.height() * 0.85
                     w = h * ratio
-                if w > s_rect.width() * 0.95:
-                    w = s_rect.width() * 0.85
+                if w > bounds.width() * 0.95:
+                    w = bounds.width() * 0.85
                     h = w / ratio
+                max_w = min(bounds.width(), bounds.height() * ratio)
+                if w > max_w > 0:
+                    w = max_w
+                    h = w / ratio
+                x = min(max(cx - w / 2.0, bounds.left()), bounds.right() - w)
+                y = min(max(cy - h / 2.0, bounds.top()), bounds.bottom() - h)
+                self.setRect(QRectF(x, y, w, h))
+                return
             self.setRect(QRectF(cx - w / 2.0, cy - h / 2.0, w, h))
 
     def aspect_ratio(self) -> float | None:
@@ -676,10 +690,23 @@ class CropScene(QGraphicsScene):
             return QRectF(c.x() - in_w / 2.0, c.y() - in_h / 2.0, in_w, in_h)
         return s
 
-    def _clamp_rect_to_scene(self, r: QRectF) -> QRectF:
+    def _clamp_rect_to_scene(self, r: QRectF, preserve_ratio: float | None = None) -> QRectF:
         s = self._crop_bounds_rect()
         if s.isEmpty():
             return r
+        ratio = preserve_ratio if preserve_ratio is not None else self.crop_rect_item.aspect_ratio()
+        if ratio is not None and ratio > 0:
+            max_w = min(s.width(), s.height() * ratio)
+            if max_w <= 0:
+                return r
+            min_w = min(max_w, max(16.0, 16.0 * ratio))
+            raw_w = r.width() if r.width() > 0 else r.height() * ratio
+            w = max(min_w, min(raw_w, max_w))
+            h = w / ratio
+            cx, cy = r.center().x(), r.center().y()
+            x = min(max(cx - w / 2.0, s.left()), s.right() - w)
+            y = min(max(cy - h / 2.0, s.top()), s.bottom() - h)
+            return QRectF(x, y, w, h)
         x = max(s.left(), min(r.left(), s.right() - 16.0))
         y = max(s.top(), min(r.top(), s.bottom() - 16.0))
         right = max(x + 16.0, min(r.right(), s.right()))
@@ -814,30 +841,30 @@ class CropScene(QGraphicsScene):
                 self._new_crop_started = True
             # Rubber-band drawing
             s = self._crop_bounds_rect()
-            clamped_x = max(s.left(), min(pos.x(), s.right()))
-            clamped_y = max(s.top(), min(pos.y(), s.bottom()))
-            new_rect = QRectF(self._drag_start_pos, QPointF(clamped_x, clamped_y)).normalized()
-            if ratio is not None and ratio > 0 and new_rect.width() > 0:
-                h = new_rect.width() / ratio
-                new_rect.setHeight(h)
-            self.crop_rect_item.setRect(self._clamp_rect_to_scene(new_rect))
+            start = self._drag_start_pos
+            clamped_x = max(s.left(), min(pos.x(), s.right())) if not s.isEmpty() else pos.x()
+            clamped_y = max(s.top(), min(pos.y(), s.bottom())) if not s.isEmpty() else pos.y()
+            if ratio is not None and ratio > 0 and not s.isEmpty():
+                dir_x = 1.0 if pos.x() >= start.x() else -1.0
+                dir_y = 1.0 if pos.y() >= start.y() else -1.0
+                max_w = max(0.0, (s.right() - start.x()) if dir_x > 0 else (start.x() - s.left()))
+                max_h = max(0.0, (s.bottom() - start.y()) if dir_y > 0 else (start.y() - s.top()))
+                cap_w = min(max_w, max_h * ratio)
+                raw_w = abs(clamped_x - start.x())
+                raw_h = abs(clamped_y - start.y())
+                w = min(cap_w, raw_w if raw_w >= raw_h * ratio else raw_h * ratio)
+                h = (w / ratio) if w > 0 else 0.0
+                new_rect = QRectF(start, QPointF(start.x() + dir_x * w, start.y() + dir_y * h)).normalized()
+                self.crop_rect_item.setRect(new_rect)
+            else:
+                new_rect = QRectF(start, QPointF(clamped_x, clamped_y)).normalized()
+                if ratio is not None and ratio > 0 and new_rect.width() > 0:
+                    new_rect.setHeight(new_rect.width() / ratio)
+                self.crop_rect_item.setRect(self._clamp_rect_to_scene(new_rect))
             self.crop_rect_updated.emit()
 
         elif self._drag_mode in ("tl", "tr", "bl", "br", "tc", "bc", "lc", "rc"):
-            # Resizing edges and corners
-            left, top, right, bottom = sr.left(), sr.top(), sr.right(), sr.bottom()
-
-            if "l" in self._drag_mode:
-                left = min(sr.right() - 16.0, sr.left() + dx)
-            if "r" in self._drag_mode:
-                right = max(sr.left() + 16.0, sr.right() + dx)
-            if "t" in self._drag_mode:
-                top = min(sr.bottom() - 16.0, sr.top() + dy)
-            if "b" in self._drag_mode:
-                bottom = max(sr.top() + 16.0, sr.bottom() + dy)
-
-            new_w = right - left
-            new_h = bottom - top
+            s = self._crop_bounds_rect()
 
             # Shift+Drag on corner temporarily locks the current aspect ratio during freeform drag
             effective_ratio = ratio
@@ -849,33 +876,91 @@ class CropScene(QGraphicsScene):
             ):
                 effective_ratio = sr.width() / sr.height()
 
-            # Enforce aspect ratio preset if active
+            # Enforce aspect ratio preset (and keep exact ratio even when dragging past image bounds)
             if effective_ratio is not None and effective_ratio > 0:
-                if self._drag_mode in ("tc", "bc"):
+                mode = self._drag_mode
+                has_bounds = not s.isEmpty()
+                if mode in ("tl", "tr", "bl", "br"):
+                    ax = sr.left() if "r" in mode else sr.right()
+                    ay = sr.top() if "b" in mode else sr.bottom()
+                    if has_bounds:
+                        ax = max(s.left(), min(ax, s.right()))
+                        ay = max(s.top(), min(ay, s.bottom()))
+                        max_w = max(0.0, (s.right() - ax) if "r" in mode else (ax - s.left()))
+                        max_h = max(0.0, (s.bottom() - ay) if "b" in mode else (ay - s.top()))
+                        cap_w = min(max_w, max_h * effective_ratio)
+                        min_w = min(cap_w, max(16.0, 16.0 * effective_ratio))
+                    else:
+                        cap_w = float("inf")
+                        min_w = max(16.0, 16.0 * effective_ratio)
+                    raw_w = (sr.right() + dx - ax) if "r" in mode else (ax - (sr.left() + dx))
+                    raw_h = (sr.bottom() + dy - ay) if "b" in mode else (ay - (sr.top() + dy))
+                    desired_w = raw_w if abs(dx) >= abs(dy) * effective_ratio else raw_h * effective_ratio
+                    new_w = max(min_w, min(desired_w, cap_w))
+                    new_h = new_w / effective_ratio
+                    left, right = (ax, ax + new_w) if "r" in mode else (ax - new_w, ax)
+                    top, bottom = (ay, ay + new_h) if "b" in mode else (ay - new_h, ay)
+                    self.crop_rect_item.setRect(QRectF(left, top, right - left, bottom - top))
+                elif mode in ("tc", "bc"):
+                    ay = sr.bottom() if mode == "tc" else sr.top()
+                    if has_bounds:
+                        ay = max(s.top(), min(ay, s.bottom()))
+                        avail_h = max(0.0, (ay - s.top()) if mode == "tc" else (s.bottom() - ay))
+                        max_h = min(avail_h, s.width() / effective_ratio)
+                        min_h = min(max_h, max(16.0, 16.0 / effective_ratio))
+                    else:
+                        max_h = float("inf")
+                        min_h = max(16.0, 16.0 / effective_ratio)
+                    desired_h = (ay - (sr.top() + dy)) if mode == "tc" else ((sr.bottom() + dy) - ay)
+                    new_h = max(min_h, min(desired_h, max_h))
                     new_w = new_h * effective_ratio
-                    cx = (left + right) / 2.0
-                    left = cx - new_w / 2.0
-                    right = cx + new_w / 2.0
-                elif self._drag_mode in ("lc", "rc"):
-                    new_h = new_w / effective_ratio
-                    cy = (top + bottom) / 2.0
-                    top = cy - new_h / 2.0
-                    bottom = cy + new_h / 2.0
-                elif self._drag_mode in ("tl", "br"):
-                    new_h = new_w / effective_ratio
-                    if "t" in self._drag_mode:
-                        top = bottom - new_h
+                    top, bottom = (ay - new_h, ay) if mode == "tc" else (ay, ay + new_h)
+                    cx = sr.center().x()
+                    left, right = cx - new_w / 2.0, cx + new_w / 2.0
+                    if has_bounds:
+                        if left < s.left():
+                            left = s.left()
+                            right = left + new_w
+                        if right > s.right():
+                            right = s.right()
+                            left = right - new_w
+                    self.crop_rect_item.setRect(QRectF(left, top, right - left, bottom - top))
+                else:  # ("lc", "rc")
+                    ax = sr.right() if mode == "lc" else sr.left()
+                    if has_bounds:
+                        ax = max(s.left(), min(ax, s.right()))
+                        avail_w = max(0.0, (ax - s.left()) if mode == "lc" else (s.right() - ax))
+                        max_w = min(avail_w, s.height() * effective_ratio)
+                        min_w = min(max_w, max(16.0, 16.0 * effective_ratio))
                     else:
-                        bottom = top + new_h
-                elif self._drag_mode in ("tr", "bl"):
+                        max_w = float("inf")
+                        min_w = max(16.0, 16.0 * effective_ratio)
+                    desired_w = (ax - (sr.left() + dx)) if mode == "lc" else ((sr.right() + dx) - ax)
+                    new_w = max(min_w, min(desired_w, max_w))
                     new_h = new_w / effective_ratio
-                    if "t" in self._drag_mode:
-                        top = bottom - new_h
-                    else:
-                        bottom = top + new_h
-
-            res_rect = QRectF(left, top, right - left, bottom - top)
-            self.crop_rect_item.setRect(self._clamp_rect_to_scene(res_rect))
+                    left, right = (ax - new_w, ax) if mode == "lc" else (ax, ax + new_w)
+                    cy = sr.center().y()
+                    top, bottom = cy - new_h / 2.0, cy + new_h / 2.0
+                    if has_bounds:
+                        if top < s.top():
+                            top = s.top()
+                            bottom = top + new_h
+                        if bottom > s.bottom():
+                            bottom = s.bottom()
+                            top = bottom - new_h
+                    self.crop_rect_item.setRect(QRectF(left, top, right - left, bottom - top))
+            else:
+                left, top, right, bottom = sr.left(), sr.top(), sr.right(), sr.bottom()
+                if "l" in self._drag_mode:
+                    left = min(sr.right() - 16.0, sr.left() + dx)
+                if "r" in self._drag_mode:
+                    right = max(sr.left() + 16.0, sr.right() + dx)
+                if "t" in self._drag_mode:
+                    top = min(sr.bottom() - 16.0, sr.top() + dy)
+                if "b" in self._drag_mode:
+                    bottom = max(sr.top() + 16.0, sr.bottom() + dy)
+                res_rect = QRectF(left, top, right - left, bottom - top)
+                self.crop_rect_item.setRect(self._clamp_rect_to_scene(res_rect))
             self.crop_rect_updated.emit()
 
         event.accept()

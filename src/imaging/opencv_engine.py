@@ -51,6 +51,17 @@ def clear_stage_cache() -> None:
     with _STAGE_CACHE_LOCK:
         _STAGE_CACHE.clear()
 
+
+def invalidate_stage_cache(media_id: Any = None) -> None:
+    """Invalidates cached render stages for a specific media_id, or all entries if None."""
+    with _STAGE_CACHE_LOCK:
+        if media_id is None:
+            _STAGE_CACHE.clear()
+            return
+        stale_keys = [key for key in _STAGE_CACHE if key[0] == media_id]
+        for key in stale_keys:
+            _STAGE_CACHE.pop(key, None)
+
 # Precomputed high-precision sRGB <-> Linear floating-point look-up tables
 _LUT_SRGB_TO_LIN: np.ndarray = ((np.arange(256, dtype=np.float32) / 255.0) ** 2.2).astype(np.float32)
 _LUT_LIN_TO_SRGB: np.ndarray = np.clip(

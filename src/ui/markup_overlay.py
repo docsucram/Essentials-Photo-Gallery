@@ -612,7 +612,8 @@ def _measure_text_pill_size(el: MarkupElement) -> tuple[float, float, list[str],
     font.setBold(getattr(el, "font_bold", True))
     font.setItalic(getattr(el, "font_italic", False))
     fm = QFontMetrics(font)
-    lines = (el.text or "").split("\n")
+    raw_text = (el.text or "").replace("\r\n", "\n").replace("\u2028", "\n")
+    lines = raw_text.split("\n")
     max_line_w = max((fm.horizontalAdvance(line) for line in lines), default=40)
     line_h = fm.lineSpacing()
     total_text_h = line_h * max(1, len(lines))
@@ -2643,7 +2644,9 @@ class MarkupFloatingToolbar(QFrame):
         if col.isValid():
             self.current_color = col
             if hasattr(self, "color_picker"):
+                self.color_picker.blockSignals(True)
                 self.color_picker.set_primary_color(col)
+                self.color_picker.blockSignals(False)
             self._update_color_indicators()
             self.color_changed.emit(col)
 
@@ -2653,7 +2656,9 @@ class MarkupFloatingToolbar(QFrame):
             if col.alpha() > 0:
                 self._last_opaque_secondary_color = QColor(col)
             if hasattr(self, "color_picker"):
+                self.color_picker.blockSignals(True)
                 self.color_picker.set_secondary_color(col)
+                self.color_picker.blockSignals(False)
             self._update_color_indicators()
             self.secondary_color_changed.emit(col)
 
@@ -2674,17 +2679,21 @@ class MarkupFloatingToolbar(QFrame):
 
     def swap_colors(self) -> None:
         if hasattr(self, "color_picker"):
+            self.color_picker.blockSignals(True)
             self.color_picker.swap_colors()
+            self.color_picker.blockSignals(False)
+            self.current_color = self.color_picker.primary_color
+            self.secondary_color = self.color_picker.secondary_color
         else:
             p, s = self.current_color, self.secondary_color
             self.current_color = s
             self.secondary_color = p
-            if self.secondary_color.alpha() > 0:
-                self._last_opaque_secondary_color = QColor(self.secondary_color)
-            self._update_color_indicators()
-            self.color_changed.emit(self.current_color)
-            self.secondary_color_changed.emit(self.secondary_color)
-            self.colors_swapped.emit(self.current_color, self.secondary_color)
+        if self.secondary_color.alpha() > 0:
+            self._last_opaque_secondary_color = QColor(self.secondary_color)
+        self._update_color_indicators()
+        self.color_changed.emit(self.current_color)
+        self.secondary_color_changed.emit(self.secondary_color)
+        self.colors_swapped.emit(self.current_color, self.secondary_color)
 
     def _on_primary_color_changed(self, col: QColor) -> None:
         self.current_color = col
@@ -2704,8 +2713,6 @@ class MarkupFloatingToolbar(QFrame):
         if self.secondary_color.alpha() > 0:
             self._last_opaque_secondary_color = QColor(self.secondary_color)
         self._update_color_indicators()
-        self.color_changed.emit(self.current_color)
-        self.secondary_color_changed.emit(self.secondary_color)
         self.colors_swapped.emit(self.current_color, self.secondary_color)
 
     def _pick_custom_color_primary(self) -> None:

@@ -55,6 +55,8 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QPolygonF,
+    QTextBlockFormat,
+    QTextCursor,
     QTransform,
     QUndoCommand,
     QUndoStack,
@@ -206,6 +208,7 @@ from src.imaging.opencv_engine import (
     PhotoAdjustmentRecipe,
     analyze_auto_adjust,
     detect_auto_straighten_angle,
+    invalidate_stage_cache,
     render_adjusted_image,
 )
 
@@ -1542,7 +1545,9 @@ class PixelArrayUndoCommand(QUndoCommand):
     def undo(self) -> None:
         self._first_redo = False
         if getattr(self, "_before_markup_elements", None) is not None:
-            self.viewer._markup_elements = list(self._before_markup_elements)
+            self.viewer._markup_elements = [
+                self.viewer._clone_markup_element(e) for e in self._before_markup_elements
+            ]
         if self.full_frame:
             self.viewer.master_np_rgb = self.before_patch.copy()
             self.viewer._update_display_proxy()
@@ -1563,7 +1568,9 @@ class PixelArrayUndoCommand(QUndoCommand):
             self._first_redo = False
             return
         if getattr(self, "_after_markup_elements", None) is not None:
-            self.viewer._markup_elements = list(self._after_markup_elements)
+            self.viewer._markup_elements = [
+                self.viewer._clone_markup_element(e) for e in self._after_markup_elements
+            ]
         if self.full_frame:
             self.viewer.master_np_rgb = self.after_patch.copy()
             self.viewer._update_display_proxy()
@@ -2773,7 +2780,20 @@ class SingleMediaViewer(QWidget):
         is_italic = getattr(self.markup_toolbar, "is_text_italic", False)
         text_align = getattr(self.markup_toolbar, "text_align", "left")
         align_map = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter, "right": Qt.AlignRight}
-        inp.setAlignment(align_map.get(text_align, Qt.AlignLeft))
+        align_flag = align_map.get(text_align, Qt.AlignLeft)
+        saved_cursor = inp.textCursor()
+        saved_anchor = saved_cursor.anchor()
+        saved_pos = saved_cursor.position()
+        all_cursor = QTextCursor(inp.document())
+        all_cursor.select(QTextCursor.Document)
+        block_fmt = QTextBlockFormat()
+        block_fmt.setAlignment(align_flag)
+        all_cursor.mergeBlockFormat(block_fmt)
+        restore_cursor = inp.textCursor()
+        restore_cursor.setPosition(saved_anchor)
+        restore_cursor.setPosition(saved_pos, QTextCursor.KeepAnchor)
+        inp.setTextCursor(restore_cursor)
+        inp.setAlignment(align_flag)
 
         inp_font = QFont(font_family, screen_font_pt)
         inp_font.setBold(bool(is_bold))
@@ -3401,6 +3421,7 @@ class SingleMediaViewer(QWidget):
                 )
 
     def _update_display_proxy(self) -> None:
+        invalidate_stage_cache(self.current_media_id)
         self._master_render_gen += 1
         self._master_render_dirty = False
         if self.master_np_rgb is None:
@@ -6206,6 +6227,7 @@ class SingleMediaViewer(QWidget):
     def set_markup_mode(self, enabled: bool) -> None:
         self.is_markup_mode = bool(enabled)
         if self.is_markup_mode:
+            self._is_sliding = False
             self._dismiss_depth_light_pane_if_active()
             self._markup_alt_select_active = False
             app_inst = QApplication.instance()
@@ -6410,15 +6432,14 @@ class SingleMediaViewer(QWidget):
             self._updating_active_el_live = True
             try:
                 el = self._active_movable_element
+                before_els = self._snapshot_markup_elements()
+                before_master = (
+                    self._active_movable_reselect_orig_master.copy()
+                    if getattr(self, "_active_movable_reselect_orig_master", None) is not None
+                    else (self.master_np_rgb.copy() if self.master_np_rgb is not None else None)
+                )
                 _apply_tb_to_el(el)
-                if hasattr(self, "undo_stack") and self.undo_stack.canUndo():
-                    self.undo_stack.undo()
-                    if self._markup_elements:
-                        self._markup_elements.pop()
-                    if self._markup_preview_items:
-                        it = self._markup_preview_items.pop()
-                        self._remove_scene_item(it)
-                self._commit_single_markup_element(el, f"Markup {el.kind.title()}")
+                self._commit_active_movable_edit(el, before_els, before_master, f"Markup {el.kind.title()}")
             finally:
                 self._updating_active_el_live = False
 
@@ -6644,6 +6665,7 @@ class SingleMediaViewer(QWidget):
     ) -> None:
         """Fast in-place full-res QPixmap ROI patch after an edit on master_np_rgb.
         Never swaps pixmap dimensions or item scale, so viewport zoom/pan never shifts or flashes."""
+        invalidate_stage_cache(self.current_media_id)
         if (
             bbox is not None
             and self.master_np_rgb is not None
@@ -6700,6 +6722,10 @@ class SingleMediaViewer(QWidget):
                                 self.display_proxy_rgb[py0:py1, px0:px1] = cv2.resize(
                                     roi_src, (px1 - px0, py1 - py0), interpolation=cv2.INTER_AREA
                                 )
+                self._master_render_gen += 1
+                self._master_render_dirty = False
+                if getattr(self, "scrub_proxy_rgb", None) is not self.display_proxy_rgb:
+                    self.scrub_proxy_rgb = None
                 return
         self._update_display_proxy()
         self._render_current_recipe()
@@ -6782,22 +6808,18 @@ class SingleMediaViewer(QWidget):
             self._pending_markup_item_is_rot_cached = False
         if getattr(self, "_pending_rotate_badge", None) is not None:
             self._pending_rotate_badge.setVisible(False)
+        before_els = self._snapshot_markup_elements()
+        before_master = (
+            self._active_movable_reselect_orig_master.copy()
+            if getattr(self, "_active_movable_reselect_orig_master", None) is not None
+            else (self.master_np_rgb.copy() if self.master_np_rgb is not None else None)
+        )
         el.rotation_deg = float(deg)
         if (
-            (
-                getattr(self, "_active_movable_before_roi", None) is not None
-                or getattr(self, "_active_movable_before_master", None) is not None
-            )
-            and hasattr(self, "undo_stack")
-            and self.undo_stack.canUndo()
+            getattr(self, "_active_movable_before_roi", None) is not None
+            or getattr(self, "_active_movable_before_master", None) is not None
         ):
-            self.undo_stack.undo()
-            if self._markup_elements:
-                self._markup_elements.pop()
-            if self._markup_preview_items:
-                it = self._markup_preview_items.pop()
-                self._remove_scene_item(it)
-            self._commit_single_markup_element(el, f"Markup {el.kind.title()}")
+            self._commit_active_movable_edit(el, before_els, before_master, f"Markup {el.kind.title()}")
 
     def _finalize_movable_markup(self) -> None:
         """Finalizes the active movable element and hides the selection outline and transform handles."""
@@ -6815,6 +6837,9 @@ class SingleMediaViewer(QWidget):
         self._active_movable_from_reselect = False
         self._active_movable_reselect_orig_master = None
         self._is_moving_pending_markup = False
+        self._markup_transform_changed = False
+        self._markup_transform_before_elements = None
+        self._markup_transform_before_master = None
         self._markup_transform_mode = None
         self._markup_resize_corner = None
         self._markup_resize_anchor_rect = None
@@ -6823,6 +6848,88 @@ class SingleMediaViewer(QWidget):
         self._move_markup_last_pt = None
         self.markup_rotation_changed.emit(0.0)
         self.markup_selection_changed.emit(False, False)
+
+    def _snapshot_markup_elements(self) -> list[MarkupElement]:
+        """Returns deep-cloned snapshots of committed markup elements for safe undo/redo isolation."""
+        return [self._clone_markup_element(e) for e in getattr(self, "_markup_elements", [])]
+
+    def _hit_test_markup_text_at(self, sp: QPointF) -> MarkupElement | None:
+        """Returns the topmost committed text markup element whose bounds contain scene point sp."""
+        for el in reversed(getattr(self, "_markup_elements", [])):
+            if getattr(el, "kind", None) == "text" and el.rect is not None:
+                if get_markup_element_bounds(el).contains(sp):
+                    return el
+        return None
+
+    def _commit_active_movable_edit(
+        self,
+        el: MarkupElement,
+        before_elements: list[MarkupElement] | None,
+        before_master: np.ndarray | None,
+        desc: str,
+    ) -> None:
+        """
+        Applies an interactive transform or live toolbar property update to the active movable element
+        without ever undoing unrelated prior undo-stack commands (such as deletions or text edits).
+        """
+        if self.master_np_rgb is None or el is None:
+            return
+        top_cmd = (
+            self.undo_stack.command(self.undo_stack.index() - 1)
+            if hasattr(self, "undo_stack") and self.undo_stack.canUndo()
+            else None
+        )
+        is_own_top = (
+            not getattr(self, "_active_movable_from_reselect", False)
+            and top_cmd is not None
+            and getattr(top_cmd, "_markup_owner_id", None) == id(el)
+        )
+        if is_own_top:
+            self._restore_active_movable_before_state()
+            self.undo_stack.undo()
+            if el in self._markup_elements:
+                self._markup_elements.remove(el)
+            if self._markup_preview_items:
+                it = self._markup_preview_items.pop()
+                self._remove_scene_item(it)
+            self._commit_single_markup_element(el, desc)
+            return
+
+        # Re-render cleanly from base_without so prior undo entries stay completely intact
+        base_clean = getattr(self, "_active_movable_before_master", None)
+        if base_clean is None:
+            self._restore_active_movable_before_state()
+            base_clean = self.master_np_rgb.copy()
+        orig_master = before_master if before_master is not None else self.master_np_rgb.copy()
+        orig_elements = list(before_elements) if before_elements is not None else self._snapshot_markup_elements()
+
+        rebuilt = base_clean.copy()
+        baked_el = self._shift_markup_element_for_crop(el)
+        if flatten_markup_element_roi(rebuilt, baked_el) is None:
+            rebuilt = flatten_markup_onto_rgb_image(rebuilt, [baked_el])
+        self.master_np_rgb = rebuilt
+        mh, mw = self.master_np_rgb.shape[:2]
+        self._refresh_viewport_after_master_roi((0, mh, 0, mw))
+
+        if np.array_equal(orig_master, self.master_np_rgb):
+            self._update_active_markup_selection_handles()
+            return
+
+        cmd = PixelArrayUndoCommand(self, orig_master, self.master_np_rgb.copy(), desc)
+        cmd._before_markup_elements = orig_elements
+        cmd._after_markup_elements = self._snapshot_markup_elements()
+        self.undo_stack.push(cmd)
+        self._session_markup_command_count = getattr(self, "_session_markup_command_count", 0) + 1
+        if hasattr(self.markup_toolbar, "btn_undo"):
+            self.markup_toolbar.btn_undo.setEnabled(True)
+        self._active_movable_before_master = base_clean
+        self._active_movable_before_roi = None
+        self._active_movable_from_reselect = True
+        self._active_movable_reselect_orig_master = self.master_np_rgb.copy()
+        self._update_active_markup_selection_handles()
+        self.update_revert_state()
+        if self.current_media_id is not None:
+            self.pixel_edit_saved.emit(self.current_media_id, "")
 
     def _shift_markup_element_for_crop(self, el: MarkupElement) -> MarkupElement:
         if self.current_recipe.crop_rect is None:
@@ -6980,7 +7087,7 @@ class SingleMediaViewer(QWidget):
         if el is None or self.master_np_rgb is None:
             return False
         before_del = self.master_np_rgb.copy()
-        before_els = list(self._markup_elements)
+        before_els = self._snapshot_markup_elements()
         if el in self._markup_elements:
             self._markup_elements.remove(el)
         if getattr(self, "_markup_preview_items", None):
@@ -6992,8 +7099,11 @@ class SingleMediaViewer(QWidget):
         after_del = self.master_np_rgb.copy()
         cmd = PixelArrayUndoCommand(self, before_del, after_del, "Delete Markup Item")
         cmd._before_markup_elements = before_els
-        cmd._after_markup_elements = list(self._markup_elements)
+        cmd._after_markup_elements = self._snapshot_markup_elements()
         self.undo_stack.push(cmd)
+        self._session_markup_command_count = getattr(self, "_session_markup_command_count", 0) + 1
+        if hasattr(self.markup_toolbar, "btn_undo"):
+            self.markup_toolbar.btn_undo.setEnabled(True)
         self._finalize_movable_markup()
         self.update_revert_state()
         if self.current_media_id is not None:
@@ -7014,30 +7124,53 @@ class SingleMediaViewer(QWidget):
     def edit_active_markup_text(self) -> bool:
         """Reopens the inline text editor for the currently selected Text or Stamp markup item."""
         el = getattr(self, "_active_movable_element", None)
-        if el is None or el.kind != "text" or el.rect is None:
+        if el is None or el.kind != "text" or el.rect is None or self.master_np_rgb is None:
             return False
         edit_pt = QPointF(el.rect.topLeft())
         edit_txt = str(el.text or "")
         edit_rot = float(getattr(el, "rotation_deg", 0.0) or 0.0)
-        if hasattr(self, "markup_toolbar"):
-            self.markup_toolbar.set_tool("text")
-            self.markup_toolbar.set_stroke_width(el.stroke_width)
-            self.markup_toolbar.set_primary_color(el.color)
-            if el.bg_color is not None:
-                self.markup_toolbar.set_secondary_color(el.bg_color)
-            self.markup_toolbar.set_font_family(getattr(el, "font_family", "Segoe UI"))
-            self.markup_toolbar.set_text_bold(getattr(el, "font_bold", True))
-            self.markup_toolbar.set_text_italic(getattr(el, "font_italic", False))
-            self.markup_toolbar.set_text_style(getattr(el, "text_style", "pill"))
-            self.markup_toolbar.set_text_align(getattr(el, "text_align", "left"))
-            self.markup_toolbar.set_opacity(getattr(el, "opacity", 1.0))
+
+        orig_el = self._clone_markup_element(el)
+        orig_master = self.master_np_rgb.copy()
+        orig_elements = self._snapshot_markup_elements()
+
         if el in self._markup_elements:
             self._markup_elements.remove(el)
         if getattr(self, "_markup_preview_items", None):
             it = self._markup_preview_items.pop()
             self._remove_scene_item(it)
         self._restore_active_movable_before_state()
+        base_without = self.master_np_rgb.copy()
+        remaining_elements = self._snapshot_markup_elements()
         self._finalize_movable_markup()
+
+        self._updating_active_el_live = True
+        try:
+            if hasattr(self, "markup_toolbar"):
+                self.markup_toolbar.set_tool("text")
+                self.markup_toolbar.set_stroke_width(orig_el.stroke_width)
+                self.markup_toolbar.set_primary_color(orig_el.color)
+                if orig_el.bg_color is not None:
+                    self.markup_toolbar.set_secondary_color(orig_el.bg_color)
+                self.markup_toolbar.set_font_family(getattr(orig_el, "font_family", "Segoe UI"))
+                self.markup_toolbar.set_text_bold(getattr(orig_el, "font_bold", True))
+                self.markup_toolbar.set_text_italic(getattr(orig_el, "font_italic", False))
+                self.markup_toolbar.set_text_style(getattr(orig_el, "text_style", "pill"))
+                self.markup_toolbar.set_text_align(getattr(orig_el, "text_align", "left"))
+                self.markup_toolbar.set_opacity(getattr(orig_el, "opacity", 1.0))
+        finally:
+            self._updating_active_el_live = False
+
+        # Re-apply base_without in case toolbar tool sync touched scene/handles
+        self.master_np_rgb = base_without.copy()
+        self._markup_elements = [self._clone_markup_element(e) for e in remaining_elements]
+        self._editing_existing_text_state = {
+            "orig_el": orig_el,
+            "orig_master": orig_master,
+            "orig_elements": orig_elements,
+            "base_without": base_without,
+            "remaining_elements": remaining_elements,
+        }
         self._open_inline_text_editor(edit_pt, initial_text=edit_txt, preserve_rotation=edit_rot)
         return True
 
@@ -7264,7 +7397,8 @@ class SingleMediaViewer(QWidget):
             self._cleanup_inline_text_rotate_gizmo()
             return
         widget = self._inline_text_input
-        txt = widget.toPlainText().strip() if hasattr(widget, "toPlainText") else widget.text().strip()
+        raw_txt = widget.toPlainText() if hasattr(widget, "toPlainText") else widget.text()
+        txt = raw_txt.replace("\r\n", "\n").replace("\u2028", "\n").strip()
         sp = getattr(self, "_inline_text_scene_pos", None)
         width = getattr(self.markup_toolbar, "stroke_width", 16)
         col = getattr(self.markup_toolbar, "current_color", QColor(230, 40, 40))
@@ -7278,6 +7412,91 @@ class SingleMediaViewer(QWidget):
         self._inline_text_input.deleteLater()
         self._inline_text_input = None
         self._inline_text_scene_pos = None
+
+        edit_state = getattr(self, "_editing_existing_text_state", None)
+        self._editing_existing_text_state = None
+        if edit_state is not None and self.master_np_rgb is not None:
+            orig_el = edit_state["orig_el"]
+            orig_master = edit_state["orig_master"]
+            orig_elements = edit_state["orig_elements"]
+            base_without = edit_state["base_without"]
+            remaining_elements = edit_state["remaining_elements"]
+            if not txt:
+                # Clearing text completely during edit deletes that text element cleanly
+                self.master_np_rgb = base_without.copy()
+                self._markup_elements = [self._clone_markup_element(e) for e in remaining_elements]
+                mh, mw = self.master_np_rgb.shape[:2]
+                self._refresh_viewport_after_master_roi((0, mh, 0, mw))
+                cmd = PixelArrayUndoCommand(self, orig_master, self.master_np_rgb.copy(), "Delete Markup Text")
+                cmd._before_markup_elements = orig_elements
+                cmd._after_markup_elements = self._snapshot_markup_elements()
+                self.undo_stack.push(cmd)
+                self._session_markup_command_count = getattr(self, "_session_markup_command_count", 0) + 1
+                if hasattr(self.markup_toolbar, "btn_undo"):
+                    self.markup_toolbar.btn_undo.setEnabled(True)
+                self.update_revert_state()
+                if self.current_media_id is not None:
+                    self.pixel_edit_saved.emit(self.current_media_id, "")
+                return
+
+            new_pos = sp if sp is not None else (orig_el.rect.topLeft() if orig_el.rect is not None else QPointF(16.0, 16.0))
+            el = MarkupElement(
+                kind="text",
+                rect=QRectF(new_pos.x(), new_pos.y(), 120, 32),
+                text=txt,
+                color=col,
+                bg_color=sec_col,
+                stroke_width=width,
+                font_family=getattr(self.markup_toolbar, "font_family", "Segoe UI") or "Segoe UI",
+                font_bold=getattr(self.markup_toolbar, "is_text_bold", True),
+                font_italic=getattr(self.markup_toolbar, "is_text_italic", False),
+                rotation_deg=preserved_rot,
+                text_style=getattr(self.markup_toolbar, "text_style", "pill"),
+                text_align=getattr(self.markup_toolbar, "text_align", "left"),
+                opacity=float(getattr(self.markup_toolbar, "opacity", 1.0)),
+                bg_opacity=float(getattr(self.markup_toolbar, "bg_opacity", 0.85)),
+            )
+            rebuilt = base_without.copy()
+            baked_el = self._shift_markup_element_for_crop(el)
+            if flatten_markup_element_roi(rebuilt, baked_el) is None:
+                rebuilt = flatten_markup_onto_rgb_image(rebuilt, [baked_el])
+            if np.array_equal(rebuilt, orig_master) and txt == orig_el.text:
+                self.master_np_rgb = orig_master.copy()
+                self._markup_elements = [self._clone_markup_element(e) for e in orig_elements]
+                restored_el = self._markup_elements[-1] if self._markup_elements else orig_el
+                mh, mw = self.master_np_rgb.shape[:2]
+                self._refresh_viewport_after_master_roi((0, mh, 0, mw))
+                self._active_movable_element = restored_el
+                self._active_movable_before_master = base_without.copy()
+                self._active_movable_before_roi = None
+                self._active_movable_from_reselect = True
+                self._active_movable_reselect_orig_master = orig_master.copy()
+                self._update_active_markup_selection_handles()
+                self.markup_selection_changed.emit(True, True)
+                return
+
+            self.master_np_rgb = rebuilt
+            self._markup_elements = [self._clone_markup_element(e) for e in remaining_elements] + [el]
+            mh, mw = self.master_np_rgb.shape[:2]
+            self._refresh_viewport_after_master_roi((0, mh, 0, mw))
+            cmd = PixelArrayUndoCommand(self, orig_master, self.master_np_rgb.copy(), "Edit Markup Text")
+            cmd._before_markup_elements = orig_elements
+            cmd._after_markup_elements = self._snapshot_markup_elements()
+            self.undo_stack.push(cmd)
+            self._session_markup_command_count = getattr(self, "_session_markup_command_count", 0) + 1
+            if hasattr(self.markup_toolbar, "btn_undo"):
+                self.markup_toolbar.btn_undo.setEnabled(True)
+            self._active_movable_element = el
+            self._active_movable_before_master = base_without.copy()
+            self._active_movable_before_roi = None
+            self._active_movable_from_reselect = True
+            self._active_movable_reselect_orig_master = self.master_np_rgb.copy()
+            self._update_active_markup_selection_handles()
+            self.markup_selection_changed.emit(True, True)
+            self.update_revert_state()
+            if self.current_media_id is not None:
+                self.pixel_edit_saved.emit(self.current_media_id, "")
+            return
 
         if txt and sp is not None:
             el = MarkupElement(
@@ -7307,6 +7526,13 @@ class SingleMediaViewer(QWidget):
             self._inline_text_input = None
             self._inline_text_scene_pos = None
             self._inline_text_preserved_rotation = 0.0
+        edit_state = getattr(self, "_editing_existing_text_state", None)
+        self._editing_existing_text_state = None
+        if edit_state is not None and self.master_np_rgb is not None:
+            self.master_np_rgb = edit_state["orig_master"].copy()
+            self._markup_elements = [self._clone_markup_element(e) for e in edit_state["orig_elements"]]
+            mh, mw = self.master_np_rgb.shape[:2]
+            self._refresh_viewport_after_master_roi((0, mh, 0, mw))
 
     def _adjust_inline_text_size(self) -> None:
         """Dynamically scales the on-canvas inline text editor to match typed multi-line contents."""
@@ -7332,6 +7558,11 @@ class SingleMediaViewer(QWidget):
         w = max(200, int(math.ceil(doc.idealWidth())) + 2 * screen_pad_x + 24 + extra)
         h = max(line_h + 2 * screen_pad_y + 12 + extra, int(math.ceil(doc.size().height())) + 2 * screen_pad_y + 10 + extra)
         inp.resize(w, h)
+        vp_w = inp.viewport().width()
+        if vp_w <= 0:
+            vp_w = max(1, w - 2 * screen_pad_x)
+        doc.setTextWidth(float(vp_w))
+        inp.viewport().update()
         self._update_inline_text_rotate_gizmo()
 
     def _commit_single_markup_element(self, el: MarkupElement, desc: str = "Markup") -> None:
@@ -7383,10 +7614,11 @@ class SingleMediaViewer(QWidget):
             cmd = PixelArrayUndoCommand(self, before_full, self.master_np_rgb.copy(), desc)
 
         self._session_markup_command_count = getattr(self, "_session_markup_command_count", 0) + 1
-        before_els = list(self._markup_elements)
+        before_els = self._snapshot_markup_elements()
         self._markup_elements.append(el)
         cmd._before_markup_elements = before_els
-        cmd._after_markup_elements = list(self._markup_elements)
+        cmd._after_markup_elements = self._snapshot_markup_elements()
+        cmd._markup_owner_id = id(el)
 
         # Record dummy preview item for test assertions
         if el.kind in ("pixelate", "blur", "magnifier", "magnify"):
@@ -7836,6 +8068,9 @@ class SingleMediaViewer(QWidget):
                 if el is not None:
                     self._is_moving_pending_markup = True
                     self._markup_transform_mode = "move"
+                    self._markup_transform_changed = False
+                    self._markup_transform_before_elements = self._snapshot_markup_elements()
+                    self._markup_transform_before_master = self.master_np_rgb.copy() if self.master_np_rgb is not None else None
                     self._move_markup_last_pt = sp
                     self._begin_pending_markup_preview(el)
             return
@@ -8228,9 +8463,9 @@ class SingleMediaViewer(QWidget):
             return
         self._finalize_movable_markup()
         if hasattr(self, "undo_stack") and self.undo_stack.canUndo():
-            prev_len = len(self._markup_elements)
+            undone_cmd = self.undo_stack.command(self.undo_stack.index() - 1)
             self.undo_stack.undo()
-            if len(self._markup_elements) == prev_len and self._markup_elements:
+            if getattr(undone_cmd, "_before_markup_elements", None) is None and self._markup_elements:
                 self._markup_elements.pop()
             if self._markup_preview_items:
                 it = self._markup_preview_items.pop()
@@ -8239,13 +8474,24 @@ class SingleMediaViewer(QWidget):
                 self.markup_toolbar.btn_undo.setEnabled(self.undo_stack.canUndo())
             self.update_revert_state()
 
-    def _cleanup_markup_temp_items(self) -> None:
+    def _redo_markup(self) -> None:
+        if getattr(self, "_inline_text_input", None) is not None:
+            return
+        self._finalize_movable_markup()
+        if hasattr(self, "undo_stack") and self.undo_stack.canRedo():
+            self.undo_stack.redo()
+            if hasattr(self.markup_toolbar, "btn_undo"):
+                self.markup_toolbar.btn_undo.setEnabled(self.undo_stack.canUndo())
+            self.update_revert_state()
+
+    def _cleanup_markup_temp_items(self, *, clear_committed: bool = True) -> None:
         """Removes temporary floating preview items and cursor overlays without rolling back undo stack."""
         self._clear_markup_selection_handles()
-        for it in self._markup_preview_items:
-            self._remove_scene_item(it)
-        self._markup_preview_items.clear()
-        self._markup_elements.clear()
+        if clear_committed:
+            for it in self._markup_preview_items:
+                self._remove_scene_item(it)
+            self._markup_preview_items.clear()
+            self._markup_elements.clear()
         if self._markup_current_item:
             self._remove_scene_item(self._markup_current_item)
             self._markup_current_item = None
@@ -11659,15 +11905,47 @@ class SingleMediaViewer(QWidget):
                 def _begin_pending_preview(el_obj: MarkupElement, *, for_rotation: bool = False) -> None:
                     self._begin_pending_markup_preview(el_obj, for_rotation=for_rotation)
 
+                def _start_transform(
+                    el_obj: MarkupElement,
+                    t_mode: str,
+                    sp_pt: QPointF,
+                    *,
+                    for_rotation: bool = False,
+                ) -> None:
+                    self._is_moving_pending_markup = True
+                    self._markup_transform_mode = t_mode
+                    self._markup_transform_changed = False
+                    self._markup_transform_before_elements = self._snapshot_markup_elements()
+                    self._markup_transform_before_master = (
+                        self.master_np_rgb.copy() if self.master_np_rgb is not None else None
+                    )
+                    self._move_markup_last_pt = sp_pt
+                    _begin_pending_preview(el_obj, for_rotation=for_rotation)
+
                 if event.type() == QEvent.MouseButtonDblClick and getattr(event, "button", lambda: None)() == Qt.LeftButton:
                     sp = self.graphics_view.mapToScene(event.position().toPoint())
-                    el = getattr(self, "_active_movable_element", None)
-                    if el is None or el.kind != "text" or el.rect is None or not get_markup_element_bounds(el).contains(sp):
-                        self._select_markup_element_at(sp)
-                        el = getattr(self, "_active_movable_element", None)
-                    if el is not None and el.kind == "text" and el.rect is not None:
-                        bounds = get_markup_element_bounds(el)
-                        if bounds.contains(sp):
+                    if getattr(self, "_is_moving_pending_markup", False):
+                        self._is_moving_pending_markup = False
+                        self._markup_transform_mode = None
+                        if getattr(self, "_pending_markup_item", None) is not None:
+                            self._remove_scene_item(self._pending_markup_item)
+                            self._pending_markup_item = None
+                        if (
+                            not getattr(self, "_markup_transform_changed", False)
+                            and getattr(self, "_markup_transform_before_master", None) is not None
+                            and self.master_np_rgb is not None
+                        ):
+                            self.master_np_rgb = self._markup_transform_before_master.copy()
+                    hit_txt = self._hit_test_markup_text_at(sp)
+                    if hit_txt is not None:
+                        if (
+                            getattr(self, "_inline_text_input", None) is not None
+                            and not self._inline_text_input.toPlainText().strip()
+                        ):
+                            self._cancel_inline_text()
+                        if getattr(self, "_inline_text_input", None) is None:
+                            if getattr(self, "_active_movable_element", None) is not hit_txt:
+                                self._select_markup_element_at(sp)
                             if self.edit_active_markup_text():
                                 return True
 
@@ -11679,14 +11957,11 @@ class SingleMediaViewer(QWidget):
                             self._commit_inline_text()
                             el = getattr(self, "_active_movable_element", None)
                             if el is not None:
-                                self._is_moving_pending_markup = True
-                                self._markup_transform_mode = "rotate"
                                 base_r = get_markup_element_unrotated_rect(el)
                                 c = base_r.center()
                                 self._markup_rotate_start_angle = math.degrees(math.atan2(sp.y() - c.y(), sp.x() - c.x()))
                                 self._markup_rotate_orig_deg = float(getattr(el, "rotation_deg", 0.0) or 0.0)
-                                self._move_markup_last_pt = sp
-                                _begin_pending_preview(el, for_rotation=True)
+                                _start_transform(el, "rotate", sp, for_rotation=True)
                                 self.graphics_view.viewport().setCursor(make_round_rotation_cursor())
                                 self._update_active_markup_selection_handles(show_angle_badge=True)
                                 return True
@@ -11704,44 +11979,46 @@ class SingleMediaViewer(QWidget):
                         el = self._active_movable_element
                         hit = self._hit_test_markup_handles(sp)
                         if hit == "rotate" or (hit and hit.startswith("rotate_corner:")):
-                            self._is_moving_pending_markup = True
-                            self._markup_transform_mode = "rotate"
                             base_r = get_markup_element_unrotated_rect(el)
                             c = base_r.center()
                             self._markup_rotate_start_angle = math.degrees(math.atan2(sp.y() - c.y(), sp.x() - c.x()))
                             self._markup_rotate_orig_deg = float(getattr(el, "rotation_deg", 0.0) or 0.0)
-                            self._move_markup_last_pt = sp
-                            _begin_pending_preview(el, for_rotation=True)
+                            _start_transform(el, "rotate", sp, for_rotation=True)
                             self.graphics_view.viewport().setCursor(make_round_rotation_cursor())
                             self._update_active_markup_selection_handles(show_angle_badge=True)
                             return True
                         elif hit and hit.startswith("resize:"):
-                            self._is_moving_pending_markup = True
-                            self._markup_transform_mode = "resize"
                             self._markup_resize_corner = hit.split(":", 1)[1]
                             self._markup_resize_anchor_rect = get_markup_element_unrotated_rect(el)
-                            self._move_markup_last_pt = sp
-                            _begin_pending_preview(el)
+                            _start_transform(el, "resize", sp)
                             return True
                         bounds = get_markup_element_bounds(el)
                         if bounds.contains(sp):
-                            self._is_moving_pending_markup = True
-                            self._markup_transform_mode = "move"
-                            self._move_markup_last_pt = sp
-                            _begin_pending_preview(el)
+                            _start_transform(el, "move", sp)
                             return True
                         else:
                             self._finalize_movable_markup()
                             if getattr(self.markup_toolbar, "active_tool", "") == "text":
+                                if self._hit_test_markup_text_at(sp) is not None and self._select_markup_element_at(sp):
+                                    el_hit = getattr(self, "_active_movable_element", None)
+                                    if el_hit is not None:
+                                        _start_transform(el_hit, "move", sp)
                                 return True
+                    # Single-click on existing text when Text tool is active selects it (so double-click edits cleanly without creating a duplicate)
+                    if (
+                        getattr(self.markup_toolbar, "active_tool", "") == "text"
+                        and self._hit_test_markup_text_at(sp) is not None
+                        and self._select_markup_element_at(sp)
+                    ):
+                        el_txt = getattr(self, "_active_movable_element", None)
+                        if el_txt is not None:
+                            _start_transform(el_txt, "move", sp)
+                            return True
                     # Hold Alt (or Ctrl+Click) temporarily selects & moves any existing item from any tool
                     if (event.modifiers() & (Qt.AltModifier | Qt.ControlModifier)) and self._select_markup_element_at(sp):
                         el_ctrl = getattr(self, "_active_movable_element", None)
                         if el_ctrl is not None:
-                            self._is_moving_pending_markup = True
-                            self._markup_transform_mode = "move"
-                            self._move_markup_last_pt = sp
-                            _begin_pending_preview(el_ctrl)
+                            _start_transform(el_ctrl, "move", sp)
                             return True
                     self._start_markup(sp)
                     return True
@@ -11779,6 +12056,7 @@ class SingleMediaViewer(QWidget):
                                             ang = snap_t
                                             break
                                 el.rotation_deg = float(ang)
+                                self._markup_transform_changed = True
                                 if self._pending_markup_item is not None:
                                     if getattr(self, "_pending_markup_item_is_rot_cached", False):
                                         self._pending_markup_item.setRotation(float(ang))
@@ -11827,6 +12105,7 @@ class SingleMediaViewer(QWidget):
                                     else:
                                         y2 = y1 + nh
                                 scale_markup_element(el, QRectF(x1, y1, x2 - x1, y2 - y1))
+                                self._markup_transform_changed = True
                                 pm, top_left = render_markup_element_pixmap(el, self.master_np_rgb, crop_tuple)
                                 if self._pending_markup_item is not None and not pm.isNull():
                                     self._pending_markup_item.setPixmap(pm)
@@ -11836,17 +12115,19 @@ class SingleMediaViewer(QWidget):
                                 dx = sp.x() - self._move_markup_last_pt.x()
                                 dy = sp.y() - self._move_markup_last_pt.y()
                                 self._move_markup_last_pt = sp
-                                translate_markup_element(el, dx, dy)
-                                if el.kind in ("pixelate", "blur", "magnifier", "magnify"):
-                                    pm, top_left = render_markup_element_pixmap(el, self.master_np_rgb, crop_tuple)
-                                    if self._pending_markup_item is not None and not pm.isNull():
-                                        self._pending_markup_item.setPixmap(pm)
-                                        self._pending_markup_item.setPos(top_left)
-                                else:
-                                    if self._pending_markup_item is not None:
-                                        cur_pos = self._pending_markup_item.pos()
-                                        self._pending_markup_item.setPos(cur_pos.x() + dx, cur_pos.y() + dy)
-                                self._update_active_markup_selection_handles()
+                                if abs(dx) > 1e-4 or abs(dy) > 1e-4:
+                                    self._markup_transform_changed = True
+                                    translate_markup_element(el, dx, dy)
+                                    if el.kind in ("pixelate", "blur", "magnifier", "magnify"):
+                                        pm, top_left = render_markup_element_pixmap(el, self.master_np_rgb, crop_tuple)
+                                        if self._pending_markup_item is not None and not pm.isNull():
+                                            self._pending_markup_item.setPixmap(pm)
+                                            self._pending_markup_item.setPos(top_left)
+                                    else:
+                                        if self._pending_markup_item is not None:
+                                            cur_pos = self._pending_markup_item.pos()
+                                            self._pending_markup_item.setPos(cur_pos.x() + dx, cur_pos.y() + dy)
+                                    self._update_active_markup_selection_handles()
                         return True
                     elif getattr(self, "_markup_active", False):
                         self._drag_markup(sp)
@@ -11893,8 +12174,14 @@ class SingleMediaViewer(QWidget):
                         self._update_markup_cursor()
                         return True
                     if getattr(self, "_is_moving_pending_markup", False):
+                        was_changed = bool(getattr(self, "_markup_transform_changed", False))
+                        before_els = getattr(self, "_markup_transform_before_elements", None)
+                        before_master = getattr(self, "_markup_transform_before_master", None)
                         self._is_moving_pending_markup = False
                         self._markup_transform_mode = None
+                        self._markup_transform_changed = False
+                        self._markup_transform_before_elements = None
+                        self._markup_transform_before_master = None
                         self._markup_resize_corner = None
                         self._markup_resize_anchor_rect = None
                         self._markup_rotate_start_angle = None
@@ -11906,41 +12193,19 @@ class SingleMediaViewer(QWidget):
                             self._pending_markup_item = None
                         if getattr(self, "_active_movable_element", None) is not None:
                             el = self._active_movable_element
-                            if getattr(self, "_active_movable_from_reselect", False) and getattr(self, "_active_movable_before_master", None) is not None:
-                                # Reselected item: NEVER undo previous commands (e.g. deletes); re-bake cleanly from base_without
-                                base_clean = self._active_movable_before_master
-                                before_move = getattr(self, "_active_movable_reselect_orig_master", None)
-                                if before_move is None:
-                                    before_move = base_clean.copy()
-                                rebuilt = base_clean.copy()
-                                baked_el = self._shift_markup_element_for_crop(el)
-                                if flatten_markup_element_roi(rebuilt, baked_el) is None:
-                                    rebuilt = flatten_markup_onto_rgb_image(rebuilt, [baked_el])
-                                self.master_np_rgb = rebuilt
-                                mh, mw = self.master_np_rgb.shape[:2]
-                                self._refresh_viewport_after_master_roi((0, mh, 0, mw))
-                                cmd = PixelArrayUndoCommand(self, before_move, self.master_np_rgb.copy(), f"Transform {el.kind.title()}")
-                                cmd._before_markup_elements = list(self._markup_elements)
-                                cmd._after_markup_elements = list(self._markup_elements)
-                                self.undo_stack.push(cmd)
-                                self._active_movable_reselect_orig_master = self.master_np_rgb.copy()
-                                self._update_active_markup_selection_handles()
-                                self.update_revert_state()
-                                if self.current_media_id is not None:
-                                    self.pixel_edit_saved.emit(self.current_media_id, "")
-                            else:
-                                self._restore_active_movable_before_state()
-                                if self.master_np_rgb is not None:
+                            if not was_changed:
+                                if before_master is not None and self.master_np_rgb is not None:
+                                    self.master_np_rgb = before_master.copy()
                                     mh, mw = self.master_np_rgb.shape[:2]
                                     self._refresh_viewport_after_master_roi((0, mh, 0, mw))
-                                if hasattr(self, "undo_stack") and self.undo_stack.canUndo():
-                                    self.undo_stack.undo()
-                                    if el in self._markup_elements:
-                                        self._markup_elements.remove(el)
-                                    if self._markup_preview_items:
-                                        it = self._markup_preview_items.pop()
-                                        self._remove_scene_item(it)
-                                self._commit_single_markup_element(el, f"Markup {el.kind.title()}")
+                                self._update_active_markup_selection_handles()
+                                return True
+                            self._commit_active_movable_edit(
+                                el,
+                                before_els,
+                                before_master,
+                                f"Transform {el.kind.title()}",
+                            )
                         return True
                     elif getattr(self, "_markup_active", False):
                         self._finish_markup(sp)
@@ -11948,6 +12213,9 @@ class SingleMediaViewer(QWidget):
                 elif event.type() == QEvent.Leave:
                     if getattr(self, "_region_brush_mode", "") in ("paint", "erase") and not getattr(self, "_is_painting_region_mask", False):
                         self.graphics_view.viewport().unsetCursor()
+                    if getattr(self, "_markup_active", False):
+                        self._cleanup_markup_temp_items(clear_committed=False)
+                        return True
                 elif event.type() == QEvent.Enter:
                     if getattr(self, "_region_brush_mode", "") in ("paint", "erase") and getattr(self, "_region_brush_region", ""):
                         self.graphics_view.viewport().setCursor(
@@ -11956,8 +12224,8 @@ class SingleMediaViewer(QWidget):
                                 self._region_brush_mode,
                             )
                         )
-                elif event.type() in (QEvent.FocusOut, QEvent.Leave) and getattr(self, "_markup_active", False):
-                    self._cleanup_markup_temp_items()
+                elif event.type() == QEvent.FocusOut and getattr(self, "_markup_active", False):
+                    self._cleanup_markup_temp_items(clear_committed=False)
                     return True
 
         if event.type() == QEvent.WindowDeactivate and getattr(self, "_markup_alt_select_active", False):
@@ -12072,13 +12340,16 @@ class SingleMediaViewer(QWidget):
                     self._commit_markup()
                     event.accept()
                     return True
+                elif event.key() == Qt.Key_Z and (event.modifiers() & Qt.ControlModifier) and (event.modifiers() & Qt.ShiftModifier):
+                    self._redo_markup()
+                    event.accept()
+                    return True
                 elif event.key() == Qt.Key_Z and (event.modifiers() & Qt.ControlModifier):
                     self._undo_markup()
                     event.accept()
                     return True
                 elif event.key() == Qt.Key_Y and (event.modifiers() & Qt.ControlModifier):
-                    if hasattr(self, "undo_stack") and self.undo_stack.canRedo():
-                        self.undo_stack.redo()
+                    self._redo_markup()
                     event.accept()
                     return True
 
@@ -12088,8 +12359,9 @@ class SingleMediaViewer(QWidget):
                     self._update_markup_cursor()
                     event.accept()
                     return True
-                if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) and getattr(self, "_active_movable_element", None) is not None:
-                    self.delete_active_markup_element()
+                if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+                    if getattr(self, "_active_movable_element", None) is not None:
+                        self.delete_active_markup_element()
                     event.accept()
                     return True
                 if event.key() == Qt.Key_C and (event.modifiers() & Qt.ControlModifier) and getattr(self, "_active_movable_element", None) is not None:
@@ -12110,7 +12382,13 @@ class SingleMediaViewer(QWidget):
                     event.accept()
                     return True
 
-            if event.key() == Qt.Key_Delete and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
+            if (
+                event.key() == Qt.Key_Delete
+                and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier))
+                and not self.is_in_edit_mode()
+                and not getattr(self, "is_face_tag_mode", False)
+                and not getattr(self, "is_face_adjust_mode", False)
+            ):
                 mw = self.window()
                 if hasattr(mw, "delete_selection_to_recycle_bin"):
                     mw.delete_selection_to_recycle_bin()

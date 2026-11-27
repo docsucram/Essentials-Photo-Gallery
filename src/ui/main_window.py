@@ -9075,6 +9075,8 @@ class PhotoGalleryMainWindow(QMainWindow):
             self.central_stack.currentWidget() == self.media_viewer
             and self.media_viewer.current_media_id is not None
         )
+        if in_viewer and getattr(self.media_viewer, "is_markup_mode", False):
+            return 0
         current_viewer_idx = None
         if in_viewer:
             current_viewer_idx = self.catalog_model.record_index_for_id(self.media_viewer.current_media_id)
@@ -13788,16 +13790,29 @@ class PhotoGalleryMainWindow(QMainWindow):
                     event.accept()
                     return
 
-            # Delete: Grid and Viewer modes
-            if event.key() == Qt.Key_Delete:
+            # Delete / Backspace: Markup deletion & photo deletion in Grid / Viewer modes
+            if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
                 if self.central_stack.currentWidget() == self.media_viewer:
-                    curr_id = self.media_viewer.current_media_id
-                    if curr_id is not None:
-                        self._selected_ids = [curr_id]
-                        self.delete_selection_to_recycle_bin()
-                    event.accept()
-                    return
-                elif self.central_stack.currentWidget() == self.grid_view:
+                    if getattr(self.media_viewer, "is_markup_mode", False):
+                        if getattr(self.media_viewer, "_active_movable_element", None) is not None:
+                            self.media_viewer.delete_active_markup_element()
+                        event.accept()
+                        return
+                    if event.key() == Qt.Key_Delete:
+                        if (
+                            self.media_viewer.is_in_edit_mode()
+                            or getattr(self.media_viewer, "is_face_tag_mode", False)
+                            or getattr(self.media_viewer, "is_face_adjust_mode", False)
+                        ):
+                            event.accept()
+                            return
+                        curr_id = self.media_viewer.current_media_id
+                        if curr_id is not None:
+                            self._selected_ids = [curr_id]
+                            self.delete_selection_to_recycle_bin()
+                        event.accept()
+                        return
+                elif event.key() == Qt.Key_Delete and self.central_stack.currentWidget() == self.grid_view:
                     self.delete_selection_to_recycle_bin()
                     event.accept()
                     return
